@@ -55,7 +55,6 @@ pub mod health_monitor;
 mod http;
 #[cfg(target_os = "macos")]
 mod imessage;
-pub mod imessage_wiring;
 mod manager;
 mod nostr;
 pub mod reaction_machine;

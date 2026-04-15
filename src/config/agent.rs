@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::agent::personality::canonical_personality_pack_name;
 use crate::config::helpers::{optional_env, parse_bool_env, parse_option_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
@@ -61,7 +62,9 @@ pub struct AgentConfig {
     pub model_guidance_enabled: bool,
     /// Default CLI skin for local terminal clients.
     pub cli_skin: String,
-    /// Persona seed to use for fresh workspace initialization.
+    /// Canonical personality pack to use for fresh workspace initialization.
+    pub personality_pack: String,
+    /// Legacy persona seed retained for compatibility copy and migration.
     pub persona_seed: String,
     /// Whether filesystem checkpoint snapshots are enabled.
     pub checkpoints_enabled: bool,
@@ -146,6 +149,7 @@ impl AgentConfig {
             )?,
             cli_skin: optional_env("AGENT_CLI_SKIN")?
                 .unwrap_or_else(|| settings.agent.cli_skin.clone()),
+            personality_pack: resolve_personality_pack(settings)?,
             persona_seed: optional_env("AGENT_PERSONA_SEED")?
                 .unwrap_or_else(|| settings.agent.persona_seed.clone()),
             checkpoints_enabled: parse_bool_env(
@@ -187,6 +191,32 @@ impl AgentConfig {
         // Global default
         (self.thinking_enabled, self.thinking_budget_tokens)
     }
+}
+
+pub(crate) fn resolve_personality_pack_from_settings(settings: &Settings) -> String {
+    let configured_pack = settings.agent.personality_pack.trim();
+    let legacy_seed = settings.agent.persona_seed.trim();
+    let should_prefer_legacy_seed = configured_pack.eq_ignore_ascii_case("balanced")
+        && !legacy_seed.is_empty()
+        && !legacy_seed.eq_ignore_ascii_case("default");
+
+    let chosen = if should_prefer_legacy_seed {
+        legacy_seed
+    } else {
+        configured_pack
+    };
+
+    canonical_personality_pack_name(chosen).to_string()
+}
+
+fn resolve_personality_pack(settings: &Settings) -> Result<String, ConfigError> {
+    if let Some(env_pack) = optional_env("AGENT_PERSONALITY_PACK")? {
+        return Ok(canonical_personality_pack_name(&env_pack).to_string());
+    }
+    if let Some(env_seed) = optional_env("AGENT_PERSONA_SEED")? {
+        return Ok(canonical_personality_pack_name(&env_seed).to_string());
+    }
+    Ok(resolve_personality_pack_from_settings(settings))
 }
 
 fn normalize_subagent_transparency_level(value: impl AsRef<str>) -> String {

@@ -73,7 +73,7 @@ pub(crate) async fn jobs_summary_handler(
         in_progress: s.running,
         completed: s.completed,
         failed: s.failed + s.interrupted,
-        stuck: 0,
+        stuck: s.stuck,
     }))
 }
 

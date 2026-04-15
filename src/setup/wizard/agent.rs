@@ -1,5 +1,6 @@
 //! Agent personality wizard steps: identity, tool approval, notification preferences.
 
+use crate::config::resolve_personality_pack_from_settings;
 use crate::setup::prompts::{
     confirm, input, optional_input, print_info, print_success, select_one,
 };
@@ -28,24 +29,26 @@ impl SetupWizard {
         }
 
         println!();
-        print_info("Choose a persona seed for the first SOUL.md in a fresh workspace.");
-        print_info("This shapes the starting voice without locking you into it later.");
+        print_info("Choose a personality pack for the first SOUL.md in a fresh workspace.");
+        print_info("This sets the starting identity voice without locking you into it later.");
         println!();
 
-        let current_seed = self.settings.agent.persona_seed.clone();
-        if current_seed != "default"
+        let current_pack = resolve_personality_pack_from_settings(&self.settings);
+        self.settings.agent.personality_pack = current_pack.clone();
+        self.settings.agent.persona_seed = current_pack.clone();
+        if current_pack != "balanced"
             && confirm(
-                &format!("Keep current persona seed '{}'?", current_seed),
+                &format!("Keep current personality pack '{}'?", current_pack),
                 true,
             )
             .map_err(SetupError::Io)?
         {
-            print_success(&format!("Keeping persona seed '{}'", current_seed));
+            print_success(&format!("Keeping personality pack '{}'", current_pack));
             return Ok(());
         }
 
         let options = [
-            "default       — Balanced, dependable, and humane",
+            "balanced         — Balanced, dependable, and humane",
             "professional  — Polished, reliable, workplace-ready",
             "creative_partner — Curious, imaginative, and exploratory",
             "research_assistant — Methodical, evidence-driven, and careful",
@@ -53,18 +56,20 @@ impl SetupWizard {
             "minimal       — Lean, unobtrusive, and flexible",
         ];
         let option_refs: Vec<&str> = options.to_vec();
-        let choice = select_one("Persona seed", &option_refs).map_err(SetupError::Io)?;
+        let choice = select_one("Personality pack", &option_refs).map_err(SetupError::Io)?;
         let chosen = match choice {
-            0 => "default",
+            0 => "balanced",
             1 => "professional",
             2 => "creative_partner",
             3 => "research_assistant",
             4 => "mentor",
             5 => "minimal",
-            _ => "default",
+            _ => "balanced",
         };
+        self.settings.agent.personality_pack = chosen.to_string();
+        // Keep the legacy field in sync for one-release compatibility/migration.
         self.settings.agent.persona_seed = chosen.to_string();
-        print_success(&format!("Persona seed set to '{}'", chosen));
+        print_success(&format!("Personality pack set to '{}'", chosen));
 
         Ok(())
     }

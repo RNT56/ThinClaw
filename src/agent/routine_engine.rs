@@ -20,6 +20,7 @@ use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
 use crate::agent::Scheduler;
+use crate::agent::outcomes;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
 };
@@ -663,6 +664,17 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         tracing::error!(routine = %routine.name, "Failed to complete run record: {}", e);
     }
 
+    let mut completed_run = run.clone();
+    completed_run.status = status;
+    completed_run.result_summary = summary.clone();
+    completed_run.tokens_used = tokens;
+    completed_run.completed_at = Some(Utc::now());
+    if let Err(err) =
+        outcomes::maybe_create_routine_contract(&ctx.store, &routine, &completed_run).await
+    {
+        tracing::debug!(routine = %routine.name, error = %err, "Outcome routine contract hook skipped");
+    }
+
     // Update routine runtime state
     let now = Utc::now();
     let next_fire = if let Trigger::Cron { ref schedule } = routine.trigger {
@@ -1029,9 +1041,18 @@ async fn execute_heartbeat(
     } else {
         ""
     };
+    let outcome_summary = match crate::agent::outcomes::heartbeat_review_summary(
+        &ctx.store,
+        &routine.user_id,
+    )
+    .await
+    {
+        Ok(Some(summary)) => format!("\n\n## {}\n", summary),
+        _ => String::new(),
+    };
     let full_prompt = format!(
-        "{}\n\n## HEARTBEAT.md\n\n{}{}{}{}",
-        prompt_body, checklist, daily_context, critique_context, logs_note
+        "{}\n\n## HEARTBEAT.md\n\n{}{}{}{}{}",
+        prompt_body, checklist, daily_context, critique_context, outcome_summary, logs_note
     );
 
     if !light_context {

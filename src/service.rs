@@ -55,17 +55,17 @@ fn install() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        return install_macos();
+        install_macos()
     }
 
     #[cfg(target_os = "linux")]
     {
-        return install_linux();
+        install_linux()
     }
 
     #[cfg(target_os = "windows")]
     {
-        return windows_impl::install();
+        windows_impl::install()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -77,17 +77,17 @@ fn install() -> Result<()> {
 fn start() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return start_macos();
+        start_macos()
     }
 
     #[cfg(target_os = "linux")]
     {
-        return start_linux();
+        start_linux()
     }
 
     #[cfg(target_os = "windows")]
     {
-        return windows_impl::start();
+        windows_impl::start()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -99,17 +99,17 @@ fn start() -> Result<()> {
 fn stop() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return stop_macos();
+        stop_macos()
     }
 
     #[cfg(target_os = "linux")]
     {
-        return stop_linux();
+        stop_linux()
     }
 
     #[cfg(target_os = "windows")]
     {
-        return windows_impl::stop();
+        windows_impl::stop()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -121,17 +121,17 @@ fn stop() -> Result<()> {
 fn status() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        return status_macos();
+        status_macos()
     }
 
     #[cfg(target_os = "linux")]
     {
-        return status_linux();
+        status_linux()
     }
 
     #[cfg(target_os = "windows")]
     {
-        return windows_impl::status();
+        windows_impl::status()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -145,17 +145,17 @@ fn uninstall() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        return uninstall_macos();
+        uninstall_macos()
     }
 
     #[cfg(target_os = "linux")]
     {
-        return uninstall_linux();
+        uninstall_linux()
     }
 
     #[cfg(target_os = "windows")]
     {
-        return windows_impl::uninstall();
+        windows_impl::uninstall()
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

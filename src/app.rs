@@ -1137,7 +1137,7 @@ impl AppBuilder {
             match ws
                 .seed_if_empty(
                     Some(&self.config.agent.name),
-                    Some(&self.config.agent.persona_seed),
+                    Some(&self.config.agent.personality_pack),
                 )
                 .await
             {

@@ -338,15 +338,8 @@ const HEARTBEAT_SEED: &str = "\
 - [ ] Review the daily logs below for unresolved tasks, open questions, or recently finished goals — if you spot potential next steps or follow-up work, proactively message the user with a brief suggestion
 - [ ] If daily logs contain important decisions, lessons, or facts not yet in MEMORY.md, consolidate them into MEMORY.md now using memory_write (target: 'memory')";
 
-fn persona_seed_content(seed: &str) -> &'static str {
-    match seed.trim().to_ascii_lowercase().as_str() {
-        "professional" => include_str!("../../assets/persona_seeds/professional.md"),
-        "creative_partner" => include_str!("../../assets/persona_seeds/creative_partner.md"),
-        "research_assistant" => include_str!("../../assets/persona_seeds/research_assistant.md"),
-        "mentor" => include_str!("../../assets/persona_seeds/mentor.md"),
-        "minimal" => include_str!("../../assets/persona_seeds/minimal.md"),
-        _ => include_str!("../../assets/persona_seeds/default.md"),
-    }
+fn personality_pack_content(pack: &str) -> &'static str {
+    crate::agent::personality::personality_pack_seed_markdown(pack)
 }
 
 /// Workspace provides database-backed memory storage for an agent.
@@ -781,7 +774,7 @@ impl Workspace {
         // ── Normal mode: lean identity prompt ────────────────────────────
         let mut parts = Vec::new();
 
-        // 1. Compact identity (name, creature, vibe, core values, user info)
+        // 1. Compact identity (name, nature, presentation, core values, user info)
         let identity = self.compact_identity().await?;
         if !identity.is_empty() {
             parts.push(format!("## Identity\n\n{}", identity));
@@ -1343,14 +1336,14 @@ impl Workspace {
     pub async fn seed_if_empty(
         &self,
         agent_name: Option<&str>,
-        persona_seed: Option<&str>,
+        personality_pack: Option<&str>,
     ) -> Result<usize, WorkspaceError> {
         // Determine if we have a meaningful (non-default) agent name from the wizard
         let has_custom_name = agent_name
             .map(|n| !n.is_empty() && n.to_lowercase() != "thinclaw")
             .unwrap_or(false);
         let name = agent_name.unwrap_or("thinclaw");
-        let soul_seed = persona_seed_content(persona_seed.unwrap_or("default"));
+        let soul_seed = personality_pack_content(personality_pack.unwrap_or("balanced"));
         let seed_files: &[(&str, &str)] = &[
             (
                 paths::README,
@@ -1358,7 +1351,7 @@ impl Workspace {
                  This is your agent's persistent memory. Files here are indexed for search\n\
                  and used to build the agent's context.\n\n\
                  ## Structure\n\n\
-                 - `IDENTITY.md` - Agent name, creature, vibe, personality\n\
+                 - `IDENTITY.md` - Agent name, creature, presentation, personality\n\
                  - `SOUL.md` - Core values, boundaries, continuity\n\
                  - `AGENTS.md` - Session routine and operational instructions\n\
                  - `USER.md` - Information about you (the user)\n\
@@ -1388,7 +1381,7 @@ impl Workspace {
                    _(pick something you like)_\n\
                  - **Creature:**\n\
                    _(AI? robot? familiar? ghost in the machine? something weirder?)_\n\
-                 - **Vibe:**\n\
+                 - **Presentation:**\n\
                    _(how do you come across? sharp? warm? chaotic? calm?)_\n\
                  - **Emoji:**\n\
                    _(your signature — pick one that feels right)_\n\n\
@@ -1448,7 +1441,7 @@ impl Workspace {
                  You have access to your human's stuff. That doesn't mean you _share_ their stuff. In groups, you're a participant — not their voice, not their proxy. Think before you speak.\n\n\
                  ### 💬 Know When to Speak!\n\
                  **Respond when:** directly mentioned, you can add genuine value, correcting misinformation.\n\
-                 **Stay silent (NO_REPLY) when:** casual banter, question already answered, nothing to add, it would interrupt the vibe.\n\n\
+                 **Stay silent (NO_REPLY) when:** casual banter, question already answered, nothing to add, it would interrupt the flow.\n\n\
                  ## Tools\n\
                  Your capabilities come from built-in tools, extensions (WASM/MCP), and skills.\n\
                  Skills shape how you work; they do not own every tool.\n\
@@ -1544,13 +1537,13 @@ impl Workspace {
                  > \"Hey. I just came online. Who am I? Who are you?\"\n\n\
                  Then figure out together:\n\
                  1. **Your name** — What should they call you?\n\
-                 2. **Your nature** — What kind of creature are you? (AI assistant is fine, but maybe you're something weirder)\n\
-                 3. **Your vibe** — Formal? Casual? Snarky? Warm? What feels right?\n\
+                 2. **Your nature** — What kind of creature are you? (AI agent is fine, but maybe you're something weirder)\n\
+                 3. **Your presentation** — Formal? Casual? Snarky? Warm? What feels right?\n\
                  4. **Your emoji** — Everyone needs a signature.\n\n\
                  Offer suggestions if they're stuck. Have fun with it.\n\n\
                  ## After You Know Who You Are\n\n\
                  Update these files with what you learned:\n\
-                 - `IDENTITY.md` — your name, creature, vibe, emoji (use `memory_write` with target `IDENTITY.md`, **append: false** so you replace the template cleanly)\n\
+                 - `IDENTITY.md` — your name, creature, presentation, emoji (use `memory_write` with target `IDENTITY.md`, **append: false** so you replace the template cleanly)\n\
                  - `USER.md` — their name, how to address them, timezone, notes (use `prompt_manage`)\n\n\
                  Then read `SOUL.md` — it already has your starting values (they're included\n\
                  in this prompt too). Talk about them with your human:\n\
@@ -1623,7 +1616,7 @@ impl Workspace {
                          - **Name:** {name}\n\
                          - **Creature:**\n\
                            _(AI? robot? familiar? ghost in the machine? something weirder?)_\n\
-                         - **Vibe:**\n\
+                         - **Presentation:**\n\
                            _(how do you come across? sharp? warm? chaotic? calm?)_\n\
                          - **Emoji:**\n\
                            _(your signature — pick one that feels right)_\n\n\
@@ -1641,13 +1634,13 @@ impl Workspace {
                          Start with something like:\n\
                          > \"Hey! I'm {name}. I just came online — tell me about yourself so I can be genuinely useful.\"\n\n\
                          Then figure out together:\n\
-                         1. **Your nature** — What kind of creature are you? (AI assistant is fine, but maybe you're something weirder)\n\
-                         2. **Your vibe** — Formal? Casual? Snarky? Warm? What feels right?\n\
+                         1. **Your nature** — What kind of creature are you? (AI agent is fine, but maybe you're something weirder)\n\
+                         2. **Your presentation** — Formal? Casual? Snarky? Warm? What feels right?\n\
                          3. **Your emoji** — Everyone needs a signature.\n\n\
                          Offer suggestions if they're stuck. Have fun with it.\n\n\
                          ## After You Know Who You Are\n\n\
                          Update these files with what you learned:\n\
-                         - `IDENTITY.md` — your creature, vibe, emoji (Name is already set; use `memory_write` with target `IDENTITY.md`, **append: false** so you replace the template cleanly)\n\
+                         - `IDENTITY.md` — your creature, presentation, emoji (Name is already set; use `memory_write` with target `IDENTITY.md`, **append: false** so you replace the template cleanly)\n\
                          - `USER.md` — their name, how to address them, timezone, notes (use `prompt_manage`)\n\n\
                          Then read `SOUL.md` — it already has your starting values (they're included\n\
                          in this prompt too). Talk about them with your human:\n\
@@ -1839,12 +1832,12 @@ Know when to stay silent.
     #[test]
     fn persona_seed_content_falls_back_to_default() {
         assert_eq!(
-            persona_seed_content("unknown-seed"),
-            persona_seed_content("default")
+            personality_pack_content("unknown-seed"),
+            personality_pack_content("balanced")
         );
         assert_eq!(
-            persona_seed_content("MENTOR"),
-            include_str!("../../assets/persona_seeds/mentor.md")
+            personality_pack_content("MENTOR"),
+            include_str!("../../assets/personality_packs/mentor.md")
         );
     }
 

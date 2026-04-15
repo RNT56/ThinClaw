@@ -586,11 +586,15 @@ impl LibSqlWasmToolStore {
             .db
             .connect()
             .map_err(|e| WasmStorageError::Database(format!("Connection failed: {}", e)))?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
+        let mut rows = conn
+            .query("PRAGMA busy_timeout = 5000", ())
             .await
             .map_err(|e| {
                 WasmStorageError::Database(format!("Failed to set busy_timeout: {}", e))
             })?;
+        let _ = rows.next().await.map_err(|e| {
+            WasmStorageError::Database(format!("Failed to confirm busy_timeout: {}", e))
+        })?;
         Ok(conn)
     }
 }

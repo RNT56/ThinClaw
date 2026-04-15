@@ -1,3 +1,7 @@
+use std::sync::Arc;
+
+use thinclaw::api::experiments as experiments_api;
+
 use crate::db_contract::fixtures;
 use crate::db_contract::support::contract_db_or_skip;
 
@@ -154,4 +158,80 @@ async fn experiments_targets_usage_and_lease_contract() {
         .expect("get_experiment_lease should succeed")
         .expect("lease should exist");
     assert_eq!(loaded_lease.trial_id, trial.id);
+}
+
+#[tokio::test]
+async fn experiments_opportunities_include_outcome_backed_signals() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+
+    let user_id = fixtures::user("experiments_outcome_user");
+    ctx.db
+        .set_setting(&user_id, "experiments.enabled", &serde_json::json!(true))
+        .await
+        .expect("experiments.enabled should be set");
+
+    let mut contract = fixtures::outcome_contract(&user_id);
+    contract.status = "evaluated".to_string();
+    contract.final_verdict = Some("negative".to_string());
+    contract.final_score = Some(-1.0);
+    contract.contract_type = "tool_durability".to_string();
+    contract.source_kind = "artifact_version".to_string();
+    contract.metadata = serde_json::json!({
+        "pattern_key": "artifact:prompt:USER.md",
+        "artifact_type": "prompt",
+        "artifact_name": "USER.md"
+    });
+    contract.evaluated_at = Some(chrono::Utc::now());
+    ctx.db
+        .insert_outcome_contract(&contract)
+        .await
+        .expect("insert_outcome_contract should succeed");
+
+    let response = experiments_api::list_opportunities(&Arc::clone(&ctx.db), &user_id, 20)
+        .await
+        .expect("list_opportunities should succeed");
+    let opportunity = response
+        .opportunities
+        .iter()
+        .find(|entry| entry.source.as_deref() == Some("outcome_learning"))
+        .expect("expected outcome-backed opportunity");
+
+    assert_eq!(
+        opportunity.opportunity_type,
+        thinclaw::experiments::ExperimentTargetKind::PromptAsset
+    );
+    assert!(
+        opportunity
+            .signals
+            .iter()
+            .any(|signal| signal.contains("negative outcome")),
+        "expected negative outcome signal chips"
+    );
+    assert!(
+        opportunity
+            .summary
+            .to_ascii_lowercase()
+            .contains("negative outcome"),
+        "expected outcome-backed summary"
+    );
+    let project_hint = opportunity
+        .project_hint
+        .as_ref()
+        .expect("expected outcome-backed project hint");
+    assert_eq!(
+        project_hint
+            .get("metric_name")
+            .and_then(|value| value.as_str()),
+        Some("outcome_success_rate")
+    );
+    assert!(
+        project_hint
+            .get("name")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .contains("USER.md"),
+        "expected prompt benchmark project hint name"
+    );
 }

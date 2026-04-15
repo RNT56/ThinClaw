@@ -49,7 +49,7 @@ const PRESENTATION_SETTING_KEYS = new Set([
 const SKINNED_TOOL_NAMES = ['shell', 'browser', 'memory', 'search_files', 'todo', 'subagent'];
 const WEBCHAT_BOOTSTRAP = readWebchatBootstrap();
 let currentResolvedSkin = WEBCHAT_BOOTSTRAP.resolvedSkin;
-let currentAgentName = WEBCHAT_BOOTSTRAP.agentName || 'thinclaw';
+let currentAgentName = WEBCHAT_BOOTSTRAP.agentName || 'Agent';
 const AVAILABLE_SKINS = Array.isArray(WEBCHAT_BOOTSTRAP.availableSkins) ? WEBCHAT_BOOTSTRAP.availableSkins : [];
 
 function readWebchatBootstrap() {
@@ -60,7 +60,7 @@ function readWebchatBootstrap() {
     if (!parsed || typeof parsed !== 'object') return fallbackWebchatBootstrap();
     return {
       theme: parsed.theme || 'system',
-      agentName: parsed.agentName || 'thinclaw',
+      agentName: parsed.agentName || 'Agent',
       showBranding: parsed.showBranding !== false,
       availableSkins: Array.isArray(parsed.availableSkins) ? parsed.availableSkins : [],
       resolvedSkin: parsed.resolvedSkin || fallbackWebchatBootstrap().resolvedSkin,
@@ -73,7 +73,7 @@ function readWebchatBootstrap() {
 function fallbackWebchatBootstrap() {
   return {
     theme: 'system',
-    agentName: 'thinclaw',
+    agentName: 'Agent',
     showBranding: true,
     availableSkins: [],
     resolvedSkin: {
@@ -138,7 +138,7 @@ function personalityCopy(key, data) {
 
 function applySkinPresentation() {
   const skin = resolvedSkinMeta();
-  const tagline = skin.tagline || 'Secure AI Assistant';
+  const tagline = skin.tagline || 'Secure personal agent';
   const authTagline = document.querySelector('.auth-tagline');
   if (authTagline) authTagline.textContent = tagline;
   const brandMeta = document.getElementById('web-brand-chip-meta');
@@ -154,7 +154,18 @@ function applySkinPresentation() {
   document.documentElement.setAttribute('data-elevation', skin.elevation || 'medium');
 }
 
+function applyAgentPresentation() {
+  const name = (currentAgentName || 'Agent').trim() || 'Agent';
+  const authTitle = document.querySelector('.auth-brand h1');
+  if (authTitle) authTitle.textContent = name;
+  const brandTitle = document.querySelector('.web-brand-chip-title');
+  if (brandTitle) brandTitle.textContent = name;
+  const assistantLabel = document.querySelector('.assistant-label');
+  if (assistantLabel) assistantLabel.textContent = name;
+}
+
 applySkinPresentation();
+applyAgentPresentation();
 
 const RESEARCH_GPU_CLOUDS = [
   {
@@ -979,6 +990,7 @@ function createSubsessionRow(session) {
 function renderThreadSidebar() {
   const assistantEl = document.getElementById('assistant-thread');
   const assistantMetaEl = document.getElementById('assistant-meta');
+  applyAgentPresentation();
   if (threadsCache.assistantThread) {
     assistantThreadId = threadsCache.assistantThread.id;
     const isActive = currentThreadId === assistantThreadId;
@@ -1146,7 +1158,7 @@ function formatMessageTimestamp(timestamp) {
 
 function messageRoleLabel(role) {
   if (role === 'user') return 'You';
-  if (role === 'assistant') return currentAgentName || 'Assistant';
+  if (role === 'assistant') return currentAgentName || 'Agent';
   return 'Status';
 }
 
@@ -3895,6 +3907,8 @@ function sendJobPrompt(jobId, done) {
 // --- Routines ---
 
 let currentRoutineId = null;
+let pendingRoutineRunHighlightId = null;
+let learningOutcomesById = {};
 
 function loadRoutines() {
   currentRoutineId = null;
@@ -3945,7 +3959,7 @@ function renderRoutinesList(routines) {
     const toggleLabel = r.enabled ? 'Disable' : 'Enable';
     const toggleClass = r.enabled ? 'btn-cancel' : 'btn-restart';
 
-    return '<tr class="routine-row" onclick="openRoutineDetail(\'' + r.id + '\')">'
+    return '<tr class="routine-row" data-record-id="routine:' + escapeHtml(r.id) + '" onclick="openRoutineDetail(\'' + r.id + '\')">'
       + '<td>' + escapeHtml(r.name) + '</td>'
       + '<td>' + escapeHtml(r.trigger_summary) + '</td>'
       + '<td>' + escapeHtml(r.action_type) + '</td>'
@@ -4034,7 +4048,7 @@ function renderRoutineDetail(routine) {
         : run.status === 'Failed' ? 'failed'
         : run.status === 'Attention' ? 'stuck'
         : 'in_progress';
-      html += '<tr>'
+      html += '<tr data-record-id="routine-run:' + escapeHtml(run.id) + '">'
         + '<td>' + escapeHtml(run.trigger_type) + '</td>'
         + '<td>' + formatDate(run.started_at) + '</td>'
         + '<td>' + formatDate(run.completed_at) + '</td>'
@@ -4050,6 +4064,15 @@ function renderRoutineDetail(routine) {
 
   html += '</section>';
   detail.innerHTML = html;
+  if (pendingRoutineRunHighlightId) {
+    window.setTimeout(() => {
+      const highlighted = highlightRecordRow(pendingRoutineRunHighlightId);
+      if (!highlighted) {
+        showToast('Routine run source is not available in the current detail view.', 'warning');
+      }
+      pendingRoutineRunHighlightId = null;
+    }, 60);
+  }
 }
 
 function triggerRoutine(id) {
@@ -4463,7 +4486,10 @@ function renderResearchOpportunityCard(opportunity) {
   const linkButton = opportunity.linked_target_id
     ? '<button class="btn-cancel" onclick="switchResearchSubtab(\'projects\')">Linked target</button>'
     : '<button class="btn-cancel" onclick="linkResearchOpportunity(\'' + escapeJsString(opportunity.id) + '\')">Link target</button>';
-  return '<article class="ui-panel ui-panel--subtle ui-panel-stack research-opportunity-card">' +
+  return '<article class="ui-panel ui-panel--subtle ui-panel-stack research-opportunity-card"'
+    + ' data-opportunity-id="' + escapeHtml(opportunity.id) + '"'
+    + ' data-research-source="' + escapeHtml(opportunity.source || 'inferred') + '"'
+    + ' data-research-kind="' + escapeHtml(opportunity.kind) + '">' +
     '<div class="research-opportunity-head">' +
       '<div>' +
         '<div class="research-opportunity-kicker">' + escapeHtml(opportunity.kind) + '</div>' +
@@ -4475,7 +4501,7 @@ function renderResearchOpportunityCard(opportunity) {
     '<div class="research-opportunity-summary">' + escapeHtml(opportunity.summary || 'No summary provided.') + '</div>' +
     '<div class="research-opportunity-signals">' + signalHtml + '</div>' +
     '<div class="research-opportunity-actions">' +
-      '<button class="btn-restart" onclick="primeResearchProjectFormFromOpportunity(\'' + escapeJsString(opportunity.id) + '\')">Create Project</button>' +
+      '<button class="btn-restart" data-action="create-project" onclick="primeResearchProjectFormFromOpportunity(\'' + escapeJsString(opportunity.id) + '\')">Create Project</button>' +
       linkButton +
       '<button class="btn-cancel" onclick="switchResearchSubtab(\'' + escapeJsString(selectSubtab) + '\')">Open ' + escapeHtml(getResearchSubtabLabel(selectSubtab)) + '</button>' +
       (needsGpuClouds
@@ -5359,7 +5385,7 @@ function renderResearchProjects() {
   empty.style.display = 'none';
   tbody.innerHTML = projects.map((project) => {
     const runnerLabel = project.default_runner_profile_id ? runnerNameById(project.default_runner_profile_id) : '-';
-    return '<tr>'
+    return '<tr data-record-id="research-project:' + escapeHtml(project.id) + '">'
       + '<td>' + escapeHtml(project.name) + '</td>'
       + '<td><span class="badge ' + researchBadgeClass(project.status) + '">' + escapeHtml(project.status) + '</span></td>'
       + '<td>' + escapeHtml(project.primary_metric.name + ' (' + project.primary_metric.comparator + ')') + '</td>'
@@ -5394,7 +5420,7 @@ function renderResearchRunners() {
       : '-';
     const launchMode = researchLaunchModeForBackend(runner.backend, runner.backend_config);
     const providerState = researchRunnerProviderState(runner);
-    return '<tr>'
+    return '<tr data-record-id="research-runner:' + escapeHtml(runner.id) + '">'
       + '<td>' + escapeHtml(runner.name) + '</td>'
       + '<td>' + escapeHtml(runner.backend) + '</td>'
       + '<td><span class="badge ' + launchMode.className + '">' + escapeHtml(launchMode.label) + '</span><div class="research-table-note">' + escapeHtml(launchMode.detail) + '</div></td>'
@@ -6015,16 +6041,18 @@ function loadLearning() {
     apiFetch('/api/learning/provider-health'),
     apiFetch('/api/learning/history?limit=50'),
     apiFetch('/api/learning/candidates?limit=50'),
+    apiFetch('/api/learning/outcomes?limit=50'),
     apiFetch('/api/learning/code-proposals?limit=50'),
     apiFetch('/api/learning/feedback?limit=50'),
     apiFetch('/api/learning/artifact-versions?limit=50'),
     apiFetch('/api/learning/rollbacks?limit=50'),
   ]).then((results) => {
-    const [statusRes, healthRes, historyRes, candidatesRes, proposalsRes, feedbackRes, artifactsRes, rollbacksRes] = results;
+    const [statusRes, healthRes, historyRes, candidatesRes, outcomesRes, proposalsRes, feedbackRes, artifactsRes, rollbacksRes] = results;
     const status = statusRes.status === 'fulfilled' ? statusRes.value : null;
     const health = healthRes.status === 'fulfilled' ? healthRes.value : null;
     const history = historyRes.status === 'fulfilled' ? historyRes.value : null;
     const candidates = candidatesRes.status === 'fulfilled' ? candidatesRes.value : null;
+    const outcomes = outcomesRes.status === 'fulfilled' ? outcomesRes.value : null;
     const proposals = proposalsRes.status === 'fulfilled' ? proposalsRes.value : null;
     const feedback = feedbackRes.status === 'fulfilled' ? feedbackRes.value : null;
     const artifacts = artifactsRes.status === 'fulfilled' ? artifactsRes.value : null;
@@ -6041,6 +6069,7 @@ function loadLearning() {
 
     renderLearningHistory(history);
     renderLearningCandidates(candidates);
+    renderLearningOutcomes(outcomes);
     renderLearningProposals(proposals);
     renderLearningFeedback(feedback);
     renderLearningArtifacts(artifacts);
@@ -6050,13 +6079,13 @@ function loadLearning() {
 
 function learningBadgeClass(value) {
   const normalized = String(value || '').toLowerCase();
-  if (['healthy', 'enabled', 'active', 'approved', 'applied', 'recorded', 'helpful'].includes(normalized)) {
+  if (['healthy', 'enabled', 'active', 'approved', 'applied', 'recorded', 'helpful', 'positive', 'evaluated'].includes(normalized)) {
     return 'completed';
   }
-  if (['failed', 'unhealthy', 'rejected', 'harmful'].includes(normalized)) {
+  if (['failed', 'unhealthy', 'rejected', 'harmful', 'negative', 'dismissed', 'expired'].includes(normalized)) {
     return 'failed';
   }
-  if (['warning', 'stuck', 'needs_review', 'review', 'pending', 'proposed', 'degraded'].includes(normalized)) {
+  if (['warning', 'stuck', 'needs_review', 'review', 'pending', 'proposed', 'degraded', 'open', 'evaluating', 'neutral'].includes(normalized)) {
     return 'stuck';
   }
   return 'pending';
@@ -6069,6 +6098,52 @@ function formatLearningConfidence(value) {
   return (num <= 1 ? Math.round(num * 100) : Math.round(num)) + '%';
 }
 
+function highlightRecordRow(recordId) {
+  if (!recordId) return false;
+  const row = document.querySelector('[data-record-id="' + escapeHtml(String(recordId)) + '"]');
+  if (!row) return false;
+  document.querySelectorAll('.record-highlight').forEach((el) => el.classList.remove('record-highlight'));
+  row.classList.add('record-highlight');
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  window.setTimeout(() => row.classList.remove('record-highlight'), 2200);
+  return true;
+}
+
+function viewLearningSource(contract) {
+  if (!contract || !contract.source_ref) return;
+  const source = contract.source_ref;
+  if (source.kind === 'routine_run') {
+    if (!source.routine_id) {
+      showToast('Routine source context is missing for this outcome.', 'warning');
+      return;
+    }
+    pendingRoutineRunHighlightId = 'routine-run:' + source.id;
+    switchTab('routines');
+    openRoutineDetail(source.routine_id);
+    return;
+  }
+
+  switchTab('learning');
+  let recordId = null;
+  if (source.kind === 'learning_event') recordId = 'learning-event:' + source.id;
+  if (source.kind === 'artifact_version') recordId = 'learning-artifact:' + source.id;
+  if (source.kind === 'learning_code_proposal') recordId = 'learning-proposal:' + source.id;
+  if (!recordId) {
+    showToast('No in-app source navigation is available for ' + source.kind + '.', 'warning');
+    return;
+  }
+
+  window.setTimeout(() => {
+    if (!highlightRecordRow(recordId)) {
+      showToast('Source record is not currently visible in the loaded table (' + source.id + ').', 'warning');
+    }
+  }, 120);
+}
+
+function viewLearningOutcomeSourceById(contractId) {
+  viewLearningSource(learningOutcomesById[contractId] || null);
+}
+
 function renderLearningSummary(status) {
   const summary = document.getElementById('learning-summary');
   if (!summary) return;
@@ -6076,9 +6151,13 @@ function renderLearningSummary(status) {
   summary.innerHTML = ''
     + summaryCard('Events', status.recent?.events || 0, 'active')
     + summaryCard('Candidates', status.recent?.candidates || 0, 'completed')
+    + summaryCard('Outcome Open', status.outcomes_open || 0, status.outcomes_due ? 'stuck' : '')
+    + summaryCard('Outcome Due', status.outcomes_due || 0, status.outcomes_due ? 'stuck' : '')
     + summaryCard('Proposals', status.recent?.code_proposals || 0, 'stuck')
     + summaryCard('Feedback', status.recent?.feedback || 0, '')
     + summaryCard('Rollbacks', status.recent?.rollbacks || 0, 'failed')
+    + summaryCard('Outcome Neg Ratio', Math.round((status.outcomes_negative_ratio_last_7d || 0) * 100) + '%', (status.outcomes_negative_ratio_last_7d || 0) > 0.2 ? 'failed' : 'completed')
+    + summaryCard('Outcome Evaluator', status.outcomes_evaluator_healthy ? 'healthy' : 'stale', status.outcomes_evaluator_healthy ? 'completed' : 'failed')
     + summaryCard('Healthy Providers', (status.provider_health?.healthy || 0) + ' / ' + (status.provider_health?.total || 0), 'completed');
 }
 
@@ -6126,7 +6205,7 @@ function renderLearningHistory(data) {
     const actionLabel = event.id
       ? '<button class="btn-restart" onclick="setLearningFeedbackTarget(\'learning_event\', \'' + escapeJsString(event.id) + '\')">Feedback</button>'
       : '';
-    return '<tr>'
+    return '<tr data-record-id="learning-event:' + escapeHtml(event.id) + '">'
       + '<td>' + formatDate(event.created_at) + '</td>'
       + '<td>' + escapeHtml(event.source) + '</td>'
       + '<td><span class="badge ' + learningBadgeClass(event.class) + '">' + escapeHtml(event.class) + '</span></td>'
@@ -6164,6 +6243,122 @@ function renderLearningCandidates(data) {
   }).join('');
 }
 
+function renderLearningOutcomes(data) {
+  const tbody = document.getElementById('learning-outcomes-tbody');
+  const empty = document.getElementById('learning-outcomes-empty');
+  if (!tbody || !empty) return;
+  const outcomes = data?.outcomes || [];
+  learningOutcomesById = {};
+
+  if (!outcomes.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    renderLearningOutcomeDetail(null);
+    return;
+  }
+
+  empty.style.display = 'none';
+  tbody.innerHTML = outcomes.map((contract) => {
+    learningOutcomesById[contract.id] = contract;
+    const sourceNavigable = contract.source_ref
+      && (
+        contract.source_ref.kind === 'learning_event'
+        || contract.source_ref.kind === 'artifact_version'
+        || contract.source_ref.kind === 'learning_code_proposal'
+        || (contract.source_ref.kind === 'routine_run' && !!contract.source_ref.routine_id)
+      );
+    const source = contract.source_ref?.kind
+      ? contract.source_ref.kind + ' / ' + String(contract.source_ref.id || contract.source_id).slice(0, 8)
+      : contract.source_kind + ' / ' + contract.source_id.slice(0, 8);
+    const viewBtn = '<button class="btn-restart" data-action="view-outcome" onclick="viewLearningOutcome(\'' + escapeJsString(contract.id) + '\')">View</button>';
+    const sourceBtn = sourceNavigable
+      ? '<button class="btn-restart" data-action="open-source" onclick="viewLearningOutcomeSourceById(\'' + escapeJsString(contract.id) + '\')">Source</button>'
+      : '<button class="btn-restart" disabled title="Source record context unavailable">Source</button>';
+    const reviewBtns = contract.status === 'open' || contract.status === 'evaluating'
+      ? [
+          '<button class="btn-restart" onclick="reviewLearningOutcome(\'' + escapeJsString(contract.id) + '\', \'confirm\', \'positive\')">Positive</button>',
+          '<button class="btn-restart" onclick="reviewLearningOutcome(\'' + escapeJsString(contract.id) + '\', \'confirm\', \'neutral\')">Neutral</button>',
+          '<button class="btn-cancel" onclick="reviewLearningOutcome(\'' + escapeJsString(contract.id) + '\', \'confirm\', \'negative\')">Negative</button>',
+          '<button class="btn-cancel" onclick="reviewLearningOutcome(\'' + escapeJsString(contract.id) + '\', \'dismiss\')">Dismiss</button>',
+        ].join(' ')
+      : '<button class="btn-restart" onclick="reviewLearningOutcome(\'' + escapeJsString(contract.id) + '\', \'requeue\')">Requeue</button>';
+    return '<tr data-outcome-id="' + escapeHtml(contract.id) + '">'
+      + '<td>' + formatDate(contract.created_at) + '</td>'
+      + '<td>' + escapeHtml(contract.contract_type) + '</td>'
+      + '<td><span class="badge ' + learningBadgeClass(contract.status) + '">' + escapeHtml(contract.status) + '</span></td>'
+      + '<td>' + escapeHtml(source) + '</td>'
+      + '<td title="' + escapeHtml(contract.summary || '') + '">' + escapeHtml(contract.summary || '-') + '</td>'
+      + '<td>' + escapeHtml(contract.final_verdict || '-') + '</td>'
+      + '<td>' + viewBtn + ' ' + sourceBtn + ' ' + reviewBtns + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function renderLearningOutcomeDetail(data) {
+  const container = document.getElementById('learning-outcome-detail');
+  if (!container) return;
+  if (!data || !data.contract) {
+    container.innerHTML = '<div class="empty-state ui-panel-empty">Select an outcome contract to inspect its observations.</div>';
+    return;
+  }
+  const contract = data.contract;
+  const observations = data.observations || [];
+  const source = contract.source_ref || { kind: contract.source_kind, id: contract.source_id };
+  const sourceNavigable = source.kind === 'learning_event'
+    || source.kind === 'artifact_version'
+    || source.kind === 'learning_code_proposal'
+    || (source.kind === 'routine_run' && !!source.routine_id);
+  const sourceButton = sourceNavigable
+    ? '<button class="btn-restart" onclick="viewLearningOutcomeSourceById(\'' + escapeJsString(contract.id) + '\')">Open Source</button>'
+    : '<button class="btn-restart" disabled title="Source record context unavailable">Source unavailable</button>';
+  const observationMarkup = observations.length
+    ? observations.map((obs) => '<li><strong>' + escapeHtml(obs.observation_kind) + '</strong> (' + escapeHtml(obs.polarity) + ', ' + escapeHtml(String(obs.weight)) + ')'
+        + (obs.summary ? ': ' + escapeHtml(obs.summary) : '')
+        + '</li>').join('')
+    : '<li>No observations recorded.</li>';
+  container.innerHTML = ''
+    + '<div class="ui-resource-header" data-outcome-detail-id="' + escapeHtml(contract.id) + '">'
+    + '<div class="ui-resource-name"><strong>' + escapeHtml(contract.contract_type) + '</strong></div>'
+    + '<span class="badge ' + learningBadgeClass(contract.status) + '">' + escapeHtml(contract.status) + '</span>'
+    + '</div>'
+    + '<div class="ui-panel-actions" style="margin-bottom:0.75rem">' + sourceButton + '</div>'
+    + '<div class="ui-resource-meta">Source: ' + escapeHtml(source.kind + ' / ' + source.id) + '</div>'
+    + '<div class="ui-resource-meta">Ledger Event: ' + escapeHtml(contract.ledger_learning_event_id || '-') + '</div>'
+    + '<div class="ui-resource-meta">Last Evaluator: ' + escapeHtml(contract.last_evaluator || '-') + '</div>'
+    + '<div class="ui-resource-meta">Due: ' + escapeHtml(formatDate(contract.due_at)) + '</div>'
+    + '<div class="ui-resource-meta">Verdict: ' + escapeHtml(contract.final_verdict || '-') + '</div>'
+    + '<div class="ui-resource-note">' + escapeHtml(contract.summary || 'No summary provided.') + '</div>'
+    + '<ul class="ui-panel-stack" style="margin:0;padding-left:1rem">' + observationMarkup + '</ul>';
+}
+
+function viewLearningOutcome(contractId) {
+  apiFetch('/api/learning/outcomes/' + encodeURIComponent(contractId))
+    .then((data) => renderLearningOutcomeDetail(data))
+    .catch((err) => showToast('Failed to load outcome detail: ' + err.message, 'error'));
+}
+
+function reviewLearningOutcome(contractId, decision, verdict) {
+  const body = { decision: decision };
+  if (verdict) body.verdict = verdict;
+  apiFetch('/api/learning/outcomes/' + encodeURIComponent(contractId) + '/review', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(() => {
+    loadLearning();
+    viewLearningOutcome(contractId);
+  }).catch((err) => showToast('Failed to review outcome: ' + err.message, 'error'));
+}
+
+function evaluateLearningOutcomesNow() {
+  apiFetch('/api/learning/outcomes/evaluate-now', { method: 'POST' })
+    .then((data) => {
+      showToast('Processed ' + (data.processed || 0) + ' outcome contract(s).', 'success');
+      loadLearning();
+    })
+    .catch((err) => showToast('Failed to evaluate outcomes: ' + err.message, 'error'));
+}
+
 function renderLearningProposals(data) {
   const tbody = document.getElementById('learning-proposals-tbody');
   const empty = document.getElementById('learning-proposals-empty');
@@ -6183,7 +6378,7 @@ function renderLearningProposals(data) {
     const feedbackBtn = '<button class="btn-restart" onclick="setLearningFeedbackTarget(\'code_proposal\', \'' + escapeJsString(proposal.id) + '\')">Feedback</button>';
     const approveBtn = isPending ? '<button class="btn-restart" onclick="reviewLearningProposal(\'' + escapeJsString(proposal.id) + '\', \'approve\')">Approve</button>' : '';
     const rejectBtn = isPending ? '<button class="btn-cancel" onclick="reviewLearningProposal(\'' + escapeJsString(proposal.id) + '\', \'reject\')">Reject</button>' : '';
-    return '<tr>'
+    return '<tr data-record-id="learning-proposal:' + escapeHtml(proposal.id) + '">'
       + '<td>' + formatDate(proposal.created_at) + '</td>'
       + '<td><span class="badge ' + learningBadgeClass(proposal.status) + '">' + escapeHtml(proposal.status) + '</span></td>'
       + '<td title="' + escapeHtml(proposal.rationale) + '">' + escapeHtml(proposal.title) + '</td>'
@@ -6235,7 +6430,7 @@ function renderLearningArtifacts(data) {
     const label = version.version_label || version.id;
     const rollbackBtn = '<button class="btn-cancel" onclick="recordLearningRollback(\'' + escapeJsString(version.id) + '\', \'' + escapeJsString(version.artifact_type) + '\', \'' + escapeJsString(version.artifact_name) + '\')">Rollback</button>';
     const feedbackBtn = '<button class="btn-restart" onclick="setLearningFeedbackTarget(\'artifact_version\', \'' + escapeJsString(version.id) + '\')">Feedback</button>';
-    return '<tr>'
+    return '<tr data-record-id="learning-artifact:' + escapeHtml(version.id) + '">'
       + '<td>' + formatDate(version.created_at) + '</td>'
       + '<td>' + escapeHtml(version.artifact_type + ' / ' + version.artifact_name) + '</td>'
       + '<td><span class="badge ' + learningBadgeClass(version.status) + '">' + escapeHtml(version.status) + '</span></td>'
@@ -7622,10 +7817,10 @@ const SETTINGS_SCHEMA = {
   'Presentation': {
     icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h16"/><path d="M8 5v14"/></svg>',
     fields: [
-      { key: 'agent.cli_skin', label: 'CLI skin', type: 'select', dynamicOptions: 'skins', desc: 'Shared ThinClaw skin used by the CLI and, by default, the WebUI.' },
+      { key: 'agent.cli_skin', label: 'CLI skin', type: 'select', dynamicOptions: 'skins', desc: 'Shared agent skin used by the CLI and, by default, the WebUI.' },
       { key: 'webchat_skin', label: 'WebUI skin', type: 'select', dynamicOptions: 'skins', desc: 'Override the WebUI skin, or leave it following the active CLI skin.', nullable: true, followLabel: 'Follow agent skin' },
       { key: 'webchat_theme', label: 'WebUI theme', type: 'select', options: [{ value: 'system', label: 'System' }, { value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }], desc: 'Overall light/dark polarity for the WebUI.' },
-      { key: 'webchat_show_branding', label: 'Bottom branding pill', type: 'bool', desc: 'Show the ThinClaw branding pill in the lower-right corner.' },
+      { key: 'webchat_show_branding', label: 'Bottom branding pill', type: 'bool', desc: 'Show the runtime branding pill in the lower-right corner.' },
     ],
   },
   'Notifications': {
@@ -7654,6 +7849,7 @@ const SETTINGS_SCHEMA = {
     icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="18" height="14" x="3" y="7" rx="2"/><path d="M12 7V3"/><path d="M15 3h-6"/><circle cx="9" cy="13" r="2"/><circle cx="15" cy="13" r="2"/><path d="M9 18h6"/></svg>',
     fields: [
       { key: 'agent.name', label: 'Agent name', type: 'text', desc: 'How the agent identifies itself' },
+      { key: 'agent.personality_pack', label: 'Personality pack', type: 'select', options: [{value: 'balanced', label: 'balanced'}, {value: 'professional', label: 'professional'}, {value: 'creative_partner', label: 'creative_partner'}, {value: 'research_assistant', label: 'research_assistant'}, {value: 'mentor', label: 'mentor'}, {value: 'minimal', label: 'minimal'}], desc: 'Default personality pack for new workspace identity and cross-surface copy' },
       { key: 'agent.max_parallel_jobs', label: 'Max parallel jobs', type: 'number', desc: 'Concurrent job limit', min: 1, max: 20 },
       { key: 'agent.job_timeout_secs', label: 'Job timeout (seconds)', type: 'number', desc: 'Max time before a job is killed', min: 60 },
       { key: 'agent.max_tool_iterations', label: 'Max tool iterations', type: 'number', desc: 'Agentic loop iteration cap', min: 1, max: 200 },
@@ -10488,7 +10684,11 @@ function saveSetting(key, value) {
       .then((res) => {
         if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
         delete settingsCache[key];
-        if (key === 'agent.name') currentAgentName = 'thinclaw';
+        if (key === 'agent.name') {
+          currentAgentName = WEBCHAT_BOOTSTRAP.agentName || 'Agent';
+          applyAgentPresentation();
+          renderThreadSidebar();
+        }
         if (key.indexOf('experiments.') === 0) applyOptionalFeatureFlagsFromCache();
         showToast('Reset ' + key + ' to default', 'success');
         if (PRESENTATION_SETTING_KEYS.has(key)) {
@@ -10505,7 +10705,11 @@ function saveSetting(key, value) {
     }).then((res) => {
       if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
       settingsCache[key] = { value: value, updated_at: new Date().toISOString() };
-      if (key === 'agent.name') currentAgentName = String(value || 'thinclaw');
+      if (key === 'agent.name') {
+        currentAgentName = String(value || WEBCHAT_BOOTSTRAP.agentName || 'Agent');
+        applyAgentPresentation();
+        renderThreadSidebar();
+      }
       if (key.indexOf('experiments.') === 0) applyOptionalFeatureFlagsFromCache();
       showToast('Saved ' + key, 'success');
       if (PRESENTATION_SETTING_KEYS.has(key)) {

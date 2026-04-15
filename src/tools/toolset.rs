@@ -103,9 +103,9 @@ impl ToolsetRegistry {
             description: "Messaging and communication tools".to_string(),
             tools: vec![
                 "send_message".to_string(),
-                "telegram_action".to_string(),
-                "discord_action".to_string(),
-                "slack_action".to_string(),
+                "telegram_actions".to_string(),
+                "discord_actions".to_string(),
+                "slack_actions".to_string(),
                 "apple_mail".to_string(),
                 "tts".to_string(),
             ],
@@ -190,7 +190,8 @@ impl ToolsetRegistry {
     pub fn resolve(&self, name: &str) -> Result<Vec<String>, String> {
         let mut resolved = Vec::new();
         let mut visited = HashSet::new();
-        self.resolve_inner(name, &mut resolved, &mut visited)?;
+        let mut stack = HashSet::new();
+        self.resolve_inner(name, &mut resolved, &mut visited, &mut stack)?;
         Ok(resolved)
     }
 
@@ -199,10 +200,15 @@ impl ToolsetRegistry {
         name: &str,
         resolved: &mut Vec<String>,
         visited: &mut HashSet<String>,
+        stack: &mut HashSet<String>,
     ) -> Result<(), String> {
-        if !visited.insert(name.to_string()) {
+        if stack.contains(name) {
             return Err(format!("Cycle detected in toolset resolution: {}", name));
         }
+        if !visited.insert(name.to_string()) {
+            return Ok(());
+        }
+        stack.insert(name.to_string());
 
         let toolset = self
             .toolsets
@@ -218,8 +224,10 @@ impl ToolsetRegistry {
 
         // Resolve includes
         for include in &toolset.includes {
-            self.resolve_inner(include, resolved, visited)?;
+            self.resolve_inner(include, resolved, visited, stack)?;
         }
+
+        stack.remove(name);
 
         Ok(())
     }
@@ -321,6 +329,40 @@ mod tests {
         assert!(tools.contains(&"shell".to_string()));
         assert!(tools.contains(&"read_file".to_string()));
         assert!(tools.contains(&"http".to_string())); // from web
+    }
+
+    #[test]
+    fn test_shared_include_dag_is_allowed() {
+        let mut reg = ToolsetRegistry::new();
+        reg.register(Toolset {
+            name: "shared".to_string(),
+            description: "Shared dependency".to_string(),
+            tools: vec!["json".to_string()],
+            includes: vec![],
+        });
+        reg.register(Toolset {
+            name: "left".to_string(),
+            description: "Left branch".to_string(),
+            tools: vec!["echo".to_string()],
+            includes: vec!["shared".to_string()],
+        });
+        reg.register(Toolset {
+            name: "right".to_string(),
+            description: "Right branch".to_string(),
+            tools: vec!["time".to_string()],
+            includes: vec!["shared".to_string()],
+        });
+        reg.register(Toolset {
+            name: "root".to_string(),
+            description: "Root".to_string(),
+            tools: vec![],
+            includes: vec!["left".to_string(), "right".to_string()],
+        });
+
+        let tools = reg.resolve("root").unwrap();
+        assert!(tools.contains(&"echo".to_string()));
+        assert!(tools.contains(&"time".to_string()));
+        assert!(tools.contains(&"json".to_string()));
     }
 
     #[test]

@@ -78,9 +78,7 @@ use crate::setup::UiMode;
 
 #[derive(Parser, Debug)]
 #[command(name = "thinclaw")]
-#[command(
-    about = "Secure personal AI assistant that protects your data and expands its capabilities"
-)]
+#[command(about = "Secure personal agent that protects your data and expands its capabilities")]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]

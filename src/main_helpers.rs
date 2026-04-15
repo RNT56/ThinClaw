@@ -4,6 +4,7 @@
 //! and agent startup orchestration.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -19,6 +20,7 @@ use thinclaw::channels::wasm::{
 use thinclaw::config::Config;
 use thinclaw::pairing::PairingStore;
 use thinclaw::secrets::SecretsStore;
+use thinclaw::settings::Settings;
 
 const STARTUP_SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
 
@@ -514,24 +516,67 @@ mod tests {
 
 /// Check if onboarding is needed and return the reason.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-pub(crate) fn check_onboard_needed() -> Option<&'static str> {
+pub(crate) fn check_onboard_needed(toml_path: Option<&Path>, no_db: bool) -> Option<String> {
+    if no_db {
+        return None;
+    }
+
+    let mut settings = Settings::load();
+    let resolved_toml_path: PathBuf = toml_path
+        .map(PathBuf::from)
+        .unwrap_or_else(Settings::default_toml_path);
+    if let Ok(Some(toml_settings)) = Settings::load_toml(&resolved_toml_path) {
+        settings.merge_from(&toml_settings);
+    }
+
+    let bootstrap_path = thinclaw::bootstrap::thinclaw_env_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("bootstrap.json");
+    let bootstrap_json: serde_json::Value = std::fs::read_to_string(&bootstrap_path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or(serde_json::Value::Null);
+
+    let env_backend = std::env::var("DATABASE_BACKEND").ok();
+    let settings_backend = settings.database_backend.clone();
+    let configured_libsql = matches!(
+        env_backend.as_deref().or(settings_backend.as_deref()),
+        Some("libsql" | "sqlite" | "turso")
+    );
+
     let has_db = std::env::var("DATABASE_URL").is_ok()
         || std::env::var("LIBSQL_PATH").is_ok()
+        || std::env::var("LIBSQL_URL").is_ok()
+        || settings.database_url.is_some()
+        || settings.libsql_path.is_some()
+        || settings.libsql_url.is_some()
+        || bootstrap_json
+            .get("database_url")
+            .and_then(|value| value.as_str())
+            .is_some()
+        || configured_libsql
         || thinclaw::config::default_libsql_path().exists();
 
     if !has_db {
-        return Some("Database not configured");
+        return Some("Database not configured".to_string());
     }
 
-    if std::env::var("ONBOARD_COMPLETED")
+    let onboard_completed = std::env::var("ONBOARD_COMPLETED")
         .map(|v| v == "true")
         .unwrap_or(false)
-    {
+        || settings.onboard_completed
+        || bootstrap_json
+            .get("onboard_completed")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+    if onboard_completed {
         return None;
     }
 
     // No explicit completion marker — treat as first run
-    Some("First run")
+    Some("First run".to_string())
 }
 
 /// Inject credentials for a channel based on naming convention.

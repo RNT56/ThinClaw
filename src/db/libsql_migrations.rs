@@ -252,6 +252,57 @@ CREATE INDEX IF NOT EXISTS idx_learning_code_proposals_user_status_created
 CREATE INDEX IF NOT EXISTS idx_learning_code_proposals_status
     ON learning_code_proposals(status);
 
+CREATE TABLE IF NOT EXISTS outcome_contracts (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    actor_id TEXT,
+    channel TEXT,
+    thread_id TEXT,
+    source_kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    contract_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    summary TEXT,
+    due_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    final_verdict TEXT,
+    final_score REAL,
+    evaluation_details TEXT NOT NULL DEFAULT '{}',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    dedupe_key TEXT NOT NULL,
+    claimed_at TEXT,
+    evaluated_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_contracts_dedupe_key
+    ON outcome_contracts(dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_outcome_contracts_status_due
+    ON outcome_contracts(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_outcome_contracts_user_actor_thread_status
+    ON outcome_contracts(user_id, actor_id, thread_id, status);
+CREATE INDEX IF NOT EXISTS idx_outcome_contracts_source
+    ON outcome_contracts(source_kind, source_id);
+
+CREATE TABLE IF NOT EXISTS outcome_observations (
+    id TEXT PRIMARY KEY,
+    contract_id TEXT NOT NULL REFERENCES outcome_contracts(id) ON DELETE CASCADE,
+    observation_kind TEXT NOT NULL,
+    polarity TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 0,
+    summary TEXT,
+    evidence TEXT NOT NULL DEFAULT '{}',
+    fingerprint TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_observations_contract_fingerprint
+    ON outcome_observations(contract_id, fingerprint);
+CREATE INDEX IF NOT EXISTS idx_outcome_observations_contract_observed_at
+    ON outcome_observations(contract_id, observed_at DESC);
+
 -- ==================== Experiments ====================
 
 CREATE TABLE IF NOT EXISTS experiment_runner_profiles (
@@ -1395,6 +1446,7 @@ mod tests {
     fn schema_includes_learning_tables() {
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS learning_events"));
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS learning_code_proposals"));
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS outcome_contracts"));
         assert!(SCHEMA.contains("conversation_messages_fts"));
     }
 

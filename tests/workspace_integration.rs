@@ -388,7 +388,10 @@ async fn test_workspace_system_prompt() {
         .await
         .unwrap();
     workspace
-        .write(paths::SOUL, "# SOUL.md\n\n- **Vibe:** Be kind and thorough")
+        .write(
+            paths::SOUL,
+            "# SOUL.md\n\n- **Presentation:** Be kind and thorough",
+        )
         .await
         .unwrap();
     workspace

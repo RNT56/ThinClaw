@@ -22,6 +22,7 @@ pub mod llm_hooks;
 pub mod llms_txt;
 pub mod model_guidance;
 pub mod pricing_sync;
+pub mod prompt_stack;
 mod provider;
 pub(crate) mod provider_factory;
 pub mod provider_presets;
@@ -42,6 +43,7 @@ pub use credential_sync::{OAuthCredentialSyncHandle, prime_runtime_oauth_credent
 pub use failover::{
     CooldownConfig, FailoverProvider, LeaseConfig, LeaseSelectionStrategy, ProviderLeaseEntry,
 };
+pub use prompt_stack::{PromptLayer, PromptStack};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, StreamChunk, StreamChunkStream, ThinkingConfig, ToolCall, ToolCompletionRequest,

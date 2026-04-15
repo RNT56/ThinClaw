@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::agent::agent_router::AgentRouter;
 use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::learning::{TrajectoryLogger, TrajectoryTurnRecord, hydrate_trajectory_record};
+use crate::agent::outcomes::{OutcomeService, spawn_outcome_service};
 use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
@@ -387,6 +388,7 @@ pub struct BackgroundTasksHandle {
     notification_forwarder_handle: Option<tokio::task::JoinHandle<()>>,
     // Bug 5 fix: zombie reaper was previously untracked and leaked on shutdown
     zombie_reaper_handle: Option<tokio::task::JoinHandle<()>>,
+    outcome_handle: Option<tokio::task::JoinHandle<()>>,
     health_monitor: Option<Arc<crate::channels::ChannelHealthMonitor>>,
     /// Receiver for system events (heartbeat messages injected by the routine engine).
     /// The message loop polls this to process heartbeat turns when the dispatcher is idle.
@@ -734,6 +736,24 @@ impl Agent {
             crate::agent::routine_engine::spawn_zombie_reaper(Arc::clone(engine))
         });
 
+        let outcome_handle = self.store().map(|store| {
+            let service = Arc::new(
+                OutcomeService::new(
+                    Arc::clone(store),
+                    self.deps.cheap_llm.clone(),
+                    self.deps.safety.clone(),
+                )
+                .with_learning_context(
+                    self.deps.workspace.clone(),
+                    self.deps.skill_registry.clone(),
+                    routine_handle
+                        .as_ref()
+                        .map(|(_, engine)| Arc::clone(engine)),
+                ),
+            );
+            spawn_outcome_service(service)
+        });
+
         BackgroundTasksHandle {
             repair_handle,
             session_pruning_handle,
@@ -742,6 +762,7 @@ impl Agent {
             routine_handle,
             notification_forwarder_handle,
             zombie_reaper_handle,
+            outcome_handle,
             health_monitor,
             system_event_mutex: tokio::sync::Mutex::new(Some(system_event_rx)),
         }
@@ -771,6 +792,9 @@ impl Agent {
         }
         // Bug 5 fix: abort zombie reaper (was previously untracked and leaked)
         if let Some(h) = handle.zombie_reaper_handle {
+            h.abort();
+        }
+        if let Some(h) = handle.outcome_handle {
             h.abort();
         }
         if let Some(ref monitor) = handle.health_monitor {

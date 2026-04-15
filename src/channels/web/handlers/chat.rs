@@ -236,28 +236,19 @@ pub(crate) async fn chat_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let origin = headers
-        .get("origin")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| {
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        let parsed = url::Url::parse(origin).map_err(|_| {
             (
                 StatusCode::FORBIDDEN,
-                "WebSocket Origin header required".to_string(),
+                "WebSocket origin is invalid".to_string(),
             )
         })?;
-
-    let host = origin
-        .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-        .and_then(|rest| rest.split(':').next()?.split('/').next())
-        .unwrap_or("");
-
-    let is_local = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
-    if !is_local {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "WebSocket origin not allowed".to_string(),
-        ));
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "WebSocket origin must use http or https".to_string(),
+            ));
+        }
     }
     Ok(ws.on_upgrade(move |socket| crate::channels::web::ws::handle_ws_connection(socket, state)))
 }

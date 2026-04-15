@@ -11,7 +11,7 @@ use uuid::Uuid;
 pub mod paths {
     /// Long-term curated memory.
     pub const MEMORY: &str = "MEMORY.md";
-    /// Agent identity (name, nature, vibe).
+    /// Agent identity (name, nature, presentation, voice).
     pub const IDENTITY: &str = "IDENTITY.md";
     /// Core values and principles.
     pub const SOUL: &str = "SOUL.md";

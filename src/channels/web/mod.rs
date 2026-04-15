@@ -1,14 +1,14 @@
 //! Web gateway channel for browser-based access to ThinClaw.
 //!
 //! Provides a single-page web UI with:
-//! - Chat with the agent (via REST + SSE)
+//! - Chat with the agent (browser UI uses REST + SSE)
 //! - Workspace/memory browsing
 //! - Job management
 //!
 //! ```text
 //! Browser ─── POST /api/chat/send ──► Agent Loop
 //!         ◄── GET  /api/chat/events ── SSE stream
-//!         ─── GET  /api/chat/ws ─────► WebSocket (bidirectional)
+//! Programmatic client ─ GET /api/chat/ws ─► Authenticated WebSocket (bidirectional)
 //!         ─── GET  /api/memory/* ────► Workspace
 //!         ─── GET  /api/jobs/* ──────► Database
 //!         ◄── GET  / ───────────────── Static HTML/CSS/JS

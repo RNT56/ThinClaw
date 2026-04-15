@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Agent Subsystems
 - **Checkpoint system**: durable mid-turn state snapshots for crash recovery and long-running tasks
-- **Vibe engine**: adaptive tone/style selection based on conversation context and channel type
+- **Personality overlay engine**: adaptive tone/style selection based on conversation context and channel type
 - **Session search**: full-text search across all agent sessions with relevance ranking
 - **Context monitor**: proactive context-window utilisation tracking with compaction triggers
 
@@ -63,8 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `quarantine`: sandboxed skill staging with integrity checks before promotion to active use
 - Skill file watcher for automatic hot-reload on disk changes
 
-#### Persona Seed Library
-- 6 production-ready persona seeds: `default`, `creative_partner`, `mentor`, `minimal`, `professional`, `research_assistant`
+#### Personality Pack Library
+- 6 production-ready personality packs: `default`, `creative_partner`, `mentor`, `minimal`, `professional`, `research_assistant`
 - Psychographic identity profiles with tonal overlays and channel-aware formatting hints
 
 #### TUI Skin System

@@ -5,7 +5,7 @@
 <h1 align="center">ThinClaw</h1>
 
 <p align="center">
-  <em>A self-hosted personal agent runtime in Rust</em>
+  <em>A self-hosted personal agent with a Rust runtime underneath</em>
 </p>
 
 <p align="center">
@@ -30,16 +30,17 @@
 
 ## What Is ThinClaw?
 
-ThinClaw is a Rust-based agent runtime you run yourself. It can operate as a standalone binary, a long-running service with a web gateway, or as the backend engine embedded inside Scrappy.
+ThinClaw is a Rust-based self-hosted agent you run yourself. It can operate as a standalone binary, a long-running service with a web gateway, or as the backend engine embedded inside Scrappy.
 
 It is built around a few core ideas:
 
+- a named agent with durable identity across CLI, WebUI, channels, and background work
 - operator-controlled deployment, models, and integrations
 - layered safety around secrets, tools, network access, and external content
 - hybrid extensibility through native Rust, WASM, and MCP
 - a proactive runtime built around channels, routines, memory, and background work
 
-ThinClaw is not just a chat wrapper. It is the runtime that handles sessions, tools, channels, persistence, and policy.
+ThinClaw is not just a chat wrapper. It is an agent product built on a runtime that handles identity, sessions, tools, channels, persistence, and policy.
 
 ## Quick Start
 
@@ -152,6 +153,8 @@ You can run ThinClaw:
 ## Core Capabilities
 
 - Multi-surface operation through the CLI, gateway, channels, and background jobs
+- A shared identity model with `personality_pack` defaults for new workspaces and `/personality` session overlays (`/vibe` remains a compatibility alias)
+- A shared command vocabulary centered on `/compress`, `/personality`, `/skills`, `/heartbeat`, `/summarize`, and `/rollback`
 - Humanist Cockpit onboarding with shared CLI/TUI readiness framing, shared skin palettes, and saved follow-up notes
 - Shared terminal skin system across boot, REPL, full-screen TUI, onboarding TUI, setup prompts, and human-readable CLI subcommands
 - Built-in ASCII-art skins plus user-defined TOML skins from `~/.thinclaw/skins/`
@@ -169,7 +172,7 @@ You can run ThinClaw:
 | Local standalone | personal machine, laptop, workstation | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | Long-running service | Mac Mini, Linux host, VPS | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | Remote gateway access | LAN, Tailscale, controlled remote use | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| Scrappy embedding | desktop app workflow | [Agent_flow.md](Agent_flow.md) |
+| Scrappy embedding | desktop app workflow | [docs/README.md](docs/README.md) |
 
 Code-backed local default: the gateway listens on port `3000` unless you configure otherwise.
 
@@ -217,12 +220,15 @@ Start here, then go deeper by topic:
 
 - [docs/README.md](docs/README.md): audience-first docs index
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): standalone, service, remote, and gateway deployment
+- [docs/IDENTITY_AND_PERSONALITY.md](docs/IDENTITY_AND_PERSONALITY.md): personality packs, identity stack, and `/personality`
+- [docs/MEMORY_AND_GROWTH.md](docs/MEMORY_AND_GROWTH.md): continuity, memory, compaction, and growth surfaces
+- [docs/RESEARCH_AND_EXPERIMENTS.md](docs/RESEARCH_AND_EXPERIMENTS.md): research tab, experiments, runners, campaigns, and GPU clouds
+- [docs/SURFACES_AND_COMMANDS.md](docs/SURFACES_AND_COMMANDS.md): shared cross-surface vocabulary
 - [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md): provider setup and routing
 - [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md): native vs WASM channel model
 - [docs/SECURITY.md](docs/SECURITY.md): public security and trust overview
 - [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md): WASM tools, WASM channels, MCP, registry, and trust boundaries
 - [src/setup/README.md](src/setup/README.md): canonical onboarding and setup spec
-- [Agent_flow.md](Agent_flow.md): boot and runtime flow
 - [src/tools/README.md](src/tools/README.md): maintainer-facing tool architecture
 - [src/workspace/README.md](src/workspace/README.md): workspace and memory model
 - [FEATURE_PARITY.md](FEATURE_PARITY.md): parity tracker plus ThinClaw-first feature ledger

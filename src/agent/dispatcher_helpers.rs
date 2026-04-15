@@ -22,6 +22,15 @@ pub(crate) async fn execute_chat_tool_standalone(
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
 ) -> Result<String, Error> {
+    let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
+    if let Some(reason) = tool_policies.denial_reason_for_metadata(tool_name, &job_ctx.metadata) {
+        return Err(crate::error::ToolError::ExecutionFailed {
+            name: tool_name.to_string(),
+            reason,
+        }
+        .into());
+    }
+
     if !crate::tools::ToolRegistry::tool_name_allowed_by_metadata(&job_ctx.metadata, tool_name) {
         return Err(crate::error::ToolError::ExecutionFailed {
             name: tool_name.to_string(),
@@ -370,6 +379,7 @@ mod tests {
                 notify_channel: None,
                 model_guidance_enabled: true,
                 cli_skin: "cockpit".to_string(),
+                personality_pack: "balanced".to_string(),
                 persona_seed: "default".to_string(),
                 checkpoints_enabled: true,
                 max_checkpoints: 50,

@@ -303,7 +303,7 @@ if [[ -f .env ]]; then
 fi
 
 # Create .env from template
-cp .env.template .env
+cp env.example .env
 
 # Inject the gateway auth token
 sed -i "s/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=${TOKEN}/" .env

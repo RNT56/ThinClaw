@@ -278,6 +278,19 @@ pub async fn start_server(
             "/api/learning/code-proposals/{id}/review",
             post(learning_code_proposal_review_handler),
         )
+        .route(
+            "/api/learning/outcomes/evaluate-now",
+            post(learning_outcomes_evaluate_now_handler),
+        )
+        .route("/api/learning/outcomes", get(learning_outcomes_handler))
+        .route(
+            "/api/learning/outcomes/{id}",
+            get(learning_outcome_detail_handler),
+        )
+        .route(
+            "/api/learning/outcomes/{id}/review",
+            post(learning_outcome_review_handler),
+        )
         .route("/api/learning/rollbacks", get(learning_rollbacks_handler))
         .route(
             "/api/learning/rollbacks",

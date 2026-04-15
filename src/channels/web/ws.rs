@@ -1,7 +1,8 @@
 //! WebSocket handler for bidirectional client communication.
 //!
 //! Provides the same event stream as SSE but also accepts incoming messages
-//! (chat, approvals) over a single persistent connection.
+//! (chat, approvals) over a single persistent connection for authenticated
+//! non-browser clients. The browser UI remains SSE-first.
 //!
 //! ```text
 //! Client ──── WS frame: {"type":"message","content":"hello"} ──► Agent Loop

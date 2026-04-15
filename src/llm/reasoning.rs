@@ -9,6 +9,7 @@ use crate::error::LlmError;
 
 use crate::llm::cost_tracker::{CostEntry, CostTracker};
 use crate::llm::model_guidance;
+use crate::llm::prompt_stack::PromptStack;
 use crate::llm::usage_tracking::mark_reasoning_request;
 use crate::llm::{
     ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
@@ -253,8 +254,8 @@ pub struct Reasoning {
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
     skill_context: Option<String>,
-    /// Optional session-scoped vibe overlay block.
-    vibe_overlay: Option<String>,
+    /// Optional session-scoped personality overlay block.
+    personality_overlay: Option<String>,
     /// Channel name (e.g. "discord", "telegram") for formatting hints.
     channel: Option<String>,
     /// Formatting guidance resolved from the active channel implementation.
@@ -305,7 +306,7 @@ impl Reasoning {
             safety,
             workspace_system_prompt: None,
             skill_context: None,
-            vibe_overlay: None,
+            personality_overlay: None,
             channel: None,
             channel_formatting_hints: None,
             model_name: None,
@@ -346,7 +347,7 @@ impl Reasoning {
             safety: Arc::clone(&self.safety),
             workspace_system_prompt: self.workspace_system_prompt.clone(),
             skill_context: self.skill_context.clone(),
-            vibe_overlay: self.vibe_overlay.clone(),
+            personality_overlay: self.personality_overlay.clone(),
             channel: self.channel.clone(),
             channel_formatting_hints: self.channel_formatting_hints.clone(),
             model_name: Some(model_name),
@@ -402,10 +403,10 @@ impl Reasoning {
         self
     }
 
-    /// Set a temporary session vibe overlay.
-    pub fn with_vibe_overlay(mut self, overlay: String) -> Self {
+    /// Set a temporary session personality overlay.
+    pub fn with_personality_overlay(mut self, overlay: String) -> Self {
         if !overlay.is_empty() {
-            self.vibe_overlay = Some(overlay);
+            self.personality_overlay = Some(overlay);
         }
         self
     }
@@ -1227,77 +1228,68 @@ Respond with a JSON plan in this format:
         // Model-family-specific guidance
         let model_guidance_section = self.build_model_guidance_section();
 
-        format!(
-            r#"## Tooling
-{tools_raw}
-Call tools when they would help. For multi-step tasks, call independent tools in parallel.
-{execution_style}
+        let tools_raw = if context.available_tools.is_empty() {
+            "No tools available.".to_string()
+        } else {
+            context
+                .available_tools
+                .iter()
+                .map(|t| {
+                    let short = t.description.split('.').next().unwrap_or(&t.description);
+                    let short = if short.len() > 80 {
+                        let end = short
+                            .char_indices()
+                            .map(|(i, _)| i)
+                            .take_while(|&i| i < 77)
+                            .last()
+                            .unwrap_or(77);
+                        &short[..end]
+                    } else {
+                        short
+                    };
+                    format!("- {}: {}", t.name, short)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
 
-## Memory
-After meaningful interactions, proactively save important learnings to your daily log via `memory_write` (target: "daily_log").
-Write decisions, preferences, facts learned, lessons, and anything worth remembering. Don't ask — just write it.
-For identity/personality updates to SOUL.md, USER.md, or AGENTS.md, use `prompt_manage`.
-Use `memory_write` for MEMORY.md, daily logs, HEARTBEAT.md, and IDENTITY.md.
+        let identity = if let Some(ref id) = self.workspace_system_prompt {
+            match &self.personality_overlay {
+                Some(overlay) => format!("{id}\n\n---\n\n{overlay}"),
+                None => id.clone(),
+            }
+        } else if let Some(ref overlay) = self.personality_overlay {
+            overlay.clone()
+        } else {
+            String::new()
+        };
 
-## Safety
-- Don't exfiltrate private data. Ever.
-- Don't run destructive commands without asking.
-- Use `memory_write` for routine memory updates.
-- Use `prompt_manage` for SOUL.md / AGENTS.md / USER.md updates, and follow approval policy when required.
-- You have no independent goals beyond the user's request.{ext}{workspace}{model_guidance}{channel}{runtime}{group}
+        let skills = if let Some(ref skill_ctx) = self.skill_context {
+            format!("## Skills\n{}", skill_ctx)
+        } else {
+            String::new()
+        };
 
-## Project Context
-{identity}{skills}"#,
-            tools_raw = if context.available_tools.is_empty() {
-                "No tools available.".to_string()
-            } else {
-                // Compact tool listing: name + first sentence only.
-                // Full schemas are sent separately via the API's structured tools parameter.
-                context
-                    .available_tools
-                    .iter()
-                    .map(|t| {
-                        let short = t.description.split('.').next().unwrap_or(&t.description);
-                        let short = if short.len() > 80 {
-                            // Safe truncation on char boundary
-                            let end = short
-                                .char_indices()
-                                .map(|(i, _)| i)
-                                .take_while(|&i| i < 77)
-                                .last()
-                                .unwrap_or(77);
-                            &short[..end]
-                        } else {
-                            short
-                        };
-                        format!("- {}: {}", t.name, short)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            },
-            execution_style = execution_style_section,
-            ext = extensions_section,
-            workspace = workspace_section,
-            model_guidance = model_guidance_section,
-            channel = channel_section,
-            runtime = runtime_section,
-            group = group_section,
-            identity = if let Some(ref id) = self.workspace_system_prompt {
-                match &self.vibe_overlay {
-                    Some(overlay) => format!("{id}\n\n---\n\n{overlay}"),
-                    None => id.clone(),
-                }
-            } else if let Some(ref overlay) = self.vibe_overlay {
-                overlay.clone()
-            } else {
-                String::new()
-            },
-            skills = if let Some(ref skill_ctx) = self.skill_context {
-                format!("\n\n## Skills\n{}", skill_ctx)
-            } else {
-                String::new()
-            },
-        )
+        let mut stack = PromptStack::new();
+        stack.push_section(
+            "Tooling",
+            format!(
+                "{tools_raw}\nCall tools when they would help. For multi-step tasks, call independent tools in parallel.\n{execution_style_section}"
+            ),
+        );
+        stack.push_section(
+            "Memory",
+            "After meaningful interactions, proactively save important learnings to your daily log via `memory_write` (target: \"daily_log\").\nWrite decisions, preferences, facts learned, lessons, and anything worth remembering. Don't ask — just write it.\nFor identity/personality updates to SOUL.md, USER.md, or AGENTS.md, use `prompt_manage`.\nUse `memory_write` for MEMORY.md, daily logs, HEARTBEAT.md, and IDENTITY.md.",
+        );
+        stack.push_section(
+            "Safety",
+            format!(
+                "- Don't exfiltrate private data. Ever.\n- Don't run destructive commands without asking.\n- Use `memory_write` for routine memory updates.\n- Use `prompt_manage` for SOUL.md / AGENTS.md / USER.md updates, and follow approval policy when required.\n- You have no independent goals beyond the user's request.{extensions_section}{workspace_section}{model_guidance_section}{channel_section}{runtime_section}{group_section}"
+            ),
+        );
+        stack.push_section("Project Context", identity);
+        stack.push_raw(skills);
+        stack.render()
     }
 
     fn build_model_guidance_section(&self) -> String {
@@ -1882,7 +1874,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_prompt_includes_vibe_overlay_after_identity() {
+    fn conversation_prompt_includes_personality_overlay_after_identity() {
         let reasoning = Reasoning::new(
             Arc::new(StubLlm::new("done")),
             Arc::new(crate::safety::SafetyLayer::new(
@@ -1897,13 +1889,13 @@ mod tests {
             )),
         )
         .with_system_prompt("## Identity\n\nBase identity".to_string())
-        .with_vibe_overlay("## Temporary Vibe\n\nBe extra concise.".to_string());
+        .with_personality_overlay("## Temporary Personality\n\nBe extra concise.".to_string());
 
         let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
 
         assert!(prompt.contains("## Identity\n\nBase identity"));
-        assert!(prompt.contains("## Temporary Vibe\n\nBe extra concise."));
-        assert!(prompt.contains("Base identity\n\n---\n\n## Temporary Vibe"));
+        assert!(prompt.contains("## Temporary Personality\n\nBe extra concise."));
+        assert!(prompt.contains("Base identity\n\n---\n\n## Temporary Personality"));
     }
 
     #[test]

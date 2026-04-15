@@ -179,7 +179,7 @@ impl SetupWizard {
                 Phase::ChannelsContinuity,
                 "Channel Configuration",
                 "Choose where ThinClaw should receive and send messages.",
-                "A working channel is what turns configuration into a usable assistant.",
+                "A working channel is what turns configuration into a usable agent.",
                 Some("Start with one channel you can verify right now."),
             );
             push_step(

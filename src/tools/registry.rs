@@ -23,10 +23,10 @@ use crate::tools::builtin::{
     CanvasTool, ClarifyTool, CreateAgentTool, CreateJobTool, DeviceInfoTool, EchoTool,
     EmitUserMessageTool, ExecuteCodeTool, GrepTool, HomeAssistantTool, HttpTool, JobEventsTool,
     JobPromptTool, JobStatusTool, JsonTool, LearningFeedbackTool, LearningHistoryTool,
-    LearningProposalReviewTool, LearningStatusTool, ListAgentsTool, ListDirTool, ListJobsTool,
-    LlmListModelsTool, LlmSelectTool, MemoryDeleteTool, MemoryReadTool, MemorySearchTool,
-    MemoryTreeTool, MemoryWriteTool, MessageAgentTool, MoaTool, ProcessTool, PromptManageTool,
-    PromptQueue, ReadFileTool, RemoveAgentTool, SearchFilesTool, SendMessageTool,
+    LearningOutcomesTool, LearningProposalReviewTool, LearningStatusTool, ListAgentsTool,
+    ListDirTool, ListJobsTool, LlmListModelsTool, LlmSelectTool, MemoryDeleteTool, MemoryReadTool,
+    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, MoaTool, ProcessTool,
+    PromptManageTool, PromptQueue, ReadFileTool, RemoveAgentTool, SearchFilesTool, SendMessageTool,
     SessionSearchTool, SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool,
     SkillInstallTool, SkillListTool, SkillManageTool, SkillReadTool, SkillReloadTool,
     SkillRemoveTool, SkillSearchTool, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool,
@@ -726,12 +726,13 @@ impl ToolRegistry {
             Arc::clone(&orchestrator),
             Arc::clone(&store),
         )));
+        self.register_sync(Arc::new(LearningOutcomesTool::new(Arc::clone(&store))));
         self.register_sync(Arc::new(LearningHistoryTool::new(Arc::clone(&store))));
         self.register_sync(Arc::new(LearningFeedbackTool::new(Arc::clone(
             &orchestrator,
         ))));
         self.register_sync(Arc::new(LearningProposalReviewTool::new(orchestrator)));
-        count += 4;
+        count += 5;
 
         tracing::info!("Registered {} learning tools", count);
     }

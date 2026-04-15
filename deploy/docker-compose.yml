@@ -3,7 +3,7 @@ version: '3.9'
 # ThinClaw Remote Agent — Docker Compose deployment
 #
 # Quick start:
-#   cp .env.template .env
+#   cp env.example .env
 #   # Edit .env: set GATEWAY_AUTH_TOKEN and at least one LLM key
 #   docker compose up -d --build
 #

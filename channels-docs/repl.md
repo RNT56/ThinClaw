@@ -14,7 +14,7 @@ may not include this interactive mode.
 ## Features
 
 - Interactive prompt with line editing
-- Slash commands (`/help`, `/status`, `/restart`, `/tools`, etc.)
+- Shared slash commands for identity, memory, and workflows (`/help`, `/identity`, `/memory`, `/personality`, `/compress`, `/skills`, `/rollback`, etc.)
 - Autocomplete for commands
 - Multi-line input support
 - Single-message mode: `thinclaw --message "What time is it?"`
@@ -37,3 +37,10 @@ thinclaw --message "Summarize the project README"
 - When other channels are active, the REPL runs alongside them
 - The boot screen is displayed when REPL mode is active
 - Not available when running as a headless daemon or a build without the CLI surface
+- Primary command vocabulary follows the shared agent-first docs: `/compress` is preferred over `/compact`, and `/personality` is preferred over `/vibe`
+
+## Related Docs
+
+- [../docs/IDENTITY_AND_PERSONALITY.md](../docs/IDENTITY_AND_PERSONALITY.md)
+- [../docs/MEMORY_AND_GROWTH.md](../docs/MEMORY_AND_GROWTH.md)
+- [../docs/SURFACES_AND_COMMANDS.md](../docs/SURFACES_AND_COMMANDS.md)

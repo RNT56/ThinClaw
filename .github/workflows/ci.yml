@@ -10,6 +10,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # `dtolnay/rust-toolchain` already installs through rustup's `--profile minimal`
+  # internally, so `profile: minimal` is redundant and not a supported action input.
   codestyle:
     name: Code Style (fmt + clippy)
     runs-on: ubuntu-latest
@@ -17,10 +19,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
-          profile: minimal
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Check formatting
@@ -58,7 +59,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
           components: clippy
@@ -79,7 +80,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
       - uses: Swatinem/rust-cache@v2
@@ -109,7 +110,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
       - uses: Swatinem/rust-cache@v2
@@ -127,7 +128,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
       - uses: Swatinem/rust-cache@v2
@@ -155,7 +156,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
       - uses: Swatinem/rust-cache@v2
@@ -188,7 +189,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
       - uses: Swatinem/rust-cache@v2
@@ -222,7 +223,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
       - uses: Swatinem/rust-cache@v2
@@ -257,10 +258,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
           components: llvm-tools-preview
+          targets: wasm32-wasip2
       - uses: Swatinem/rust-cache@v2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev postgresql-client

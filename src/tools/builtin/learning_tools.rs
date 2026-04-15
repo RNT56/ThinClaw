@@ -8,10 +8,13 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::agent::learning::LearningOrchestrator;
+use crate::agent::{learning::LearningOrchestrator, outcomes};
 use crate::context::JobContext;
 use crate::db::Database;
-use crate::history::LearningArtifactVersion as DbLearningArtifactVersion;
+use crate::history::{
+    LearningArtifactVersion as DbLearningArtifactVersion,
+    OutcomeContractQuery as DbOutcomeContractQuery,
+};
 use crate::skills::{
     MAX_PROMPT_FILE_SIZE, SkillSource, normalize_line_endings,
     parser::parse_skill_md,
@@ -373,10 +376,19 @@ async fn record_artifact_version(
         provenance,
         created_at: Utc::now(),
     };
-    store
+    let id = store
         .insert_learning_artifact_version(&version)
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    if let Err(err) = outcomes::maybe_create_artifact_contract(store, &version).await {
+        tracing::debug!(
+            artifact_type = %artifact_type,
+            artifact_name = %artifact_name,
+            error = %err,
+            "Outcome-backed artifact contract creation skipped"
+        );
+    }
+    Ok(id)
 }
 
 fn serialized<T: serde::Serialize>(value: T) -> serde_json::Value {
@@ -1085,22 +1097,50 @@ impl Tool for LearningStatusTool {
         let feedback_fut = store.list_learning_feedback(&user_id, None, None, 5);
         let rollbacks_fut = store.list_learning_rollbacks(&user_id, None, None, 5);
         let proposals_fut = store.list_learning_code_proposals(&user_id, None, 5);
+        let outcome_stats_fut = store.outcome_summary_stats(&user_id);
+        let outcome_query = DbOutcomeContractQuery {
+            user_id: user_id.clone(),
+            actor_id: None,
+            status: None,
+            contract_type: None,
+            source_kind: None,
+            source_id: None,
+            thread_id: None,
+            limit: 5,
+        };
+        let outcomes_fut = store.list_outcome_contracts(&outcome_query);
 
-        let (events, evaluations, candidates, artifact_versions, feedback, rollbacks, proposals) =
-            tokio::try_join!(
-                events_fut,
-                evals_fut,
-                candidates_fut,
-                versions_fut,
-                feedback_fut,
-                rollbacks_fut,
-                proposals_fut,
-            )
-            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+        let (
+            events,
+            evaluations,
+            candidates,
+            artifact_versions,
+            feedback,
+            rollbacks,
+            proposals,
+            outcome_stats,
+            outcome_contracts,
+        ) = tokio::try_join!(
+            events_fut,
+            evals_fut,
+            candidates_fut,
+            versions_fut,
+            feedback_fut,
+            rollbacks_fut,
+            proposals_fut,
+            outcome_stats_fut,
+            outcomes_fut,
+        )
+        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
 
         let summary = serde_json::json!({
             "settings": serialized(&settings),
             "provider_health": providers,
+            "outcomes": {
+                "enabled": settings.enabled && settings.outcomes.enabled,
+                "summary": outcome_stats,
+                "recent": summarize_recent(outcome_contracts),
+            },
             "recent_activity": {
                 "events": summarize_recent(events),
                 "evaluations": summarize_recent(evaluations),
@@ -1125,6 +1165,129 @@ fn summarize_recent<T: serde::Serialize>(items: Vec<T>) -> serde_json::Value {
         "count": items.len(),
         "items": items,
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// learning_outcomes
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub struct LearningOutcomesTool {
+    store: Arc<dyn Database>,
+}
+
+impl LearningOutcomesTool {
+    pub fn new(store: Arc<dyn Database>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for LearningOutcomesTool {
+    fn name(&self) -> &str {
+        "learning_outcomes"
+    }
+
+    fn description(&self) -> &str {
+        "Inspect outcome-backed learning contracts and their observations."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "contract_id": {
+                    "type": "string",
+                    "description": "Optional outcome contract UUID for detailed inspection"
+                },
+                "status": { "type": "string" },
+                "contract_type": { "type": "string" },
+                "source_kind": { "type": "string" },
+                "thread_id": { "type": "string" },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        if let Some(contract_id) = params.get("contract_id").and_then(|value| value.as_str()) {
+            let parsed = Uuid::parse_str(contract_id).map_err(|_| {
+                ToolError::InvalidParameters("contract_id must be a valid UUID".to_string())
+            })?;
+            let contract = self
+                .store
+                .get_outcome_contract(&ctx.user_id, parsed)
+                .await
+                .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(format!("Outcome contract '{}' not found", parsed))
+                })?;
+            let observations = self
+                .store
+                .list_outcome_observations(parsed)
+                .await
+                .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+            return Ok(ToolOutput::success(
+                serde_json::json!({
+                    "contract": contract,
+                    "observations": observations,
+                }),
+                start.elapsed(),
+            ));
+        }
+
+        let limit = params
+            .get("limit")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(25)
+            .clamp(1, 100) as i64;
+        let contracts = self
+            .store
+            .list_outcome_contracts(&DbOutcomeContractQuery {
+                user_id: ctx.user_id.clone(),
+                actor_id: None,
+                status: params
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                contract_type: params
+                    .get("contract_type")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                source_kind: params
+                    .get("source_kind")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                source_id: None,
+                thread_id: params
+                    .get("thread_id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                limit,
+            })
+            .await
+            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "count": contracts.len(),
+                "items": contracts,
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

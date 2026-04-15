@@ -129,17 +129,24 @@ impl LibSqlBackend {
 
     /// Create a new connection to the database.
     ///
-    /// Sets `PRAGMA busy_timeout = 5000` on every connection so concurrent
-    /// writers wait up to 5 seconds instead of failing instantly with
-    /// "database is locked".
+    /// Sets `PRAGMA busy_timeout = 5000` on every connection and drains the
+    /// pragma result row so concurrent writers wait up to 5 seconds instead of
+    /// failing instantly with "database is locked". This pragma returns a row
+    /// in libsql, so connection setup must consume it rather than dropping the
+    /// query result immediately.
     pub async fn connect(&self) -> Result<Connection, DatabaseError> {
         let conn = self
             .db
             .connect()
             .map_err(|e| DatabaseError::Pool(format!("Failed to create connection: {}", e)))?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
+        let mut rows = conn
+            .query("PRAGMA busy_timeout = 5000", ())
             .await
             .map_err(|e| DatabaseError::Pool(format!("Failed to set busy_timeout: {}", e)))?;
+        let _ = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to confirm busy_timeout: {}", e)))?;
         Ok(conn)
     }
 }
@@ -506,6 +513,8 @@ pub(crate) fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun,
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::db::Database;
     use crate::db::WorkspaceStore;
     use crate::db::libsql::LibSqlBackend;
@@ -539,6 +548,35 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         let timeout: i64 = row.get(0).unwrap();
         assert_eq!(timeout, 5000);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_connects_set_busy_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_busy_timeout_parallel.db");
+        let backend = Arc::new(LibSqlBackend::new_local(&db_path).await.unwrap());
+        backend.run_migrations().await.unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let backend = Arc::clone(&backend);
+            handles.push(tokio::spawn(async move {
+                let conn = backend.connect().await.expect("connect");
+                let mut rows = conn.query("PRAGMA busy_timeout", ()).await.expect("query");
+                let row = rows
+                    .next()
+                    .await
+                    .expect("rows next")
+                    .expect("busy_timeout row");
+                let timeout: i64 = row.get(0).expect("busy_timeout value");
+                timeout
+            }));
+        }
+
+        for handle in handles {
+            let timeout: i64 = handle.await.unwrap();
+            assert_eq!(timeout, 5000);
+        }
     }
 
     #[tokio::test]

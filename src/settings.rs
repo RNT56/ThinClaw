@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::tools::policy::ToolPolicyManager;
+
 /// Multi-provider cloud intelligence configuration.
 ///
 /// Enables ThinClaw to manage multiple LLM providers with failover,
@@ -469,6 +471,47 @@ pub struct LearningExportSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningOutcomeSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_learning_outcomes_evaluation_interval_secs")]
+    pub evaluation_interval_secs: u64,
+    #[serde(default = "default_learning_outcomes_max_due_per_tick")]
+    pub max_due_per_tick: u32,
+    #[serde(default = "default_learning_outcomes_default_ttl_hours")]
+    pub default_ttl_hours: u32,
+    #[serde(default = "default_true")]
+    pub llm_assist_enabled: bool,
+    #[serde(default = "default_true")]
+    pub heartbeat_summary_enabled: bool,
+}
+
+fn default_learning_outcomes_evaluation_interval_secs() -> u64 {
+    600
+}
+
+fn default_learning_outcomes_max_due_per_tick() -> u32 {
+    50
+}
+
+fn default_learning_outcomes_default_ttl_hours() -> u32 {
+    72
+}
+
+impl Default for LearningOutcomeSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            evaluation_interval_secs: default_learning_outcomes_evaluation_interval_secs(),
+            max_due_per_tick: default_learning_outcomes_max_due_per_tick(),
+            default_ttl_hours: default_learning_outcomes_default_ttl_hours(),
+            llm_assist_enabled: true,
+            heartbeat_summary_enabled: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningSettings {
     /// Master toggle for self-improvement runtime.
     #[serde(default)]
@@ -488,6 +531,8 @@ pub struct LearningSettings {
     pub code_proposals: LearningCodeProposalSettings,
     #[serde(default)]
     pub exports: LearningExportSettings,
+    #[serde(default)]
+    pub outcomes: LearningOutcomeSettings,
 }
 
 impl Default for LearningSettings {
@@ -501,6 +546,7 @@ impl Default for LearningSettings {
             providers: LearningProvidersSettings::default(),
             code_proposals: LearningCodeProposalSettings::default(),
             exports: LearningExportSettings::default(),
+            outcomes: LearningOutcomeSettings::default(),
         }
     }
 }
@@ -745,6 +791,10 @@ pub struct Settings {
     /// Optional research/experiments subsystem settings.
     #[serde(default)]
     pub experiments: ExperimentsSettings,
+
+    /// Persisted per-channel / per-group tool access policy.
+    #[serde(default)]
+    pub tool_policies: ToolPolicyManager,
 }
 
 /// Follow-up categories produced by onboarding when setup cannot be completed
@@ -1329,7 +1379,12 @@ pub struct AgentSettings {
     #[serde(default = "default_cli_skin")]
     pub cli_skin: String,
 
+    /// Canonical personality pack for new workspaces and cross-surface identity copy.
+    #[serde(default = "default_personality_pack")]
+    pub personality_pack: String,
+
     /// Persona seed to use when creating a fresh SOUL.md.
+    /// Legacy compatibility field. New code should prefer `personality_pack`.
     #[serde(default = "default_persona_seed")]
     pub persona_seed: String,
 
@@ -1398,6 +1453,10 @@ fn default_persona_seed() -> String {
     "default".to_string()
 }
 
+fn default_personality_pack() -> String {
+    "balanced".to_string()
+}
+
 fn default_max_checkpoints() -> usize {
     50
 }
@@ -1447,6 +1506,7 @@ impl Default for AgentSettings {
             workspace_mode: None,
             model_guidance_enabled: true,
             cli_skin: default_cli_skin(),
+            personality_pack: default_personality_pack(),
             persona_seed: default_persona_seed(),
             checkpoints_enabled: true,
             max_checkpoints: default_max_checkpoints(),

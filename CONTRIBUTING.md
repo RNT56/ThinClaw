@@ -45,7 +45,10 @@ This includes:
 Before editing broad docs, check the canonical doc for the subsystem:
 
 - onboarding: `src/setup/README.md`
-- runtime flow: `Agent_flow.md`
+- identity/personality: `docs/IDENTITY_AND_PERSONALITY.md`
+- memory/growth: `docs/MEMORY_AND_GROWTH.md`
+- research/experiments: `docs/RESEARCH_AND_EXPERIMENTS.md`
+- shared command vocabulary: `docs/SURFACES_AND_COMMANDS.md`
 - deployment: `docs/DEPLOYMENT.md`
 - channels: `docs/CHANNEL_ARCHITECTURE.md`
 - extensions: `docs/EXTENSION_SYSTEM.md`

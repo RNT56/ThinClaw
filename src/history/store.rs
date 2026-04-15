@@ -275,6 +275,99 @@ pub struct LearningCodeProposal {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Deferred consequence contract that waits for downstream observations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutcomeContract {
+    pub id: Uuid,
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    pub source_kind: String,
+    pub source_id: String,
+    pub contract_type: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub due_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_verdict: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_score: Option<f64>,
+    pub evaluation_details: serde_json::Value,
+    pub metadata: serde_json::Value,
+    pub dedupe_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluated_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Observation attached to an outcome contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutcomeObservation {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub observation_kind: String,
+    pub polarity: String,
+    pub weight: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub evidence: serde_json::Value,
+    pub fingerprint: String,
+    pub observed_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Filters for listing outcome contracts in APIs, tools, and services.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutcomeContractQuery {
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    pub limit: i64,
+}
+
+/// Aggregate metrics used by Learning Ledger surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OutcomeSummaryStats {
+    pub open: u64,
+    pub due: u64,
+    pub evaluated_last_7d: u64,
+    pub negative_ratio_last_7d: f64,
+}
+
+/// Distinct user with pending outcome evaluator work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutcomePendingUser {
+    pub user_id: String,
+}
+
+/// Raw timing markers used to determine whether the outcome evaluator is stale.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OutcomeEvaluatorHealth {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_due_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_evaluating_claimed_at: Option<DateTime<Utc>>,
+}
+
 /// Database store for the agent.
 #[cfg(feature = "postgres")]
 pub struct Store {
@@ -1062,6 +1155,7 @@ pub struct SandboxJobSummary {
     pub completed: usize,
     pub failed: usize,
     pub interrupted: usize,
+    pub stuck: usize,
 }
 
 #[cfg(feature = "postgres")]
@@ -1237,6 +1331,7 @@ impl Store {
                 "completed" => summary.completed += c,
                 "failed" => summary.failed += c,
                 "interrupted" => summary.interrupted += c,
+                "stuck" => summary.stuck += c,
                 _ => {}
             }
         }
@@ -1331,6 +1426,7 @@ impl Store {
                 "completed" => summary.completed += c,
                 "failed" => summary.failed += c,
                 "interrupted" => summary.interrupted += c,
+                "stuck" => summary.stuck += c,
                 _ => {}
             }
         }
@@ -3083,6 +3179,423 @@ impl Store {
         .await?;
         Ok(())
     }
+
+    /// Persist an outcome contract, reusing the existing row when the dedupe key matches.
+    pub async fn insert_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+        let id = if contract.id.is_nil() {
+            Uuid::new_v4()
+        } else {
+            contract.id
+        };
+        let row = conn
+            .query_one(
+                r#"
+                INSERT INTO outcome_contracts (
+                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
+                    contract_type, status, summary, due_at, expires_at, final_verdict,
+                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    evaluated_at, created_at, updated_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7,
+                    $8, $9, $10, $11, $12, $13,
+                    $14, $15::jsonb, $16::jsonb, $17, $18,
+                    $19, $20, $21
+                )
+                ON CONFLICT (dedupe_key) DO UPDATE
+                    SET updated_at = outcome_contracts.updated_at
+                RETURNING id
+                "#,
+                &[
+                    &id,
+                    &contract.user_id,
+                    &contract.actor_id,
+                    &contract.channel,
+                    &contract.thread_id,
+                    &contract.source_kind,
+                    &contract.source_id,
+                    &contract.contract_type,
+                    &contract.status,
+                    &contract.summary,
+                    &contract.due_at,
+                    &contract.expires_at,
+                    &contract.final_verdict,
+                    &contract.final_score,
+                    &contract.evaluation_details,
+                    &contract.metadata,
+                    &contract.dedupe_key,
+                    &contract.claimed_at,
+                    &contract.evaluated_at,
+                    &contract.created_at,
+                    &contract.updated_at,
+                ],
+            )
+            .await?;
+        Ok(row.get("id"))
+    }
+
+    /// Retrieve a single outcome contract belonging to a user.
+    pub async fn get_outcome_contract(
+        &self,
+        user_id: &str,
+        contract_id: Uuid,
+    ) -> Result<Option<OutcomeContract>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT
+                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
+                    contract_type, status, summary, due_at, expires_at, final_verdict,
+                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    evaluated_at, created_at, updated_at
+                FROM outcome_contracts
+                WHERE id = $1 AND user_id = $2
+                "#,
+                &[&contract_id, &user_id],
+            )
+            .await?;
+        Ok(row.as_ref().map(outcome_contract_from_row))
+    }
+
+    /// List outcome contracts for a user with optional filters.
+    pub async fn list_outcome_contracts(
+        &self,
+        query: &OutcomeContractQuery,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        if query.limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT
+                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
+                    contract_type, status, summary, due_at, expires_at, final_verdict,
+                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    evaluated_at, created_at, updated_at
+                FROM outcome_contracts
+                WHERE user_id = $1
+                  AND ($2::text IS NULL OR COALESCE(NULLIF(actor_id, ''), user_id) = $2)
+                  AND ($3::text IS NULL OR status = $3)
+                  AND ($4::text IS NULL OR contract_type = $4)
+                  AND ($5::text IS NULL OR source_kind = $5)
+                  AND ($6::text IS NULL OR source_id = $6)
+                  AND ($7::text IS NULL OR thread_id = $7)
+                ORDER BY created_at DESC, id DESC
+                LIMIT $8
+                "#,
+                &[
+                    &query.user_id,
+                    &query.actor_id,
+                    &query.status,
+                    &query.contract_type,
+                    &query.source_kind,
+                    &query.source_id,
+                    &query.thread_id,
+                    &query.limit,
+                ],
+            )
+            .await?;
+        Ok(rows.iter().map(outcome_contract_from_row).collect())
+    }
+
+    /// Claim due contracts for evaluator processing.
+    pub async fn claim_due_outcome_contracts(
+        &self,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE outcome_contracts
+            SET status = 'expired',
+                updated_at = $1
+            WHERE status IN ('open', 'evaluating')
+              AND evaluated_at IS NULL
+              AND expires_at <= $1
+            "#,
+            &[&now],
+        )
+        .await?;
+
+        let rows = conn
+            .query(
+                r#"
+                WITH due AS (
+                    SELECT id
+                    FROM outcome_contracts
+                    WHERE status = 'open'
+                      AND due_at <= $2
+                      AND expires_at > $2
+                    ORDER BY due_at ASC, created_at ASC
+                    LIMIT $1
+                    FOR UPDATE SKIP LOCKED
+                )
+                UPDATE outcome_contracts oc
+                SET status = 'evaluating',
+                    claimed_at = $2,
+                    updated_at = $2
+                FROM due
+                WHERE oc.id = due.id
+                RETURNING
+                    oc.id, oc.user_id, oc.actor_id, oc.channel, oc.thread_id, oc.source_kind,
+                    oc.source_id, oc.contract_type, oc.status, oc.summary, oc.due_at,
+                    oc.expires_at, oc.final_verdict, oc.final_score, oc.evaluation_details,
+                    oc.metadata, oc.dedupe_key, oc.claimed_at, oc.evaluated_at,
+                    oc.created_at, oc.updated_at
+                "#,
+                &[&limit, &now],
+            )
+            .await?;
+        Ok(rows.iter().map(outcome_contract_from_row).collect())
+    }
+
+    /// Persist a full outcome contract update.
+    pub async fn update_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE outcome_contracts
+            SET user_id = $2,
+                actor_id = $3,
+                channel = $4,
+                thread_id = $5,
+                source_kind = $6,
+                source_id = $7,
+                contract_type = $8,
+                status = $9,
+                summary = $10,
+                due_at = $11,
+                expires_at = $12,
+                final_verdict = $13,
+                final_score = $14,
+                evaluation_details = $15::jsonb,
+                metadata = $16::jsonb,
+                dedupe_key = $17,
+                claimed_at = $18,
+                evaluated_at = $19,
+                created_at = $20,
+                updated_at = $21
+            WHERE id = $1
+            "#,
+            &[
+                &contract.id,
+                &contract.user_id,
+                &contract.actor_id,
+                &contract.channel,
+                &contract.thread_id,
+                &contract.source_kind,
+                &contract.source_id,
+                &contract.contract_type,
+                &contract.status,
+                &contract.summary,
+                &contract.due_at,
+                &contract.expires_at,
+                &contract.final_verdict,
+                &contract.final_score,
+                &contract.evaluation_details,
+                &contract.metadata,
+                &contract.dedupe_key,
+                &contract.claimed_at,
+                &contract.evaluated_at,
+                &contract.created_at,
+                &contract.updated_at,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Aggregate outcome counts for Learning Ledger status cards.
+    pub async fn outcome_summary_stats(
+        &self,
+        user_id: &str,
+    ) -> Result<OutcomeSummaryStats, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                r#"
+                SELECT
+                    (SELECT COUNT(*)
+                     FROM outcome_contracts
+                     WHERE user_id = $1
+                       AND status IN ('open', 'evaluating')) AS open_count,
+                    (SELECT COUNT(*)
+                     FROM outcome_contracts
+                     WHERE user_id = $1
+                       AND status = 'open'
+                       AND due_at <= NOW()
+                       AND expires_at > NOW()) AS due_count,
+                    (SELECT COUNT(*)
+                     FROM outcome_contracts
+                     WHERE user_id = $1
+                       AND status = 'evaluated'
+                       AND COALESCE(evaluated_at, updated_at) >= NOW() - INTERVAL '7 days')
+                        AS evaluated_count,
+                    (SELECT COALESCE(AVG(CASE WHEN final_verdict = 'negative' THEN 1.0 ELSE 0.0 END), 0.0)
+                     FROM outcome_contracts
+                     WHERE user_id = $1
+                       AND status = 'evaluated'
+                       AND COALESCE(evaluated_at, updated_at) >= NOW() - INTERVAL '7 days')
+                        AS negative_ratio
+                "#,
+                &[&user_id],
+            )
+            .await?;
+        Ok(OutcomeSummaryStats {
+            open: row.get::<_, i64>("open_count") as u64,
+            due: row.get::<_, i64>("due_count") as u64,
+            evaluated_last_7d: row.get::<_, i64>("evaluated_count") as u64,
+            negative_ratio_last_7d: row
+                .try_get::<_, Option<f64>>("negative_ratio")
+                .ok()
+                .flatten()
+                .unwrap_or(0.0),
+        })
+    }
+
+    /// Return distinct users with due or evaluating outcome work.
+    pub async fn list_users_with_pending_outcome_work(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomePendingUser>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT DISTINCT user_id
+                FROM outcome_contracts
+                WHERE (status = 'open' AND due_at <= $1 AND expires_at > $1)
+                   OR status = 'evaluating'
+                ORDER BY user_id ASC
+                "#,
+                &[&now],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| OutcomePendingUser {
+                user_id: row.get("user_id"),
+            })
+            .collect())
+    }
+
+    /// Return the oldest due and evaluating timestamps for outcome health checks.
+    pub async fn outcome_evaluator_health(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<OutcomeEvaluatorHealth, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                r#"
+                SELECT
+                    (
+                        SELECT MIN(due_at)
+                        FROM outcome_contracts
+                        WHERE user_id = $1
+                          AND status = 'open'
+                          AND due_at <= $2
+                          AND expires_at > $2
+                    ) AS oldest_due_at,
+                    (
+                        SELECT MIN(COALESCE(claimed_at, updated_at))
+                        FROM outcome_contracts
+                        WHERE user_id = $1
+                          AND status = 'evaluating'
+                    ) AS oldest_evaluating_claimed_at
+                "#,
+                &[&user_id, &now],
+            )
+            .await?;
+        Ok(OutcomeEvaluatorHealth {
+            oldest_due_at: row
+                .try_get::<_, Option<DateTime<Utc>>>("oldest_due_at")
+                .ok()
+                .flatten(),
+            oldest_evaluating_claimed_at: row
+                .try_get::<_, Option<DateTime<Utc>>>("oldest_evaluating_claimed_at")
+                .ok()
+                .flatten(),
+        })
+    }
+
+    /// Persist a contract observation, coalescing duplicates by fingerprint.
+    pub async fn insert_outcome_observation(
+        &self,
+        observation: &OutcomeObservation,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+        let id = if observation.id.is_nil() {
+            Uuid::new_v4()
+        } else {
+            observation.id
+        };
+        let row = conn
+            .query_one(
+                r#"
+                INSERT INTO outcome_observations (
+                    id, contract_id, observation_kind, polarity, weight, summary, evidence,
+                    fingerprint, observed_at, created_at
+                ) VALUES (
+                    $1, $2, $3, $4, $5, $6, $7::jsonb,
+                    $8, $9, $10
+                )
+                ON CONFLICT (contract_id, fingerprint) DO UPDATE
+                    SET observed_at = outcome_observations.observed_at
+                RETURNING id
+                "#,
+                &[
+                    &id,
+                    &observation.contract_id,
+                    &observation.observation_kind,
+                    &observation.polarity,
+                    &observation.weight,
+                    &observation.summary,
+                    &observation.evidence,
+                    &observation.fingerprint,
+                    &observation.observed_at,
+                    &observation.created_at,
+                ],
+            )
+            .await?;
+        Ok(row.get("id"))
+    }
+
+    /// List observations for a single contract.
+    pub async fn list_outcome_observations(
+        &self,
+        contract_id: Uuid,
+    ) -> Result<Vec<OutcomeObservation>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT
+                    id, contract_id, observation_kind, polarity, weight, summary, evidence,
+                    fingerprint, observed_at, created_at
+                FROM outcome_observations
+                WHERE contract_id = $1
+                ORDER BY observed_at ASC, id ASC
+                "#,
+                &[&contract_id],
+            )
+            .await?;
+        Ok(rows.iter().map(outcome_observation_from_row).collect())
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -3303,6 +3816,70 @@ fn learning_code_proposal_from_row(row: &tokio_postgres::Row) -> LearningCodePro
             .unwrap_or_else(|| serde_json::json!({})),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn outcome_contract_from_row(row: &tokio_postgres::Row) -> OutcomeContract {
+    OutcomeContract {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        actor_id: row.try_get::<_, Option<String>>("actor_id").ok().flatten(),
+        channel: row.try_get::<_, Option<String>>("channel").ok().flatten(),
+        thread_id: row.try_get::<_, Option<String>>("thread_id").ok().flatten(),
+        source_kind: row.get("source_kind"),
+        source_id: row.get("source_id"),
+        contract_type: row.get("contract_type"),
+        status: row.get("status"),
+        summary: row.try_get::<_, Option<String>>("summary").ok().flatten(),
+        due_at: row.get("due_at"),
+        expires_at: row.get("expires_at"),
+        final_verdict: row
+            .try_get::<_, Option<String>>("final_verdict")
+            .ok()
+            .flatten(),
+        final_score: row.try_get::<_, Option<f64>>("final_score").ok().flatten(),
+        evaluation_details: row
+            .try_get::<_, Option<serde_json::Value>>("evaluation_details")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| serde_json::json!({})),
+        metadata: row
+            .try_get::<_, Option<serde_json::Value>>("metadata")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| serde_json::json!({})),
+        dedupe_key: row.get("dedupe_key"),
+        claimed_at: row
+            .try_get::<_, Option<DateTime<Utc>>>("claimed_at")
+            .ok()
+            .flatten(),
+        evaluated_at: row
+            .try_get::<_, Option<DateTime<Utc>>>("evaluated_at")
+            .ok()
+            .flatten(),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn outcome_observation_from_row(row: &tokio_postgres::Row) -> OutcomeObservation {
+    OutcomeObservation {
+        id: row.get("id"),
+        contract_id: row.get("contract_id"),
+        observation_kind: row.get("observation_kind"),
+        polarity: row.get("polarity"),
+        weight: row.get("weight"),
+        summary: row.try_get::<_, Option<String>>("summary").ok().flatten(),
+        evidence: row
+            .try_get::<_, Option<serde_json::Value>>("evidence")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| serde_json::json!({})),
+        fingerprint: row.get("fingerprint"),
+        observed_at: row.get("observed_at"),
+        created_at: row.get("created_at"),
     }
 }
 

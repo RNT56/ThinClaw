@@ -2207,6 +2207,11 @@ html[data-surface-pattern="cloud"] .chat-workspace::before {
   background: var(--chrome-hover);
 }
 
+.record-highlight td {
+  background: rgba(239, 196, 95, 0.22) !important;
+  transition: background 160ms ease;
+}
+
 .jobs-table.ui-panel-table {
   min-width: 640px;
 }

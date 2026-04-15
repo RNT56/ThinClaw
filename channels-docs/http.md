@@ -14,7 +14,7 @@ Designed for integrating with automation systems, CI/CD pipelines, or custom cli
 HTTP_PORT=8080
 HTTP_HOST=0.0.0.0
 
-# Optional webhook secret for HMAC verification
+# Required webhook secret for request authentication
 HTTP_WEBHOOK_SECRET=my-webhook-secret
 
 # User ID for messages from this channel
@@ -27,11 +27,13 @@ Send a message to the agent:
 ```bash
 curl -X POST http://localhost:8080/webhook \
   -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: my-webhook-secret" \
   -d '{"content": "Run the test suite"}'
 ```
 
 ## Notes
 
 - Shares the unified webhook server with WASM channel webhook routes
+- `HTTP_WEBHOOK_SECRET` is mandatory; the channel will refuse to start without it
 - Default bind address is `0.0.0.0` — restrict with `HTTP_HOST=127.0.0.1` if needed
 - Responses are delivered asynchronously (the agent processes and responds via the channel)

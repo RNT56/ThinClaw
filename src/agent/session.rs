@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::agent::context_monitor::ContextPressure;
-use crate::agent::vibe::VibeOverlay;
+use crate::agent::personality::SessionPersonalityOverlay;
 use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 use crate::llm::{ChatMessage, ToolCall};
 
@@ -49,9 +49,9 @@ pub struct Session {
     /// Tools that have been auto-approved for this session ("always approve").
     #[serde(default)]
     pub auto_approved_tools: HashSet<String>,
-    /// Temporary session-level vibe overlay. This is intentionally not persisted.
+    /// Temporary session-level personality overlay. This is intentionally not persisted.
     #[serde(skip)]
-    pub active_vibe: Option<VibeOverlay>,
+    pub active_personality: Option<SessionPersonalityOverlay>,
 }
 
 impl Session {
@@ -73,7 +73,7 @@ impl Session {
             last_active_at: now,
             metadata: serde_json::Value::Null,
             auto_approved_tools: HashSet::new(),
-            active_vibe: None,
+            active_personality: None,
         }
     }
 
@@ -100,7 +100,7 @@ impl Session {
             last_active_at: now,
             metadata: serde_json::Value::Null,
             auto_approved_tools: HashSet::new(),
-            active_vibe: None,
+            active_personality: None,
         }
     }
 
@@ -284,6 +284,8 @@ pub struct ThreadRuntimeState {
     pub active_subagents: Vec<PersistedSubagentState>,
     #[serde(default)]
     pub last_context_pressure: Option<ContextPressure>,
+    #[serde(default)]
+    pub post_compaction_context: Option<String>,
 }
 
 /// A conversation thread within a session.
@@ -364,6 +366,7 @@ impl Thread {
             auto_approved_tools,
             active_subagents,
             last_context_pressure,
+            post_compaction_context: None,
         }
     }
 
@@ -508,6 +511,8 @@ impl Thread {
     pub fn restore_from_messages(&mut self, messages: Vec<ChatMessage>) {
         self.turns.clear();
         self.state = ThreadState::Idle;
+        self.pending_approval = None;
+        self.pending_auth = None;
 
         // Messages alternate: user, assistant, user, assistant...
         let mut iter = messages.into_iter().peekable();
@@ -893,6 +898,7 @@ mod tests {
             auto_approved_tools: vec![],
             active_subagents: vec![],
             last_context_pressure: None,
+            post_compaction_context: None,
         });
 
         assert_eq!(thread.state, ThreadState::Interrupted);

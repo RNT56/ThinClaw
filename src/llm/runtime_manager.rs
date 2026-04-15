@@ -1009,7 +1009,8 @@ impl LlmRuntimeManager {
                 {
                     return self.direct_provider_for_route_target(&target, snapshot);
                 }
-                create_llm_provider(&snapshot.config.llm)
+                let provider = create_llm_provider(&snapshot.config.llm)?;
+                Ok(Self::wrap_runtime_provider_with_retry(provider, snapshot))
             }
             "cheap" => {
                 if let Some(target) =
@@ -1112,6 +1113,23 @@ impl LlmRuntimeManager {
         Ok(provider)
     }
 
+    fn wrap_runtime_provider_with_retry(
+        provider: Arc<dyn LlmProvider>,
+        snapshot: &LlmRuntimeSnapshot,
+    ) -> Arc<dyn LlmProvider> {
+        let rel = &snapshot.config.llm.reliability;
+        if rel.max_retries > 0 {
+            Arc::new(RetryProvider::new(
+                provider,
+                RetryConfig {
+                    max_retries: rel.max_retries,
+                },
+            )) as Arc<dyn LlmProvider>
+        } else {
+            provider
+        }
+    }
+
     fn provider_for_provider_slot(
         &self,
         provider: &str,
@@ -1151,16 +1169,20 @@ impl LlmRuntimeManager {
         }
 
         if let Some((provider, model)) = spec.split_once('/') {
-            return create_provider_for_runtime_slug(provider, model, &snapshot.config.llm);
+            let provider = create_provider_for_runtime_slug(provider, model, &snapshot.config.llm)?;
+            return Ok(Self::wrap_runtime_provider_with_retry(provider, snapshot));
         }
 
         if let Some(primary_provider) = snapshot.providers.primary.as_deref() {
-            return create_provider_for_runtime_slug(primary_provider, spec, &snapshot.config.llm);
+            let provider =
+                create_provider_for_runtime_slug(primary_provider, spec, &snapshot.config.llm)?;
+            return Ok(Self::wrap_runtime_provider_with_retry(provider, snapshot));
         }
 
         let mut llm_config = snapshot.config.llm.clone();
         apply_model_override(&mut llm_config, spec);
-        create_llm_provider(&llm_config)
+        let provider = create_llm_provider(&llm_config)?;
+        Ok(Self::wrap_runtime_provider_with_retry(provider, snapshot))
     }
 
     pub fn advisor_config_for_messages(

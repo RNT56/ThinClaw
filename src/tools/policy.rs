@@ -20,6 +20,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::llm::ToolDefinition;
+
 /// Policy controlling which tools are accessible.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -169,6 +171,80 @@ impl ToolPolicyManager {
         }
 
         &self.default_policy
+    }
+
+    /// Load the persisted policy manager from settings, falling back to
+    /// allow-all when settings are unavailable.
+    pub fn load_from_settings() -> Self {
+        crate::settings::Settings::load().tool_policies
+    }
+
+    /// Resolve the effective `(channel, group_id)` scope from job metadata.
+    pub fn scope_from_metadata(metadata: &serde_json::Value) -> (Option<String>, Option<String>) {
+        let channel = metadata_value_as_string(metadata, "channel");
+        let group_id = [
+            "group_id",
+            "chat_id",
+            "room_id",
+            "conversation_id",
+            "conversation_scope_id",
+            "thread_id",
+        ]
+        .into_iter()
+        .find_map(|key| metadata_value_as_string(metadata, key));
+        (channel, group_id)
+    }
+
+    /// Filter tool definitions for the effective metadata scope.
+    pub fn filter_tool_definitions_for_metadata(
+        &self,
+        defs: Vec<ToolDefinition>,
+        metadata: &serde_json::Value,
+    ) -> Vec<ToolDefinition> {
+        let (channel, group_id) = Self::scope_from_metadata(metadata);
+        defs.into_iter()
+            .filter(|def| self.is_allowed(&def.name, channel.as_deref(), group_id.as_deref()))
+            .collect()
+    }
+
+    /// Return an execution error when a tool is blocked for the metadata scope.
+    pub fn denial_reason_for_metadata(
+        &self,
+        tool_name: &str,
+        metadata: &serde_json::Value,
+    ) -> Option<String> {
+        let (channel, group_id) = Self::scope_from_metadata(metadata);
+        if self.is_allowed(tool_name, channel.as_deref(), group_id.as_deref()) {
+            return None;
+        }
+
+        let scope = match (channel.as_deref(), group_id.as_deref()) {
+            (Some(channel), Some(group_id)) => format!("channel '{channel}' group '{group_id}'"),
+            (Some(channel), None) => format!("channel '{channel}'"),
+            (None, Some(group_id)) => format!("group '{group_id}'"),
+            (None, None) => "the current context".to_string(),
+        };
+
+        Some(format!(
+            "Tool '{tool_name}' is blocked by the configured tool policy for {scope}."
+        ))
+    }
+}
+
+fn metadata_value_as_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    let value = metadata.get(key)?;
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(boolean) => Some(boolean.to_string()),
+        _ => None,
     }
 }
 

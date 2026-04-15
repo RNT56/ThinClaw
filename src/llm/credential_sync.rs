@@ -129,7 +129,7 @@ pub fn oauth_source_location_hint(kind: OAuthCredentialSourceKind) -> String {
             }
         }
         OAuthCredentialSourceKind::OpenAiCodex => default_codex_auth_path()
-            .unwrap_or_else(|| CodexCodeConfig::resolved_auth_file_path())
+            .unwrap_or_else(CodexCodeConfig::resolved_auth_file_path)
             .display()
             .to_string(),
         OAuthCredentialSourceKind::JsonFile => "Configured JSON file".to_string(),

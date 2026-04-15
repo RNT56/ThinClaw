@@ -97,7 +97,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
       - uses: swatinem/rust-cache@v2

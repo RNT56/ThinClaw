@@ -157,7 +157,8 @@ pub fn pressure_message(pressure: ContextPressure) -> Option<String> {
     match pressure {
         ContextPressure::None => None,
         ContextPressure::Warning => Some(
-            "⚠ Context window 85% full — consider /compact or starting a /new thread".to_string(),
+            "⚠ Context window 85% full — consider /compress (/compact) or starting a /new thread"
+                .to_string(),
         ),
         ContextPressure::Critical => {
             Some("🔴 Context window 95% full — auto-compaction imminent".to_string())

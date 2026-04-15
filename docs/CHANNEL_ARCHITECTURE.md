@@ -104,6 +104,7 @@ Use these pages for operator setup:
 - [../channels-docs/README.md](../channels-docs/README.md)
 - [../channels-docs/gateway.md](../channels-docs/gateway.md)
 - [../channels-docs/telegram.md](../channels-docs/telegram.md)
+- [../channels-docs/whatsapp.md](../channels-docs/whatsapp.md)
 - [../channels-docs/slack.md](../channels-docs/slack.md)
 - [../channels-docs/discord.md](../channels-docs/discord.md)
 

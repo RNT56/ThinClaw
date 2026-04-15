@@ -208,6 +208,7 @@ impl SandboxStore for LibSqlBackend {
                 "completed" => summary.completed += count,
                 "failed" => summary.failed += count,
                 "interrupted" => summary.interrupted += count,
+                "stuck" => summary.stuck += count,
                 _ => {}
             }
         }
@@ -284,6 +285,7 @@ impl SandboxStore for LibSqlBackend {
                 "completed" => summary.completed += count,
                 "failed" => summary.failed += count,
                 "interrupted" => summary.interrupted += count,
+                "stuck" => summary.stuck += count,
                 _ => {}
             }
         }

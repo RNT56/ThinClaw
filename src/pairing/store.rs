@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -653,12 +653,13 @@ impl PairingStore {
             .read(true)
             .write(true)
             .create(true)
-            .truncate(true)
             .open(&path)?;
 
         file.lock_exclusive()?;
 
-        let content = fs::read_to_string(&path).unwrap_or_default();
+        let mut content = String::new();
+        let mut reader = file.try_clone()?;
+        reader.read_to_string(&mut content)?;
         let mut store: AllowFromStoreFile =
             serde_json::from_str(&content).unwrap_or(AllowFromStoreFile {
                 version: 1,
@@ -677,7 +678,9 @@ impl PairingStore {
 
         store.allow_from.push(entry);
         let json = serde_json::to_string_pretty(&store)?;
-        fs::write(&path, json)?;
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, json)?;
+        fs::rename(&tmp_path, &path)?;
 
         fs4::FileExt::unlock(&file)?;
         Ok(())

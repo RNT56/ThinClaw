@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::llm::cost_tracker::CostTracker;
+use chrono::Utc;
 
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -11,6 +12,7 @@ use uuid::Uuid;
 
 use std::sync::Mutex as StdMutex;
 
+use crate::agent::outcomes;
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
 use crate::channels::web::types::SseEvent;
@@ -381,6 +383,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             &capability_metadata,
             "allowed_skills",
         );
+        let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
 
         let mut iteration = 0;
 
@@ -395,6 +398,10 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                 allowed_skills.as_deref(),
             )
             .await;
+        reason_ctx.available_tools = tool_policies.filter_tool_definitions_for_metadata(
+            reason_ctx.available_tools.clone(),
+            &capability_metadata,
+        );
 
         // Generate plan if planning is enabled
         let plan = if self.use_planning() {
@@ -571,6 +578,10 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                     allowed_skills.as_deref(),
                 )
                 .await;
+            reason_ctx.available_tools = tool_policies.filter_tool_definitions_for_metadata(
+                reason_ctx.available_tools.clone(),
+                &capability_metadata,
+            );
 
             // Select next tool(s) to use
             let selections = reasoning.select_tools(reason_ctx).await?;
@@ -840,6 +851,15 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
 
         // Fetch job context early so we have the real user_id for hooks and rate limiting
         let job_ctx = deps.context_manager.get_context(job_id).await?;
+        let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
+        if let Some(reason) = tool_policies.denial_reason_for_metadata(tool_name, &job_ctx.metadata)
+        {
+            return Err(crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason,
+            }
+            .into());
+        }
         if !crate::tools::ToolRegistry::tool_name_allowed_by_metadata(&job_ctx.metadata, tool_name)
         {
             return Err(crate::error::ToolError::ExecutionFailed {
@@ -1332,44 +1352,57 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         };
 
         // Derive RunStatus + summary from the job's actual terminal state.
-        let (status, event, summary) = match self.context_manager().get_context(self.job_id).await {
-            Ok(ctx) => {
-                // Extract the reason from the last state transition (if any).
-                let reason = ctx.transitions.last().and_then(|t| t.reason.clone());
-                match ctx.state {
-                    JobState::Completed => (
-                        crate::agent::routine::RunStatus::Ok,
-                        "completed",
-                        "Job completed successfully".to_string(),
-                    ),
-                    JobState::Failed => (
-                        crate::agent::routine::RunStatus::Failed,
-                        "failed",
-                        reason.unwrap_or_else(|| "Job failed".to_string()),
-                    ),
-                    JobState::Stuck => (
-                        crate::agent::routine::RunStatus::Failed,
-                        "failed",
-                        reason.unwrap_or_else(|| "Job stuck".to_string()),
-                    ),
-                    JobState::Cancelled => (
-                        crate::agent::routine::RunStatus::Failed,
-                        "failed",
-                        "Job cancelled".to_string(),
-                    ),
-                    other => (
-                        crate::agent::routine::RunStatus::Failed,
-                        "failed",
-                        format!("Job ended in unexpected state: {:?}", other),
-                    ),
+        let (status, event, summary, job_user_id, job_actor_id) =
+            match self.context_manager().get_context(self.job_id).await {
+                Ok(ctx) => {
+                    // Extract the reason from the last state transition (if any).
+                    let reason = ctx.transitions.last().and_then(|t| t.reason.clone());
+                    match ctx.state {
+                        JobState::Completed => (
+                            crate::agent::routine::RunStatus::Ok,
+                            "completed",
+                            "Job completed successfully".to_string(),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
+                        JobState::Failed => (
+                            crate::agent::routine::RunStatus::Failed,
+                            "failed",
+                            reason.unwrap_or_else(|| "Job failed".to_string()),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
+                        JobState::Stuck => (
+                            crate::agent::routine::RunStatus::Failed,
+                            "failed",
+                            reason.unwrap_or_else(|| "Job stuck".to_string()),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
+                        JobState::Cancelled => (
+                            crate::agent::routine::RunStatus::Failed,
+                            "failed",
+                            "Job cancelled".to_string(),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
+                        other => (
+                            crate::agent::routine::RunStatus::Failed,
+                            "failed",
+                            format!("Job ended in unexpected state: {:?}", other),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
+                    }
                 }
-            }
-            Err(e) => (
-                crate::agent::routine::RunStatus::Failed,
-                "failed",
-                format!("Could not read final job state: {}", e),
-            ),
-        };
+                Err(e) => (
+                    crate::agent::routine::RunStatus::Failed,
+                    "failed",
+                    format!("Could not read final job state: {}", e),
+                    None,
+                    None,
+                ),
+            };
 
         // Use the last meaningful output from the worker (LLM's final response
         // or last emit_user_message) as the result_summary for the SSE event
@@ -1384,6 +1417,31 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                 .await
             {
                 tracing::error!(run_id = %run_id, "Failed to complete routine run: {}", e);
+            }
+            if let (Some(user_id), Some(actor_id)) =
+                (job_user_id.as_deref(), job_actor_id.as_deref())
+                && let Ok(Some(routine)) = store
+                    .get_routine_by_name_for_actor(user_id, actor_id, &routine_name)
+                    .await
+            {
+                let completed_run = crate::agent::routine::RoutineRun {
+                    id: run_id,
+                    routine_id: routine.id,
+                    trigger_type: "worker".to_string(),
+                    trigger_detail: Some("worker_finalization".to_string()),
+                    started_at: Utc::now(),
+                    completed_at: Some(Utc::now()),
+                    status,
+                    result_summary: Some(summary_ref.clone()),
+                    tokens_used: None,
+                    job_id: Some(self.job_id),
+                    created_at: Utc::now(),
+                };
+                if let Err(err) =
+                    outcomes::maybe_create_routine_contract(&store, &routine, &completed_run).await
+                {
+                    tracing::debug!(run_id = %run_id, error = %err, "Outcome worker routine hook skipped");
+                }
             }
         }
 

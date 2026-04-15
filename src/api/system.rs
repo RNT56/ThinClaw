@@ -30,20 +30,31 @@ pub struct ModelInfo {
 }
 
 /// Get current engine status.
-pub fn get_status(
+pub async fn get_status(
     components: &AppComponents,
     llm: &Arc<dyn LlmProvider>,
     cheap_llm: Option<&Arc<dyn LlmProvider>>,
 ) -> EngineStatus {
+    let runtime_status = components.llm_runtime.status();
+    let active_extensions = if let Some(ref manager) = components.extension_manager {
+        manager
+            .list(None, false)
+            .await
+            .map(|extensions| extensions.into_iter().filter(|ext| ext.active).count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let setup_completed = std::env::var("ONBOARD_COMPLETED")
+        .map(|value| value == "true")
+        .unwrap_or(false)
+        || crate::settings::Settings::load().onboard_completed;
+
     EngineStatus {
-        engine_running: true,
-        setup_completed: true,
+        engine_running: runtime_status.revision > 0 || !runtime_status.primary_model.is_empty(),
+        setup_completed,
         tool_count: components.tools.count(),
-        active_extensions: components
-            .extension_manager
-            .as_ref()
-            .map(|_| 1) // placeholder — real count requires async
-            .unwrap_or(0),
+        active_extensions,
         model_name: llm.active_model_name(),
         cheap_model_name: cheap_llm.map(|c| c.active_model_name()),
         db_connected: components.db.is_some(),

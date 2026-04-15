@@ -1,6 +1,6 @@
-# Discord Channel for ThinClaw
+# Discord Interactions Channel for ThinClaw
 
-WASM channel for Discord integration - handle slash commands and button interactions via webhooks.
+Packaged WASM channel for Discord interactions in ThinClaw. This is the webhook/slash-command path, not the native Discord Gateway runtime.
 
 ## Features
 
@@ -9,13 +9,19 @@ WASM channel for Discord integration - handle slash commands and button interact
 - **Thread Support** - Respond in threads
 - **DM Support** - Handle direct messages
 
-## Setup
+## Install and Setup
 
-1. Create a Discord Application at <https://discord.com/developers/applications>
-2. Create a Bot and get the token
-3. Set up Interactions URL to point to your ThinClaw instance
-4. Copy the Application ID and Public Key
-5. Store in ThinClaw secrets:
+1. Install the packaged channel from the ThinClaw registry:
+
+   ```bash
+   thinclaw registry install discord
+   ```
+
+2. Create a Discord Application at <https://discord.com/developers/applications>
+3. Create a Bot and get the token
+4. Set the Interactions URL to point at your ThinClaw host
+5. Copy the Application ID and Public Key
+6. Store the secrets ThinClaw expects:
 
    ```bash
    thinclaw secret set discord_bot_token YOUR_BOT_TOKEN
@@ -53,6 +59,8 @@ curl -X POST \
 In your Discord app settings, set:
 
 - Interactions Endpoint URL: `https://your-thinclaw.com/webhook/discord`
+
+ThinClaw registers the packaged Discord interactions channel on `/webhook/discord`. If you want normal message-stream handling instead of webhook interactions, use the native Discord Gateway path documented in [../../channels-docs/discord.md](../../channels-docs/discord.md).
 
 ## Usage Examples
 
@@ -113,7 +121,7 @@ To send embeds, include an `embeds` array in the `metadata_json` field of the ag
 
 ```bash
 cd channels-src/discord
-cargo build --target wasm32-wasi --release
+cargo build --target wasm32-wasip2 --release
 ```
 
 ## License

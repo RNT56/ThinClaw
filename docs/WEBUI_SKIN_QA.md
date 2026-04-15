@@ -35,18 +35,18 @@ ThinClaw now treats the CLI skin system as the shared brand source for both term
    Verify the card and page background show subtle aura treatment, not a flat generic panel.
 
 2. Top chrome
-   Verify the brand chip shows `ThinClaw`, the resolved skin name, and the active prompt symbol.
+   Verify the brand chip shows the active agent name, the resolved skin name, and the active prompt symbol.
    Verify the active tab state uses the resolved accent colors.
 
 3. Sidebar and thread list
    Verify active thread rows pick up the resolved accent treatment.
-   Verify assistant subsession cards inherit the updated branded styling.
+   Verify agent subsession cards inherit the updated branded styling.
 
 4. Chat transcript
    Verify user messages use `chatUserBg` and `chatUserFg`.
-   Verify assistant messages stay neutral but adopt the skin border treatment.
+   Verify agent messages stay neutral but adopt the skin border treatment.
    Verify system messages remain centered ribbons.
-   Verify role kickers render for user, assistant, and system entries.
+   Verify role kickers render for user, agent, and system entries.
 
 5. Composer
    Verify the prompt chip shows the resolved skin prompt symbol.
@@ -68,6 +68,7 @@ ThinClaw now treats the CLI skin system as the shared brand source for both term
 
 1. WebUI Presentation settings
    Verify `agent.cli_skin`, `webchat_skin`, `webchat_theme`, and `webchat_show_branding` appear in the Presentation section under General.
+   Verify `agent.personality_pack` appears in the Agent section under General.
    Verify `webchat_skin` includes a nullable `Follow agent skin` option.
    Verify `WEBCHAT_ACCENT_COLOR` does not appear in the Presentation section.
 

@@ -17,6 +17,7 @@ use crate::agent::dispatcher::{
     AgenticLoopResult, check_auth_required, execute_chat_tool_standalone, parse_auth_result,
 };
 use crate::agent::learning::{ImprovementClass, LearningEvent, LearningOrchestrator, RiskTier};
+use crate::agent::outcomes;
 use crate::agent::session::{
     PendingApproval, PersistedSubagentState, Session, Thread, ThreadState,
 };
@@ -24,6 +25,8 @@ use crate::agent::submission::SubmissionResult;
 use crate::agent::{load_thread_runtime, mutate_thread_runtime};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
+use crate::context::post_compaction::{ContextInjector, PostCompactionConfig};
+use crate::context::read_audit::{ReadAuditConfig, ReadAuditor};
 use crate::db::Database;
 use crate::error::Error;
 use crate::history::ConversationKind as HistoryConversationKind;
@@ -85,6 +88,71 @@ fn detect_user_correction_signal(role: &str, content: &str) -> u32 {
 }
 
 impl Agent {
+    fn build_post_compaction_context_fragment(&self) -> Option<String> {
+        let workspace_root = self
+            .config
+            .workspace_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok())?;
+        let root = workspace_root.to_string_lossy().to_string();
+        let mut auditor = ReadAuditor::new(ReadAuditConfig::default());
+        auditor.scan_rules(&root);
+        let appendix = auditor.build_appendix();
+        if appendix.trim().is_empty() {
+            return None;
+        }
+
+        let mut injector = ContextInjector::new(PostCompactionConfig::from_env());
+        injector.add_rules(&appendix);
+        let injected = injector.build();
+        if injected.trim().is_empty() {
+            None
+        } else {
+            Some(injected)
+        }
+    }
+
+    async fn update_post_compaction_context(&self, thread_id: Uuid, fragment: Option<String>) {
+        let Some(store) = self.store().map(Arc::clone) else {
+            return;
+        };
+
+        if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
+            runtime.post_compaction_context = fragment.clone();
+        })
+        .await
+        {
+            tracing::debug!(
+                thread = %thread_id,
+                error = %err,
+                "Failed to update post-compaction context"
+            );
+        }
+    }
+
+    async fn clear_thread_runtime_transients(&self, thread_id: Uuid) {
+        let Some(store) = self.store().map(Arc::clone) else {
+            return;
+        };
+
+        if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
+            runtime.pending_approval = None;
+            runtime.pending_auth = None;
+            runtime.post_compaction_context = None;
+            if runtime.state == ThreadState::AwaitingApproval {
+                runtime.state = ThreadState::Idle;
+            }
+        })
+        .await
+        {
+            tracing::debug!(
+                thread = %thread_id,
+                error = %err,
+                "Failed to clear transient thread runtime state"
+            );
+        }
+    }
+
     async fn conversation_visible_to_identity(
         &self,
         store: &Arc<dyn Database>,
@@ -180,6 +248,32 @@ impl Agent {
         }
     }
 
+    fn trajectory_learning_metadata(
+        thread_id: Uuid,
+        session_id: Option<Uuid>,
+        turn_number: Option<usize>,
+    ) -> serde_json::Value {
+        let mut metadata = serde_json::json!({});
+        if let Some(obj) = metadata.as_object_mut() {
+            if let Some(session_id) = session_id {
+                obj.insert(
+                    "session_id".to_string(),
+                    serde_json::json!(session_id.to_string()),
+                );
+            }
+            if let Some(turn_number) = turn_number {
+                obj.insert("turn_number".to_string(), serde_json::json!(turn_number));
+            }
+            if let (Some(session_id), Some(turn_number)) = (session_id, turn_number) {
+                obj.insert(
+                    "trajectory_target_id".to_string(),
+                    serde_json::json!(format!("{}:{}:{}", session_id, thread_id, turn_number)),
+                );
+            }
+        }
+        metadata
+    }
+
     async fn best_effort_record_learning_event(
         &self,
         store: &Arc<dyn Database>,
@@ -189,6 +283,7 @@ impl Agent {
         role: &str,
         content: &str,
         persisted_message_id: Option<Uuid>,
+        trajectory_metadata: Option<serde_json::Value>,
     ) {
         let correction_count = detect_user_correction_signal(role, content);
         let class = if correction_count > 0 {
@@ -218,14 +313,7 @@ impl Agent {
             .and_then(|v| v.as_str())
             .and_then(|value| Uuid::parse_str(value).ok());
 
-        let learning_event = LearningEvent::new(
-            format!("thread_ops::persist_{}_message", role),
-            class,
-            risk_tier,
-            summary,
-        )
-        .with_target(target)
-        .with_metadata(json!({
+        let mut learning_metadata = json!({
             "thread_id": thread_id.to_string(),
             "channel": message.channel.clone(),
             "role": role,
@@ -239,7 +327,25 @@ impl Agent {
             "correction_count": correction_count,
             "repeated_failures": correction_count,
             "success": !(role.eq_ignore_ascii_case("user") && correction_count > 0),
-        }));
+        });
+        if let Some(target) = learning_metadata.as_object_mut()
+            && let Some(extra_obj) = trajectory_metadata
+                .as_ref()
+                .and_then(|value| value.as_object())
+        {
+            for (key, value) in extra_obj {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+
+        let learning_event = LearningEvent::new(
+            format!("thread_ops::persist_{}_message", role),
+            class,
+            risk_tier,
+            summary,
+        )
+        .with_target(target)
+        .with_metadata(learning_metadata);
 
         let persisted_event = learning_event.into_persisted(
             identity.principal_id.clone(),
@@ -281,6 +387,22 @@ impl Agent {
                             "Learning orchestrator skipped event"
                         );
                     }
+                }
+
+                let outcome_result = if role.eq_ignore_ascii_case("assistant") {
+                    outcomes::maybe_create_turn_contract(store, &persisted_event).await
+                } else {
+                    outcomes::observe_user_turn(store, &persisted_event)
+                        .await
+                        .map(|_| None)
+                };
+                if let Err(err) = outcome_result {
+                    tracing::debug!(
+                        thread = %thread_id,
+                        event_id = %event_id,
+                        error = %err,
+                        "Outcome-backed learning hook skipped event"
+                    );
                 }
 
                 orchestrator
@@ -882,6 +1004,7 @@ impl Agent {
         // Job tools (create_job, list_jobs, etc.) are in the tool registry
 
         // Auto-compact if needed BEFORE adding new turn
+        let mut auto_compaction_fragment: Option<Option<String>> = None;
         {
             let mut sess = session.lock().await;
             let thread = sess
@@ -954,8 +1077,14 @@ impl Agent {
                     .await
                 {
                     tracing::warn!("Auto-compaction failed: {}", e);
+                } else {
+                    auto_compaction_fragment = Some(self.build_post_compaction_context_fragment());
                 }
             }
+        }
+        if let Some(fragment) = auto_compaction_fragment {
+            self.update_post_compaction_context(thread_id, fragment)
+                .await;
         }
 
         // Create checkpoint before turn
@@ -1034,6 +1163,7 @@ impl Agent {
 
         // Re-acquire lock and check if interrupted
         let mut sess = session.lock().await;
+        let session_id = sess.id;
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -1092,6 +1222,7 @@ impl Agent {
                 thread.complete_turn(&response);
                 let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                 let thread_snapshot = thread.clone();
+                let turn_number = thread.turn_number();
                 let _ = self
                     .channels
                     .send_status(
@@ -1102,8 +1233,14 @@ impl Agent {
                     .await;
 
                 // Persist assistant response (user message already persisted at turn start)
-                self.persist_assistant_response(thread_id, message, &response)
-                    .await;
+                self.persist_assistant_response(
+                    thread_id,
+                    message,
+                    &response,
+                    session_id,
+                    turn_number,
+                )
+                .await;
                 drop(sess);
                 let _ = thread_snapshot;
                 self.sync_context_pressure_warning(message, thread_id, usage_percent)
@@ -1233,6 +1370,7 @@ impl Agent {
             "user",
             user_input,
             persisted_message_id,
+            None,
         )
         .await;
     }
@@ -1247,6 +1385,8 @@ impl Agent {
         thread_id: Uuid,
         message: &IncomingMessage,
         response: &str,
+        session_id: Uuid,
+        turn_number: usize,
     ) {
         let identity = message.resolved_identity();
         let Some(store) = self
@@ -1283,6 +1423,11 @@ impl Agent {
             "assistant",
             response,
             persisted_message_id,
+            Some(Self::trajectory_learning_metadata(
+                thread_id,
+                Some(session_id),
+                Some(turn_number),
+            )),
         )
         .await;
     }
@@ -1319,6 +1464,7 @@ impl Agent {
             let usage_percent = self.context_monitor.usage_percent(&thread.messages());
             drop(mgr);
             drop(sess);
+            self.clear_thread_runtime_transients(thread_id).await;
             self.record_context_pressure_state(thread_id, usage_percent)
                 .await;
             Ok(SubmissionResult::ok_with_message(format!(
@@ -1356,6 +1502,7 @@ impl Agent {
             let usage_percent = self.context_monitor.usage_percent(&thread.messages());
             drop(mgr);
             drop(sess);
+            self.clear_thread_runtime_transients(thread_id).await;
             self.record_context_pressure_state(thread_id, usage_percent)
                 .await;
             Ok(SubmissionResult::ok_with_message(format!(
@@ -1431,6 +1578,9 @@ impl Agent {
                     msg.push_str(", summary saved to workspace");
                 }
                 drop(sess);
+                let fragment = self.build_post_compaction_context_fragment();
+                self.update_post_compaction_context(thread_id, fragment)
+                    .await;
                 self.record_context_pressure_state(thread_id, usage_after)
                     .await;
                 Ok(SubmissionResult::ok_with_message(msg))
@@ -1451,12 +1601,15 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
         thread.turns.clear();
         thread.state = ThreadState::Idle;
+        thread.pending_approval = None;
+        thread.pending_auth = None;
         let usage_percent = self.context_monitor.usage_percent(&thread.messages());
 
         // Clear undo history too
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         undo_mgr.lock().await.clear();
         drop(sess);
+        self.clear_thread_runtime_transients(thread_id).await;
         self.record_context_pressure_state(thread_id, usage_percent)
             .await;
 
@@ -1558,6 +1711,10 @@ impl Agent {
                 job_ctx.metadata = serde_json::json!({});
             }
             if let Some(metadata) = job_ctx.metadata.as_object_mut() {
+                metadata.insert(
+                    "channel".to_string(),
+                    serde_json::json!(message.channel.clone()),
+                );
                 metadata.insert(
                     "thread_id".to_string(),
                     serde_json::json!(thread_id.to_string()),
@@ -2018,6 +2175,7 @@ impl Agent {
 
             // Handle the result
             let mut sess = session.lock().await;
+            let session_id = sess.id;
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
@@ -2030,9 +2188,16 @@ impl Agent {
                     thread.complete_turn(&response);
                     let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                     let thread_snapshot = thread.clone();
+                    let turn_number = thread.turn_number();
                     // User message already persisted at turn start; save assistant response
-                    self.persist_assistant_response(thread_id, message, &response)
-                        .await;
+                    self.persist_assistant_response(
+                        thread_id,
+                        message,
+                        &response,
+                        session_id,
+                        turn_number,
+                    )
+                    .await;
                     drop(sess);
                     let _ = thread_snapshot;
                     self.sync_context_pressure_warning(message, thread_id, usage_percent)
@@ -2107,14 +2272,22 @@ impl Agent {
             );
             {
                 let mut sess = session.lock().await;
+                let session_id = sess.id;
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
                     let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                     let thread_snapshot = thread.clone();
+                    let turn_number = thread.turn_number();
                     // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(thread_id, message, &rejection)
-                        .await;
+                    self.persist_assistant_response(
+                        thread_id,
+                        message,
+                        &rejection,
+                        session_id,
+                        turn_number,
+                    )
+                    .await;
                     drop(sess);
                     let _ = thread_snapshot;
                     self.sync_context_pressure_warning(message, thread_id, usage_percent)
@@ -2154,12 +2327,20 @@ impl Agent {
         let auth_data = parse_auth_result(tool_result);
         let thread_snapshot = {
             let mut sess = session.lock().await;
+            let session_id = sess.id;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
                 thread.enter_auth_mode(ext_name.clone());
                 thread.complete_turn(&instructions);
+                let turn_number = thread.turn_number();
                 // User message already persisted at turn start; save auth instructions
-                self.persist_assistant_response(thread_id, message, &instructions)
-                    .await;
+                self.persist_assistant_response(
+                    thread_id,
+                    message,
+                    &instructions,
+                    session_id,
+                    turn_number,
+                )
+                .await;
                 Some(thread.clone())
             } else {
                 None
@@ -2389,6 +2570,8 @@ impl Agent {
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
             thread.restore_from_messages(checkpoint.messages);
+            drop(sess);
+            self.clear_thread_runtime_transients(thread_id).await;
             Ok(SubmissionResult::ok_with_message(format!(
                 "Resumed from checkpoint: {}",
                 checkpoint.description

@@ -29,8 +29,9 @@ use crate::experiments::{
 use crate::history::{
     ConversationMessage, ConversationSummary, JobEventRecord, LearningArtifactVersion,
     LearningCandidate, LearningCodeProposal, LearningEvaluation, LearningEvent,
-    LearningFeedbackRecord, LearningRollbackRecord, LlmCallRecord, SandboxJobRecord,
-    SandboxJobSummary, SessionSearchHit, SettingRow, Store,
+    LearningFeedbackRecord, LearningRollbackRecord, LlmCallRecord, OutcomeContract,
+    OutcomeContractQuery, OutcomeEvaluatorHealth, OutcomeObservation, OutcomePendingUser,
+    OutcomeSummaryStats, SandboxJobRecord, SandboxJobSummary, SessionSearchHit, SettingRow, Store,
 };
 use crate::identity::{
     ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, EndpointApprovalStatus,
@@ -449,6 +450,79 @@ impl ConversationStore for PgBackend {
         self.store
             .update_learning_code_proposal(proposal_id, status, branch_name, pr_url, metadata)
             .await
+    }
+
+    async fn insert_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store.insert_outcome_contract(contract).await
+    }
+
+    async fn get_outcome_contract(
+        &self,
+        user_id: &str,
+        contract_id: Uuid,
+    ) -> Result<Option<OutcomeContract>, DatabaseError> {
+        self.store.get_outcome_contract(user_id, contract_id).await
+    }
+
+    async fn list_outcome_contracts(
+        &self,
+        query: &OutcomeContractQuery,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.store.list_outcome_contracts(query).await
+    }
+
+    async fn claim_due_outcome_contracts(
+        &self,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.store.claim_due_outcome_contracts(limit, now).await
+    }
+
+    async fn update_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<(), DatabaseError> {
+        self.store.update_outcome_contract(contract).await
+    }
+
+    async fn outcome_summary_stats(
+        &self,
+        user_id: &str,
+    ) -> Result<OutcomeSummaryStats, DatabaseError> {
+        self.store.outcome_summary_stats(user_id).await
+    }
+
+    async fn list_users_with_pending_outcome_work(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomePendingUser>, DatabaseError> {
+        self.store.list_users_with_pending_outcome_work(now).await
+    }
+
+    async fn outcome_evaluator_health(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<OutcomeEvaluatorHealth, DatabaseError> {
+        self.store.outcome_evaluator_health(user_id, now).await
+    }
+
+    async fn insert_outcome_observation(
+        &self,
+        observation: &OutcomeObservation,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store.insert_outcome_observation(observation).await
+    }
+
+    async fn list_outcome_observations(
+        &self,
+        contract_id: Uuid,
+    ) -> Result<Vec<OutcomeObservation>, DatabaseError> {
+        self.store.list_outcome_observations(contract_id).await
     }
 
     async fn conversation_belongs_to_user(

@@ -612,6 +612,14 @@ pub struct ExperimentOpportunity {
     pub suggested_preset: ExperimentPreset,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_target_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub signals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_hint: Option<serde_json::Value>,
     #[serde(default)]
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,

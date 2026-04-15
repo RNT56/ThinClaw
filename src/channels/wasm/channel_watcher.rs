@@ -33,6 +33,8 @@ use tokio::task::JoinHandle;
 use crate::channels::manager::ChannelManager;
 use crate::channels::wasm::loader::WasmChannelLoader;
 use crate::channels::wasm::router::WasmChannelRouter;
+use crate::channels::wasm::{RegisteredEndpoint, SharedWasmChannel};
+use crate::secrets::SecretsStore;
 
 /// Configuration for the channel watcher.
 #[derive(Debug, Clone)]
@@ -76,7 +78,11 @@ pub struct ChannelWatcher {
     /// Channel manager for hot-add/remove.
     channel_manager: Arc<ChannelManager>,
     /// Webhook router for updating routes on channel add/remove.
-    webhook_router: Option<Arc<RwLock<WasmChannelRouter>>>,
+    webhook_router: Option<Arc<WasmChannelRouter>>,
+    /// Optional secrets store for restoring webhook secrets on hot-added channels.
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// User scope for secret lookup.
+    user_id: String,
 }
 
 impl ChannelWatcher {
@@ -94,12 +100,25 @@ impl ChannelWatcher {
             loader,
             channel_manager,
             webhook_router: None,
+            secrets_store: None,
+            user_id: "default".to_string(),
         }
     }
 
     /// Set the webhook router for updating routes on channel changes.
-    pub fn with_webhook_router(mut self, router: Arc<RwLock<WasmChannelRouter>>) -> Self {
+    pub fn with_webhook_router(mut self, router: Arc<WasmChannelRouter>) -> Self {
         self.webhook_router = Some(router);
+        self
+    }
+
+    /// Set the secrets store used to restore webhook secrets for hot-added channels.
+    pub fn with_secrets_store(
+        mut self,
+        store: Arc<dyn SecretsStore + Send + Sync>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.secrets_store = Some(store);
+        self.user_id = user_id.into();
         self
     }
 
@@ -149,6 +168,8 @@ impl ChannelWatcher {
         let loader = Arc::clone(&self.loader);
         let channel_manager = Arc::clone(&self.channel_manager);
         let webhook_router = self.webhook_router.clone();
+        let secrets_store = self.secrets_store.clone();
+        let user_id = self.user_id.clone();
 
         let handle = tokio::spawn(async move {
             tracing::info!(
@@ -167,6 +188,8 @@ impl ChannelWatcher {
                     &loader,
                     &channel_manager,
                     webhook_router.as_ref(),
+                    secrets_store.as_deref(),
+                    &user_id,
                 )
                 .await
                 {
@@ -193,7 +216,9 @@ impl ChannelWatcher {
         known: &Arc<RwLock<HashMap<String, WatchedChannel>>>,
         loader: &Arc<WasmChannelLoader>,
         channel_manager: &Arc<ChannelManager>,
-        _webhook_router: Option<&Arc<RwLock<WasmChannelRouter>>>,
+        webhook_router: Option<&Arc<WasmChannelRouter>>,
+        secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
+        user_id: &str,
     ) -> Result<(), String> {
         // Scan current .wasm files
         let mut current_files: HashMap<String, SystemTime> = HashMap::new();
@@ -228,7 +253,17 @@ impl ChannelWatcher {
                 None => {
                     // New channel
                     tracing::info!(channel = %name, "New WASM channel detected, loading...");
-                    match Self::load_and_add(dir, name, loader, channel_manager).await {
+                    match Self::load_and_add(
+                        dir,
+                        name,
+                        loader,
+                        channel_manager,
+                        webhook_router,
+                        secrets_store,
+                        user_id,
+                    )
+                    .await
+                    {
                         Ok(()) => {
                             known_guard.insert(
                                 name.clone(),
@@ -258,9 +293,22 @@ impl ChannelWatcher {
                             if let Err(e) = channel_manager.hot_remove(name).await {
                                 tracing::warn!(channel = %name, error = %e, "Error removing old channel during reload");
                             }
+                            if let Some(router) = webhook_router {
+                                router.unregister(name).await;
+                            }
 
                             // Load new
-                            match Self::load_and_add(dir, name, loader, channel_manager).await {
+                            match Self::load_and_add(
+                                dir,
+                                name,
+                                loader,
+                                channel_manager,
+                                webhook_router,
+                                secrets_store,
+                                user_id,
+                            )
+                            .await
+                            {
                                 Ok(()) => {
                                     known_guard.insert(
                                         name.clone(),
@@ -301,6 +349,9 @@ impl ChannelWatcher {
             if let Err(e) = channel_manager.hot_remove(&name).await {
                 tracing::warn!(channel = %name, error = %e, "Error removing deleted channel");
             }
+            if let Some(router) = webhook_router {
+                router.unregister(&name).await;
+            }
             known_guard.remove(&name);
             tracing::info!(channel = %name, "WASM channel hot-removed");
         }
@@ -314,6 +365,9 @@ impl ChannelWatcher {
         name: &str,
         loader: &Arc<WasmChannelLoader>,
         channel_manager: &Arc<ChannelManager>,
+        webhook_router: Option<&Arc<WasmChannelRouter>>,
+        secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
+        user_id: &str,
     ) -> Result<(), String> {
         let wasm_path = dir.join(format!("{}.wasm", name));
         let cap_path = dir.join(format!("{}.capabilities.json", name));
@@ -328,10 +382,42 @@ impl ChannelWatcher {
             .await
             .map_err(|e| format!("load failed: {}", e))?;
 
+        let secret_header = loaded.webhook_secret_header().map(str::to_string);
+        let secret_name = loaded.webhook_secret_name();
+        let channel_name = loaded.name().to_string();
+        let channel_arc = Arc::new(loaded.channel);
+
         channel_manager
-            .hot_add(Box::new(loaded.channel))
+            .hot_add(Box::new(SharedWasmChannel::new(Arc::clone(&channel_arc))))
             .await
             .map_err(|e| format!("hot_add failed: {}", e))?;
+
+        if let Some(router) = webhook_router {
+            let endpoints = {
+                let registered = channel_arc.endpoints().await;
+                if registered.is_empty() {
+                    vec![RegisteredEndpoint {
+                        channel_name: channel_name.clone(),
+                        path: format!("/webhook/{}", channel_name),
+                        methods: vec!["POST".to_string()],
+                        require_secret: false,
+                    }]
+                } else {
+                    registered
+                }
+            };
+            let webhook_secret = match secrets_store {
+                Some(store) => store
+                    .get_decrypted(user_id, &secret_name)
+                    .await
+                    .ok()
+                    .map(|secret| secret.expose().to_string()),
+                None => None,
+            };
+            router
+                .register(channel_arc, endpoints, webhook_secret, secret_header)
+                .await;
+        }
 
         Ok(())
     }
@@ -347,6 +433,8 @@ impl ChannelWatcher {
             &self.loader,
             &self.channel_manager,
             self.webhook_router.as_ref(),
+            self.secrets_store.as_deref(),
+            &self.user_id,
         )
         .await
     }

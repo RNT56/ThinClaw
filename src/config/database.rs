@@ -59,6 +59,26 @@ pub struct DatabaseConfig {
 }
 
 impl DatabaseConfig {
+    pub(crate) fn disabled() -> Self {
+        let backend = std::env::var("DATABASE_BACKEND")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(DatabaseBackend::LibSql);
+
+        Self {
+            backend,
+            url: SecretString::from("disabled://no-db"),
+            pool_size: 0,
+            libsql_path: if backend == DatabaseBackend::LibSql {
+                Some(default_libsql_path())
+            } else {
+                None
+            },
+            libsql_url: None,
+            libsql_auth_token: None,
+        }
+    }
+
     pub(crate) fn resolve() -> Result<Self, ConfigError> {
         let backend: DatabaseBackend = if let Some(b) = optional_env("DATABASE_BACKEND")? {
             b.parse().map_err(|e| ConfigError::InvalidValue {

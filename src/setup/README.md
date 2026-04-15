@@ -2,6 +2,8 @@
 
 This is the code-adjacent specification for ThinClaw onboarding. If setup behavior changes in `src/setup/`, update this file in the same change.
 
+For the canonical identity vocabulary used by setup, also keep [../../docs/IDENTITY_AND_PERSONALITY.md](../../docs/IDENTITY_AND_PERSONALITY.md) aligned.
+
 ## Scope
 
 This document owns:
@@ -11,7 +13,7 @@ This document owns:
 - the current wizard shape and persistence behavior
 - setup-specific invariants and operator expectations
 
-This document does not own the broader runtime walkthrough. Use `Agent_flow.md` for boot/runtime flow and `docs/DEPLOYMENT.md` for deployment modes.
+This document does not own deployment or broader trust architecture. Use `docs/DEPLOYMENT.md` for deployment modes and `docs/IDENTITY_AND_PERSONALITY.md` for the current agent identity model.
 
 ## Entry Points
 
@@ -124,7 +126,7 @@ and the onboarding TUI shell from the same step plan:
 7. Routing Policy
 8. Fallback Providers
 9. Embeddings
-10. Agent Identity
+10. Agent Identity & Personality
 11. Timezone
 12. Channel Configuration
 13. Session Continuity
@@ -147,7 +149,7 @@ The operator-facing phases are:
 - Welcome & Profile
 - Core Runtime
 - AI Stack
-- Identity & Presence
+- Identity & Personality
 - Channels & Continuity
 - Capabilities & Automation
 - Experience & Operations
@@ -214,5 +216,5 @@ Later steps focus on trust boundaries, operator control, and day-two usability r
 
 - Do not restate onboarding in multiple conflicting docs.
 - Treat `src/setup/wizard/mod.rs` as the ultimate source of truth for step order and wizard branching.
-- Update `docs/DEPLOYMENT.md`, `README.md`, and `Agent_flow.md` when setup-facing behavior changes the public story.
+- Update `docs/DEPLOYMENT.md`, `README.md`, and the identity/surface canonicals when setup-facing behavior changes the public story.
 - If behavior changes affect parity-tracked functionality, update `FEATURE_PARITY.md` in the same branch.

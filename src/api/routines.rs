@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::agent::routine_engine::RoutineEngine;
+use crate::agent::{outcomes, routine_engine::RoutineEngine};
 use crate::channels::web::types::*;
 use crate::db::Database;
 
@@ -71,6 +71,9 @@ pub async fn toggle_routine(
         .update_routine(&routine)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if !routine.enabled {
+        let _ = outcomes::observe_routine_state_change(store, &routine, "routine_disabled").await;
+    }
 
     Ok(serde_json::json!({
         "status": if routine.enabled { "enabled" } else { "disabled" },
@@ -84,6 +87,10 @@ pub async fn delete_routine(
     routine_id: &str,
 ) -> ApiResult<serde_json::Value> {
     let id = Uuid::parse_str(routine_id)?;
+    let routine = store
+        .get_routine(id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let deleted = store
         .delete_routine(id)
@@ -91,6 +98,9 @@ pub async fn delete_routine(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     if deleted {
+        if let Some(routine) = routine.as_ref() {
+            let _ = outcomes::observe_routine_state_change(store, routine, "routine_deleted").await;
+        }
         Ok(serde_json::json!({
             "status": "deleted",
             "routine_id": routine_id,

@@ -53,19 +53,10 @@ mod fallback {
         Failed,
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     pub struct ContainerJobConfig {
         pub claude_code_enabled: bool,
         pub codex_code_enabled: bool,
-    }
-
-    impl Default for ContainerJobConfig {
-        fn default() -> Self {
-            Self {
-                claude_code_enabled: false,
-                codex_code_enabled: false,
-            }
-        }
     }
 
     #[derive(Debug)]

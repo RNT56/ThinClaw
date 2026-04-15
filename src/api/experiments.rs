@@ -26,6 +26,7 @@ use crate::experiments::{
     ExperimentTarget, ExperimentTargetKind, ExperimentTargetLink, ExperimentTrial,
     ExperimentTrialStatus, compare_metrics, extract_metrics, hash_lease_token,
 };
+use crate::history::{OutcomeContract, OutcomeContractQuery};
 use crate::llm::usage_tracking::{
     USAGE_TRACKING_EXPERIMENT_CAMPAIGN_ID_KEY, USAGE_TRACKING_EXPERIMENT_ROLE_KEY,
     USAGE_TRACKING_EXPERIMENT_TARGET_IDS_KEY, USAGE_TRACKING_EXPERIMENT_TRIAL_ID_KEY,
@@ -1447,9 +1448,28 @@ pub async fn list_opportunities(
         .list_experiment_target_links()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(ExperimentOpportunityListResponse {
-        opportunities: derive_opportunities(&usage, &targets, &target_links),
-    })
+    let outcome_contracts = store
+        .list_outcome_contracts(&OutcomeContractQuery {
+            user_id: user_id.to_string(),
+            actor_id: None,
+            status: Some("evaluated".to_string()),
+            contract_type: None,
+            source_kind: None,
+            source_id: None,
+            thread_id: None,
+            limit: ((limit.max(25)) * 8) as i64,
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut opportunities = derive_opportunities(&usage, &targets, &target_links);
+    opportunities.extend(derive_outcome_opportunities(
+        &outcome_contracts,
+        &targets,
+        limit,
+    ));
+    sort_experiment_opportunities(&mut opportunities);
+    opportunities.truncate(limit.max(1));
+    Ok(ExperimentOpportunityListResponse { opportunities })
 }
 
 pub async fn list_gpu_cloud_providers(
@@ -3702,6 +3722,8 @@ fn derive_opportunities(
         let rank_score = aggregate_opportunity_score(&aggregate);
         let route_key = aggregate.route_key.clone();
         let logical_role = aggregate.logical_role.clone();
+        let signals =
+            opportunity_signals_for_usage(&aggregate, error_rate, avg_latency_ms, avg_cost_usd);
         let summary = opportunity_summary(
             aggregate.kind,
             aggregate.provider.as_str(),
@@ -3721,6 +3743,10 @@ fn derive_opportunities(
             gpu_requirement: opportunity_gpu_requirement(aggregate.kind, self_hosted),
             suggested_preset: opportunity_preset(aggregate.kind, self_hosted),
             linked_target_id: aggregate.linked_target_id,
+            source: Some("telemetry".to_string()),
+            confidence: Some((0.4 + (aggregate.call_count.min(8) as f64 * 0.05)).clamp(0.4, 0.9)),
+            signals,
+            project_hint: None,
             metadata: serde_json::json!({
                 "usage_class": format!("{:?}", aggregate.class),
                 "call_count": aggregate.call_count,
@@ -3738,6 +3764,394 @@ fn derive_opportunities(
     }
 
     opportunities
+}
+
+#[derive(Debug, Clone)]
+struct OutcomeOpportunityAggregate {
+    kind: ExperimentTargetKind,
+    contract_type: String,
+    artifact_type: Option<String>,
+    artifact_name: Option<String>,
+    routine_id: Option<String>,
+    routine_name: Option<String>,
+    pattern_key: String,
+    count: u32,
+    first_seen: DateTime<Utc>,
+    last_seen: DateTime<Utc>,
+    rank_score: f64,
+    linked_target_id: Option<Uuid>,
+}
+
+fn derive_outcome_opportunities(
+    contracts: &[OutcomeContract],
+    targets: &[ExperimentTarget],
+    limit: usize,
+) -> Vec<ExperimentOpportunity> {
+    let cutoff = Utc::now() - chrono::Duration::days(30);
+    let mut aggregates: HashMap<String, OutcomeOpportunityAggregate> = HashMap::new();
+
+    for contract in contracts.iter().filter(|contract| {
+        contract.final_verdict.as_deref() == Some("negative")
+            && contract.evaluated_at.unwrap_or(contract.updated_at) >= cutoff
+    }) {
+        let Some(kind) = outcome_target_kind(contract) else {
+            continue;
+        };
+        let pattern_key = contract
+            .metadata
+            .get("pattern_key")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "{}:{}:{}",
+                    contract.contract_type, contract.source_kind, contract.source_id
+                )
+            });
+        let artifact_type = contract
+            .metadata
+            .get("artifact_type")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let artifact_name = contract
+            .metadata
+            .get("artifact_name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| outcome_default_artifact_name(contract));
+        let routine_id = contract
+            .metadata
+            .get("routine_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let routine_name = contract
+            .metadata
+            .get("routine_name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let linked_target_id = find_outcome_linked_target_id(
+            targets,
+            kind,
+            artifact_name.as_deref(),
+            routine_id.as_deref(),
+            &pattern_key,
+        );
+        let evaluated_at = contract.evaluated_at.unwrap_or(contract.updated_at);
+        let aggregate = aggregates
+            .entry(pattern_key.clone())
+            .or_insert_with(|| OutcomeOpportunityAggregate {
+                kind,
+                contract_type: contract.contract_type.clone(),
+                artifact_type: artifact_type.clone(),
+                artifact_name: artifact_name.clone(),
+                routine_id: routine_id.clone(),
+                routine_name: routine_name.clone(),
+                pattern_key: pattern_key.clone(),
+                count: 0,
+                first_seen: evaluated_at,
+                last_seen: evaluated_at,
+                rank_score: 0.0,
+                linked_target_id,
+            });
+        aggregate.count = aggregate.count.saturating_add(1);
+        aggregate.first_seen = aggregate.first_seen.min(evaluated_at);
+        aggregate.last_seen = aggregate.last_seen.max(evaluated_at);
+        if aggregate.linked_target_id.is_none() {
+            aggregate.linked_target_id = linked_target_id;
+        }
+    }
+
+    let mut aggregates: Vec<_> = aggregates.into_values().collect();
+    for aggregate in &mut aggregates {
+        let recency_bonus = ((Utc::now() - aggregate.last_seen).num_days().max(0) as f64).min(14.0);
+        aggregate.rank_score = aggregate.count as f64 * 4.0 - recency_bonus;
+    }
+    aggregates.sort_by(|left, right| {
+        right
+            .rank_score
+            .partial_cmp(&left.rank_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                experiment_target_kind_sort_key(left.kind)
+                    .cmp(&experiment_target_kind_sort_key(right.kind))
+            })
+            .then_with(|| left.pattern_key.cmp(&right.pattern_key))
+    });
+
+    aggregates
+        .into_iter()
+        .take(limit.max(1))
+        .map(|aggregate| outcome_aggregate_to_opportunity(aggregate))
+        .collect()
+}
+
+fn outcome_target_kind(contract: &OutcomeContract) -> Option<ExperimentTargetKind> {
+    match contract.contract_type.as_str() {
+        "turn_usefulness" => Some(ExperimentTargetKind::PromptAsset),
+        "routine_usefulness" => Some(ExperimentTargetKind::ToolPolicy),
+        "tool_durability" => match contract
+            .metadata
+            .get("artifact_type")
+            .and_then(|value| value.as_str())
+        {
+            Some("prompt") => Some(ExperimentTargetKind::PromptAsset),
+            Some("skill") | Some("routine") => Some(ExperimentTargetKind::ToolPolicy),
+            Some("parser") => Some(ExperimentTargetKind::Parser),
+            Some("evaluator") => Some(ExperimentTargetKind::Evaluator),
+            Some("inference") => Some(ExperimentTargetKind::InferenceConfig),
+            Some("serving") => Some(ExperimentTargetKind::ServingConfig),
+            Some("training") => Some(ExperimentTargetKind::TrainingConfig),
+            Some("training_code") | Some("code") => Some(ExperimentTargetKind::TrainingCode),
+            _ if contract.source_kind == "learning_code_proposal" => {
+                Some(ExperimentTargetKind::TrainingCode)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn outcome_default_artifact_name(contract: &OutcomeContract) -> Option<String> {
+    match contract.contract_type.as_str() {
+        "turn_usefulness" => Some(crate::workspace::paths::USER.to_string()),
+        _ => None,
+    }
+}
+
+fn find_outcome_linked_target_id(
+    targets: &[ExperimentTarget],
+    kind: ExperimentTargetKind,
+    artifact_name: Option<&str>,
+    routine_id: Option<&str>,
+    pattern_key: &str,
+) -> Option<Uuid> {
+    targets
+        .iter()
+        .find(|target| {
+            if target.kind != kind {
+                return false;
+            }
+            let asset_id = target
+                .metadata
+                .get("asset_id")
+                .and_then(|value| value.as_str());
+            let target_pattern = target
+                .metadata
+                .get("pattern_key")
+                .and_then(|value| value.as_str());
+            asset_id.zip(artifact_name).is_some_and(|(left, right)| left == right)
+                || asset_id.zip(routine_id).is_some_and(|(left, right)| left == right)
+                || target_pattern.is_some_and(|value| value == pattern_key)
+        })
+        .map(|target| target.id)
+}
+
+fn outcome_aggregate_to_opportunity(aggregate: OutcomeOpportunityAggregate) -> ExperimentOpportunity {
+    let (summary, project_hint) = outcome_summary_and_project_hint(&aggregate);
+    let id_source = format!("{}|{:?}", aggregate.pattern_key, aggregate.kind);
+    let hash = blake3::hash(id_source.as_bytes()).to_hex().to_string();
+    let signals = outcome_signals(&aggregate);
+    ExperimentOpportunity {
+        id: format!("opp_outcome_{}", &hash[..16]),
+        provider: "outcome_learning".to_string(),
+        model: aggregate
+            .artifact_name
+            .clone()
+            .or_else(|| aggregate.routine_name.clone())
+            .unwrap_or_else(|| "negative pattern".to_string()),
+        route_key: None,
+        logical_role: None,
+        opportunity_type: aggregate.kind,
+        summary,
+        gpu_requirement: outcome_gpu_requirement(aggregate.kind),
+        suggested_preset: outcome_preset(aggregate.kind),
+        linked_target_id: aggregate.linked_target_id,
+        source: Some("outcome_learning".to_string()),
+        confidence: Some((0.45 + aggregate.count.min(5) as f64 * 0.1).clamp(0.45, 0.95)),
+        signals,
+        project_hint: Some(project_hint),
+        metadata: serde_json::json!({
+            "rank_score": aggregate.rank_score,
+            "negative_outcome_count": aggregate.count,
+            "pattern_key": aggregate.pattern_key,
+            "contract_type": aggregate.contract_type,
+            "artifact_type": aggregate.artifact_type,
+            "artifact_name": aggregate.artifact_name,
+            "routine_id": aggregate.routine_id,
+            "routine_name": aggregate.routine_name,
+        }),
+        created_at: aggregate.first_seen,
+        updated_at: aggregate.last_seen,
+    }
+}
+
+fn outcome_summary_and_project_hint(
+    aggregate: &OutcomeOpportunityAggregate,
+) -> (String, serde_json::Value) {
+    match aggregate.kind {
+        ExperimentTargetKind::PromptAsset => {
+            let target = aggregate
+                .artifact_name
+                .clone()
+                .unwrap_or_else(|| crate::workspace::paths::USER.to_string());
+            (
+                format!(
+                    "Use repeated negative outcome signals to benchmark and improve prompt behavior for {}.",
+                    target
+                ),
+                serde_json::json!({
+                    "name": format!("Outcome prompt benchmark for {}", target),
+                    "mutable_paths": [target],
+                    "fixed_paths": ["README.md"],
+                    "metric_name": "outcome_success_rate",
+                    "comparator": "higher_is_better",
+                    "strategy": "Use the repeated negative outcome pattern as a benchmark seed, improve the prompt surface conservatively, and compare against the current baseline."
+                }),
+            )
+        }
+        ExperimentTargetKind::ToolPolicy => {
+            let label = aggregate
+                .routine_name
+                .clone()
+                .or_else(|| aggregate.artifact_name.clone())
+                .unwrap_or_else(|| "tool orchestration".to_string());
+            (
+                format!(
+                    "Investigate repeated negative outcome signals around {} and refine orchestration or notification policy.",
+                    label
+                ),
+                serde_json::json!({
+                    "name": format!("Outcome orchestration benchmark for {}", label),
+                    "mutable_paths": ["src/agent/routine_engine.rs", "src/agent/outcomes.rs"],
+                    "fixed_paths": ["README.md"],
+                    "metric_name": "negative_outcome_rate",
+                    "comparator": "lower_is_better",
+                    "strategy": "Reduce repeated negative outcome patterns without broadening scope, and keep operator-facing behavior benchmarkable."
+                }),
+            )
+        }
+        ExperimentTargetKind::TrainingCode => (
+            "Promote repeated negative durability signals into a benchmarked code-improvement search.".to_string(),
+            serde_json::json!({
+                "name": "Outcome-driven code benchmark",
+                "mutable_paths": aggregate.artifact_name.clone().map(|value| vec![value]).unwrap_or_default(),
+                "fixed_paths": ["README.md"],
+                "metric_name": "regression_rate",
+                "comparator": "lower_is_better",
+                "strategy": "Use repeated negative durability outcomes as the seed benchmark and only mutate the code surface implicated by the pattern."
+            }),
+        ),
+        kind => (
+            format!(
+                "Use repeated negative outcome signals to drive a focused {:?} benchmark.",
+                kind
+            ),
+            serde_json::json!({
+                "name": format!("Outcome-driven {:?} benchmark", kind),
+                "mutable_paths": [],
+                "fixed_paths": ["README.md"],
+                "metric_name": "outcome_success_rate",
+                "comparator": "higher_is_better",
+                "strategy": "Turn repeated negative outcome evidence into a repeatable benchmark and search only the target surface."
+            }),
+        ),
+    }
+}
+
+fn outcome_signals(aggregate: &OutcomeOpportunityAggregate) -> Vec<String> {
+    let mut signals = vec![
+        "outcome-backed evidence".to_string(),
+        format!("{} negative outcome{}", aggregate.count, if aggregate.count == 1 { "" } else { "s" }),
+    ];
+    if let Some(artifact_name) = aggregate.artifact_name.as_deref() {
+        signals.push(format!("target {}", artifact_name));
+    }
+    if let Some(routine_name) = aggregate.routine_name.as_deref() {
+        signals.push(format!("routine {}", routine_name));
+    }
+    signals
+}
+
+fn outcome_gpu_requirement(kind: ExperimentTargetKind) -> ExperimentGpuRequirement {
+    match kind {
+        ExperimentTargetKind::TrainingCode
+        | ExperimentTargetKind::TrainingConfig => ExperimentGpuRequirement::Required,
+        ExperimentTargetKind::InferenceConfig
+        | ExperimentTargetKind::ServingConfig => ExperimentGpuRequirement::Recommended,
+        _ => ExperimentGpuRequirement::NotNeeded,
+    }
+}
+
+fn outcome_preset(kind: ExperimentTargetKind) -> ExperimentPreset {
+    match kind {
+        ExperimentTargetKind::PromptAsset | ExperimentTargetKind::RoutingPolicy => {
+            ExperimentPreset::HostedPromptRouting
+        }
+        ExperimentTargetKind::RagConfig => ExperimentPreset::RagPipeline,
+        ExperimentTargetKind::ToolPolicy => ExperimentPreset::ToolOrchestration,
+        ExperimentTargetKind::InferenceConfig | ExperimentTargetKind::ServingConfig => {
+            ExperimentPreset::OpenWeightsInferenceTuning
+        }
+        ExperimentTargetKind::TrainingConfig => ExperimentPreset::SelfHostedFinetune,
+        ExperimentTargetKind::TrainingCode => ExperimentPreset::OpenWeightsTrainingCode,
+        ExperimentTargetKind::Evaluator | ExperimentTargetKind::Parser => {
+            ExperimentPreset::AutoresearchSingleFile
+        }
+    }
+}
+
+fn experiment_target_kind_sort_key(kind: ExperimentTargetKind) -> &'static str {
+    match kind {
+        ExperimentTargetKind::PromptAsset => "prompt_asset",
+        ExperimentTargetKind::RoutingPolicy => "routing_policy",
+        ExperimentTargetKind::RagConfig => "rag_config",
+        ExperimentTargetKind::ToolPolicy => "tool_policy",
+        ExperimentTargetKind::Evaluator => "evaluator",
+        ExperimentTargetKind::Parser => "parser",
+        ExperimentTargetKind::InferenceConfig => "inference_config",
+        ExperimentTargetKind::TrainingConfig => "training_config",
+        ExperimentTargetKind::TrainingCode => "training_code",
+        ExperimentTargetKind::ServingConfig => "serving_config",
+    }
+}
+
+fn opportunity_signals_for_usage(
+    aggregate: &OpportunityAggregate,
+    error_rate: f64,
+    avg_latency_ms: Option<f64>,
+    avg_cost_usd: Option<f64>,
+) -> Vec<String> {
+    let mut signals = vec![format!("{} model call{}", aggregate.call_count, if aggregate.call_count == 1 { "" } else { "s" })];
+    if error_rate > 0.0 {
+        signals.push(format!("{:.0}% error rate", error_rate * 100.0));
+    }
+    if let Some(avg_latency_ms) = avg_latency_ms {
+        signals.push(format!("{:.0} ms avg latency", avg_latency_ms));
+    }
+    if let Some(avg_cost_usd) = avg_cost_usd {
+        signals.push(format!("${:.4} avg cost", avg_cost_usd));
+    }
+    signals
+}
+
+fn sort_experiment_opportunities(opportunities: &mut [ExperimentOpportunity]) {
+    opportunities.sort_by(|left, right| {
+        let right_score = right
+            .metadata
+            .get("rank_score")
+            .and_then(|value| value.as_f64())
+            .unwrap_or_default();
+        let left_score = left
+            .metadata
+            .get("rank_score")
+            .and_then(|value| value.as_f64())
+            .unwrap_or_default();
+        right_score
+            .partial_cmp(&left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

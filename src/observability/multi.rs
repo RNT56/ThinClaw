@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Fan-out observer that dispatches to multiple backends.
 //!
 //! Useful for combining backends, e.g. log + OpenTelemetry simultaneously.

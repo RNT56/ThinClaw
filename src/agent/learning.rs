@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use uuid::Uuid;
 
+use crate::agent::outcomes;
+use crate::agent::routine_engine::RoutineEngine;
 use crate::db::Database;
 use crate::history::{
     LearningArtifactVersion as DbLearningArtifactVersion, LearningCandidate as DbLearningCandidate,
@@ -82,6 +84,16 @@ impl RiskTier {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Critical => "critical",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value.to_ascii_lowercase().as_str() {
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "critical" => Self::Critical,
+            _ => Self::Medium,
         }
     }
 
@@ -663,6 +675,7 @@ pub struct LearningOrchestrator {
     store: Arc<dyn Database>,
     workspace: Option<Arc<Workspace>>,
     skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
+    routine_engine: Option<Arc<RoutineEngine>>,
     providers: Vec<Arc<dyn MemoryProvider>>,
 }
 
@@ -680,8 +693,14 @@ impl LearningOrchestrator {
             store,
             workspace,
             skill_registry,
+            routine_engine: None,
             providers,
         }
+    }
+
+    pub fn with_routine_engine(mut self, routine_engine: Option<Arc<RoutineEngine>>) -> Self {
+        self.routine_engine = routine_engine;
+        self
     }
 
     pub async fn load_settings_for_user(&self, user_id: &str) -> LearningSettings {
@@ -763,6 +782,9 @@ impl LearningOrchestrator {
             .insert_learning_feedback(&record)
             .await
             .map_err(|e| e.to_string())?;
+        if let Err(err) = outcomes::observe_feedback(&self.store, &record).await {
+            tracing::debug!(user_id = %user_id, error = %err, "Outcome feedback hook skipped");
+        }
 
         let feedback_event = LearningEvent::new(
             "learning::explicit_feedback",
@@ -941,6 +963,79 @@ impl LearningOrchestrator {
         Ok(outcome)
     }
 
+    pub async fn route_existing_candidate(
+        &self,
+        trigger: &str,
+        candidate: &DbLearningCandidate,
+    ) -> Result<LearningOutcome, String> {
+        let settings = self.load_settings_for_user(&candidate.user_id).await;
+        let class = ImprovementClass::from_str(&candidate.candidate_type);
+        let risk = RiskTier::from_str(&candidate.risk_tier);
+        let event_id = candidate.learning_event_id.unwrap_or(candidate.id);
+        let mut outcome = LearningOutcome {
+            trigger: trigger.to_string(),
+            event_id,
+            evaluation_id: None,
+            candidate_id: Some(candidate.id),
+            auto_applied: false,
+            code_proposal_id: None,
+            notes: Vec::new(),
+        };
+
+        if !settings.enabled {
+            outcome
+                .notes
+                .push("learning disabled; outcome candidate persisted only".to_string());
+            return Ok(outcome);
+        }
+
+        if self.safe_mode_tripped(&settings, &candidate.user_id).await {
+            outcome
+                .notes
+                .push("safe mode is active; outcome candidate held for review".to_string());
+            return Ok(outcome);
+        }
+
+        if risk.rank() >= RiskTier::High.rank() || class == ImprovementClass::Code {
+            match self.create_code_proposal_from_candidate(candidate).await {
+                Ok(proposal_id) => {
+                    outcome.code_proposal_id = Some(proposal_id);
+                    outcome.notes.push(
+                        "outcome candidate routed to approval-gated code proposal".to_string(),
+                    );
+                }
+                Err(err) => {
+                    outcome
+                        .notes
+                        .push(format!("outcome code proposal suppressed: {err}"));
+                }
+            }
+            return Ok(outcome);
+        }
+
+        let auto_apply_allowed = settings
+            .auto_apply_classes
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(class.as_str()));
+        if auto_apply_allowed
+            && self
+                .auto_apply_candidate(&settings, class, candidate)
+                .await
+                .unwrap_or(false)
+        {
+            outcome.auto_applied = true;
+            outcome
+                .notes
+                .push("outcome candidate auto-applied in Tier A".to_string());
+        } else {
+            outcome
+                .notes
+                .push("outcome candidate queued for manual review".to_string());
+        }
+
+        Ok(outcome)
+    }
+
     async fn is_duplicate_or_cooldown(&self, event: &DbLearningEvent) -> bool {
         let Ok(recent) = self
             .store
@@ -1081,9 +1176,17 @@ impl LearningOrchestrator {
 
         let feedback_ratio = negative_feedback / sample as f64;
         let rollback_ratio = rollbacks.len() as f64 / sample as f64;
+        let outcome_stats = self
+            .store
+            .outcome_summary_stats(user_id)
+            .await
+            .unwrap_or_default();
+        let outcome_ratio = outcome_stats.negative_ratio_last_7d;
 
         feedback_ratio >= settings.safe_mode.thresholds.negative_feedback_ratio
             || rollback_ratio >= settings.safe_mode.thresholds.rollback_ratio
+            || (outcome_stats.evaluated_last_7d >= settings.safe_mode.thresholds.min_samples as u64
+                && outcome_ratio >= settings.safe_mode.thresholds.negative_feedback_ratio)
     }
 
     async fn auto_apply_candidate(
@@ -1100,6 +1203,7 @@ impl LearningOrchestrator {
                 }
                 self.auto_apply_prompt(candidate).await
             }
+            ImprovementClass::Routine => self.auto_apply_routine(candidate).await,
             ImprovementClass::Skill => self.auto_apply_skill(candidate).await,
             _ => Ok(false),
         }
@@ -1148,7 +1252,15 @@ impl LearningOrchestrator {
             provenance: serde_json::json!({"auto_apply": true, "class": "memory"}),
             created_at: Utc::now(),
         };
-        let _ = self.store.insert_learning_artifact_version(&version).await;
+        if self
+            .store
+            .insert_learning_artifact_version(&version)
+            .await
+            .is_ok()
+            && let Err(err) = outcomes::maybe_create_artifact_contract(&self.store, &version).await
+        {
+            tracing::debug!(error = %err, "Outcome memory artifact hook skipped");
+        }
 
         Ok(true)
     }
@@ -1213,7 +1325,15 @@ impl LearningOrchestrator {
             provenance: serde_json::json!({"auto_apply": true, "class": "prompt"}),
             created_at: Utc::now(),
         };
-        let _ = self.store.insert_learning_artifact_version(&version).await;
+        if self
+            .store
+            .insert_learning_artifact_version(&version)
+            .await
+            .is_ok()
+            && let Err(err) = outcomes::maybe_create_artifact_contract(&self.store, &version).await
+        {
+            tracing::debug!(error = %err, "Outcome prompt artifact hook skipped");
+        }
 
         Ok(true)
     }
@@ -1268,8 +1388,92 @@ impl LearningOrchestrator {
             provenance: serde_json::json!({"auto_apply": true, "class": "skill"}),
             created_at: Utc::now(),
         };
-        let _ = self.store.insert_learning_artifact_version(&version).await;
+        if self
+            .store
+            .insert_learning_artifact_version(&version)
+            .await
+            .is_ok()
+            && let Err(err) = outcomes::maybe_create_artifact_contract(&self.store, &version).await
+        {
+            tracing::debug!(error = %err, "Outcome skill artifact hook skipped");
+        }
 
+        Ok(true)
+    }
+
+    async fn auto_apply_routine(&self, candidate: &DbLearningCandidate) -> Result<bool, String> {
+        let Some(engine) = self.routine_engine.as_ref() else {
+            return Ok(false);
+        };
+        let Some(patch) = candidate.proposal.get("routine_patch") else {
+            return Ok(false);
+        };
+        let patch_type = patch
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if patch_type != "notification_noise_reduction" {
+            return Ok(false);
+        }
+        let routine_id = patch
+            .get("routine_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "routine patch missing routine_id".to_string())
+            .and_then(|value| Uuid::parse_str(value).map_err(|err| err.to_string()))?;
+
+        let Some(mut routine) = self
+            .store
+            .get_routine(routine_id)
+            .await
+            .map_err(|err| err.to_string())?
+        else {
+            return Ok(false);
+        };
+
+        if !routine.notify.on_success {
+            return Ok(false);
+        }
+
+        let before = serde_json::to_string_pretty(&routine).map_err(|err| err.to_string())?;
+        routine.notify.on_success = false;
+        routine.updated_at = Utc::now();
+        self.store
+            .update_routine(&routine)
+            .await
+            .map_err(|err| err.to_string())?;
+        let after = serde_json::to_string_pretty(&routine).map_err(|err| err.to_string())?;
+        engine.refresh_event_cache().await;
+
+        let version = DbLearningArtifactVersion {
+            id: Uuid::new_v4(),
+            candidate_id: Some(candidate.id),
+            user_id: candidate.user_id.clone(),
+            artifact_type: "routine".to_string(),
+            artifact_name: routine.name.clone(),
+            version_label: Some(Utc::now().to_rfc3339()),
+            status: "applied".to_string(),
+            diff_summary: Some("Auto-disabled routine success notifications".to_string()),
+            before_content: Some(before),
+            after_content: Some(after),
+            provenance: serde_json::json!({
+                "auto_apply": true,
+                "class": "routine",
+                "patch_type": patch_type,
+                "routine_id": routine.id.to_string(),
+                "routine_name": routine.name,
+                "actor_id": routine.owner_actor_id(),
+            }),
+            created_at: Utc::now(),
+        };
+        if self
+            .store
+            .insert_learning_artifact_version(&version)
+            .await
+            .is_ok()
+            && let Err(err) = outcomes::maybe_create_artifact_contract(&self.store, &version).await
+        {
+            tracing::debug!(error = %err, "Outcome routine artifact hook skipped");
+        }
         Ok(true)
     }
 
@@ -1393,6 +1597,31 @@ impl LearningOrchestrator {
             .map_err(|e| e.to_string())
     }
 
+    async fn create_code_proposal_from_candidate(
+        &self,
+        candidate: &DbLearningCandidate,
+    ) -> Result<Uuid, String> {
+        let event = DbLearningEvent {
+            id: candidate.learning_event_id.unwrap_or(candidate.id),
+            user_id: candidate.user_id.clone(),
+            actor_id: None,
+            channel: None,
+            thread_id: None,
+            conversation_id: None,
+            message_id: None,
+            job_id: None,
+            event_type: candidate.candidate_type.clone(),
+            source: "outcome_backed_learning".to_string(),
+            payload: candidate.proposal.clone(),
+            metadata: Some(serde_json::json!({
+                "source_candidate_id": candidate.id,
+                "source": "outcome_backed_learning",
+            })),
+            created_at: candidate.created_at,
+        };
+        self.create_code_proposal(&event, candidate).await
+    }
+
     pub async fn review_code_proposal(
         &self,
         user_id: &str,
@@ -1448,6 +1677,11 @@ impl LearningOrchestrator {
                     Some(&serde_json::json!({"source": "proposal_review"})),
                 )
                 .await;
+            if let Err(err) =
+                outcomes::observe_proposal_rejection(&self.store, &existing, note).await
+            {
+                tracing::debug!(proposal_id = %proposal_id, error = %err, "Outcome proposal rejection hook skipped");
+            }
         } else {
             let settings = self.load_settings_for_user(user_id).await;
             let mut metadata = existing.metadata.clone();
@@ -1528,6 +1762,17 @@ impl LearningOrchestrator {
                 )
                 .await
                 .map_err(|e| e.to_string())?;
+            if matches!(final_status.as_str(), "approved" | "applied")
+                && let Some(updated) = self
+                    .store
+                    .get_learning_code_proposal(user_id, proposal_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                && let Err(err) =
+                    outcomes::maybe_create_proposal_contract(&self.store, &updated).await
+            {
+                tracing::debug!(proposal_id = %proposal_id, error = %err, "Outcome proposal durability hook skipped");
+            }
         }
 
         self.store
@@ -2013,7 +2258,7 @@ impl TrajectoryTurnRecord {
                             "Turn produced a response, but errors reduced confidence in its quality."
                                 .to_string()
                         } else {
-                            "Turn completed with a usable assistant response.".to_string()
+                            "Turn completed with a usable agent response.".to_string()
                         },
                     }
                 }
@@ -2486,6 +2731,15 @@ fn collect_jsonl_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use tokio::sync::mpsc;
+
+    use crate::agent::routine::{Routine, RoutineAction, RoutineGuardrails, Trigger};
+    use crate::agent::routine_engine::RoutineEngine;
+    use crate::config::RoutineConfig;
+    use crate::testing::StubLlm;
+    use crate::workspace::Workspace;
 
     #[test]
     fn prompt_validator_rejects_transcript_residue() {
@@ -2654,5 +2908,164 @@ mod tests {
             "learning_evaluation:learning_orchestrator_v1"
         );
         assert!(assessment.score <= 0.1);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn auto_apply_routine_records_artifact_version_and_outcome_contract() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let user_id = "routine-auto-apply-user";
+
+        db.set_setting(user_id, "learning.enabled", &serde_json::json!(true))
+            .await
+            .expect("set learning.enabled");
+        db.set_setting(
+            user_id,
+            "learning.outcomes.enabled",
+            &serde_json::json!(true),
+        )
+        .await
+        .expect("set learning.outcomes.enabled");
+
+        let workspace = Arc::new(Workspace::new_with_db(user_id, Arc::clone(&db)));
+        let (notify_tx, _notify_rx) = mpsc::channel(4);
+        let routine_engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            Arc::new(StubLlm::new("ok")),
+            Arc::clone(&workspace),
+            notify_tx,
+            None,
+        ));
+
+        let now = Utc::now();
+        let routine = Routine {
+            id: Uuid::new_v4(),
+            name: "Daily outcome digest".to_string(),
+            description: "Summarize outcomes".to_string(),
+            user_id: user_id.to_string(),
+            actor_id: user_id.to_string(),
+            enabled: true,
+            trigger: Trigger::Manual,
+            action: RoutineAction::Lightweight {
+                prompt: "Summarize the latest outcome-backed learning signals.".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 128,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: crate::agent::routine::NotifyConfig {
+                user: user_id.to_string(),
+                on_success: true,
+                ..crate::agent::routine::NotifyConfig::default()
+            },
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        };
+        db.create_routine(&routine).await.expect("create routine");
+
+        let event = DbLearningEvent {
+            id: Uuid::new_v4(),
+            user_id: user_id.to_string(),
+            actor_id: Some(user_id.to_string()),
+            channel: Some("gateway".to_string()),
+            thread_id: Some("thread-routine".to_string()),
+            conversation_id: None,
+            message_id: None,
+            job_id: None,
+            event_type: "outcome_candidate".to_string(),
+            source: "test".to_string(),
+            payload: serde_json::json!({}),
+            metadata: None,
+            created_at: Utc::now(),
+        };
+        db.insert_learning_event(&event)
+            .await
+            .expect("insert learning event");
+        let candidate = DbLearningCandidate {
+            id: Uuid::new_v4(),
+            learning_event_id: Some(event.id),
+            user_id: user_id.to_string(),
+            candidate_type: "routine_patch".to_string(),
+            risk_tier: "medium".to_string(),
+            confidence: Some(0.91),
+            target_type: Some("routine".to_string()),
+            target_name: Some(routine.name.clone()),
+            summary: Some("Disable noisy success notifications for this routine".to_string()),
+            proposal: serde_json::json!({
+                "routine_patch": {
+                    "type": "notification_noise_reduction",
+                    "routine_id": routine.id.to_string(),
+                    "changes": {
+                        "notify": {
+                            "on_success": false
+                        }
+                    }
+                }
+            }),
+            created_at: Utc::now(),
+        };
+        db.insert_learning_candidate(&candidate)
+            .await
+            .expect("insert learning candidate");
+
+        let orchestrator =
+            LearningOrchestrator::new(Arc::clone(&db), Some(workspace), None::<Arc<_>>)
+                .with_routine_engine(Some(routine_engine));
+
+        let applied = orchestrator
+            .auto_apply_routine(&candidate)
+            .await
+            .expect("auto_apply_routine should succeed");
+        assert!(applied, "routine patch should auto-apply");
+
+        let updated_routine = db
+            .get_routine(routine.id)
+            .await
+            .expect("get routine")
+            .expect("routine should exist");
+        assert!(
+            !updated_routine.notify.on_success,
+            "routine success notifications should be disabled"
+        );
+
+        let artifact_versions = db
+            .list_learning_artifact_versions(user_id, Some("routine"), Some(&routine.name), 10)
+            .await
+            .expect("list learning artifact versions");
+        assert_eq!(artifact_versions.len(), 1, "routine mutation should be ledgered");
+        let version = &artifact_versions[0];
+        assert_eq!(version.status, "applied");
+        assert_eq!(version.artifact_type, "routine");
+        assert!(
+            version
+                .provenance
+                .get("patch_type")
+                .and_then(|value| value.as_str())
+                == Some("notification_noise_reduction")
+        );
+
+        let contracts = db
+            .list_outcome_contracts(&crate::history::OutcomeContractQuery {
+                user_id: user_id.to_string(),
+                actor_id: Some(user_id.to_string()),
+                status: Some("open".to_string()),
+                contract_type: Some("tool_durability".to_string()),
+                source_kind: Some("artifact_version".to_string()),
+                source_id: Some(version.id.to_string()),
+                thread_id: None,
+                limit: 10,
+            })
+            .await
+            .expect("list outcome contracts");
+        assert_eq!(
+            contracts.len(),
+            1,
+            "routine artifact auto-apply should create a durability contract"
+        );
     }
 }

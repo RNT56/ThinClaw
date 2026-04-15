@@ -106,6 +106,8 @@ expression: settings
   "claude_code_enabled": false,
   "claude_code_model": null,
   "claude_code_max_turns": null,
+  "codex_code_enabled": false,
+  "codex_code_model": null,
   "webchat_theme": "",
   "webchat_skin": null,
   "webchat_accent_color": null,
@@ -131,6 +133,7 @@ expression: settings
     "workspace_mode": null,
     "model_guidance_enabled": true,
     "cli_skin": "cockpit",
+    "personality_pack": "balanced",
     "persona_seed": "default",
     "checkpoints_enabled": true,
     "max_checkpoints": 50,
@@ -238,6 +241,14 @@ expression: settings
     },
     "exports": {
       "enabled": false
+    },
+    "outcomes": {
+      "enabled": false,
+      "evaluation_interval_secs": 600,
+      "max_due_per_tick": 50,
+      "default_ttl_hours": 72,
+      "llm_assist_enabled": true,
+      "heartbeat_summary_enabled": true
     }
   },
   "experiments": {

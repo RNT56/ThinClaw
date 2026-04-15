@@ -105,6 +105,8 @@ pub struct TuiApp {
     show_thinking: bool,
     /// Ctrl+C double-tap tracking.
     last_ctrl_c: Option<Instant>,
+    /// Exit requested by a slash command.
+    pending_exit: bool,
     /// Channel for sending user messages out.
     outgoing_tx: mpsc::Sender<TuiEvent>,
     /// Channel for receiving status updates.
@@ -181,6 +183,7 @@ impl TuiApp {
             active_stream: None,
             show_thinking: true,
             last_ctrl_c: None,
+            pending_exit: false,
             outgoing_tx,
             incoming_rx,
             total_chat_lines: 0,
@@ -232,6 +235,9 @@ impl TuiApp {
                                 }
                                 KeyAction::Submit(text) => {
                                     self.handle_submit(&text).await;
+                                    if self.pending_exit {
+                                        return Ok(());
+                                    }
                                 }
                                 KeyAction::Continue => {}
                             }
@@ -401,6 +407,9 @@ impl TuiApp {
         // Slash commands
         if text.starts_with('/') {
             self.handle_slash_command(text).await;
+            if self.pending_exit {
+                let _ = self.outgoing_tx.send(TuiEvent::Exit).await;
+            }
             return;
         }
 
@@ -530,22 +539,36 @@ impl TuiApp {
         match command {
             "/help" => {
                 self.messages.push(ChatMessage::System {
-                    text: HELP_TEXT.to_string(),
+                    text: crate::agent::command_catalog::tui_help_text(),
                 });
             }
-            "/clear" | "/cls" => {
+            "/clear" => {
+                self.messages.clear();
+                self.scroll_offset = 0;
+                let _ = self
+                    .outgoing_tx
+                    .send(TuiEvent::UserMessage("/clear".to_string()))
+                    .await;
+            }
+            "/cls" => {
                 self.messages.clear();
                 self.scroll_offset = 0;
             }
             "/new" | "/reset" => {
                 self.messages.clear();
                 self.scroll_offset = 0;
-                self.messages.push(ChatMessage::System {
-                    text: "Session reset.".to_string(),
-                });
+                let forwarded = if command == "/reset" {
+                    "/new".to_string()
+                } else {
+                    command.to_string()
+                };
+                let _ = self
+                    .outgoing_tx
+                    .send(TuiEvent::UserMessage(forwarded))
+                    .await;
             }
             "/exit" | "/quit" => {
-                // Will be handled by the event loop
+                self.pending_exit = true;
             }
             "/think" => {
                 self.show_thinking = !self.show_thinking;
@@ -576,11 +599,15 @@ impl TuiApp {
                 self.handle_skin_command(arg);
             }
             // Commands forwarded to the agent loop (they need agent-side handling)
-            "/undo" | "/redo" | "/compact" | "/model" | "/models" | "/agent" | "/agents"
-            | "/rollback" | "/vibe" => {
+            cmd if crate::agent::command_catalog::tui_forwarded_commands().contains(&cmd) => {
+                let forwarded = if arg.is_empty() {
+                    command.to_string()
+                } else {
+                    format!("{command} {arg}")
+                };
                 let _ = self
                     .outgoing_tx
-                    .send(TuiEvent::UserMessage(cmd.to_string()))
+                    .send(TuiEvent::UserMessage(forwarded))
                     .await;
             }
             _ => {
@@ -625,29 +652,7 @@ impl TuiApp {
     }
 
     fn autocomplete_command(&mut self) {
-        const COMMANDS: &[&str] = &[
-            "/help",
-            "/clear",
-            "/new",
-            "/reset",
-            "/exit",
-            "/quit",
-            "/think",
-            "/status",
-            "/interrupt",
-            "/undo",
-            "/redo",
-            "/compact",
-            "/model",
-            "/models",
-            "/agent",
-            "/agents",
-            "/rollback",
-            "/vibe",
-            "/skin",
-        ];
-
-        let matches: Vec<&&str> = COMMANDS
+        let matches: Vec<&&str> = crate::agent::command_catalog::tui_autocomplete_commands()
             .iter()
             .filter(|c| c.starts_with(&self.input))
             .collect();
@@ -736,41 +741,6 @@ impl From<StatusUpdate> for TuiUpdate {
     }
 }
 
-const HELP_TEXT: &str = "\
-━━━ ThinClaw cockpit controls ━━━
-
-  /help          Show this guide
-  /clear         Clear the visible log
-  /new, /reset   Start a fresh session
-  /think         Toggle thinking updates
-  /status        Show the current agent state
-  /interrupt     Stop the current operation
-  /exit, /quit   Leave the TUI
-
-  /undo          Undo the last turn
-  /redo          Redo an undone turn
-  /compact       Compact the context window
-  /model <name>  Switch model
-  /models        List available models
-  /agent <name>  Switch agent
-  /agents        List available agents
-  /rollback ...  Filesystem rollback command family
-  /vibe ...      Set, show, or clear a temporary session vibe
-  /skin [name]   Switch the local CLI skin, or show the current skin
-
-  !<command>     Run a local shell command
-
-━━━ Movement ━━━
-
-  Enter          Send a message
-  Ctrl+C         Abort active run, press twice to exit
-  Ctrl+L         Clear the screen
-  Up/Down        Browse input history
-  PageUp/Down    Scroll the conversation
-  Tab            Autocomplete commands
-  Home/End       Jump to start/end of input
-";
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,7 +777,8 @@ mod tests {
 
     #[test]
     fn test_help_text() {
-        assert!(HELP_TEXT.contains("/help"));
-        assert!(HELP_TEXT.contains("Ctrl+C"));
+        let help = crate::agent::command_catalog::tui_help_text();
+        assert!(help.contains("/help"));
+        assert!(help.contains("Ctrl+C"));
     }
 }

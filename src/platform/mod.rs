@@ -13,6 +13,17 @@ pub use paths::{
 };
 pub use shell::{ShellFlavor, ShellLauncher, shell_launcher};
 
+fn command_available(command: &str) -> bool {
+    std::process::Command::new(command)
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
+fn any_command_available(commands: &[&str]) -> bool {
+    commands.iter().any(|command| command_available(command))
+}
+
 /// Supported service manager kinds for the current host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceManagerKind {
@@ -71,23 +82,45 @@ impl PlatformCapabilities {
         let service_manager = ServiceManagerKind::WindowsScm;
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         let service_manager = ServiceManagerKind::None;
+        let docker_available = any_command_available(&["docker"]);
+        let browser_available = if cfg!(target_os = "macos") {
+            any_command_available(&["open"])
+        } else if cfg!(target_os = "windows") {
+            any_command_available(&["cmd"])
+        } else {
+            any_command_available(&["xdg-open", "gio"])
+        };
+        let brave_available = if cfg!(target_os = "macos") {
+            std::path::Path::new("/Applications/Brave Browser.app").exists()
+        } else {
+            any_command_available(&["brave-browser", "brave"])
+        };
+        let edge_available = if cfg!(target_os = "windows") {
+            any_command_available(&["msedge", "microsoft-edge"])
+        } else if cfg!(target_os = "macos") {
+            std::path::Path::new("/Applications/Microsoft Edge.app").exists()
+        } else {
+            any_command_available(&["microsoft-edge", "microsoft-edge-stable", "msedge"])
+        };
 
         Self {
             shell,
             secure_store,
             service_manager,
-            local_browser_supported: true,
-            docker_browser_fallback_supported: true,
-            edge_browser_supported: cfg!(target_os = "windows"),
-            brave_browser_supported: true,
+            local_browser_supported: browser_available,
+            docker_browser_fallback_supported: docker_available,
+            edge_browser_supported: edge_available,
+            brave_browser_supported: brave_available,
             imessage_supported: cfg!(target_os = "macos"),
             apple_mail_supported: cfg!(target_os = "macos"),
             devices: DeviceCapabilities {
-                full_screen_capture: true,
-                interactive_screen_capture: !cfg!(target_os = "windows"),
-                window_screen_capture: !cfg!(target_os = "windows"),
-                camera_capture: true,
-                microphone_capture: true,
+                full_screen_capture: cfg!(target_os = "macos")
+                    || cfg!(target_os = "linux")
+                    || cfg!(target_os = "windows"),
+                interactive_screen_capture: cfg!(target_os = "macos") || cfg!(target_os = "linux"),
+                window_screen_capture: cfg!(target_os = "macos") || cfg!(target_os = "linux"),
+                camera_capture: any_command_available(&["ffmpeg"]),
+                microphone_capture: any_command_available(&["ffmpeg"]),
                 native_location: cfg!(target_os = "macos"),
             },
         }

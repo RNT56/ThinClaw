@@ -42,7 +42,9 @@ use crate::history::{
     ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationSummary,
     JobEventRecord, LearningArtifactVersion, LearningCandidate, LearningCodeProposal,
     LearningEvaluation, LearningEvent, LearningFeedbackRecord, LearningRollbackRecord,
-    LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SessionSearchHit, SettingRow,
+    LlmCallRecord, OutcomeContract, OutcomeContractQuery, OutcomeEvaluatorHealth,
+    OutcomeObservation, OutcomePendingUser, OutcomeSummaryStats, SandboxJobRecord,
+    SandboxJobSummary, SessionSearchHit, SettingRow,
 };
 use crate::identity::{
     ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, NewActorEndpointRecord,
@@ -303,6 +305,49 @@ pub trait ConversationStore: Send + Sync {
         pr_url: Option<&str>,
         metadata: Option<&serde_json::Value>,
     ) -> Result<(), DatabaseError>;
+    async fn insert_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn get_outcome_contract(
+        &self,
+        user_id: &str,
+        contract_id: Uuid,
+    ) -> Result<Option<OutcomeContract>, DatabaseError>;
+    async fn list_outcome_contracts(
+        &self,
+        query: &OutcomeContractQuery,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError>;
+    async fn claim_due_outcome_contracts(
+        &self,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError>;
+    async fn update_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<(), DatabaseError>;
+    async fn outcome_summary_stats(
+        &self,
+        user_id: &str,
+    ) -> Result<OutcomeSummaryStats, DatabaseError>;
+    async fn list_users_with_pending_outcome_work(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomePendingUser>, DatabaseError>;
+    async fn outcome_evaluator_health(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<OutcomeEvaluatorHealth, DatabaseError>;
+    async fn insert_outcome_observation(
+        &self,
+        observation: &OutcomeObservation,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn list_outcome_observations(
+        &self,
+        contract_id: Uuid,
+    ) -> Result<Vec<OutcomeObservation>, DatabaseError>;
     async fn conversation_belongs_to_user(
         &self,
         conversation_id: Uuid,
@@ -460,6 +505,7 @@ pub trait SandboxStore: Send + Sync {
                 "completed" => summary.completed += 1,
                 "failed" => summary.failed += 1,
                 "interrupted" => summary.interrupted += 1,
+                "stuck" => summary.stuck += 1,
                 _ => {}
             }
         }

@@ -10,8 +10,8 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use crate::agent::Agent;
+use crate::agent::personality;
 use crate::agent::session::{PendingApproval, Session, ThreadState};
-use crate::agent::vibe;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
@@ -327,9 +327,12 @@ impl Agent {
 
         let active_channel_names = self.channels.channel_names().await;
         let active_channel_hint = self.channels.formatting_hints_for(&message.channel).await;
-        let active_vibe_overlay = {
+        let active_personality_overlay = {
             let session_guard = session.lock().await;
-            session_guard.active_vibe.as_ref().map(vibe::format_overlay)
+            session_guard
+                .active_personality
+                .as_ref()
+                .map(personality::format_overlay)
         };
 
         // Capture the routed model name for cost tracking, thinking config, etc.
@@ -369,8 +372,8 @@ impl Agent {
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
         }
-        if let Some(overlay) = active_vibe_overlay {
-            reasoning = reasoning.with_vibe_overlay(overlay);
+        if let Some(overlay) = active_personality_overlay {
+            reasoning = reasoning.with_personality_overlay(overlay);
         }
         if let Some(ctx) = skill_context {
             reasoning = reasoning.with_skill_context(ctx);
@@ -378,6 +381,14 @@ impl Agent {
 
         // Build context with messages that we'll mutate during the loop
         let mut context_messages = initial_messages;
+        let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
+        if let Some(store) = self.store().map(Arc::clone)
+            && let Ok(Some(runtime)) = crate::agent::load_thread_runtime(&store, thread_id).await
+            && let Some(fragment) = runtime.post_compaction_context
+            && !fragment.trim().is_empty()
+        {
+            context_messages.insert(0, ChatMessage::system(fragment));
+        }
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
         let mut job_ctx = JobContext::with_identity(
@@ -391,6 +402,10 @@ impl Agent {
             job_ctx.metadata = serde_json::json!({});
         }
         if let Some(metadata) = job_ctx.metadata.as_object_mut() {
+            metadata.insert(
+                "channel".to_string(),
+                serde_json::json!(message.channel.clone()),
+            );
             metadata.insert(
                 "thread_id".to_string(),
                 serde_json::json!(thread_id.to_string()),
@@ -824,6 +839,8 @@ impl Agent {
                 .tools()
                 .tool_definitions_for_capabilities(routed_allowed_tools, routed_allowed_skills)
                 .await;
+            let tool_defs =
+                tool_policies.filter_tool_definitions_for_metadata(tool_defs, &job_ctx.metadata);
 
             // Apply trust-based tool attenuation if skills are active.
             let tool_defs = if !active_skills.is_empty() {
@@ -3122,6 +3139,7 @@ mod tests {
                 notify_channel: None,
                 model_guidance_enabled: true,
                 cli_skin: "cockpit".to_string(),
+                personality_pack: "balanced".to_string(),
                 persona_seed: "default".to_string(),
                 checkpoints_enabled: true,
                 max_checkpoints: 50,

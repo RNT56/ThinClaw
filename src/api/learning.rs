@@ -4,15 +4,17 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use uuid::Uuid;
 
-use crate::agent::learning::LearningOrchestrator;
+use crate::agent::{learning::LearningOrchestrator, outcomes};
 use crate::db::Database;
 use crate::history::{
     LearningArtifactVersion as DbLearningArtifactVersion, LearningCandidate as DbLearningCandidate,
     LearningCodeProposal as DbLearningCodeProposal, LearningEvaluation as DbLearningEvaluation,
     LearningEvent as DbLearningEvent, LearningFeedbackRecord as DbLearningFeedbackRecord,
-    LearningRollbackRecord as DbLearningRollbackRecord,
+    LearningRollbackRecord as DbLearningRollbackRecord, OutcomeContract as DbOutcomeContract,
+    OutcomeObservation as DbOutcomeObservation,
 };
 
 use super::error::{ApiError, ApiResult};
@@ -179,6 +181,75 @@ fn to_proposal_item(proposal: &DbLearningCodeProposal) -> LearningCodeProposalIt
     }
 }
 
+fn to_outcome_item(contract: &DbOutcomeContract) -> LearningOutcomeContractItem {
+    let source_ref = outcome_source_ref(contract);
+    LearningOutcomeContractItem {
+        id: contract.id,
+        user_id: contract.user_id.clone(),
+        actor_id: contract.actor_id.clone(),
+        channel: contract.channel.clone(),
+        thread_id: contract.thread_id.clone(),
+        source_kind: contract.source_kind.clone(),
+        source_id: contract.source_id.clone(),
+        source_ref,
+        contract_type: contract.contract_type.clone(),
+        status: contract.status.clone(),
+        summary: contract.summary.clone(),
+        due_at: contract.due_at.to_rfc3339(),
+        expires_at: contract.expires_at.to_rfc3339(),
+        final_verdict: contract.final_verdict.clone(),
+        final_score: contract.final_score,
+        ledger_learning_event_id: outcomes::ledger_learning_event_id(contract),
+        last_evaluator: outcomes::contract_last_evaluator(contract),
+        evaluation_details: contract.evaluation_details.clone(),
+        metadata: contract.metadata.clone(),
+        dedupe_key: contract.dedupe_key.clone(),
+        claimed_at: contract.claimed_at.map(|dt| dt.to_rfc3339()),
+        evaluated_at: contract.evaluated_at.map(|dt| dt.to_rfc3339()),
+        created_at: contract.created_at.to_rfc3339(),
+        updated_at: contract.updated_at.to_rfc3339(),
+    }
+}
+
+fn outcome_source_ref(contract: &DbOutcomeContract) -> LearningOutcomeSourceRef {
+    LearningOutcomeSourceRef {
+        kind: contract.source_kind.clone(),
+        id: contract.source_id.clone(),
+        routine_id: contract
+            .metadata
+            .get("routine_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        artifact_name: contract
+            .metadata
+            .get("artifact_name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        artifact_type: contract
+            .metadata
+            .get("artifact_type")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+    }
+}
+
+fn to_outcome_observation_item(
+    observation: &DbOutcomeObservation,
+) -> LearningOutcomeObservationItem {
+    LearningOutcomeObservationItem {
+        id: observation.id,
+        contract_id: observation.contract_id,
+        observation_kind: observation.observation_kind.clone(),
+        polarity: observation.polarity.clone(),
+        weight: observation.weight,
+        summary: observation.summary.clone(),
+        evidence: observation.evidence.clone(),
+        fingerprint: observation.fingerprint.clone(),
+        observed_at: observation.observed_at.to_rfc3339(),
+        created_at: observation.created_at.to_rfc3339(),
+    }
+}
+
 fn to_provider_item(
     health: crate::agent::learning::ProviderHealthStatus,
 ) -> LearningProviderHealthItem {
@@ -251,6 +322,10 @@ pub struct LearningListQuery {
     #[serde(default)]
     pub artifact_name: Option<String>,
     #[serde(default)]
+    pub contract_type: Option<String>,
+    #[serde(default)]
+    pub source_kind: Option<String>,
+    #[serde(default)]
     pub target_type: Option<String>,
     #[serde(default)]
     pub target_id: Option<String>,
@@ -283,6 +358,13 @@ pub struct LearningRollbackRequest {
     pub reason: String,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LearningOutcomeReviewRequest {
+    pub decision: String,
+    #[serde(default)]
+    pub verdict: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -320,6 +402,12 @@ pub struct LearningStatusResponse {
     pub code_proposals_enabled: bool,
     pub code_proposal_publish_mode: String,
     pub exports_enabled: bool,
+    pub outcomes_enabled: bool,
+    pub outcomes_open: u64,
+    pub outcomes_due: u64,
+    pub outcomes_evaluated_last_7d: u64,
+    pub outcomes_negative_ratio_last_7d: f64,
+    pub outcomes_evaluator_healthy: bool,
     pub recent: LearningRecentCounts,
     pub provider_health: LearningProviderHealthSummary,
 }
@@ -382,6 +470,22 @@ pub struct LearningRollbackResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct LearningOutcomeResponse {
+    pub generated_at: String,
+    pub user_id: String,
+    pub has_more: bool,
+    pub outcomes: Vec<LearningOutcomeContractItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LearningOutcomeDetailResponse {
+    pub generated_at: String,
+    pub user_id: String,
+    pub contract: LearningOutcomeContractItem,
+    pub observations: Vec<LearningOutcomeObservationItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct LearningFeedbackActionResponse {
     pub feedback: LearningFeedbackItem,
     pub status: &'static str,
@@ -398,6 +502,19 @@ pub struct LearningCodeProposalReviewResponse {
 pub struct LearningRollbackActionResponse {
     pub rollback: LearningRollbackItem,
     pub status: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LearningOutcomeReviewResponse {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<LearningOutcomeContractItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LearningOutcomeEvaluateNowResponse {
+    pub status: &'static str,
+    pub processed: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -548,6 +665,71 @@ pub struct LearningCodeProposalItem {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LearningOutcomeSourceRef {
+    pub kind: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routine_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LearningOutcomeContractItem {
+    pub id: Uuid,
+    pub user_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    pub source_kind: String,
+    pub source_id: String,
+    pub source_ref: LearningOutcomeSourceRef,
+    pub contract_type: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub due_at: String,
+    pub expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_verdict: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ledger_learning_event_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_evaluator: Option<String>,
+    pub evaluation_details: serde_json::Value,
+    pub metadata: serde_json::Value,
+    pub dedupe_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evaluated_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LearningOutcomeObservationItem {
+    pub id: Uuid,
+    pub contract_id: Uuid,
+    pub observation_kind: String,
+    pub polarity: String,
+    pub weight: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    pub evidence: serde_json::Value,
+    pub fingerprint: String,
+    pub observed_at: String,
+    pub created_at: String,
+}
+
 pub async fn status(
     store: &Arc<dyn Database>,
     orchestrator: &LearningOrchestrator,
@@ -585,6 +767,13 @@ pub async fn status(
         .list_learning_code_proposals(user_id, None, recent_limit)
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let outcome_stats = store
+        .outcome_summary_stats(user_id)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let outcomes_evaluator_healthy = outcomes::evaluator_is_healthy(store, user_id)
+        .await
+        .map_err(ApiError::Internal)?;
     let provider_health = orchestrator.provider_health(user_id).await;
     let provider_items: Vec<LearningProviderHealthItem> =
         provider_health.into_iter().map(to_provider_item).collect();
@@ -615,6 +804,12 @@ pub async fn status(
         code_proposals_enabled: settings.code_proposals.enabled,
         code_proposal_publish_mode: settings.code_proposals.publish_mode.clone(),
         exports_enabled: settings.exports.enabled,
+        outcomes_enabled: settings.enabled && settings.outcomes.enabled,
+        outcomes_open: outcome_stats.open,
+        outcomes_due: outcome_stats.due,
+        outcomes_evaluated_last_7d: outcome_stats.evaluated_last_7d,
+        outcomes_negative_ratio_last_7d: outcome_stats.negative_ratio_last_7d,
+        outcomes_evaluator_healthy,
         recent,
         provider_health: summarize_provider_health(&provider_items),
     })
@@ -774,6 +969,151 @@ pub async fn rollbacks(
     })
 }
 
+pub async fn outcomes(
+    store: &Arc<dyn Database>,
+    user_id: &str,
+    actor_id: Option<&str>,
+    status: Option<&str>,
+    contract_type: Option<&str>,
+    source_kind: Option<&str>,
+    thread_id: Option<&str>,
+    limit: usize,
+) -> ApiResult<LearningOutcomeResponse> {
+    let limit_plus_one = (limit.saturating_add(1)) as i64;
+    let contracts = store
+        .list_outcome_contracts(&crate::history::OutcomeContractQuery {
+            user_id: user_id.to_string(),
+            actor_id: actor_id.map(str::to_string),
+            status: status.map(str::to_string),
+            contract_type: contract_type.map(str::to_string),
+            source_kind: source_kind.map(str::to_string),
+            source_id: None,
+            thread_id: thread_id.map(str::to_string),
+            limit: limit_plus_one,
+        })
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    let has_more = contracts.len() > limit;
+    Ok(LearningOutcomeResponse {
+        generated_at: now_rfc3339(),
+        user_id: user_id.to_string(),
+        has_more,
+        outcomes: contracts.iter().take(limit).map(to_outcome_item).collect(),
+    })
+}
+
+pub async fn outcome_detail(
+    store: &Arc<dyn Database>,
+    user_id: &str,
+    contract_id: Uuid,
+) -> ApiResult<LearningOutcomeDetailResponse> {
+    let contract = store
+        .get_outcome_contract(user_id, contract_id)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?
+        .ok_or_else(|| {
+            ApiError::SessionNotFound(format!("Outcome contract {} not found", contract_id))
+        })?;
+    let observations = store
+        .list_outcome_observations(contract_id)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    Ok(LearningOutcomeDetailResponse {
+        generated_at: now_rfc3339(),
+        user_id: user_id.to_string(),
+        contract: to_outcome_item(&contract),
+        observations: observations
+            .iter()
+            .map(to_outcome_observation_item)
+            .collect(),
+    })
+}
+
+pub async fn review_outcome(
+    store: &Arc<dyn Database>,
+    user_id: &str,
+    contract_id: Uuid,
+    decision: &str,
+    verdict: Option<&str>,
+) -> ApiResult<LearningOutcomeReviewResponse> {
+    let decision = decision.trim().to_ascii_lowercase();
+    let mut contract = store
+        .get_outcome_contract(user_id, contract_id)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?
+        .ok_or_else(|| {
+            ApiError::SessionNotFound(format!("Outcome contract {} not found", contract_id))
+        })?;
+
+    match decision.as_str() {
+        "confirm" => {
+            let verdict = verdict
+                .map(|value| value.trim().to_ascii_lowercase())
+                .ok_or_else(|| {
+                    ApiError::InvalidInput("verdict is required for confirm".to_string())
+                })?;
+            if !matches!(verdict.as_str(), "positive" | "neutral" | "negative") {
+                return Err(ApiError::InvalidInput(format!(
+                    "unsupported verdict: {}",
+                    verdict
+                )));
+            }
+            contract.status = "evaluated".to_string();
+            contract.final_verdict = Some(verdict.clone());
+            contract.final_score = Some(match verdict.as_str() {
+                "positive" => 1.0,
+                "negative" => -1.0,
+                _ => 0.0,
+            });
+            contract.evaluated_at = Some(Utc::now());
+            contract.evaluation_details = json!({
+                "strategy": "manual_review",
+                "review_decision": "confirm",
+                "manual_verdict": verdict,
+            });
+        }
+        "dismiss" => {
+            contract.status = "dismissed".to_string();
+            contract.evaluation_details = json!({
+                "strategy": "manual_review",
+                "review_decision": "dismiss",
+            });
+        }
+        "requeue" => {
+            contract.status = "open".to_string();
+            contract.claimed_at = None;
+            contract.final_verdict = None;
+            contract.final_score = None;
+            contract.evaluated_at = None;
+            contract.due_at = Utc::now();
+            contract.evaluation_details = json!({
+                "strategy": "manual_review",
+                "review_decision": "requeue",
+            });
+        }
+        other => {
+            return Err(ApiError::InvalidInput(format!(
+                "unsupported outcome review decision: {}",
+                other
+            )));
+        }
+    }
+
+    outcomes::persist_manual_review_to_learning_ledger(store, &mut contract, &decision)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+    contract.updated_at = Utc::now();
+    store
+        .update_outcome_contract(&contract)
+        .await
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
+
+    Ok(LearningOutcomeReviewResponse {
+        status: "updated",
+        contract: Some(to_outcome_item(&contract)),
+    })
+}
+
 pub async fn submit_feedback(
     orchestrator: &LearningOrchestrator,
     user_id: &str,
@@ -856,6 +1196,9 @@ pub async fn record_rollback(
         .insert_learning_rollback(&record)
         .await
         .map_err(|error| ApiError::Internal(error.to_string()))?;
+    if let Err(error) = outcomes::observe_rollback(store, &record).await {
+        tracing::debug!(user_id = %user_id, error = %error, "Outcome rollback hook skipped");
+    }
     let rollback = LearningRollbackItem {
         id,
         user_id: user_id.to_string(),

@@ -178,6 +178,7 @@ fn extract_subagent_message(arguments: &serde_json::Value) -> Option<String> {
 fn with_subagent_thread_metadata(
     metadata: &serde_json::Value,
     parent_thread_id: &str,
+    channel_name: &str,
 ) -> serde_json::Value {
     let mut merged = if metadata.is_object() {
         metadata.clone()
@@ -186,6 +187,10 @@ fn with_subagent_thread_metadata(
     };
 
     if let Some(object) = merged.as_object_mut() {
+        object.insert(
+            "channel".to_string(),
+            serde_json::Value::String(channel_name.to_string()),
+        );
         object.insert(
             "thread_id".to_string(),
             serde_json::Value::String(parent_thread_id.to_string()),
@@ -581,7 +586,8 @@ impl SubagentExecutor {
                     .map(str::to_string)
             })
             .unwrap_or_else(|| "agent:main".to_string());
-        let ch_meta = with_subagent_thread_metadata(channel_metadata, &parent_thread_id);
+        let ch_meta =
+            with_subagent_thread_metadata(channel_metadata, &parent_thread_id, channel_name);
 
         let agent_name = name.clone();
         let agent_task = task.clone();
@@ -1113,6 +1119,7 @@ async fn run_subagent_loop(
     )
     .await;
     let model_name = llm.active_model_name();
+    let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
     let mut reasoning = Reasoning::new(llm, safety.clone())
         .with_system_prompt(combined_system_prompt)
         .with_model_name(model_name);
@@ -1149,9 +1156,10 @@ async fn run_subagent_loop(
             available_tools: if force_text {
                 vec![]
             } else {
-                tools
+                let defs = tools
                     .tool_definitions_for_capabilities(allowed_tools, allowed_skills)
-                    .await
+                    .await;
+                tool_policies.filter_tool_definitions_for_metadata(defs, &job_ctx.metadata)
             },
             job_description: None,
             current_state: None,
@@ -1701,7 +1709,7 @@ mod tests {
     #[test]
     fn with_subagent_thread_metadata_inserts_thread_id_for_non_object_metadata() {
         let metadata = serde_json::json!("legacy");
-        let merged = with_subagent_thread_metadata(&metadata, "thread-123");
+        let merged = with_subagent_thread_metadata(&metadata, "thread-123", "web");
 
         assert_eq!(merged["thread_id"], serde_json::json!("thread-123"));
     }
@@ -1712,7 +1720,7 @@ mod tests {
             "thread_id": "stale-thread",
             "channel": "web"
         });
-        let merged = with_subagent_thread_metadata(&metadata, "thread-fresh");
+        let merged = with_subagent_thread_metadata(&metadata, "thread-fresh", "web");
 
         assert_eq!(merged["thread_id"], serde_json::json!("thread-fresh"));
         assert_eq!(merged["channel"], serde_json::json!("web"));

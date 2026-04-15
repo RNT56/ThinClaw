@@ -10,7 +10,7 @@ It covers:
 - Scrappy-connected deployments
 - source-build feature choices
 
-For onboarding details, use [../src/setup/README.md](../src/setup/README.md). For boot/runtime internals, use [../Agent_flow.md](../Agent_flow.md).
+For onboarding details, use [../src/setup/README.md](../src/setup/README.md). For identity and surface behavior, use [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md) and [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md).
 
 ## Deployment Modes
 

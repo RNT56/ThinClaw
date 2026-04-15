@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use uuid::Uuid;
 
+use crate::agent::outcomes;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
     normalize_cron_expr,
@@ -471,6 +472,11 @@ impl Tool for RoutineUpdateTool {
             .update_routine(&routine)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to update: {e}")))?;
+        if !routine.enabled {
+            let _ =
+                outcomes::observe_routine_state_change(&self.store, &routine, "routine_disabled")
+                    .await;
+        }
 
         // Refresh event cache in case trigger changed
         self.engine.refresh_event_cache().await;
@@ -549,6 +555,11 @@ impl Tool for RoutineDeleteTool {
             .delete_routine(routine.id)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to delete: {e}")))?;
+        if deleted {
+            let _ =
+                outcomes::observe_routine_state_change(&self.store, &routine, "routine_deleted")
+                    .await;
+        }
 
         // Refresh event cache
         self.engine.refresh_event_cache().await;

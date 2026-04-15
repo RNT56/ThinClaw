@@ -30,7 +30,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | Filesystem checkpoints + `/rollback` | ✅ | Shadow-git checkpoints create reversible file mutation history with list, diff, and restore support. |
 | Remote skill federation | ✅ | ThinClaw now supports GitHub taps plus `/.well-known/skills` registries, quarantine scanning, provenance lock files, and risky-install approval gates. |
 | Accessibility-tree browser automation | ✅ | Managed `agent-browser` integration and cloud browser routing move ThinClaw from screenshot-only inspection toward interaction-oriented browsing. |
-| Session-level `/vibe` overlays | ✅ | Session-scoped tone overlays add playfulness without mutating durable identity files. |
+| Session-level `/personality` overlays (`/vibe` alias) | ✅ | Session-scoped personality overlays add temporary tone shifts without mutating durable identity files. |
 | CLI skin system | ✅ | Shared TOML-backed local skins now cover boot, REPL, full-screen TUI, onboarding TUI, setup prompts, and human-readable CLI subcommands with prompt symbols, ASCII art, taglines, and tool emoji labels. |
 | Trajectory archive + training export | ✅ | Structured turn archives and `trajectory export` provide SFT/DPO-friendly offline training datasets. |
 | Anthropic prompt caching | ✅ | Provider-scoped message metadata now carries Anthropic-compatible cache hints where supported. |
@@ -89,14 +89,14 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 |---------|----------|----------|----------|-------|
 | CLI/TUI | ✅ | ✅ | - | Ratatui-based TUI |
 | HTTP webhook | ✅ | ✅ | - | axum with secret validation |
-| REPL (local shell) | ✅ | ✅ | - | Full local shell surface with slash commands, skins, `/rollback`, and `/vibe`; no longer just a testing stub |
+| REPL (local shell) | ✅ | ✅ | - | Full local shell surface with slash commands, skins, `/rollback`, and `/personality` (`/vibe` alias); no longer just a testing stub |
 | WASM channels | ❌ | ✅ | - | ThinClaw innovation |
 | WhatsApp | ✅ | ✅ | - | WASM channel via Cloud API webhook — text, media (image/audio/video/document/sticker), reply threading, DM pairing, markdown→WhatsApp formatting, message chunking |
 | Telegram | ✅ | ✅ | - | WASM channel, DM pairing, caption, /start, bot_username, forum threading, sendMessage+editMessageText streaming (host-side, HTML formatted) |
 | Discord | ✅ | ✅ | - | Native Rust Gateway WS + REST ([`src/channels/discord.rs`](src/channels/discord.rs)) + WASM interactions channel (slash commands) |
 | Signal | ✅ | ✅ | - | signal-cli daemon, SSE listener, user/group allowlists, DM pairing |
 | Slack | ✅ | ✅ | - | WASM channel (Events API webhook). Native dead code (`slack.rs`) removed. |
-| iMessage | ✅ | ✅ | P3 | `IMessageChannel` (720 LOC) + `IMessageConfig` startup wiring ([`src/channels/imessage_wiring.rs`](src/channels/imessage_wiring.rs)) |
+| iMessage | ✅ | ✅ | P3 | `IMessageChannel` + `IMessageConfig` native runtime ([`src/channels/imessage.rs`](src/channels/imessage.rs)) |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
 | Feishu/Lark | ✅ | ❌ | P3 | Bitable create app/field tools |
 | LINE | ✅ | ❌ | P3 | |
@@ -166,7 +166,7 @@ Slack remains a supported WASM Events API channel with webhook ingestion, thread
 | `gateway start/stop` | ✅ | ✅ | P2 | `gateway.rs`: start (foreground/bg with PID), stop (SIGTERM), status (health+uptime) |
 | `onboard` (wizard) | ✅ | ✅ | - | Interactive setup with five onboarding lanes, including `Custom / Advanced`, plus Humanist Cockpit copy/readiness framing and shared CliSkin presentation across CLI and TUI |
 | `/skin` | ❌ | ✅ | - | Runtime local-client skin switching with built-in TOML skins (`cockpit`, `midnight`, `solar`, `athena`, `delphi`, `olympus`), ASCII art, and user overrides |
-| `/vibe` | ❌ | ✅ | - | Session-scoped tone overlay command (`/vibe`, `/vibe <name>`, `/vibe reset`) that never rewrites durable identity files |
+| `/personality` | ❌ | ✅ | - | Session-scoped personality overlay command (`/personality`, `/personality <name>`, `/personality reset`) with `/vibe` retained as a compatibility alias |
 | `tui` | ✅ | ✅ | - | Ratatui TUI |
 | `config` | ✅ | ✅ | - | Read/write config |
 | `channels` | ✅ | ✅ | P2 | `channels.rs`: list (env+WASM detection), info (per-channel details) |
@@ -343,14 +343,14 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 |---------|----------|----------|-------|
 | Dynamic loading | ✅ | ✅ | WASM modules |
 | Manifest validation | ✅ | ✅ | WASM metadata |
-| HTTP path registration | ✅ | ✅ | Plugin route registry with conflict detection ([`src/extensions/plugin_routes.rs`](src/extensions/plugin_routes.rs)) |
+| HTTP path registration | ✅ | ❌ | No public plugin-specific HTTP route registry is exposed in the current ThinClaw runtime; packaged channels use host-owned webhook routing instead |
 | Home-directory install roots | ✅ | ✅ | Default install locations are `~/.thinclaw/tools/` and `~/.thinclaw/channels/`, not workspace-relative |
 | Channel plugins | ✅ | ✅ | WASM channels |
-| Auth plugins | ✅ | ✅ | `AuthPlugin` trait + `AuthCredentials`/`AuthToken` ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs)) |
-| Memory plugins | ✅ | ✅ | `MemoryPlugin` trait + `MemoryEntry` ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs)) |
+| Auth plugins | ✅ | ❌ | No public auth-plugin trait surface is exposed in the current ThinClaw runtime |
+| Memory plugins | ✅ | ❌ | No public memory-plugin trait surface is exposed in the current ThinClaw runtime |
 | Tool plugins | ✅ | ✅ | WASM tools |
 | Hook plugins | ✅ | ✅ | Declarative hooks from extension capabilities |
-| Provider plugins | ✅ | ✅ | `ProviderPlugin` trait + capabilities ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs)) |
+| Provider plugins | ✅ | ❌ | No public provider-plugin trait surface is exposed in the current ThinClaw runtime |
 | Plugin CLI (`install`, `list`) | ✅ | ✅ | `registry list/install/install-defaults` subcommands ([`src/cli/registry.rs`](src/cli/registry.rs)) |
 | Plugin CLI (`search`) | ✅ | ✅ | `registry search <query>` — full-text search across name, description, keywords |
 | Plugin CLI (`remove`) | ✅ | ✅ | `registry remove <name>` — deletes `.wasm` + `.capabilities.json` from channels/tools dir |
@@ -950,8 +950,8 @@ running inside Scrappy.
 
 **Plugin System**
 - ✅ ClawHub registry — `ClawHubConfig` + `CatalogCache` ([`src/extensions/clawhub.rs`](src/extensions/clawhub.rs))
-- ✅ HTTP path registration for plugins — `PluginRouter` ([`src/extensions/plugin_routes.rs`](src/extensions/plugin_routes.rs))
-- ✅ Auth / Memory / Provider plugin types — trait interfaces ([`src/extensions/plugin_interfaces.rs`](src/extensions/plugin_interfaces.rs))
+- ❌ Public plugin HTTP-route registry — not exposed in the current ThinClaw runtime
+- ❌ Public auth / memory / provider plugin trait surface — not exposed in the current ThinClaw runtime
 
 **Housekeeping**
 - ✅ `Default` derives for TtsProvider, TtsOutputFormat (clippy-driven)

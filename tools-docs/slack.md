@@ -32,19 +32,19 @@ Slack uses a **Bot Token** from a Slack App installed to your workspace.
 
 4. **Authenticate the tool**
    ```bash
-   thinclaw tool auth slack
+   thinclaw tool auth slack-tool
    ```
 
    Or provide `SLACK_BOT_TOKEN` through your deployment's env/secret flow if that is how you manage credentials.
 
 5. **Invite the bot to channels**
-   - In Slack, go to the channel → type `/invite @ThinClaw Agent`
+   - In Slack, go to the channel and invite the app using its current display name, for example `/invite @Your Agent Name`
    - The bot can only read/write in channels it has been invited to
 
 6. **Verify**
    ```
    You: List all Slack channels
-   You: Send "Hello from ThinClaw!" to #general
+   You: Send "Hello from the agent!" to #general
    ```
 
 ## Available Actions (5)

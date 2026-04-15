@@ -48,109 +48,95 @@ pub async fn run_remote_runner(
         .context("invalid lease credentials response")?
         .credentials;
 
-    post_status(
-        &client,
-        gateway_url,
-        lease_id,
-        token,
-        "runner_started",
-        Some(serde_json::json!({ "backend": job.backend })),
-    )
-    .await
-    .ok();
-
-    let checkout_dir = prepare_checkout_dir(workspace_root, lease_id)?;
-    clone_checkout(&job, &checkout_dir).await?;
-
-    let run_root = checkout_dir.join(&job.workdir);
-    if !run_root.exists() {
-        return Err(anyhow!(
-            "runner workdir does not exist: {}",
-            run_root.display()
-        ));
-    }
-
-    let env = merge_env(&job, &credentials);
     let started_at = Instant::now();
+    let mut terminal_completion_attempted = false;
 
-    let mut log = String::new();
-    if let Some(prepare_command) = job.prepare_command.as_deref() {
+    let result: anyhow::Result<()> = async {
+        post_status(
+            &client,
+            gateway_url,
+            lease_id,
+            token,
+            "runner_started",
+            Some(serde_json::json!({ "backend": job.backend })),
+        )
+        .await
+        .ok();
+
+        let checkout_dir = prepare_checkout_dir(workspace_root, lease_id)?;
+        clone_checkout(&job, &checkout_dir).await?;
+
+        let run_root = checkout_dir.join(&job.workdir);
+        if !run_root.exists() {
+            return Err(anyhow!(
+                "runner workdir does not exist: {}",
+                run_root.display()
+            ));
+        }
+
+        let env = merge_env(&job, &credentials);
+        let mut log = String::new();
+        if let Some(prepare_command) = job.prepare_command.as_deref() {
+            post_event(
+                &client,
+                gateway_url,
+                lease_id,
+                token,
+                "running_prepare",
+                Some(serde_json::json!({ "command": prepare_command })),
+            )
+            .await
+            .ok();
+            let output = run_shell_command(&run_root, prepare_command, &env).await?;
+            log.push_str("== prepare ==\n");
+            log.push_str(&output);
+            log.push('\n');
+        }
+
         post_event(
             &client,
             gateway_url,
             lease_id,
             token,
-            "running_prepare",
-            Some(serde_json::json!({ "command": prepare_command })),
+            "running_benchmark",
+            Some(serde_json::json!({ "command": job.run_command })),
         )
         .await
         .ok();
-        let output = run_shell_command(&run_root, prepare_command, &env).await?;
-        log.push_str("== prepare ==\n");
-        log.push_str(&output);
-        log.push('\n');
-    }
 
-    post_event(
-        &client,
-        gateway_url,
-        lease_id,
-        token,
-        "running_benchmark",
-        Some(serde_json::json!({ "command": job.run_command })),
-    )
-    .await
-    .ok();
+        let run_output = run_shell_command(&run_root, &job.run_command, &env).await?;
+        log.push_str("== run ==\n");
+        log.push_str(&run_output);
 
-    let run_output = run_shell_command(&run_root, &job.run_command, &env).await?;
-    log.push_str("== run ==\n");
-    log.push_str(&run_output);
-
-    let log_path = checkout_dir.join("run.log");
-    tokio::fs::write(&log_path, &log)
-        .await
-        .with_context(|| format!("failed to write {}", log_path.display()))?;
-
-    let summary_path = run_root.join("summary.json");
-    let summary_json = if summary_path.exists() {
-        let raw = tokio::fs::read_to_string(&summary_path)
+        let log_path = checkout_dir.join("run.log");
+        tokio::fs::write(&log_path, &log)
             .await
-            .unwrap_or_default();
-        serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-    let metrics = extract_metrics(
-        &job.primary_metric,
-        &job.secondary_metrics,
-        &log,
-        &summary_json,
-    );
-    let exit_code = parse_exit_code(&run_output).unwrap_or(1);
-    let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
+            .with_context(|| format!("failed to write {}", log_path.display()))?;
 
-    let artifact_log = ExperimentRunnerArtifactUpload {
-        kind: "run_log".to_string(),
-        uri_or_local_path: log_path.to_string_lossy().to_string(),
-        size_bytes: Some(
-            tokio::fs::metadata(&log_path)
+        let summary_path = run_root.join("summary.json");
+        let summary_json = if summary_path.exists() {
+            let raw = tokio::fs::read_to_string(&summary_path)
                 .await
-                .map(|meta| meta.len())
-                .unwrap_or_default(),
-        ),
-        fetchable: false,
-        metadata: serde_json::json!({}),
-    };
-    post_artifact(&client, gateway_url, lease_id, token, &artifact_log)
-        .await
-        .ok();
+                .unwrap_or_default();
+            serde_json::from_str::<serde_json::Value>(&raw)
+                .unwrap_or_else(|_| serde_json::json!({}))
+        } else {
+            serde_json::json!({})
+        };
+        let metrics = extract_metrics(
+            &job.primary_metric,
+            &job.secondary_metrics,
+            &log,
+            &summary_json,
+        );
+        let exit_code = parse_exit_code(&run_output).unwrap_or(1);
+        let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
 
-    if summary_path.exists() {
-        let artifact_summary = ExperimentRunnerArtifactUpload {
-            kind: "summary_json".to_string(),
-            uri_or_local_path: summary_path.to_string_lossy().to_string(),
+        let artifact_log = ExperimentRunnerArtifactUpload {
+            kind: "run_log".to_string(),
+            uri_or_local_path: log_path.to_string_lossy().to_string(),
             size_bytes: Some(
-                tokio::fs::metadata(&summary_path)
+                tokio::fs::metadata(&log_path)
                     .await
                     .map(|meta| meta.len())
                     .unwrap_or_default(),
@@ -158,34 +144,101 @@ pub async fn run_remote_runner(
             fetchable: false,
             metadata: serde_json::json!({}),
         };
-        post_artifact(&client, gateway_url, lease_id, token, &artifact_summary)
+        post_artifact(&client, gateway_url, lease_id, token, &artifact_log)
             .await
             .ok();
-    }
 
-    let completion = ExperimentRunnerCompletion {
-        exit_code: Some(exit_code),
-        metrics_json: metrics,
-        summary: Some(format!(
-            "Remote runner finished with exit code {exit_code}."
-        )),
-        runtime_ms: Some(runtime_ms),
-        attributed_cost_usd: None,
-        log_preview_path: Some(log_path.to_string_lossy().to_string()),
-        artifact_manifest_json: serde_json::json!({
-            "checkout_dir": checkout_dir.to_string_lossy(),
-            "summary_json_path": summary_path.to_string_lossy(),
-        }),
-    };
-    client
-        .post(lease_url(gateway_url, lease_id, "complete"))
-        .bearer_auth(token)
-        .json(&completion)
-        .send()
+        if summary_path.exists() {
+            let artifact_summary = ExperimentRunnerArtifactUpload {
+                kind: "summary_json".to_string(),
+                uri_or_local_path: summary_path.to_string_lossy().to_string(),
+                size_bytes: Some(
+                    tokio::fs::metadata(&summary_path)
+                        .await
+                        .map(|meta| meta.len())
+                        .unwrap_or_default(),
+                ),
+                fetchable: false,
+                metadata: serde_json::json!({}),
+            };
+            post_artifact(&client, gateway_url, lease_id, token, &artifact_summary)
+                .await
+                .ok();
+        }
+
+        let completion = ExperimentRunnerCompletion {
+            exit_code: Some(exit_code),
+            metrics_json: metrics,
+            summary: Some(format!(
+                "Remote runner finished with exit code {exit_code}."
+            )),
+            runtime_ms: Some(runtime_ms),
+            attributed_cost_usd: None,
+            log_preview_path: Some(log_path.to_string_lossy().to_string()),
+            artifact_manifest_json: serde_json::json!({
+                "checkout_dir": checkout_dir.to_string_lossy(),
+                "summary_json_path": summary_path.to_string_lossy(),
+            }),
+        };
+        terminal_completion_attempted = true;
+        client
+            .post(lease_url(gateway_url, lease_id, "complete"))
+            .bearer_auth(token)
+            .json(&completion)
+            .send()
+            .await
+            .context("failed to complete lease")?
+            .error_for_status()
+            .context("lease completion request failed")?;
+
+        Ok(())
+    }
+    .await;
+
+    if let Err(err) = result {
+        let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
+        let error_text = err.to_string();
+        post_status(
+            &client,
+            gateway_url,
+            lease_id,
+            token,
+            "failed",
+            Some(serde_json::json!({ "error": error_text.clone() })),
+        )
         .await
-        .context("failed to complete lease")?
-        .error_for_status()
-        .context("lease completion request failed")?;
+        .ok();
+        post_event(
+            &client,
+            gateway_url,
+            lease_id,
+            token,
+            "runner_failed",
+            Some(serde_json::json!({ "error": error_text.clone() })),
+        )
+        .await
+        .ok();
+        if !terminal_completion_attempted {
+            let failure = ExperimentRunnerCompletion {
+                exit_code: Some(1),
+                metrics_json: serde_json::json!({}),
+                summary: Some(format!("Remote runner failed: {}", error_text)),
+                runtime_ms: Some(runtime_ms),
+                attributed_cost_usd: None,
+                log_preview_path: None,
+                artifact_manifest_json: serde_json::json!({
+                    "error": error_text.clone(),
+                }),
+            };
+            let _ = client
+                .post(lease_url(gateway_url, lease_id, "complete"))
+                .bearer_auth(token)
+                .json(&failure)
+                .send()
+                .await;
+        }
+        return Err(err);
+    }
 
     Ok(())
 }

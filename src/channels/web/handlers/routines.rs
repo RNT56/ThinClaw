@@ -9,6 +9,7 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::agent::outcomes;
 use crate::channels::IncomingMessage;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
@@ -223,6 +224,9 @@ pub(crate) async fn routines_toggle_handler(
         .update_routine(&routine)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !routine.enabled {
+        let _ = outcomes::observe_routine_state_change(store, &routine, "routine_disabled").await;
+    }
 
     Ok(Json(serde_json::json!({
         "status": if routine.enabled { "enabled" } else { "disabled" },
@@ -257,6 +261,7 @@ pub(crate) async fn routines_delete_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if deleted {
+        let _ = outcomes::observe_routine_state_change(store, &routine, "routine_deleted").await;
         Ok(Json(serde_json::json!({
             "status": "deleted",
             "routine_id": routine_id,

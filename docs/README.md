@@ -8,6 +8,11 @@ Use this page to pick the right path for your role instead of relying on whichev
 
 - New to ThinClaw: go to [../README.md](../README.md)
 - Running ThinClaw yourself: go to [DEPLOYMENT.md](DEPLOYMENT.md)
+- Understanding identity, packs, and `/personality`: go to [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
+- Understanding memory, continuity, and `/compress`: go to [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
+- Understanding outcome-backed learning, Learning Ledger outcomes, and deferred review: go to [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md)
+- Understanding research workspaces, experiments, and GPU clouds: go to [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md)
+- Understanding the shared surface vocabulary: go to [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md)
 - Choosing or configuring providers: go to [LLM_PROVIDERS.md](LLM_PROVIDERS.md)
 - Understanding channels: go to [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md)
 - Understanding extensions and tools: go to [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md)
@@ -18,6 +23,10 @@ Use this page to pick the right path for your role instead of relying on whichev
 ### Operators
 
 - [DEPLOYMENT.md](DEPLOYMENT.md)
+- [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
+- [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
+- [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md)
+- [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md)
 - Deployment note: `thinclaw` and `thinclaw run` are quiet by default; use `thinclaw --debug` or `thinclaw --debug run` for verbose startup logs
 - [LLM_PROVIDERS.md](LLM_PROVIDERS.md)
 - [EXTERNAL_DEPENDENCIES.md](EXTERNAL_DEPENDENCIES.md)
@@ -27,7 +36,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 ### Contributors And Maintainers
 
 - [../CLAUDE.md](../CLAUDE.md)
-- [../Agent_flow.md](../Agent_flow.md)
+- [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
 - [../src/setup/README.md](../src/setup/README.md)
 - [../src/tools/README.md](../src/tools/README.md)
 - [../src/workspace/README.md](../src/workspace/README.md)
@@ -44,8 +53,12 @@ Use this page to pick the right path for your role instead of relying on whichev
 | Topic | Canonical Doc |
 |---|---|
 | Public product entry point | [../README.md](../README.md) |
+| Identity packs and session personality | [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md) |
+| Memory, continuity, and growth surfaces | [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md) |
+| Outcome-backed learning and Learning Ledger outcomes | [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md) |
+| Research, experiments, and remote runners | [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md) |
+| Shared cross-surface command vocabulary | [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md) |
 | Onboarding and setup behavior | [../src/setup/README.md](../src/setup/README.md) |
-| Boot and runtime flow | [../Agent_flow.md](../Agent_flow.md) |
 | Deployment and remote access | [DEPLOYMENT.md](DEPLOYMENT.md) |
 | Channel architecture | [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md) |
 | Security and trust | [SECURITY.md](SECURITY.md) |
@@ -59,4 +72,4 @@ Use this page to pick the right path for your role instead of relying on whichev
 
 ## Archive Boundary
 
-Historical migration-era material lives in [../rewrite-docs/README.md](../rewrite-docs/README.md). It is useful for history, not for current architecture or setup decisions.
+Historical migration-era notes may still appear elsewhere in the repository, but they are not part of the current docs tree. Treat anything outside this index and the linked canonicals above as archival context rather than a source of truth for current architecture or setup decisions.

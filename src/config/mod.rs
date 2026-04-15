@@ -39,6 +39,7 @@ use crate::settings::Settings;
 
 // Re-export all public types so `crate::config::FooConfig` continues to work.
 pub use self::agent::AgentConfig;
+pub(crate) use self::agent::resolve_personality_pack_from_settings;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
     ChannelsConfig, CliConfig, DiscordChannelConfig, GatewayConfig, HttpConfig, NostrConfig,
@@ -230,7 +231,7 @@ impl Config {
         // Overlay TOML config file (values win over DB settings)
         Self::apply_toml_overlay(&mut db_settings, toml_path)?;
 
-        Self::build(&db_settings).await
+        Self::build(&db_settings, true).await
     }
 
     /// Load configuration from environment variables only (no database).
@@ -249,6 +250,14 @@ impl Config {
     pub async fn from_env_with_toml(
         toml_path: Option<&std::path::Path>,
     ) -> Result<Self, ConfigError> {
+        Self::from_env_with_toml_options(toml_path, true).await
+    }
+
+    /// Load from env with an optional TOML config file overlay and optional DB resolution.
+    pub async fn from_env_with_toml_options(
+        toml_path: Option<&std::path::Path>,
+        resolve_database: bool,
+    ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_thinclaw_env();
         let mut settings = Settings::load();
@@ -256,7 +265,7 @@ impl Config {
         // Overlay TOML config file (values win over JSON settings)
         Self::apply_toml_overlay(&mut settings, toml_path)?;
 
-        Self::build(&settings).await
+        Self::build(&settings, resolve_database).await
     }
 
     /// Load and merge a TOML config file into settings.
@@ -300,9 +309,13 @@ impl Config {
     }
 
     /// Build config from settings (shared by from_env and from_db).
-    async fn build(settings: &Settings) -> Result<Self, ConfigError> {
+    async fn build(settings: &Settings, resolve_database: bool) -> Result<Self, ConfigError> {
         Ok(Self {
-            database: DatabaseConfig::resolve()?,
+            database: if resolve_database {
+                DatabaseConfig::resolve()?
+            } else {
+                DatabaseConfig::disabled()
+            },
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
             tunnel: TunnelConfig::resolve(settings)?,

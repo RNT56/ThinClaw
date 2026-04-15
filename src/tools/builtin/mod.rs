@@ -72,8 +72,8 @@ pub use job::{
 };
 pub use json::JsonTool;
 pub use learning_tools::{
-    LearningFeedbackTool, LearningHistoryTool, LearningProposalReviewTool, LearningStatusTool,
-    PromptManageTool, SkillManageTool,
+    LearningFeedbackTool, LearningHistoryTool, LearningOutcomesTool, LearningProposalReviewTool,
+    LearningStatusTool, PromptManageTool, SkillManageTool,
 };
 pub use llm_tools::{
     LlmListModelsTool, LlmSelectTool, SharedModelOverride, new_shared_model_override,

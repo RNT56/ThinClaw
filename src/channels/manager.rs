@@ -7,6 +7,7 @@ use std::sync::{
 };
 use std::time::Instant;
 
+use chrono::Utc;
 use futures::stream;
 use tokio::sync::{RwLock, mpsc};
 
@@ -15,11 +16,24 @@ use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse,
 use crate::error::ChannelError;
 
 /// Per-channel atomic message counters.
-#[derive(Default)]
 struct ChannelCounters {
     received: AtomicU64,
     sent: AtomicU64,
     errors: AtomicU64,
+    last_message_at: std::sync::RwLock<Option<String>>,
+    last_error: std::sync::RwLock<Option<String>>,
+}
+
+impl Default for ChannelCounters {
+    fn default() -> Self {
+        Self {
+            received: AtomicU64::new(0),
+            sent: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            last_message_at: std::sync::RwLock::new(None),
+            last_error: std::sync::RwLock::new(None),
+        }
+    }
 }
 
 /// Manages multiple input channels and merges their message streams.
@@ -78,6 +92,13 @@ impl ChannelManager {
             .clone()
     }
 
+    fn record_channel_error(counter: &ChannelCounters, error: &ChannelError) {
+        counter.errors.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut guard) = counter.last_error.write() {
+            *guard = Some(error.to_string());
+        }
+    }
+
     /// Get a clone of the injection sender.
     ///
     /// Background tasks (like job monitors) use this to push messages into the
@@ -90,6 +111,7 @@ impl ChannelManager {
     pub async fn add(&self, channel: Box<dyn Channel>) {
         let name = channel.name().to_string();
         self.channels.write().await.insert(name.clone(), channel);
+        let _ = self.counter_for(&name).await;
         tracing::debug!("Added channel: {}", name);
     }
 
@@ -104,6 +126,7 @@ impl ChannelManager {
 
         // Register for respond/broadcast/send_status
         self.channels.write().await.insert(name.clone(), channel);
+        let _ = self.counter_for(&name).await;
 
         // Forward stream messages through inject_tx
         let tx = self.inject_tx.clone();
@@ -214,10 +237,11 @@ impl ChannelManager {
     ///
     /// Call this once per message received from a channel before processing.
     pub async fn record_received(&self, channel_name: &str) {
-        self.counter_for(channel_name)
-            .await
-            .received
-            .fetch_add(1, Ordering::Relaxed);
+        let counter = self.counter_for(channel_name).await;
+        counter.received.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut guard) = counter.last_message_at.write() {
+            *guard = Some(Utc::now().to_rfc3339());
+        }
     }
 
     /// Send a response to a specific channel.
@@ -238,11 +262,11 @@ impl ChannelManager {
                 });
             }
         }; // lock guard drops here
+        let counter = self.counter_for(&channel_name).await;
         if result.is_ok() {
-            self.counter_for(&channel_name)
-                .await
-                .sent
-                .fetch_add(1, Ordering::Relaxed);
+            counter.sent.fetch_add(1, Ordering::Relaxed);
+        } else if let Err(ref err) = result {
+            Self::record_channel_error(counter.as_ref(), err);
         }
         result
     }
@@ -286,11 +310,11 @@ impl ChannelManager {
                 });
             }
         }; // lock drops here
+        let counter = self.counter_for(channel_name).await;
         if result.is_ok() {
-            self.counter_for(channel_name)
-                .await
-                .sent
-                .fetch_add(1, Ordering::Relaxed);
+            counter.sent.fetch_add(1, Ordering::Relaxed);
+        } else if let Err(ref err) = result {
+            Self::record_channel_error(counter.as_ref(), err);
         }
         result
     }
@@ -315,16 +339,11 @@ impl ChannelManager {
                     continue;
                 }
             };
+            let counter = self.counter_for(name).await;
             if result.is_ok() {
-                self.counter_for(name)
-                    .await
-                    .sent
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.counter_for(name)
-                    .await
-                    .errors
-                    .fetch_add(1, Ordering::Relaxed);
+                counter.sent.fetch_add(1, Ordering::Relaxed);
+            } else if let Err(ref err) = result {
+                Self::record_channel_error(counter.as_ref(), err);
             }
             results.push((name.clone(), result));
         }
@@ -389,15 +408,24 @@ impl ChannelManager {
                 (0, 0, 0)
             };
 
-            // Derive channel_type from the name prefix heuristic (e.g. "telegram" → "telegram")
-            let channel_type = name.split('_').next().unwrap_or(name.as_str()).to_string();
+            let (last_message_at, last_error) = if let Some(c) = counters_guard.get(name.as_str()) {
+                (
+                    c.last_message_at
+                        .read()
+                        .ok()
+                        .and_then(|guard| guard.clone()),
+                    c.last_error.read().ok().and_then(|guard| guard.clone()),
+                )
+            } else {
+                (None, None)
+            };
 
             entries.push(ChannelStatusEntry {
                 name: name.clone(),
-                channel_type,
+                channel_type: name.clone(),
                 state: ChannelViewState::Running { uptime_secs },
-                last_message_at: None,
-                last_error: None,
+                last_message_at,
+                last_error,
                 messages_received: received,
                 messages_sent: sent,
                 errors,

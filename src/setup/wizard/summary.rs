@@ -1,5 +1,6 @@
 //! Final wizard summary: save settings and print configuration overview.
 
+use crate::config::resolve_personality_pack_from_settings;
 use crate::settings::KeySource;
 use crate::setup::prompts::{confirm, print_info, print_success, print_warning};
 
@@ -153,6 +154,8 @@ impl SetupWizard {
         }
 
         println!("  Agent: {}", self.settings.agent.name);
+        let effective_pack = resolve_personality_pack_from_settings(&self.settings);
+        println!("  Personality Pack: {}", effective_pack);
         println!("  CLI Skin: {}", self.settings.agent.cli_skin);
 
         if let Some(ref tz) = self.settings.user_timezone {

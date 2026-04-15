@@ -1,5 +1,5 @@
 [Unit]
-Description=ThinClaw AI Assistant
+Description=ThinClaw Personal Agent
 After=cloud-sql-proxy.service docker.service
 Requires=cloud-sql-proxy.service
 

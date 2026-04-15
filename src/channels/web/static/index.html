@@ -23,7 +23,7 @@
     <div class="auth-card-login">
       <div class="auth-brand">
         <h1>ThinClaw</h1>
-        <p class="auth-tagline">Secure AI Assistant</p>
+        <p class="auth-tagline">Secure personal agent</p>
       </div>
       <div class="auth-form">
         <label for="token-input">Gateway Token</label>
@@ -40,17 +40,17 @@
       <!-- Tab Bar -->
       <div class="tab-bar">
         <div class="web-brand-chip" id="web-brand-chip">
-          <span class="web-brand-chip-title">ThinClaw</span>
+          <span class="web-brand-chip-title">Agent</span>
           <span class="web-brand-chip-meta" id="web-brand-chip-meta">cockpit · ›</span>
         </div>
         <button class="active" data-tab="chat"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Chat</button>
-      <button data-tab="memory"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/></svg> Memory</button>
+      <button data-tab="memory"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/></svg> Memory &amp; Growth</button>
       <button data-tab="jobs"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m15 12-8.373 8.373a1 1 0 1 1-1.414-1.414L13.586 10.586"/><path d="m18.293 14.707 1.414-1.414a1 1 0 0 0 0-1.414l-7.586-7.586a1 1 0 0 0-1.414 0l-1.414 1.414a1 1 0 0 0 0 1.414l7.586 7.586a1 1 0 0 0 1.414 0z"/></svg> Jobs</button>
       <button data-tab="routines"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Routines</button>
       <button data-tab="extensions"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg> Extensions</button>
       <button data-tab="skills"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg> Skills</button>
       <button data-tab="research" id="research-tab-button" style="display:none"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M9 3h6"/><path d="M12 3v18"/><path d="m8 21 4-4 4 4"/><path d="M19 7H5"/><path d="m7 7 1.5 6.5a2 2 0 0 0 3 1.2L19 11"/></svg> Research</button>
-      <button data-tab="learning"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M4.22 4.22l2.12 2.12"/><path d="M17.66 17.66l2.12 2.12"/><path d="M3 12h3"/><path d="M18 12h3"/><path d="M4.22 19.78l2.12-2.12"/><path d="M17.66 6.34l2.12-2.12"/><circle cx="12" cy="12" r="4"/></svg> Learning</button>
+      <button data-tab="learning"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M4.22 4.22l2.12 2.12"/><path d="M17.66 17.66l2.12 2.12"/><path d="M3 12h3"/><path d="M18 12h3"/><path d="M4.22 19.78l2.12-2.12"/><path d="M17.66 6.34l2.12-2.12"/><circle cx="12" cy="12" r="4"/></svg> Learning Ledger</button>
       <button data-tab="providers"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg> Providers</button>
       <button data-tab="costs"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg> Costs</button>
       <button data-tab="settings"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg> Settings</button>
@@ -79,7 +79,7 @@
           <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" title="Toggle sidebar">&laquo;</button>
         </div>
         <div class="assistant-item" id="assistant-thread" onclick="switchToAssistant()">
-          <span class="assistant-label">Assistant</span>
+          <span class="assistant-label">Agent</span>
           <span class="assistant-meta" id="assistant-meta"></span>
         </div>
         <div class="subsession-tree assistant-subsessions" id="assistant-subsessions"></div>
@@ -238,7 +238,7 @@
               </table>
             </div>
             <div class="empty-state ui-panel-empty" id="routines-empty" style="display:none">
-              No routines configured. Ask the assistant to create one.
+              No routines configured. Ask the agent to create one.
             </div>
           </section>
           <div class="routine-detail" id="routine-detail" style="display:none"></div>
@@ -620,7 +620,7 @@
                 <div class="ui-panel-header ui-panel-header--divider">
                   <div class="ui-panel-copy">
                     <h3 class="ui-panel-title">GPU Clouds</h3>
-                    <p class="ui-panel-desc">Quick-launch assistant for external GPU providers. Connect credentials, generate a runner template, and launch a test job from the same place.</p>
+                    <p class="ui-panel-desc">Quick-launch agent workspaces for external GPU providers. Connect credentials, generate a runner template, and launch a test job from the same place.</p>
                   </div>
                   <div class="ui-panel-actions">
                     <button class="btn-restart" onclick="switchTab('providers')">Open Provider Vault</button>
@@ -642,7 +642,7 @@
       <div class="learning-container ui-dashboard-shell">
         <div class="learning-header ui-page-header ui-panel-header">
           <div class="ui-panel-copy">
-            <h2 class="ui-panel-title ui-panel-title--page">Learning</h2>
+            <h2 class="ui-panel-title ui-panel-title--page">Learning Ledger</h2>
             <p class="ui-panel-desc">Review recent learning signals, inspect code proposals, and record feedback or rollbacks without leaving the gateway.</p>
           </div>
         </div>
@@ -708,6 +708,38 @@
               </table>
             </div>
             <div class="empty-state ui-panel-empty" id="learning-candidates-empty" style="display:none">No candidates available.</div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Outcomes</h3>
+                <p class="ui-panel-desc">Review deferred reality checks for turns, routines, and durable changes, then confirm or dismiss the verdicts.</p>
+              </div>
+              <div class="ui-panel-actions">
+                <button class="btn-restart" onclick="evaluateLearningOutcomesNow()">Evaluate Now</button>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Source</th>
+                    <th>Summary</th>
+                    <th>Verdict</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-outcomes-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-outcomes-empty" style="display:none">No outcome contracts recorded yet.</div>
+            <div class="ui-panel ui-panel--subtle" id="learning-outcome-detail">
+              <div class="empty-state ui-panel-empty">Select an outcome contract to inspect its observations.</div>
+            </div>
           </section>
 
           <section class="ui-panel ui-panel-stack">
@@ -890,7 +922,7 @@
             <div class="ui-panel-header ui-panel-header--divider">
               <div class="ui-panel-copy">
                 <h3 class="ui-panel-title">Registered Tools</h3>
-                <p class="ui-panel-desc">See the current tool registry exposed to the assistant after extensions and MCP servers are loaded.</p>
+                <p class="ui-panel-desc">See the current tool registry available to the agent after extensions and MCP servers are loaded.</p>
               </div>
             </div>
             <div class="ui-panel-table-wrap">

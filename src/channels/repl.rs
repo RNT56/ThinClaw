@@ -12,10 +12,12 @@
 //! - `/undo` - Undo the last turn
 //! - `/redo` - Redo an undone turn
 //! - `/clear` - Clear the conversation
-//! - `/compact` - Compact the context
-//! - `/new` - Start a new thread
+//! - `/compress` - Compact the context (`/compact` alias)
+//! - `/new` or `/thread new` - Start a new thread
 //! - `/rollback` - Filesystem rollback command family
-//! - `/vibe` - Set, show, or clear a temporary session vibe
+//! - `/identity` - Show the active identity stack
+//! - `/memory` - Show memory and learning surfaces
+//! - `/personality` - Set, show, or clear a temporary session personality (`/vibe` alias)
 //! - `/skin` - Runtime CLI skin command family
 //! - `yes`/`no`/`always` - Respond to tool approval prompts
 //! - `Esc` - Interrupt current operation
@@ -62,22 +64,28 @@ const SLASH_COMMANDS: &[&str] = &[
     "/undo",
     "/redo",
     "/clear",
+    "/compress",
     "/compact",
     "/new",
     "/interrupt",
     "/version",
     "/tools",
     "/ping",
+    "/context",
     "/job",
     "/status",
     "/cancel",
     "/list",
+    "/identity",
+    "/memory",
+    "/skills",
     "/heartbeat",
     "/summarize",
     "/suggest",
-    "/thread",
-    "/resume",
+    "/thread new",
+    "/resume <id>",
     "/rollback",
+    "/personality",
     "/vibe",
     "/skin",
 ];
@@ -291,8 +299,8 @@ fn print_help(skin: &CliSkin) {
     let branding = TerminalBranding::from_skin(skin.clone());
 
     branding.print_banner(
-        "ThinClaw REPL",
-        Some("Interactive shell with skin-aware status, approvals, and markdown rendering."),
+        "Agent REPL",
+        Some("Interactive shell with shared identity, memory, and skin-aware controls."),
     );
     println!("  {}", branding.body_bold("Commands"));
     println!(
@@ -329,13 +337,28 @@ fn print_help(skin: &CliSkin) {
     );
     println!(
         "  {} {}",
-        branding.accent("/compact"),
-        branding.muted("compact context window")
+        branding.accent("/compress"),
+        branding.muted("compact context window (/compact alias)")
     );
     println!(
         "  {} {}",
         branding.accent("/new"),
         branding.muted("new conversation thread")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/thread new"),
+        branding.muted("new conversation thread")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/thread <id>"),
+        branding.muted("switch to an existing thread")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/resume <id>"),
+        branding.muted("restore a saved checkpoint into the current thread")
     );
     println!(
         "  {} {}",
@@ -354,8 +377,28 @@ fn print_help(skin: &CliSkin) {
     );
     println!(
         "  {} {}",
-        branding.accent("/vibe"),
-        branding.muted("set, show, or clear a temporary session vibe")
+        branding.accent("/identity"),
+        branding.muted("show the active agent name, base pack, skin, and session overlay")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/memory"),
+        branding.muted("show memory, recall, learning, and continuity surfaces")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/heartbeat"),
+        branding.muted("run the live heartbeat check")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/skills"),
+        branding.muted("list installed skills or search the registry")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/personality"),
+        branding.muted("set, show, or clear a temporary session personality (/vibe alias)")
     );
     println!(
         "  {} {}",

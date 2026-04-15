@@ -301,7 +301,7 @@ async fn main() -> anyhow::Result<()> {
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
     if !cli.no_onboard
-        && let Some(reason) = check_onboard_needed()
+        && let Some(reason) = check_onboard_needed(cli.config.as_deref(), cli.no_db)
     {
         println!("Onboarding needed: {}", reason);
         println!();
@@ -311,7 +311,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Load initial config from env + disk + optional TOML (before DB is available)
     let toml_path = cli.config.as_deref();
-    let config = match Config::from_env_with_toml(toml_path).await {
+    let config = match Config::from_env_with_toml_options(toml_path, !cli.no_db).await {
         Ok(c) => c,
         Err(thinclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
@@ -1084,11 +1084,12 @@ async fn main() -> anyhow::Result<()> {
     let mut wasm_watcher_state: Option<(
         Arc<thinclaw::channels::wasm::WasmChannelLoader>,
         std::path::PathBuf,
+        Arc<thinclaw::channels::wasm::WasmChannelRouter>,
     )> = None;
 
     if let Some((rt, ps, router, loader, channels_dir)) = wasm_channel_runtime_state.take() {
         // Always capture for the watcher — it works without an extension manager.
-        wasm_watcher_state = Some((Arc::clone(&loader), channels_dir));
+        wasm_watcher_state = Some((Arc::clone(&loader), channels_dir, Arc::clone(&router)));
 
         // Wire the runtime into the extension manager if available.
         if let Some(ref ext_mgr) = components.extension_manager {
@@ -1274,10 +1275,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── WASM channel hot-reload watcher ─────────────────────────────────
-    if let Some((loader, channels_dir)) = wasm_watcher_state {
+    if let Some((loader, channels_dir, wasm_router)) = wasm_watcher_state {
         use thinclaw::channels::wasm::channel_watcher::ChannelWatcher;
 
-        let watcher = ChannelWatcher::new(channels_dir, loader, Arc::clone(&channels));
+        let mut watcher = ChannelWatcher::new(channels_dir, loader, Arc::clone(&channels))
+            .with_webhook_router(wasm_router);
+        if let Some(ref secrets_store) = components.secrets_store {
+            watcher = watcher.with_secrets_store(Arc::clone(secrets_store), "default");
+        }
         watcher.seed_from_dir().await;
         watcher.start().await;
         tracing::info!(

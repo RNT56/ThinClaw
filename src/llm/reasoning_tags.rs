@@ -795,10 +795,10 @@ That's my plan."#;
 
     #[test]
     fn test_clean_response_thinking_tags_reasoning_properly_tagged() {
-        let input = "<thinking>The user is asking about my name.</thinking>\n\nI'm ThinClaw, a secure personal AI assistant.";
+        let input = "<thinking>The user is asking about my name.</thinking>\n\nI'm ThinClaw, a secure personal agent.";
         assert_eq!(
             clean_response(input),
-            "I'm ThinClaw, a secure personal AI assistant."
+            "I'm ThinClaw, a secure personal agent."
         );
     }
 

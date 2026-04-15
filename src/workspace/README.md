@@ -1,6 +1,6 @@
 # Workspace & Memory System
 
-The workspace provides persistent memory for agents with a flexible filesystem-like structure and hybrid search.
+The workspace provides persistent memory for agents with a flexible filesystem-like structure, a durable identity stack, and hybrid search.
 
 ## Key Principles
 
@@ -16,7 +16,7 @@ workspace/
 ├── README.md              <- Root runbook/index
 ├── MEMORY.md              <- Long-term curated memory
 ├── HEARTBEAT.md           <- Periodic checklist
-├── IDENTITY.md            <- Agent name, nature, vibe
+├── IDENTITY.md            <- Agent name, nature, and presentation
 ├── SOUL.md                <- Core values
 ├── AGENTS.md              <- Behavior instructions
 ├── USER.md                <- User context
@@ -60,6 +60,8 @@ let results = workspace.search("dark mode preference", 5).await?;
 // Get system prompt from identity files
 let prompt = workspace.system_prompt().await?;
 ```
+
+The onboarding-selected `personality_pack` seeds `SOUL.md` for fresh workspaces. Temporary `/personality` overlays do not rewrite these files.
 
 ## Memory Tools
 

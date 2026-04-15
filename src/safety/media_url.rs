@@ -111,10 +111,18 @@ fn is_private_ip(ip: &IpAddr) -> bool {
         IpAddr::V4(v4) => {
             v4.is_private()
                 || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
                 || v4.octets()[0] == 100 && v4.octets()[1] >= 64 && v4.octets()[1] <= 127 // CGN
         }
         IpAddr::V6(v6) => {
-            v6.is_loopback() || v6.segments()[0] == 0xfe80 // link-local
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // fc00::/7 unique local addresses
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // fe80::/10 link-local addresses
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
         }
     }
 }
@@ -189,6 +197,33 @@ mod tests {
         let config = MediaUrlConfig::default();
         assert!(matches!(
             config.validate("http://127.0.0.1/secret"),
+            UrlValidation::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn test_ipv6_ula_blocked() {
+        let config = MediaUrlConfig::default();
+        assert!(matches!(
+            config.validate("http://[fc00::1]/image.png"),
+            UrlValidation::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn test_ipv6_unspecified_blocked() {
+        let config = MediaUrlConfig::default();
+        assert!(matches!(
+            config.validate("http://[::]/image.png"),
+            UrlValidation::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn test_ipv6_multicast_blocked() {
+        let config = MediaUrlConfig::default();
+        assert!(matches!(
+            config.validate("http://[ff02::1]/image.png"),
             UrlValidation::Invalid(_)
         ));
     }
