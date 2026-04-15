@@ -17,8 +17,8 @@
   },
   "artifacts": {
     "wasm32-wasip2": {
-      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.5/gmail-wasm32-wasip2.tar.gz",
-      "sha256": "fd7564387358d05b1fd37584e7ba846a98773fb3e62f4924879e7aa9a2cdd0c6"
+      "url": "https://github.com/RNT56/ThinClaw/releases/download/v0.13.6/gmail-wasm32-wasip2.tar.gz",
+      "sha256": "01dba409f0ceeaf868dfef7acd47e16d8978db7ee7c06f573c9a8c1bd519c875"
     }
   },
   "auth_summary": {
