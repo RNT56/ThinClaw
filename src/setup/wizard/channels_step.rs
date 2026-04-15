@@ -22,14 +22,14 @@ use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
     pub(super) async fn init_secrets_context(&mut self) -> Result<SecretsContext, SetupError> {
-        // Get crypto (should be set from step 2, or load from keychain/env)
+        // Get crypto (should be set from step 2, or load from OS secure store/env)
         let crypto = if let Some(ref c) = self.secrets_crypto {
             Arc::clone(c)
         } else {
-            // Try to load master key from keychain or env
+            // Try to load master key from the OS secure store or env
             let key = if let Ok(env_key) = std::env::var("SECRETS_MASTER_KEY") {
                 env_key
-            } else if let Ok(keychain_key) = crate::secrets::keychain::get_master_key().await {
+            } else if let Ok(keychain_key) = crate::platform::secure_store::get_master_key().await {
                 keychain_key.iter().map(|b| format!("{:02x}", b)).collect()
             } else {
                 return Err(SetupError::Config(

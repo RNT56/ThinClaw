@@ -96,27 +96,43 @@ pub struct PageLink {
 
 /// Find a usable browser binary.
 fn find_browser() -> Option<PathBuf> {
-    let candidates = [
-        // macOS
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        // Linux
-        "chromium-browser",
-        "chromium",
-        "google-chrome",
-        "google-chrome-stable",
-        // Generic
-        "chrome",
-    ];
+    let candidates = if cfg!(target_os = "windows") {
+        vec![
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+            r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
+            "chrome",
+            "msedge",
+            "brave",
+        ]
+    } else {
+        vec![
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "chromium-browser",
+            "chromium",
+            "google-chrome",
+            "google-chrome-stable",
+            "chrome",
+        ]
+    };
 
-    for candidate in &candidates {
+    for candidate in candidates {
         let path = Path::new(candidate);
         if path.exists() {
             return Some(path.to_path_buf());
         }
         // Check in PATH
-        if let Ok(output) = Command::new("which").arg(candidate).output()
+        let lookup = if cfg!(target_os = "windows") {
+            Command::new("where").arg(candidate).output()
+        } else {
+            Command::new("which").arg(candidate).output()
+        };
+        if let Ok(output) = lookup
             && output.status.success()
         {
             let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -296,11 +312,20 @@ pub async fn run_browser_command(cmd: BrowserCommand) -> anyhow::Result<()> {
                     println!();
                     println!("Install one of:");
                     println!("  • Google Chrome");
-                    println!("  • Chromium");
-                    println!("  • Brave Browser");
-                    println!();
-                    println!("macOS: brew install --cask google-chrome");
-                    println!("Linux: apt install chromium-browser");
+                    if cfg!(target_os = "windows") {
+                        println!("  • Microsoft Edge");
+                        println!("  • Brave Browser");
+                        println!();
+                        println!(
+                            "Windows: install Chrome, Edge, or Brave, or use Docker Desktop for the container fallback"
+                        );
+                    } else {
+                        println!("  • Chromium");
+                        println!("  • Brave Browser");
+                        println!();
+                        println!("macOS: brew install --cask google-chrome");
+                        println!("Linux: apt install chromium-browser");
+                    }
                 }
             }
         }

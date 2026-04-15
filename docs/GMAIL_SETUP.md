@@ -202,7 +202,7 @@ curl -X POST \
 
 - OAuth tokens are encrypted with AES-256-GCM using ThinClaw's master key
 - Tokens are stored in the database secrets table, not on disk in plaintext
-- The master key is stored in the OS keychain (macOS Keychain / GNOME Keyring)
+- The master key is stored in the OS secure store (macOS Keychain, Linux Secret Service, or Windows Credential Manager)
 - The agent never sees raw tokens — the WASM sandbox uses the host's HTTP proxy
   to inject credentials into API requests
 

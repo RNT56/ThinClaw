@@ -200,6 +200,15 @@ security-framework = "3"
 secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
 zbus = "4"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-service = "0.8"
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+] }
+
 [dev-dependencies]
 tokio-test = "0.4"
 pretty_assertions = "1"

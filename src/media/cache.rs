@@ -27,10 +27,7 @@ pub struct CacheConfig {
 
 impl Default for CacheConfig {
     fn default() -> Self {
-        let cache_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".thinclaw")
-            .join("media_cache");
+        let cache_dir = crate::platform::resolve_data_dir("media_cache");
 
         Self {
             cache_dir,

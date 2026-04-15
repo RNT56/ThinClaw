@@ -152,7 +152,7 @@ impl CreateJobTool {
     }
 
     /// Inject monitor dependencies so fire-and-forget jobs spawn a background
-    /// monitor that forwards Claude Code output to the main agent loop.
+    /// monitor that forwards container agent output to the main agent loop.
     pub fn with_monitor_deps(
         mut self,
         event_tx: tokio::sync::broadcast::Sender<(Uuid, SseEvent)>,
@@ -171,6 +171,66 @@ impl CreateJobTool {
 
     pub fn sandbox_enabled(&self) -> bool {
         self.job_manager.is_some()
+    }
+
+    fn claude_code_enabled(&self) -> bool {
+        self.job_manager
+            .as_ref()
+            .map(|jm| jm.claude_code_enabled())
+            .unwrap_or(false)
+    }
+
+    fn codex_code_enabled(&self) -> bool {
+        self.job_manager
+            .as_ref()
+            .map(|jm| jm.codex_code_enabled())
+            .unwrap_or(false)
+    }
+
+    fn available_sandbox_modes(&self) -> Vec<&'static str> {
+        let mut modes = vec!["worker"];
+        if self.claude_code_enabled() {
+            modes.push("claude_code");
+        }
+        if self.codex_code_enabled() {
+            modes.push("codex_code");
+        }
+        modes
+    }
+
+    fn sandbox_mode_schema_description(&self) -> String {
+        let mut descriptions = vec!["'worker' (default) uses the ThinClaw sub-agent.".to_string()];
+        if self.claude_code_enabled() {
+            descriptions.push(
+                "'claude_code' uses Claude Code CLI for full agentic software engineering."
+                    .to_string(),
+            );
+        }
+        if self.codex_code_enabled() {
+            descriptions.push(
+                "'codex_code' uses Codex CLI for full agentic software engineering.".to_string(),
+            );
+        }
+        format!("Execution mode. {}", descriptions.join(" "))
+    }
+
+    fn resolve_sandbox_mode(&self, requested_mode: Option<&str>) -> Result<JobMode, ToolError> {
+        match requested_mode {
+            None | Some("worker") => Ok(JobMode::Worker),
+            Some("claude_code") if self.claude_code_enabled() => Ok(JobMode::ClaudeCode),
+            Some("codex_code") if self.codex_code_enabled() => Ok(JobMode::CodexCode),
+            Some("claude_code") => Err(ToolError::InvalidParameters(
+                "mode 'claude_code' is not enabled in the current sandbox configuration"
+                    .to_string(),
+            )),
+            Some("codex_code") => Err(ToolError::InvalidParameters(
+                "mode 'codex_code' is not enabled in the current sandbox configuration".to_string(),
+            )),
+            Some(other) => Err(ToolError::InvalidParameters(format!(
+                "unsupported sandbox mode '{}'",
+                other
+            ))),
+        }
     }
 
     /// Parse and validate the `credentials` parameter.
@@ -363,15 +423,13 @@ impl CreateJobTool {
         });
 
         // Persist the job mode to DB
-        if mode == JobMode::ClaudeCode
+        if matches!(mode, JobMode::ClaudeCode | JobMode::CodexCode)
             && let Some(store) = self.store.clone()
         {
+            let mode_name = mode.as_str().to_string();
             let job_id_copy = job_id;
             tokio::spawn(async move {
-                if let Err(e) = store
-                    .update_sandbox_job_mode(job_id_copy, "claude_code")
-                    .await
-                {
+                if let Err(e) = store.update_sandbox_job_mode(job_id_copy, &mode_name).await {
                     tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
                 }
             });
@@ -397,7 +455,7 @@ impl CreateJobTool {
         self.update_status(job_id, "running", None, None, Some(now), None);
 
         if !wait {
-            // Spawn a background monitor that forwards Claude Code output
+            // Spawn a background monitor that forwards container agent output
             // into the main agent loop.
             //
             // This monitor is intentionally fire-and-forget: its lifetime is
@@ -599,10 +657,7 @@ fn validate_env_var_name(name: &str) -> Result<(), ToolError> {
 }
 
 fn projects_base() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("projects")
+    crate::platform::resolve_data_dir("projects")
 }
 
 /// Resolve the project directory, creating it if it doesn't exist.
@@ -687,7 +742,7 @@ impl Tool for CreateJobTool {
              whenever the user asks you to build, create, or work on something. The task \
              description should be detailed enough for the sub-agent to work independently. \
              Set wait=false to start immediately while continuing the conversation. Set mode \
-             to 'claude_code' for complex software engineering tasks."
+             to 'claude_code' or 'codex_code' only when that container coding agent is enabled."
         } else {
             "Create a new job or task for the agent to work on. Use this when the user wants \
              you to do something substantial that should be tracked as a separate job."
@@ -696,6 +751,8 @@ impl Tool for CreateJobTool {
 
     fn parameters_schema(&self) -> serde_json::Value {
         if self.sandbox_enabled() {
+            let available_modes = self.available_sandbox_modes();
+            let mode_description = self.sandbox_mode_schema_description();
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -714,9 +771,8 @@ impl Tool for CreateJobTool {
                     },
                     "mode": {
                         "type": "string",
-                        "enum": ["worker", "claude_code"],
-                        "description": "Execution mode. 'worker' (default) uses the ThinClaw sub-agent. \
-                                        'claude_code' uses Claude Code CLI for full agentic software engineering."
+                        "enum": available_modes,
+                        "description": mode_description
                     },
                     "project_dir": {
                         "type": "string",
@@ -776,10 +832,7 @@ impl Tool for CreateJobTool {
         if self.sandbox_enabled() {
             let wait = params.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
 
-            let mode = match params.get("mode").and_then(|v| v.as_str()) {
-                Some("claude_code") => JobMode::ClaudeCode,
-                _ => JobMode::Worker,
-            };
+            let mode = self.resolve_sandbox_mode(params.get("mode").and_then(|v| v.as_str()))?;
 
             let explicit_dir = params
                 .get("project_dir")
@@ -1121,8 +1174,8 @@ impl Tool for JobEventsTool {
 
     fn description(&self) -> &str {
         "Read the event log for a sandbox job. Shows messages, tool calls, results, \
-         and status changes from the container. Use this to check what Claude Code \
-         or a worker sub-agent has been doing."
+         and status changes from the container. Use this to check what a container coding agent \
+         or worker sub-agent has been doing."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1221,12 +1274,12 @@ impl Tool for JobEventsTool {
     }
 }
 
-/// Tool for sending follow-up prompts to a running Claude Code sandbox job.
+/// Tool for sending follow-up prompts to a running container coding agent job.
 ///
 /// The prompt is queued in an in-memory `PromptQueue` (a broadcast channel
-/// shared with the web gateway). The Claude Code bridge inside the container
+/// shared with the web gateway). The bridge inside the container
 /// polls for queued prompts between turns and feeds them into the next
-/// `claude --resume` invocation, enabling interactive multi-turn sessions
+/// CLI resume invocation, enabling interactive multi-turn sessions
 /// with long-running sandbox jobs.
 pub struct JobPromptTool {
     prompt_queue: PromptQueue,
@@ -1254,7 +1307,7 @@ impl Tool for JobPromptTool {
     }
 
     fn description(&self) -> &str {
-        "Send a follow-up prompt to a running Claude Code sandbox job. The prompt is \
+        "Send a follow-up prompt to a running container coding agent job. The prompt is \
          queued and delivered on the next poll cycle. Use this to give the sub-agent \
          additional instructions, answer its questions, or tell it to wrap up."
     }
@@ -1629,6 +1682,56 @@ mod tests {
             props.contains_key("credentials"),
             "sandbox schema must expose credentials"
         );
+    }
+
+    #[test]
+    fn test_sandbox_schema_only_exposes_enabled_agent_modes() {
+        let manager = Arc::new(ContextManager::new(5));
+        let jm = Arc::new(ContainerJobManager::new(
+            ContainerJobConfig {
+                claude_code_enabled: false,
+                codex_code_enabled: true,
+                ..ContainerJobConfig::default()
+            },
+            TokenStore::new(),
+        ));
+        let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
+        let schema = tool.parameters_schema();
+        let mode_enum = schema["properties"]["mode"]["enum"]
+            .as_array()
+            .expect("mode enum array");
+        let mode_values: Vec<&str> = mode_enum
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect();
+
+        assert_eq!(mode_values, vec!["worker", "codex_code"]);
+    }
+
+    #[tokio::test]
+    async fn test_execute_rejects_disabled_codex_mode() {
+        let manager = Arc::new(ContextManager::new(5));
+        let jm = Arc::new(ContainerJobManager::new(
+            ContainerJobConfig {
+                claude_code_enabled: true,
+                codex_code_enabled: false,
+                ..ContainerJobConfig::default()
+            },
+            TokenStore::new(),
+        ));
+        let tool = CreateJobTool::new(manager).with_sandbox(jm, None);
+        let params = serde_json::json!({
+            "title": "Test Job",
+            "description": "A test job description",
+            "mode": "codex_code"
+        });
+
+        let err = tool
+            .execute(params, &JobContext::default())
+            .await
+            .expect_err("disabled codex mode should be rejected");
+
+        assert!(err.to_string().contains("not enabled"));
     }
 
     #[tokio::test]

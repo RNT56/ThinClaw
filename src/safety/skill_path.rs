@@ -57,10 +57,7 @@ pub struct SkillPathConfig {
 
 impl Default for SkillPathConfig {
     fn default() -> Self {
-        let base_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".thinclaw")
-            .join("skills");
+        let base_dir = crate::platform::state_paths().skills_dir;
 
         Self {
             base_dir,

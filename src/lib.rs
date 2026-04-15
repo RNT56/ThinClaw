@@ -74,6 +74,7 @@ pub mod observability;
 #[cfg(feature = "docker-sandbox")]
 pub mod orchestrator;
 pub mod pairing;
+pub mod platform;
 pub mod profile;
 pub mod profile_evolution;
 pub mod qr_pairing;

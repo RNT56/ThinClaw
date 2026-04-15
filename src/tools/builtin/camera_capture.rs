@@ -44,9 +44,9 @@ fn capture_path(custom: Option<&str>) -> PathBuf {
         PathBuf::from(p)
     } else {
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(format!(".thinclaw/camera/capture_{ts}.jpg"))
+        crate::platform::state_paths()
+            .camera_dir
+            .join(format!("capture_{ts}.jpg"))
     }
 }
 
@@ -156,12 +156,69 @@ async fn capture_camera(path: &std::path::Path, _warmup_secs: f32) -> Result<Str
 
 /// Capture from camera on Windows.
 #[cfg(target_os = "windows")]
-async fn capture_camera(path: &std::path::Path, _warmup_secs: f32) -> Result<String, ToolError> {
+async fn list_windows_video_devices() -> Result<Vec<String>, ToolError> {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-list_devices",
+            "true",
+            "-f",
+            "dshow",
+            "-i",
+            "dummy",
+        ])
+        .output()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("ffmpeg: {e}")))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut devices = Vec::new();
+    let mut in_video_section = false;
+    for line in stderr.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("DirectShow video devices") {
+            in_video_section = true;
+            continue;
+        }
+        if trimmed.contains("DirectShow audio devices") {
+            in_video_section = false;
+            continue;
+        }
+        if in_video_section
+            && let Some(start) = trimmed.find('"')
+            && let Some(end) = trimmed[start + 1..].find('"')
+        {
+            devices.push(trimmed[start + 1..start + 1 + end].to_string());
+        }
+    }
+    if devices.is_empty() {
+        return Err(ToolError::ExecutionFailed(
+            "No Windows camera devices found via ffmpeg/dshow.".to_string(),
+        ));
+    }
+    Ok(devices)
+}
+
+#[cfg(target_os = "windows")]
+async fn capture_camera(
+    path: &std::path::Path,
+    _warmup_secs: f32,
+    device_name: Option<&str>,
+) -> Result<String, ToolError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Create camera dir: {e}")))?;
     }
+
+    let device = if let Some(device) = device_name.filter(|value| !value.trim().is_empty()) {
+        device.to_string()
+    } else if let Ok(device) = std::env::var("THINCLAW_CAMERA_DEVICE") {
+        device
+    } else {
+        let mut devices = list_windows_video_devices().await?;
+        devices.remove(0)
+    };
 
     let ffmpeg = Command::new("ffmpeg")
         .args([
@@ -170,7 +227,7 @@ async fn capture_camera(path: &std::path::Path, _warmup_secs: f32) -> Result<Str
             "-video_size",
             "1280x720",
             "-i",
-            "video=0",
+            &format!("video={device}"),
             "-frames:v",
             "1",
             "-y",
@@ -184,9 +241,9 @@ async fn capture_camera(path: &std::path::Path, _warmup_secs: f32) -> Result<Str
         return Ok("ffmpeg".to_string());
     }
 
-    Err(ToolError::ExecutionFailed(
-        "Camera capture failed. Install ffmpeg.".to_string(),
-    ))
+    Err(ToolError::ExecutionFailed(format!(
+        "Camera capture failed for Windows device '{device}'. Install ffmpeg or set THINCLAW_CAMERA_DEVICE/device_name to a valid DirectShow device."
+    )))
 }
 
 #[async_trait]
@@ -216,6 +273,10 @@ impl Tool for CameraCaptureTool {
                     "default": 1.0,
                     "minimum": 0.0,
                     "maximum": 10.0
+                },
+                "device_name": {
+                    "type": "string",
+                    "description": "Optional camera device override. On Windows this maps to a DirectShow device name and also falls back to THINCLAW_CAMERA_DEVICE."
                 }
             },
             "required": []
@@ -235,8 +296,13 @@ impl Tool for CameraCaptureTool {
             .and_then(|v| v.as_f64())
             .map(|w| w.min(10.0) as f32)
             .unwrap_or(1.0);
+        #[cfg(target_os = "windows")]
+        let device_name = params.get("device_name").and_then(|v| v.as_str());
 
         let path = capture_path(custom_path);
+        #[cfg(target_os = "windows")]
+        let tool_used = capture_camera(&path, warmup, device_name).await?;
+        #[cfg(not(target_os = "windows"))]
         let tool_used = capture_camera(&path, warmup).await?;
 
         let metadata = tokio::fs::metadata(&path)

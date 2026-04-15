@@ -25,6 +25,7 @@ use ratatui::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::channels::StatusUpdate;
+use crate::platform::shell_launcher;
 use crate::settings::Settings;
 use crate::tui::skin::CliSkin;
 
@@ -600,12 +601,7 @@ impl TuiApp {
             text: format!("$ {cmd}"),
         });
 
-        match tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()
-            .await
-        {
+        match shell_launcher().tokio_command(cmd).output().await {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);

@@ -187,11 +187,11 @@ impl RegistryInstaller {
 
     /// Default installer using standard paths.
     pub fn with_defaults(repo_root: PathBuf) -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let state_paths = crate::platform::state_paths();
         Self {
             repo_root,
-            tools_dir: home.join(".thinclaw").join("tools"),
-            channels_dir: home.join(".thinclaw").join("channels"),
+            tools_dir: state_paths.tools_dir,
+            channels_dir: state_paths.channels_dir,
         }
     }
 

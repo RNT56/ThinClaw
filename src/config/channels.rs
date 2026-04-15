@@ -352,10 +352,7 @@ impl ChannelsConfig {
 
 /// Get the default channels directory (~/.thinclaw/channels/).
 fn default_channels_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("channels")
+    crate::platform::state_paths().channels_dir
 }
 
 /// Telegram bot configuration.

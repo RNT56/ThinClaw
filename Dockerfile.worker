@@ -14,8 +14,9 @@ FROM rust:1.92-bookworm AS builder
 WORKDIR /build
 COPY . .
 
-# Build only the thinclaw binary (release mode)
-RUN cargo build --release --bin thinclaw
+# Build the worker binary with Docker sandbox support enabled so the
+# container entrypoints expose the internal bridge subcommands.
+RUN cargo build --release --features docker-sandbox --bin thinclaw
 
 # ---
 
@@ -45,12 +46,13 @@ RUN apt-get update \
 # Install Rust toolchain for the sandbox user
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
+    CODEX_HOME=/home/sandbox/.codex \
     PATH=/usr/local/cargo/bin:$PATH
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 \
     && chmod -R a+r /usr/local/rustup /usr/local/cargo
 
-# Install Claude Code CLI (for claude-bridge mode)
-RUN npm install -g @anthropic-ai/claude-code@latest
+# Install container coding CLIs (for claude-bridge and codex-bridge modes)
+RUN npm install -g @anthropic-ai/claude-code@latest @openai/codex@latest
 
 # Copy the binary
 COPY --from=builder /build/target/release/thinclaw /usr/local/bin/thinclaw
@@ -60,7 +62,8 @@ RUN useradd -m -u 1000 -s /bin/bash sandbox \
     && mkdir -p /workspace \
     && chown sandbox:sandbox /workspace \
     && mkdir -p /home/sandbox/.claude \
-    && chown sandbox:sandbox /home/sandbox/.claude
+    && mkdir -p /home/sandbox/.codex \
+    && chown sandbox:sandbox /home/sandbox/.claude /home/sandbox/.codex
 
 USER sandbox
 WORKDIR /workspace

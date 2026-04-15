@@ -59,6 +59,12 @@ This document lists every **optional external tool and service** that ThinClaw f
 | [Whisper endpoint](#whisper-compatible-stt-endpoint) | Audio transcription / talk mode | Optional | Varies | OpenAI API or local whisper.cpp server |
 | [nginx](#nginx) / [Caddy](#caddy) | TLS termination (reverse proxy) | Optional | ✅ Free (OSS) | `brew install nginx` / `brew install caddy` |
 
+Windows host defaults:
+- Docker-backed sandbox and browser fallback expect Docker Desktop.
+- Local browser automation auto-detects Chrome, Edge, and Brave.
+- Camera/microphone capture expect `ffmpeg`, and Signal attachments can be forced with `SIGNAL_ATTACHMENTS_DIR`.
+- Secrets use the Windows OS secure store; service management uses the Windows Service Control Manager.
+
 ---
 
 ## VPN / Tunnel Providers
@@ -214,7 +220,7 @@ TUNNEL_CUSTOM_URL_PATTERN=https://
 | macOS | `brew install --cask docker` | [docs.docker.com/desktop/mac](https://docs.docker.com/desktop/install/mac-install/) |
 | Ubuntu/Debian | See script below | [docs.docker.com/engine/install](https://docs.docker.com/engine/install/) |
 | Other Linux | See link | Same link above |
-| Windows | — | [docs.docker.com/desktop/windows](https://docs.docker.com/desktop/install/windows-install/) |
+| Windows | `winget install Docker.DockerDesktop` | [docs.docker.com/desktop/windows](https://docs.docker.com/desktop/install/windows-install/) |
 
 **Linux quick install:**
 
@@ -283,17 +289,19 @@ CONTAINER_RUNTIME=podman
 
 ### Chrome / Chromium (local)
 
-**What it does:** The `BrowserTool` uses Chrome/Chromium for web automation (navigating, screenshots, link extraction, text extraction).
+**What it does:** The `BrowserTool` uses Chrome-family browsers for web automation (navigating, screenshots, link extraction, text extraction).
 
 **Where to get it:**
 
 | Option | Install | Notes |
 |--------|---------|-------|
 | Google Chrome | [google.com/chrome](https://www.google.com/chrome/) | Most common; auto-detected |
+| Microsoft Edge | Built into most Windows installs | Auto-detected on Windows |
+| Brave | [brave.com/download](https://brave.com/download/) | Auto-detected on macOS, Linux, and Windows |
 | Chromium (OSS) | `brew install --cask chromium` (macOS) | Lighter, open-source |
 | Chromium (Linux) | `apt install chromium-browser` | Package name varies by distro |
 
-ThinClaw auto-detects the Chrome binary in common locations. No configuration needed if Chrome is installed normally.
+ThinClaw auto-detects the local browser binary in common locations. No configuration is needed if Chrome, Edge, or Brave is installed normally.
 
 **Override the binary path:**
 
@@ -305,9 +313,9 @@ CHROME_PATH=/usr/bin/google-chrome-stable
 
 ### Docker Chromium (headless)
 
-**What it does:** When no local Chrome is found (or on headless servers), ThinClaw automatically starts a Docker container with Chromium + Xvfb for browser automation.
+**What it does:** When no local browser is found (or on headless servers), ThinClaw automatically starts a Docker container with Chromium + Xvfb for browser automation.
 
-**Prerequisites:** Docker (see [Docker section](#docker))
+**Prerequisites:** Docker Desktop on Windows, or Docker on macOS/Linux (see [Docker section](#docker))
 
 **ThinClaw configuration:**
 
@@ -351,6 +359,7 @@ signal-cli -a +1234567890 daemon --http
 ```env
 SIGNAL_HTTP_URL=http://localhost:8080
 SIGNAL_ALLOW_FROM=+1234567890,+0987654321
+SIGNAL_ATTACHMENTS_DIR=/path/to/signal-cli/attachments   # Optional override, especially useful on Windows
 ```
 
 See also: [signal-cli documentation](https://github.com/AsamK/signal-cli/wiki)
@@ -371,6 +380,7 @@ See also: [signal-cli documentation](https://github.com/AsamK/signal-cli/wiki)
 | macOS | `brew install ffmpeg` |
 | Ubuntu/Debian | `sudo apt install ffmpeg` |
 | Fedora/RHEL | `sudo dnf install ffmpeg` |
+| Windows | `winget install Gyan.FFmpeg` |
 
 **Verify:**
 
@@ -403,7 +413,7 @@ ThinClaw gracefully falls back when ffmpeg is not available — video processing
 | Priority | Source | How to Set |
 |----------|--------|------------|
 | 1 | `ANTHROPIC_API_KEY` env var | `export ANTHROPIC_API_KEY=sk-ant-api03-...` |
-| 2 | OS keychain | Set during `thinclaw onboard` (wizard step 12) |
+| 2 | OS secure store | Set during `thinclaw onboard` (wizard step 12) |
 | 3 | Claude Code OAuth | Run `claude login` on the host machine |
 
 **ThinClaw configuration:**
@@ -537,7 +547,7 @@ For Turso cloud (optional): [turso.tech](https://turso.tech/)
 |----------|----------------|---------------|
 | macOS | `brew install ollama` | [ollama.com/download](https://ollama.com/download) |
 | Linux | `curl -fsSL https://ollama.com/install.sh \| sh` | Same link above |
-| Windows | — | Same link above |
+| Windows | `winget install Ollama.Ollama` | Same link above |
 
 **Quick start:**
 

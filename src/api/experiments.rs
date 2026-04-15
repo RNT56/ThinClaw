@@ -3450,11 +3450,7 @@ async fn execute_local_trial(
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(&run_root));
     let started_at = std::time::Instant::now();
-    let log_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("experiments")
-        .join("logs");
+    let log_dir = crate::platform::resolve_data_dir("experiments").join("logs");
     tokio::fs::create_dir_all(&log_dir)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -3521,22 +3517,38 @@ fn parse_exit_code(output: &str) -> Option<i32> {
     Some(0)
 }
 
+#[cfg(target_os = "windows")]
+fn shell_command_invocation(command: &str) -> (&'static str, Vec<String>) {
+    (
+        "cmd",
+        vec![
+            "/V:ON".to_string(),
+            "/C".to_string(),
+            format!("{command} & echo __THINCLAW_EXIT_CODE__:!ERRORLEVEL!"),
+        ],
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn shell_command_invocation(command: &str) -> (&'static str, Vec<String>) {
+    (
+        "sh",
+        vec![
+            "-lc".to_string(),
+            format!("{command}; printf '\\n__THINCLAW_EXIT_CODE__:%s\\n' \"$?\""),
+        ],
+    )
+}
+
 async fn run_shell_command(
     cwd: &Path,
     command: &str,
     runner: &ExperimentRunnerProfile,
 ) -> ApiResult<String> {
-    #[cfg(target_os = "windows")]
-    let shell = ("cmd", vec!["/C", command]);
-    #[cfg(not(target_os = "windows"))]
-    let shell = ("sh", vec!["-lc", command]);
-
     let env = env_pairs_from_profile(runner);
-    let mut args: Vec<&str> = shell.1.to_vec();
-    let wrapped_command = format!("{command}; printf '\\n__THINCLAW_EXIT_CODE__:%s\\n' \"$?\"");
-    args.pop();
-    args.push(&wrapped_command);
-    run_command_capture(Some(cwd), shell.0, &args, &env).await
+    let (shell, args) = shell_command_invocation(command);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_command_capture(Some(cwd), shell, &arg_refs, &env).await
 }
 
 fn env_pairs_from_profile(runner: &ExperimentRunnerProfile) -> Vec<(String, String)> {
@@ -4530,7 +4542,7 @@ fn ensure_unique_target_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_hourly_rate_usd, summarize_llm_usage};
+    use super::{provider_hourly_rate_usd, shell_command_invocation, summarize_llm_usage};
     use crate::experiments::{ExperimentModelUsageRecord, ExperimentRunnerBackend};
     use chrono::Utc;
     use uuid::Uuid;
@@ -4606,5 +4618,24 @@ mod tests {
         assert_eq!(summary.details["by_role_usd"]["planner"], 0.12);
         assert_eq!(summary.details["by_role_usd"]["mutator"], 0.08);
         assert_eq!(summary.details["by_provider_usd"]["openai"], 0.20);
+    }
+
+    #[test]
+    fn shell_command_invocation_appends_exit_marker_for_host_shell() {
+        let (shell, args) = shell_command_invocation("echo hello");
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(shell, "cmd");
+            assert_eq!(args[0], "/V:ON");
+            assert_eq!(args[1], "/C");
+            assert!(args[2].contains("__THINCLAW_EXIT_CODE__:!ERRORLEVEL!"));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(shell, "sh");
+            assert_eq!(args[0], "-lc");
+            assert!(args[1].contains("__THINCLAW_EXIT_CODE__"));
+            assert!(args[1].contains("printf"));
+        }
     }
 }

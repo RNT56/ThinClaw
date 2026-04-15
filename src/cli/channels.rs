@@ -117,10 +117,7 @@ async fn list_channels(format: &str) -> anyhow::Result<()> {
     }
 
     // Check for WASM channels directory.
-    let wasm_dir = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".thinclaw")
-        .join("channels");
+    let wasm_dir = crate::platform::state_paths().channels_dir;
     if wasm_dir.exists()
         && let Ok(entries) = std::fs::read_dir(&wasm_dir)
     {
@@ -256,10 +253,7 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
         }
         None => {
             // Check WASM channels.
-            let wasm_dir = dirs::home_dir()
-                .unwrap_or_default()
-                .join(".thinclaw")
-                .join("channels");
+            let wasm_dir = crate::platform::state_paths().channels_dir;
             let wasm_path = wasm_dir.join(format!("{}.wasm", channel));
 
             if wasm_path.exists() {

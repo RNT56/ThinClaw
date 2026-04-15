@@ -22,6 +22,8 @@ pub enum JobMode {
     Worker,
     /// Claude Code bridge that spawns the `claude` CLI directly.
     ClaudeCode,
+    /// Codex bridge that spawns the `codex` CLI directly.
+    CodexCode,
 }
 
 impl JobMode {
@@ -29,6 +31,7 @@ impl JobMode {
         match self {
             Self::Worker => "worker",
             Self::ClaudeCode => "claude_code",
+            Self::CodexCode => "codex_code",
         }
     }
 }
@@ -57,6 +60,8 @@ pub struct ContainerJobConfig {
     /// Passed as CLAUDE_CODE_OAUTH_TOKEN to containers. Falls back to this
     /// when no ANTHROPIC_API_KEY is available.
     pub claude_code_oauth_token: Option<String>,
+    /// Whether Claude Code mode is available for new jobs.
+    pub claude_code_enabled: bool,
     /// Claude model to use in ClaudeCode mode.
     pub claude_code_model: String,
     /// Maximum turns for Claude Code.
@@ -65,6 +70,16 @@ pub struct ContainerJobConfig {
     pub claude_code_memory_limit_mb: u64,
     /// Allowed tool patterns for Claude Code (passed as CLAUDE_CODE_ALLOWED_TOOLS env var).
     pub claude_code_allowed_tools: Vec<String>,
+    /// OpenAI API key for Codex containers (read from OPENAI_API_KEY).
+    pub codex_code_api_key: Option<String>,
+    /// Whether Codex mode is available for new jobs.
+    pub codex_code_enabled: bool,
+    /// Codex model to use in CodexCode mode.
+    pub codex_code_model: String,
+    /// Memory limit in MB for Codex containers.
+    pub codex_code_memory_limit_mb: u64,
+    /// Host directory containing Codex auth/config files to mount read-only.
+    pub codex_code_home_dir: PathBuf,
 }
 
 impl Default for ContainerJobConfig {
@@ -76,10 +91,16 @@ impl Default for ContainerJobConfig {
             orchestrator_port: 50051,
             claude_code_api_key: None,
             claude_code_oauth_token: None,
+            claude_code_enabled: false,
             claude_code_model: "sonnet".to_string(),
             claude_code_max_turns: 50,
             claude_code_memory_limit_mb: 4096,
             claude_code_allowed_tools: crate::config::ClaudeCodeConfig::default().allowed_tools,
+            codex_code_api_key: None,
+            codex_code_enabled: false,
+            codex_code_model: "gpt-5.3-codex".to_string(),
+            codex_code_memory_limit_mb: 4096,
+            codex_code_home_dir: crate::config::CodexCodeConfig::default().home_dir,
         }
     }
 }
@@ -158,11 +179,7 @@ fn validate_bind_mount_path(
             ),
         })?;
 
-    let home = dirs::home_dir().ok_or_else(|| OrchestratorError::ContainerCreationFailed {
-        job_id,
-        reason: "could not determine home directory for path validation".to_string(),
-    })?;
-    let projects_base = home.join(".thinclaw").join("projects");
+    let projects_base = crate::platform::resolve_data_dir("projects");
 
     // Ensure the base exists so canonicalize always succeeds.
     std::fs::create_dir_all(&projects_base).map_err(|e| {
@@ -213,12 +230,15 @@ pub struct ContainerJobManager {
     cc_model: RwLock<String>,
     /// Runtime-override for Claude Code max turns.
     cc_max_turns: RwLock<u32>,
+    /// Runtime-override for Codex model.
+    codex_model: RwLock<String>,
 }
 
 impl ContainerJobManager {
     pub fn new(config: ContainerJobConfig, token_store: TokenStore) -> Self {
         let model = config.claude_code_model.clone();
         let turns = config.claude_code_max_turns;
+        let codex_model = config.codex_code_model.clone();
         Self {
             config,
             token_store,
@@ -226,7 +246,16 @@ impl ContainerJobManager {
             docker: Arc::new(RwLock::new(None)),
             cc_model: RwLock::new(model),
             cc_max_turns: RwLock::new(turns),
+            codex_model: RwLock::new(codex_model),
         }
+    }
+
+    pub fn claude_code_enabled(&self) -> bool {
+        self.config.claude_code_enabled
+    }
+
+    pub fn codex_code_enabled(&self) -> bool {
+        self.config.codex_code_enabled
     }
 
     /// Update Claude Code settings at runtime (called by the settings API).
@@ -249,6 +278,91 @@ impl ContainerJobManager {
             max_turns = current_turns,
             "Claude Code settings updated at runtime"
         );
+    }
+
+    /// Update Codex settings at runtime (called by the settings API).
+    ///
+    /// The next Codex container spawned will use the updated model.
+    pub async fn update_codex_code_settings(&self, model: Option<String>) {
+        let next_model = model.unwrap_or_else(|| self.config.codex_code_model.clone());
+        *self.codex_model.write().await = next_model;
+        let current_model = self.codex_model.read().await.clone();
+        tracing::info!(
+            model = %current_model,
+            "Codex settings updated at runtime"
+        );
+    }
+
+    fn extend_mode_runtime(
+        &self,
+        mode: JobMode,
+        env_vec: &mut Vec<String>,
+        binds: &mut Vec<String>,
+    ) {
+        if mode == JobMode::ClaudeCode {
+            if let Some(ref api_key) = self.config.claude_code_api_key {
+                env_vec.push(format!("ANTHROPIC_API_KEY={}", api_key));
+            } else if let Some(ref oauth_token) = self.config.claude_code_oauth_token {
+                env_vec.push(format!("CLAUDE_CODE_OAUTH_TOKEN={}", oauth_token));
+            }
+            if !self.config.claude_code_allowed_tools.is_empty() {
+                env_vec.push(format!(
+                    "CLAUDE_CODE_ALLOWED_TOOLS={}",
+                    self.config.claude_code_allowed_tools.join(",")
+                ));
+            }
+        }
+
+        if mode == JobMode::CodexCode {
+            if let Some(ref api_key) = self.config.codex_code_api_key {
+                env_vec.push(format!("OPENAI_API_KEY={}", api_key));
+            }
+            env_vec.push("CODEX_HOME=/home/sandbox/.codex".to_string());
+
+            if self.config.codex_code_home_dir.exists() {
+                binds.push(format!(
+                    "{}:/home/sandbox/.codex-host:ro",
+                    self.config.codex_code_home_dir.display()
+                ));
+            }
+        }
+    }
+
+    async fn container_cmd(
+        &self,
+        job_id: Uuid,
+        orchestrator_url: String,
+        mode: JobMode,
+    ) -> Vec<String> {
+        match mode {
+            JobMode::Worker => vec![
+                "worker".to_string(),
+                "--job-id".to_string(),
+                job_id.to_string(),
+                "--orchestrator-url".to_string(),
+                orchestrator_url,
+            ],
+            JobMode::ClaudeCode => vec![
+                "claude-bridge".to_string(),
+                "--job-id".to_string(),
+                job_id.to_string(),
+                "--orchestrator-url".to_string(),
+                orchestrator_url,
+                "--max-turns".to_string(),
+                self.cc_max_turns.read().await.to_string(),
+                "--model".to_string(),
+                self.cc_model.read().await.clone(),
+            ],
+            JobMode::CodexCode => vec![
+                "codex-bridge".to_string(),
+                "--job-id".to_string(),
+                job_id.to_string(),
+                "--orchestrator-url".to_string(),
+                orchestrator_url,
+                "--model".to_string(),
+                self.codex_model.read().await.clone(),
+            ],
+        }
     }
 
     /// Get or create a Docker connection.
@@ -357,29 +471,12 @@ impl ContainerJobManager {
             env_vec.push("THINCLAW_WORKSPACE=/workspace".to_string());
         }
 
-        // Claude Code mode: auth + tool allowlist.
-        //
-        // Auth strategies (first match wins):
-        //   1. ANTHROPIC_API_KEY: direct API key (pay-as-you-go billing).
-        //   2. CLAUDE_CODE_OAUTH_TOKEN: OAuth access token from `claude login`
-        //      session, extracted from the host's credential store.
-        if mode == JobMode::ClaudeCode {
-            if let Some(ref api_key) = self.config.claude_code_api_key {
-                env_vec.push(format!("ANTHROPIC_API_KEY={}", api_key));
-            } else if let Some(ref oauth_token) = self.config.claude_code_oauth_token {
-                env_vec.push(format!("CLAUDE_CODE_OAUTH_TOKEN={}", oauth_token));
-            }
-            if !self.config.claude_code_allowed_tools.is_empty() {
-                env_vec.push(format!(
-                    "CLAUDE_CODE_ALLOWED_TOOLS={}",
-                    self.config.claude_code_allowed_tools.join(",")
-                ));
-            }
-        }
+        self.extend_mode_runtime(mode, &mut env_vec, &mut binds);
 
-        // Memory limit: Claude Code gets more memory
+        // Memory limit: container coding agents get more memory
         let memory_mb = match mode {
             JobMode::ClaudeCode => self.config.claude_code_memory_limit_mb,
+            JobMode::CodexCode => self.config.codex_code_memory_limit_mb,
             JobMode::Worker => self.config.memory_limit_mb,
         };
 
@@ -405,26 +502,7 @@ impl ContainerJobManager {
         };
 
         // Build CMD based on mode
-        let cmd = match mode {
-            JobMode::Worker => vec![
-                "worker".to_string(),
-                "--job-id".to_string(),
-                job_id.to_string(),
-                "--orchestrator-url".to_string(),
-                orchestrator_url,
-            ],
-            JobMode::ClaudeCode => vec![
-                "claude-bridge".to_string(),
-                "--job-id".to_string(),
-                job_id.to_string(),
-                "--orchestrator-url".to_string(),
-                orchestrator_url,
-                "--max-turns".to_string(),
-                self.cc_max_turns.read().await.to_string(),
-                "--model".to_string(),
-                self.cc_model.read().await.clone(),
-            ],
-        };
+        let cmd = self.container_cmd(job_id, orchestrator_url, mode).await;
 
         let container_config = Config {
             image: Some(self.config.image.clone()),
@@ -439,6 +517,7 @@ impl ContainerJobManager {
         let container_name = match mode {
             JobMode::Worker => format!("thinclaw-worker-{}", job_id),
             JobMode::ClaudeCode => format!("thinclaw-claude-{}", job_id),
+            JobMode::CodexCode => format!("thinclaw-codex-{}", job_id),
         };
         let options = CreateContainerOptions {
             name: container_name,
@@ -472,7 +551,8 @@ impl ContainerJobManager {
 
         tracing::info!(
             job_id = %job_id,
-            "Created and started worker container"
+            mode = %mode,
+            "Created and started container job"
         );
 
         Ok(())
@@ -530,7 +610,7 @@ impl ContainerJobManager {
         // Revoke the auth token
         self.token_store.revoke(job_id).await;
 
-        tracing::info!(job_id = %job_id, "Stopped worker container");
+        tracing::info!(job_id = %job_id, "Stopped container job");
 
         Ok(())
     }
@@ -590,7 +670,7 @@ impl ContainerJobManager {
         }
         self.token_store.revoke(job_id).await;
 
-        tracing::info!(job_id = %job_id, "Completed worker container");
+        tracing::info!(job_id = %job_id, "Completed container job");
         Ok(())
     }
 
@@ -629,8 +709,8 @@ impl ContainerJobManager {
 
     /// Clean up orphan containers from a previous process crash.
     ///
-    /// Lists all Docker containers matching the `thinclaw-worker-*` or
-    /// `thinclaw-claude-*` naming convention and removes any that are not
+    /// Lists all Docker containers matching the `thinclaw-worker-*`,
+    /// `thinclaw-claude-*`, or `thinclaw-codex-*` naming convention and removes any that are not
     /// tracked in the current in-memory handle map (which is empty at startup).
     ///
     /// This is fire-and-forget — errors are logged but never fatal.
@@ -669,9 +749,21 @@ impl ContainerJobManager {
             .await
             .unwrap_or_default();
 
+        let mut codex_filters = HashMap::new();
+        codex_filters.insert("name".to_string(), vec!["thinclaw-codex-".to_string()]);
+        let codex_containers = docker
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                filters: codex_filters,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_or_default();
+
         let all_containers: Vec<_> = worker_containers
             .into_iter()
             .chain(claude_containers)
+            .chain(codex_containers)
             .collect();
 
         if all_containers.is_empty() {
@@ -831,5 +923,77 @@ mod tests {
         let handle = mgr.get_handle(job_id).await.unwrap();
         assert_eq!(handle.worker_iteration, 3);
         assert_eq!(handle.last_worker_status.as_deref(), Some("Iteration 3"));
+    }
+
+    #[test]
+    fn test_extend_mode_runtime_adds_codex_env_and_mount() {
+        let codex_home = tempfile::tempdir().unwrap();
+        let config = ContainerJobConfig {
+            codex_code_enabled: true,
+            codex_code_api_key: Some("sk-test".to_string()),
+            codex_code_home_dir: codex_home.path().to_path_buf(),
+            ..ContainerJobConfig::default()
+        };
+        let mgr = ContainerJobManager::new(config, TokenStore::new());
+        let mut env_vec = Vec::new();
+        let mut binds = Vec::new();
+
+        mgr.extend_mode_runtime(JobMode::CodexCode, &mut env_vec, &mut binds);
+
+        assert!(
+            env_vec
+                .iter()
+                .any(|entry| entry == "OPENAI_API_KEY=sk-test")
+        );
+        assert!(
+            env_vec
+                .iter()
+                .any(|entry| entry == "CODEX_HOME=/home/sandbox/.codex")
+        );
+        assert_eq!(binds.len(), 1);
+        assert!(binds[0].ends_with(":/home/sandbox/.codex-host:ro"));
+    }
+
+    #[tokio::test]
+    async fn test_codex_container_command_uses_cached_model_and_resets_to_default() {
+        let job_id = Uuid::new_v4();
+        let config = ContainerJobConfig {
+            codex_code_enabled: true,
+            codex_code_model: "gpt-5.3-codex".to_string(),
+            ..ContainerJobConfig::default()
+        };
+        let mgr = ContainerJobManager::new(config, TokenStore::new());
+
+        mgr.update_codex_code_settings(Some("gpt-5.4".to_string()))
+            .await;
+        let updated = mgr
+            .container_cmd(
+                job_id,
+                "http://orchestrator".to_string(),
+                JobMode::CodexCode,
+            )
+            .await;
+        assert_eq!(
+            updated,
+            vec![
+                "codex-bridge".to_string(),
+                "--job-id".to_string(),
+                job_id.to_string(),
+                "--orchestrator-url".to_string(),
+                "http://orchestrator".to_string(),
+                "--model".to_string(),
+                "gpt-5.4".to_string(),
+            ]
+        );
+
+        mgr.update_codex_code_settings(None).await;
+        let reset = mgr
+            .container_cmd(
+                job_id,
+                "http://orchestrator".to_string(),
+                JobMode::CodexCode,
+            )
+            .await;
+        assert_eq!(reset.last().map(String::as_str), Some("gpt-5.3-codex"));
     }
 }

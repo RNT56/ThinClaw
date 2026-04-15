@@ -36,6 +36,9 @@ use uuid::Uuid;
 
 use crate::error::WorkerError;
 use crate::worker::api::{CompletionReport, JobEventPayload, PromptResponse, WorkerHttpClient};
+use crate::worker::bridge_common::{
+    copy_auth_dir_from_mount, poll_for_prompt, post_job_event, truncate,
+};
 
 /// Configuration for the Claude bridge runtime.
 pub struct ClaudeBridgeConfig {
@@ -181,26 +184,18 @@ impl ClaudeBridgeRuntime {
     /// When no host mount is present (the default orchestrator injects
     /// credentials via environment variables), this is a no-op.
     fn copy_auth_from_mount(&self) -> Result<(), WorkerError> {
-        let mount = std::path::Path::new("/home/sandbox/.claude-host");
-        if !mount.exists() {
-            return Ok(());
+        let copied = copy_auth_dir_from_mount(
+            std::path::Path::new("/home/sandbox/.claude-host"),
+            std::path::Path::new("/home/sandbox/.claude"),
+        )?;
+
+        if copied > 0 {
+            tracing::info!(
+                job_id = %self.config.job_id,
+                files_copied = copied,
+                "Copied auth config from host mount into container"
+            );
         }
-
-        let target = std::path::Path::new("/home/sandbox/.claude");
-        std::fs::create_dir_all(target).map_err(|e| WorkerError::ExecutionFailed {
-            reason: format!("failed to create ~/.claude: {e}"),
-        })?;
-
-        let copied =
-            copy_dir_recursive(mount, target).map_err(|e| WorkerError::ExecutionFailed {
-                reason: format!("failed to copy auth from host mount: {e}"),
-            })?;
-
-        tracing::info!(
-            job_id = %self.config.job_id,
-            files_copied = copied,
-            "Copied auth config from host mount into container"
-        );
         Ok(())
     }
 
@@ -497,16 +492,12 @@ impl ClaudeBridgeRuntime {
 
     /// Post a job event to the orchestrator.
     async fn report_event(&self, event_type: &str, data: &serde_json::Value) {
-        let payload = JobEventPayload {
-            event_type: event_type.to_string(),
-            data: data.clone(),
-        };
-        self.client.post_event(&payload).await;
+        post_job_event(&self.client, event_type, data).await;
     }
 
     /// Poll the orchestrator for a follow-up prompt.
     async fn poll_for_prompt(&self) -> Result<Option<PromptResponse>, WorkerError> {
-        self.client.poll_prompt().await
+        poll_for_prompt(&self.client).await
     }
 }
 
@@ -636,78 +627,11 @@ fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
 /// entries that can't be read (e.g. permission-restricted files owned by a
 /// different uid on a read-only bind mount). Returns the number of files
 /// successfully copied.
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<usize> {
-    let entries = match std::fs::read_dir(src) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::debug!("Skipping unreadable directory {}: {}", src.display(), e);
-            return Ok(0);
-        }
-    };
-
-    let mut copied = 0;
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!("Skipping unreadable entry in {}: {}", src.display(), e);
-                continue;
-            }
-        };
-
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(e) => {
-                tracing::debug!(
-                    "Skipping entry with unreadable type {}: {}",
-                    src_path.display(),
-                    e
-                );
-                continue;
-            }
-        };
-
-        // Skip symlinks to avoid following links outside the mount.
-        if file_type.is_symlink() {
-            tracing::debug!("Skipping symlink {}", src_path.display());
-            continue;
-        }
-
-        if file_type.is_dir() {
-            if std::fs::create_dir_all(&dst_path).is_ok() {
-                copied += copy_dir_recursive(&src_path, &dst_path)?;
-            }
-        } else {
-            match std::fs::copy(&src_path, &dst_path) {
-                Ok(_) => copied += 1,
-                Err(e) => {
-                    tracing::debug!("Skipping unreadable file {}: {}", src_path.display(), e);
-                }
-            }
-        }
-    }
-    Ok(copied)
-}
-
-fn truncate(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        s
-    } else {
-        // Walk back from max_len to find a valid UTF-8 char boundary.
-        let mut end = max_len;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        &s[..end]
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker::bridge_common::copy_dir_recursive;
 
     #[test]
     fn test_parse_system_event() {

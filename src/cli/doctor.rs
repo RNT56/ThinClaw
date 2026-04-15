@@ -260,9 +260,7 @@ async fn try_pg_connect() -> Result<(), String> {
 }
 
 fn check_workspace_dir() -> CheckResult {
-    let dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw");
+    let dir = crate::platform::resolve_thinclaw_home();
 
     if dir.exists() {
         if dir.is_dir() {
@@ -308,10 +306,18 @@ mod tests {
     use crate::cli::doctor::*;
 
     #[test]
-    fn check_binary_finds_sh() {
-        match check_binary("sh", &["-c", "echo ok"]) {
+    fn check_binary_finds_host_shell() {
+        let launcher = crate::platform::shell_launcher();
+        let mut args: Vec<&str> = launcher.prefix_args().to_vec();
+        args.push("echo ok");
+
+        match check_binary(launcher.program(), &args) {
             CheckResult::Pass(_) => {}
-            other => panic!("expected Pass for sh, got: {}", format_result(&other)),
+            other => panic!(
+                "expected Pass for host shell {}, got: {}",
+                launcher.program(),
+                format_result(&other)
+            ),
         }
     }
 

@@ -27,9 +27,7 @@ pub struct RuntimeBehavior {
 
 impl Default for RuntimeBehavior {
     fn default() -> Self {
-        let thinclaw_home = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".thinclaw");
+        let thinclaw_home = crate::platform::resolve_thinclaw_home();
 
         Self {
             suppress_tool_errors: false,

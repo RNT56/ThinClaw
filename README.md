@@ -43,7 +43,7 @@ ThinClaw is not just a chat wrapper. It is the runtime that handles sessions, to
 
 ## Quick Start
 
-The fastest local path is:
+macOS / Linux:
 
 ```bash
 # 1. Install the latest release
@@ -64,6 +64,24 @@ thinclaw run --no-onboard
 # http://127.0.0.1:3000
 ```
 
+Windows (PowerShell):
+
+```powershell
+# 1. Install the latest MSI or portable ZIP from GitHub Releases
+# https://github.com/RNT56/ThinClaw/releases
+
+# 2. Run onboarding
+thinclaw onboard
+# or fully reset ThinClaw state and start over:
+# thinclaw reset --yes
+
+# 3. Start ThinClaw locally
+thinclaw run --no-onboard
+
+# 4. Open the gateway
+# http://127.0.0.1:3000
+```
+
 By default, `thinclaw` and `thinclaw run` use the same startup path and keep terminal output quiet, only surfacing warnings and errors during startup. If you want the full initialization log stream for troubleshooting, start it with either:
 
 ```bash
@@ -73,7 +91,7 @@ thinclaw --debug run --no-onboard
 
 If you need more targeted filtering, `RUST_LOG=...` still works and takes precedence.
 
-For a deeper setup path, including service mode, remote access, and provider guidance, use the docs hub at [docs/README.md](docs/README.md).
+For a deeper setup path, including service mode, remote access, provider guidance, Windows service management, and external dependencies, use the docs hub at [docs/README.md](docs/README.md).
 
 The onboarding flow now uses a calmer "Humanist Cockpit" framing in both CLI and TUI modes, with shared readiness summaries, skin-aware presentation, and saved follow-up notes so operators can pause setup without losing context.
 
@@ -114,9 +132,22 @@ ThinClaw is designed for more than interactive chat:
 You can run ThinClaw:
 
 - locally on your own machine
-- as a long-running service on macOS or Linux
+- as a long-running service on macOS, Linux, or Windows
 - behind the built-in gateway
 - embedded inside Scrappy
+
+## Host Support Matrix
+
+| Host Surface | macOS | Linux | Windows |
+|---|---|---|---|
+| Local CLI / gateway host | Supported | Supported | Supported |
+| Native OS secure store | Supported | Supported | Supported |
+| `thinclaw service` lifecycle | Supported | Supported | Supported |
+| Local browser automation | Chrome / Brave | Chrome / Chromium / Brave | Chrome / Edge / Brave |
+| Docker browser fallback | Supported | Supported | Docker Desktop |
+| Camera / microphone capture | Supported | Supported | Supported with `ffmpeg` |
+| Signal attachments | Supported | Supported | Supported, override with `SIGNAL_ATTACHMENTS_DIR` when needed |
+| Apple Mail / iMessage channels | Supported | Unsupported | Unsupported |
 
 ## Core Capabilities
 

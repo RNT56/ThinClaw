@@ -1236,6 +1236,12 @@ fn collect_signal_attachments(attachments: &[SignalAttachment]) -> Vec<MediaCont
 
 /// Resolve the signal-cli attachment directory.
 fn signal_attachment_dir() -> Option<std::path::PathBuf> {
+    if let Some(override_dir) = std::env::var_os("SIGNAL_ATTACHMENTS_DIR")
+        && !override_dir.is_empty()
+    {
+        return Some(std::path::PathBuf::from(override_dir));
+    }
+
     let home = dirs::home_dir()?;
 
     // Linux: ~/.local/share/signal-cli/attachments
@@ -1248,6 +1254,21 @@ fn signal_attachment_dir() -> Option<std::path::PathBuf> {
     let macos_path = home.join("Library/Application Support/signal-cli/attachments");
     if macos_path.is_dir() {
         return Some(macos_path);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let windows_paths = [
+            home.join("AppData/Roaming/signal-cli/attachments"),
+            home.join("AppData/Local/signal-cli/attachments"),
+            home.join("scoop/persist/signal-cli/attachments"),
+        ];
+        for candidate in windows_paths {
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+        return Some(home.join("AppData/Roaming/signal-cli/attachments"));
     }
 
     // Fallback: try the Linux path anyway (it may be created later)
@@ -1505,7 +1526,12 @@ async fn sse_listener(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+    use tempfile::tempdir;
+
+    static SIGNAL_ATTACHMENTS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_config() -> SignalConfig {
         SignalConfig {
@@ -2739,5 +2765,25 @@ mod tests {
             )
         );
         Ok(())
+    }
+
+    #[test]
+    fn signal_attachment_dir_prefers_override_env() {
+        let _guard = SIGNAL_ATTACHMENTS_ENV_LOCK.lock().unwrap();
+        let temp = tempdir().unwrap();
+
+        // SAFETY: Tests serialize access to this process-global env var with a mutex.
+        unsafe {
+            std::env::set_var("SIGNAL_ATTACHMENTS_DIR", temp.path());
+        }
+
+        let resolved = signal_attachment_dir();
+
+        // SAFETY: Protected by the same mutex as the matching set_var above.
+        unsafe {
+            std::env::remove_var("SIGNAL_ATTACHMENTS_DIR");
+        }
+
+        assert_eq!(resolved.as_deref(), Some(temp.path()));
     }
 }

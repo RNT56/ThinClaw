@@ -27,11 +27,7 @@ pub(crate) async fn serve_project_file(project_id: &str, path: &str) -> axum::re
         return (StatusCode::BAD_REQUEST, "Invalid project ID").into_response();
     }
 
-    let base = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".thinclaw")
-        .join("projects")
-        .join(project_id);
+    let base = crate::platform::resolve_data_dir("projects").join(project_id);
 
     let file_path = base.join(path);
 

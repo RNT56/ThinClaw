@@ -12,11 +12,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::context::JobContext;
+use crate::platform::shell_launcher;
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
 };
@@ -302,9 +302,8 @@ impl Tool for ProcessTool {
                 }
 
                 // Spawn the process
-                let mut child = Command::new("sh")
-                    .arg("-c")
-                    .arg(command)
+                let mut child = shell_launcher()
+                    .tokio_command(command)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .stdin(std::process::Stdio::piped())

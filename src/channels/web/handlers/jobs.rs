@@ -244,6 +244,7 @@ pub(crate) async fn jobs_restart_handler(
 
     let mode = match store.get_sandbox_job_mode(old_job_id).await {
         Ok(Some(m)) if m == "claude_code" => JobMode::ClaudeCode,
+        Ok(Some(m)) if m == "codex_code" => JobMode::CodexCode,
         _ => JobMode::Worker,
     };
 
@@ -292,7 +293,7 @@ pub(crate) async fn jobs_prompt_handler(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let prompt_queue = state.prompt_queue.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
-        "Claude Code not configured".to_string(),
+        "Container coding agents not configured".to_string(),
     ))?;
 
     let job_id: uuid::Uuid = id

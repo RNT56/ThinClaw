@@ -77,7 +77,10 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         // triggers macOS unlock+authorization dialogs, which is bad UX for
         // a read-only status command. If onboarding completed with keychain
         // storage, the key is there; we just can't cheaply verify it.
-        println!("env not set (keychain may be configured)");
+        println!(
+            "env not set ({} may be configured)",
+            crate::platform::secure_store::display_name()
+        );
     }
 
     // Embeddings
@@ -210,15 +213,9 @@ fn count_wasm_files(dir: &std::path::Path) -> usize {
 }
 
 fn default_tools_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("tools")
+    crate::platform::state_paths().tools_dir
 }
 
 fn default_channels_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("channels")
+    crate::platform::state_paths().channels_dir
 }

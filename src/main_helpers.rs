@@ -190,6 +190,36 @@ pub(crate) async fn run_claude_bridge(
         .map_err(|e| anyhow::anyhow!("Claude bridge failed: {}", e))
 }
 
+#[cfg(feature = "docker-sandbox")]
+/// Run the Codex bridge subcommand (inside Docker containers).
+pub(crate) async fn run_codex_bridge(
+    job_id: uuid::Uuid,
+    orchestrator_url: &str,
+    model: &str,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        "Starting Codex bridge for job {} (orchestrator: {}, model: {})",
+        job_id,
+        orchestrator_url,
+        model
+    );
+
+    let config = thinclaw::worker::codex_bridge::CodexBridgeConfig {
+        job_id,
+        orchestrator_url: orchestrator_url.to_string(),
+        model: model.to_string(),
+        timeout: std::time::Duration::from_secs(1800),
+    };
+
+    let runtime = thinclaw::worker::CodexBridgeRuntime::new(config)
+        .map_err(|e| anyhow::anyhow!("Codex bridge init failed: {}", e))?;
+
+    runtime
+        .run()
+        .await
+        .map_err(|e| anyhow::anyhow!("Codex bridge failed: {}", e))
+}
+
 /// Start managed tunnel if configured and no static URL is already set.
 #[cfg(feature = "tunnel")]
 pub(crate) async fn start_tunnel(

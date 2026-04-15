@@ -1,4 +1,4 @@
-//! Sandbox wizard steps: Docker sandbox and Claude Code.
+//! Sandbox wizard steps: Docker sandbox and container coding agents.
 
 use secrecy::SecretString;
 
@@ -9,11 +9,17 @@ use crate::setup::prompts::{
 use super::{SetupError, SetupWizard};
 
 const ANTHROPIC_PROVIDER_SECRET_NAME: &str = "llm_anthropic_api_key";
+const OPENAI_PROVIDER_SECRET_NAME: &str = "llm_openai_api_key";
 
 impl SetupWizard {
     pub(super) fn enable_anthropic_provider_for_claude_code_key(&mut self) {
         self.ensure_provider_enabled("anthropic");
         self.ensure_provider_slot_defaults("anthropic");
+    }
+
+    pub(super) fn enable_openai_provider_for_codex_code_key(&mut self) {
+        self.ensure_provider_enabled("openai");
+        self.ensure_provider_slot_defaults("openai");
     }
 
     async fn maybe_link_claude_code_api_key_to_anthropic_provider(
@@ -68,6 +74,56 @@ impl SetupWizard {
         Ok(())
     }
 
+    async fn maybe_link_codex_code_api_key_to_openai_provider(
+        &mut self,
+        api_key: &str,
+    ) -> Result<(), SetupError> {
+        let trimmed = api_key.trim();
+        if trimmed.is_empty() || self.has_saved_secret(OPENAI_PROVIDER_SECRET_NAME).await {
+            return Ok(());
+        }
+
+        println!();
+        print_info("ThinClaw can also reuse this OpenAI API key for the general OpenAI provider.");
+        print_info("That makes it available in Provider Vault, the Web UI, and OpenAI routing.");
+        println!();
+
+        if !confirm(
+            "Also save this API key for ThinClaw's OpenAI provider and Web UI?",
+            true,
+        )
+        .map_err(SetupError::Io)?
+        {
+            return Ok(());
+        }
+
+        let Ok(ctx) = self.init_secrets_context().await else {
+            print_info(
+                "Secrets store not available. Codex will still use the key, but the shared OpenAI provider key was not saved.",
+            );
+            return Ok(());
+        };
+
+        if let Err(e) = ctx
+            .save_secret(
+                OPENAI_PROVIDER_SECRET_NAME,
+                &SecretString::from(trimmed.to_string()),
+            )
+            .await
+        {
+            print_error(&format!(
+                "Failed to save the shared OpenAI provider key: {}",
+                e
+            ));
+            print_info("Codex will keep using its own key source.");
+            return Ok(());
+        }
+
+        self.enable_openai_provider_for_codex_code_key();
+        print_success("OpenAI provider credentials saved for reuse.");
+        Ok(())
+    }
+
     pub(super) async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
         // ── Part A: Local tools for the main agent ───────────────────────
         println!();
@@ -100,14 +156,16 @@ impl SetupWizard {
         print_info("═══ Docker Sandbox for Worker Processes ═══");
         println!();
         print_info("Docker sandboxing is separate from local tools above.");
-        print_info("It isolates worker processes like Claude Code so they run inside");
+        print_info("It isolates worker processes like Claude Code and Codex so they run inside");
         print_info("Docker containers without access to your credentials or full filesystem.");
         println!();
         print_info(
             "This does not affect ThinClaw's main agent. It still follows the local tools setting above.",
         );
         println!();
-        print_info("Docker is required for the Claude Code sandbox and container-based builds.");
+        print_info(
+            "Docker is required for container coding agent sandboxes and container-based builds.",
+        );
         println!();
 
         if !confirm("Enable Docker sandbox for worker processes?", false).map_err(SetupError::Io)? {
@@ -198,7 +256,9 @@ impl SetupWizard {
                     "Worker image '{}' wasn't found locally.",
                     image_name
                 ));
-                print_info("This image is required for the Docker sandbox and Claude Code jobs.");
+                print_info(
+                    "This image is required for the Docker sandbox and container coding agent jobs.",
+                );
                 print_info("Building it now usually takes 5-15 minutes, one time.");
                 println!();
 
@@ -281,8 +341,8 @@ impl SetupWizard {
             .filter(|value| !value.trim().is_empty());
         let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some();
 
-        let keychain_api_key = crate::secrets::keychain::get_api_key(
-            crate::secrets::keychain::CLAUDE_CODE_API_KEY_ACCOUNT,
+        let keychain_api_key = crate::platform::secure_store::get_api_key(
+            crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
         )
         .await
         .filter(|value| !value.trim().is_empty());
@@ -292,7 +352,10 @@ impl SetupWizard {
             self.maybe_link_claude_code_api_key_to_anthropic_provider(api_key)
                 .await?;
         } else if let Some(api_key) = keychain_api_key.as_deref() {
-            print_success("✓ Anthropic API key found in the OS keychain. Using it now.");
+            print_success(&format!(
+                "✓ Anthropic API key found in the {}. Using it now.",
+                crate::platform::secure_store::display_name()
+            ));
             self.maybe_link_claude_code_api_key_to_anthropic_provider(api_key)
                 .await?;
         } else if has_oauth {
@@ -300,12 +363,18 @@ impl SetupWizard {
             print_info("  (Token from 'claude login' — typically valid for 8-12 hours)");
         } else {
             print_info("No existing auth found. Claude Code containers need one of these:");
-            print_info("  1. Anthropic API key (stored securely in OS keychain)");
+            print_info(&format!(
+                "  1. Anthropic API key (stored securely in {})",
+                crate::platform::secure_store::display_name()
+            ));
             print_info("  2. OAuth session from 'claude login' on this machine");
             println!();
 
             if confirm(
-                "Do you want to store an Anthropic API key in the OS keychain?",
+                &format!(
+                    "Do you want to store an Anthropic API key in the {}?",
+                    crate::platform::secure_store::display_name()
+                ),
                 true,
             )
             .map_err(SetupError::Io)?
@@ -313,14 +382,17 @@ impl SetupWizard {
                 let api_key = input("Anthropic API key (sk-ant-...)").map_err(SetupError::Io)?;
 
                 if api_key.starts_with("sk-ant-") {
-                    match crate::secrets::keychain::store_api_key(
-                        crate::secrets::keychain::CLAUDE_CODE_API_KEY_ACCOUNT,
+                    match crate::platform::secure_store::store_api_key(
+                        crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
                         &api_key,
                     )
                     .await
                     {
                         Ok(()) => {
-                            print_success("API key stored securely in the OS keychain.");
+                            print_success(&format!(
+                                "API key stored securely in the {}.",
+                                crate::platform::secure_store::display_name()
+                            ));
                             print_info(
                                 "It will be injected into Claude Code containers at runtime.",
                             );
@@ -328,7 +400,11 @@ impl SetupWizard {
                                 .await?;
                         }
                         Err(e) => {
-                            print_error(&format!("Failed to store in keychain: {}", e));
+                            print_error(&format!(
+                                "Failed to store in {}: {}",
+                                crate::platform::secure_store::display_name(),
+                                e
+                            ));
                             print_info(
                                 "You can set ANTHROPIC_API_KEY in your environment instead.",
                             );
@@ -375,6 +451,132 @@ impl SetupWizard {
             "Claude Code enabled (model: {}, max turns: {})",
             model_display, turns_display
         ));
+
+        Ok(())
+    }
+
+    pub(super) async fn step_codex_code(&mut self) -> Result<(), SetupError> {
+        if !self.settings.sandbox.enabled {
+            print_info("Codex requires the Docker sandbox, which is not enabled yet.");
+            print_info("Skipping Codex setup.");
+            self.settings.codex_code_enabled = false;
+            return Ok(());
+        }
+
+        print_info("Codex sandbox lets ThinClaw delegate coding tasks");
+        print_info("to OpenAI's Codex CLI running inside a Docker container.");
+        print_info(
+            "It works best with an OpenAI API key and can also reuse a local Codex auth file.",
+        );
+        println!();
+
+        if !confirm("Enable Codex sandbox?", false).map_err(SetupError::Io)? {
+            self.settings.codex_code_enabled = false;
+            print_info("Codex disabled. You can turn it on later with CODEX_CODE_ENABLED=true.");
+            return Ok(());
+        }
+
+        self.settings.codex_code_enabled = true;
+
+        println!();
+        print_info("═══ Codex Authentication ═══");
+        println!();
+
+        let env_api_key = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let keychain_api_key = crate::platform::secure_store::get_api_key(
+            crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
+        )
+        .await
+        .filter(|value| !value.trim().is_empty());
+        let auth_path = crate::config::CodexCodeConfig::resolved_auth_file_path();
+        let has_auth_file = auth_path.is_file();
+
+        if let Some(api_key) = env_api_key.as_deref() {
+            print_success("✓ OPENAI_API_KEY found in the environment. Using it now.");
+            self.maybe_link_codex_code_api_key_to_openai_provider(api_key)
+                .await?;
+        } else if let Some(api_key) = keychain_api_key.as_deref() {
+            print_success(&format!(
+                "✓ OpenAI API key found in the {}. Using it now.",
+                crate::platform::secure_store::display_name()
+            ));
+            self.maybe_link_codex_code_api_key_to_openai_provider(api_key)
+                .await?;
+        } else if has_auth_file {
+            print_success("✓ Codex auth file found. Using it now.");
+            print_info(&format!("  ({})", auth_path.display()));
+        } else {
+            print_info("No existing auth found. Codex containers need one of these:");
+            print_info(&format!(
+                "  1. OpenAI API key (stored securely in {})",
+                crate::platform::secure_store::display_name()
+            ));
+            print_info(&format!("  2. Codex auth file at {}", auth_path.display()));
+            println!();
+
+            if confirm(
+                &format!(
+                    "Do you want to store an OpenAI API key in the {}?",
+                    crate::platform::secure_store::display_name()
+                ),
+                true,
+            )
+            .map_err(SetupError::Io)?
+            {
+                let api_key = input("OpenAI API key (sk-...)").map_err(SetupError::Io)?;
+                if api_key.starts_with("sk-") {
+                    match crate::platform::secure_store::store_api_key(
+                        crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
+                        &api_key,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            print_success(&format!(
+                                "API key stored securely in the {}.",
+                                crate::platform::secure_store::display_name()
+                            ));
+                            print_info("It will be injected into Codex containers at runtime.");
+                            self.maybe_link_codex_code_api_key_to_openai_provider(&api_key)
+                                .await?;
+                        }
+                        Err(e) => {
+                            print_error(&format!(
+                                "Failed to store in {}: {}",
+                                crate::platform::secure_store::display_name(),
+                                e
+                            ));
+                            print_info("You can set OPENAI_API_KEY in your environment instead.");
+                        }
+                    }
+                } else {
+                    print_error("That doesn't look like an OpenAI API key (expected sk-...).");
+                    print_info("You can set OPENAI_API_KEY in your environment later.");
+                }
+            } else {
+                print_info("No API key stored. You can:");
+                print_info("  • Set OPENAI_API_KEY in your environment");
+                print_info("  • Run Codex locally so it creates an auth file");
+            }
+        }
+
+        println!();
+        let model = optional_input("Codex model", Some("default: gpt-5.3-codex"))
+            .map_err(SetupError::Io)?;
+        if let Some(m) = model
+            && !m.is_empty()
+        {
+            self.settings.codex_code_model = Some(m);
+        }
+
+        let model_display = self
+            .settings
+            .codex_code_model
+            .as_deref()
+            .unwrap_or("gpt-5.3-codex");
+        print_success(&format!("Codex enabled (model: {})", model_display));
 
         Ok(())
     }

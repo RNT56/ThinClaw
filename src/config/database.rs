@@ -123,8 +123,5 @@ impl DatabaseConfig {
 
 /// Default libSQL database path (~/.thinclaw/thinclaw.db).
 pub fn default_libsql_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("thinclaw.db")
+    crate::platform::resolve_data_dir("thinclaw.db")
 }

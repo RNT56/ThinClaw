@@ -25,6 +25,7 @@ pub struct BootInfo {
     pub sandbox_enabled: bool,
     pub docker_status: crate::sandbox::detect::DockerStatus,
     pub claude_code_enabled: bool,
+    pub codex_code_enabled: bool,
     pub routines_enabled: bool,
     pub skills_enabled: bool,
     pub channels: Vec<String>,
@@ -124,10 +125,17 @@ pub fn print_boot_screen(info: &BootInfo) {
         "    {muted}tools{reset}     {accent}{}{reset} {muted}registered{reset}",
         info.tool_count
     );
-    if info.routines_enabled || info.skills_enabled || info.claude_code_enabled {
+    if info.routines_enabled
+        || info.skills_enabled
+        || info.claude_code_enabled
+        || info.codex_code_enabled
+    {
         let mut feature_tags = Vec::new();
         if info.claude_code_enabled {
             feature_tags.push("claude-code");
+        }
+        if info.codex_code_enabled {
+            feature_tags.push("codex-code");
         }
         if info.routines_enabled {
             feature_tags.push("routines");
@@ -244,6 +252,7 @@ mod tests {
             sandbox_enabled: true,
             docker_status: DockerStatus::Available,
             claude_code_enabled: false,
+            codex_code_enabled: false,
             routines_enabled: true,
             skills_enabled: true,
             channels: vec![
@@ -278,6 +287,7 @@ mod tests {
             sandbox_enabled: false,
             docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
+            codex_code_enabled: false,
             routines_enabled: false,
             skills_enabled: false,
             channels: vec![],
@@ -308,6 +318,7 @@ mod tests {
             sandbox_enabled: false,
             docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
+            codex_code_enabled: false,
             routines_enabled: false,
             skills_enabled: false,
             channels: vec!["repl".to_string()],

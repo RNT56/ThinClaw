@@ -13,10 +13,7 @@ use clap::Subcommand;
 
 /// Default log directory.
 fn default_log_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("logs")
+    crate::platform::state_paths().logs_dir
 }
 
 #[derive(Subcommand, Debug, Clone)]

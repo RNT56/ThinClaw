@@ -31,7 +31,28 @@ const MAX_OUTPUT_SIZE: usize = 64 * 1024;
 const MAX_CODE_LENGTH: usize = 100 * 1024;
 
 /// Safe environment variables to forward.
-const SAFE_ENV_VARS: &[&str] = &["PATH", "HOME", "LANG", "LC_ALL", "TERM", "TMPDIR"];
+const SAFE_ENV_VARS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "ComSpec",
+    "SystemRoot",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InterpreterConfig {
+    program: String,
+    prefix_args: Vec<String>,
+    extension: &'static str,
+}
 
 /// Execute code tool.
 pub struct ExecuteCodeTool {
@@ -59,26 +80,111 @@ impl ExecuteCodeTool {
         self
     }
 
+    fn language_options() -> Vec<&'static str> {
+        if cfg!(target_os = "windows") {
+            let mut options = vec!["python", "javascript", "typescript", "powershell", "cmd"];
+            if Self::find_in_path(&["bash.exe", "bash"]).is_some() {
+                options.push("bash");
+            }
+            options
+        } else {
+            vec!["python", "javascript", "typescript", "bash"]
+        }
+    }
+
+    fn find_in_path(names: &[&str]) -> Option<String> {
+        let path = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path) {
+            for name in names {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Some(candidate.to_string_lossy().to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// Determine the interpreter and file extension for a language.
-    fn interpreter_for(language: &str) -> Result<(&'static str, &'static str), ToolError> {
+    fn interpreter_for(language: &str) -> Result<InterpreterConfig, ToolError> {
         match language.to_lowercase().as_str() {
-            "python" | "py" | "python3" => Ok(("python3", ".py")),
-            "javascript" | "js" | "node" => Ok(("node", ".js")),
-            "typescript" | "ts" => Ok(("npx", ".ts")),
-            "bash" | "sh" | "shell" => Ok(("bash", ".sh")),
+            "python" | "py" | "python3" => {
+                if cfg!(target_os = "windows") {
+                    if let Some(program) = Self::find_in_path(&["python.exe", "python"]) {
+                        Ok(InterpreterConfig {
+                            program,
+                            prefix_args: Vec::new(),
+                            extension: ".py",
+                        })
+                    } else {
+                        Ok(InterpreterConfig {
+                            program: Self::find_in_path(&["py.exe", "py"])
+                                .unwrap_or_else(|| "py".to_string()),
+                            prefix_args: vec!["-3".to_string()],
+                            extension: ".py",
+                        })
+                    }
+                } else {
+                    Ok(InterpreterConfig {
+                        program: "python3".to_string(),
+                        prefix_args: Vec::new(),
+                        extension: ".py",
+                    })
+                }
+            }
+            "javascript" | "js" | "node" => Ok(InterpreterConfig {
+                program: "node".to_string(),
+                prefix_args: Vec::new(),
+                extension: ".js",
+            }),
+            "typescript" | "ts" => Ok(InterpreterConfig {
+                program: "npx".to_string(),
+                prefix_args: vec!["tsx".to_string()],
+                extension: ".ts",
+            }),
+            "bash" | "sh" | "shell" if !cfg!(target_os = "windows") => Ok(InterpreterConfig {
+                program: "bash".to_string(),
+                prefix_args: Vec::new(),
+                extension: ".sh",
+            }),
+            "bash" | "sh" | "shell" => {
+                let program = Self::find_in_path(&["bash.exe", "bash"]).ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "Unsupported language: 'bash'. Install bash.exe or use cmd/powershell on Windows."
+                            .to_string(),
+                    )
+                })?;
+                Ok(InterpreterConfig {
+                    program,
+                    prefix_args: Vec::new(),
+                    extension: ".sh",
+                })
+            }
+            "powershell" | "pwsh" if cfg!(target_os = "windows") => Ok(InterpreterConfig {
+                program: Self::find_in_path(&["pwsh.exe", "pwsh"])
+                    .or_else(|| Self::find_in_path(&["powershell.exe", "powershell"]))
+                    .unwrap_or_else(|| "powershell".to_string()),
+                prefix_args: vec!["-File".to_string()],
+                extension: ".ps1",
+            }),
+            "cmd" if cfg!(target_os = "windows") => Ok(InterpreterConfig {
+                program: "cmd".to_string(),
+                prefix_args: vec!["/C".to_string()],
+                extension: ".cmd",
+            }),
             _ => Err(ToolError::InvalidParameters(format!(
-                "Unsupported language: '{}'. Use: python, javascript, typescript, bash",
-                language
+                "Unsupported language: '{}'. Use: {}",
+                language,
+                Self::language_options().join(", ")
             ))),
         }
     }
 
     /// Build args for the interpreter.
-    fn interpreter_args(language: &str, script_path: &str) -> Vec<String> {
-        match language.to_lowercase().as_str() {
-            "typescript" | "ts" => vec!["tsx".to_string(), script_path.to_string()],
-            _ => vec![script_path.to_string()],
-        }
+    fn interpreter_args(config: &InterpreterConfig, script_path: &str) -> Vec<String> {
+        let mut args = config.prefix_args.clone();
+        args.push(script_path.to_string());
+        args
     }
 
     /// Execute code in a subprocess.
@@ -88,11 +194,15 @@ impl ExecuteCodeTool {
         code: &str,
         timeout: Duration,
     ) -> Result<(String, i32, Duration), ToolError> {
-        let (interpreter, ext) = Self::interpreter_for(language)?;
+        let interpreter = Self::interpreter_for(language)?;
 
         // Write code to a temp file
         let tmp_dir = std::env::temp_dir();
-        let script_name = format!("thinclaw_exec_{}{}", uuid::Uuid::new_v4().simple(), ext);
+        let script_name = format!(
+            "thinclaw_exec_{}{}",
+            uuid::Uuid::new_v4().simple(),
+            interpreter.extension
+        );
         let script_path = tmp_dir.join(&script_name);
 
         tokio::fs::write(&script_path, code)
@@ -105,10 +215,10 @@ impl ExecuteCodeTool {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
         let script_path_str = script_path.to_string_lossy().to_string();
-        let args = Self::interpreter_args(language, &script_path_str);
+        let args = Self::interpreter_args(&interpreter, &script_path_str);
 
         // Build subprocess with sanitized environment
-        let mut cmd = Command::new(interpreter);
+        let mut cmd = Command::new(&interpreter.program);
         cmd.args(&args)
             .current_dir(&workdir)
             .stdin(std::process::Stdio::null())
@@ -134,7 +244,7 @@ impl ExecuteCodeTool {
         let mut child = cmd.spawn().map_err(|e| {
             ToolError::ExecutionFailed(format!(
                 "Failed to spawn {}: {} (is {} installed?)",
-                interpreter, e, interpreter
+                interpreter.program, e, interpreter.program
             ))
         })?;
 
@@ -234,19 +344,20 @@ impl Tool for ExecuteCodeTool {
     }
 
     fn description(&self) -> &str {
-        "Execute code in a sandboxed subprocess. Supports Python (python3), JavaScript \
-         (node), TypeScript (tsx), and Bash. Code runs with a scrubbed environment — \
+        "Execute code in a sandboxed subprocess. Supports Python, JavaScript, TypeScript, \
+         and platform-native shell languages. Code runs with a scrubbed environment — \
          API keys and secrets are NOT accessible. Output is captured and returned. \
          Best for: data processing, calculations, testing logic, prototyping."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
+        let languages = Self::language_options();
         serde_json::json!({
             "type": "object",
             "properties": {
                 "language": {
                     "type": "string",
-                    "enum": ["python", "javascript", "typescript", "bash"],
+                    "enum": languages,
                     "description": "Programming language of the code"
                 },
                 "code": {
@@ -329,26 +440,43 @@ mod tests {
     #[test]
     fn test_interpreter_for() {
         assert_eq!(
-            ExecuteCodeTool::interpreter_for("python").unwrap(),
-            ("python3", ".py")
+            ExecuteCodeTool::interpreter_for("python")
+                .unwrap()
+                .extension,
+            ".py"
         );
         assert_eq!(
-            ExecuteCodeTool::interpreter_for("javascript").unwrap(),
-            ("node", ".js")
+            ExecuteCodeTool::interpreter_for("javascript")
+                .unwrap()
+                .program,
+            "node"
         );
-        assert_eq!(
-            ExecuteCodeTool::interpreter_for("bash").unwrap(),
-            ("bash", ".sh")
-        );
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                ExecuteCodeTool::interpreter_for("cmd").unwrap().extension,
+                ".cmd"
+            );
+        } else {
+            assert_eq!(
+                ExecuteCodeTool::interpreter_for("bash").unwrap().program,
+                "bash"
+            );
+        }
         assert!(ExecuteCodeTool::interpreter_for("cobol").is_err());
     }
 
     #[test]
     fn test_interpreter_args() {
-        let args = ExecuteCodeTool::interpreter_args("python", "/tmp/test.py");
+        let args = ExecuteCodeTool::interpreter_args(
+            &ExecuteCodeTool::interpreter_for("python").unwrap(),
+            "/tmp/test.py",
+        );
         assert_eq!(args, vec!["/tmp/test.py".to_string()]);
 
-        let args = ExecuteCodeTool::interpreter_args("typescript", "/tmp/test.ts");
+        let args = ExecuteCodeTool::interpreter_args(
+            &ExecuteCodeTool::interpreter_for("typescript").unwrap(),
+            "/tmp/test.ts",
+        );
         assert_eq!(args, vec!["tsx".to_string(), "/tmp/test.ts".to_string()]);
     }
 
@@ -387,6 +515,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_bash() {
+        if cfg!(target_os = "windows")
+            && ExecuteCodeTool::find_in_path(&["bash.exe", "bash"]).is_none()
+        {
+            return;
+        }
         let tool = ExecuteCodeTool::new();
         let ctx = JobContext::default();
 

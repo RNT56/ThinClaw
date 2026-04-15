@@ -20,9 +20,7 @@ use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
 
 /// Default tools directory.
 fn default_tools_dir() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".thinclaw").join("tools"))
-        .unwrap_or_else(|| PathBuf::from(".thinclaw/tools"))
+    crate::platform::state_paths().tools_dir
 }
 
 #[derive(Subcommand, Debug, Clone)]

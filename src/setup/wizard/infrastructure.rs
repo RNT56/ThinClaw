@@ -383,7 +383,10 @@ impl SetupWizard {
 
     /// Step 2: Security (secrets master key).
     pub(super) async fn step_security(&mut self) -> Result<(), SetupError> {
-        print_info("Recommended: use the OS keychain for local installs.");
+        let secure_store = crate::platform::secure_store::display_name();
+        print_info(&format!(
+            "Recommended: use the {secure_store} for local installs."
+        ));
         print_info("Use environment mode only when your deployment already supplies secrets.");
         println!();
 
@@ -401,8 +404,10 @@ impl SetupWizard {
         // instead of has_master_key() so we can cache the key bytes and build
         // SecretsCrypto eagerly, avoiding redundant keychain accesses later
         // (each access triggers macOS system dialogs).
-        print_info("Checking the OS keychain for an existing master key...");
-        if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
+        print_info(&format!(
+            "Checking the {secure_store} for an existing master key..."
+        ));
+        if let Ok(keychain_key_bytes) = crate::platform::secure_store::get_master_key().await {
             let key_hex: String = keychain_key_bytes
                 .iter()
                 .map(|b| format!("{:02x}", b))
@@ -412,10 +417,14 @@ impl SetupWizard {
                     .map_err(|e| SetupError::Config(e.to_string()))?,
             ));
 
-            print_info("Found an existing master key in the OS keychain.");
-            if confirm("Use existing keychain key?", true).map_err(SetupError::Io)? {
+            print_info(&format!(
+                "Found an existing master key in the {secure_store}."
+            ));
+            if confirm(&format!("Use existing {secure_store} key?"), true)
+                .map_err(SetupError::Io)?
+            {
                 self.settings.secrets_master_key_source = KeySource::Keychain;
-                print_success("Security configured (keychain)");
+                print_success(&format!("Security configured ({secure_store})"));
                 return Ok(());
             }
             // User declined the existing key; clear the cached crypto so a fresh
@@ -430,7 +439,7 @@ impl SetupWizard {
         println!();
 
         let options = [
-            "OS Keychain (recommended for local installs)",
+            "OS secure store (recommended for local installs)",
             "Environment variable (for CI or Docker)",
             "Skip (disable secrets features)",
         ];
@@ -439,14 +448,14 @@ impl SetupWizard {
 
         match choice {
             0 => {
-                // Generate and store in keychain
+                // Generate and store in the OS secure store
                 print_info("Generating master key...");
-                let key = crate::secrets::keychain::generate_master_key();
+                let key = crate::platform::secure_store::generate_master_key();
 
-                crate::secrets::keychain::store_master_key(&key)
+                crate::platform::secure_store::store_master_key(&key)
                     .await
                     .map_err(|e| {
-                        SetupError::Config(format!("Failed to store in keychain: {}", e))
+                        SetupError::Config(format!("Failed to store in {secure_store}: {}", e))
                     })?;
 
                 // Also create crypto instance
@@ -457,16 +466,27 @@ impl SetupWizard {
                 ));
 
                 self.settings.secrets_master_key_source = KeySource::Keychain;
-                print_success("Master key generated and saved to the OS keychain");
+                print_success(&format!(
+                    "Master key generated and saved to the {secure_store}"
+                ));
             }
             1 => {
                 // Env var mode
                 print_info("Generate a key and add it to your environment:");
-                let key_hex = crate::secrets::keychain::generate_master_key_hex();
+                let key_hex = crate::platform::secure_store::generate_master_key_hex();
                 println!();
-                println!("  export SECRETS_MASTER_KEY={}", key_hex);
+                if cfg!(target_os = "windows") {
+                    println!("  setx SECRETS_MASTER_KEY {}", key_hex);
+                    println!("  $env:SECRETS_MASTER_KEY = \"{}\"", key_hex);
+                } else {
+                    println!("  export SECRETS_MASTER_KEY={}", key_hex);
+                }
                 println!();
-                print_info("Add this to your shell profile or .env file.");
+                if cfg!(target_os = "windows") {
+                    print_info("Add this to your PowerShell profile or .env file.");
+                } else {
+                    print_info("Add this to your shell profile or .env file.");
+                }
 
                 self.settings.secrets_master_key_source = KeySource::Env;
                 print_success("Configured for environment storage");

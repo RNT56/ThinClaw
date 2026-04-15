@@ -44,9 +44,9 @@ fn screenshot_path(custom: Option<&str>) -> PathBuf {
         PathBuf::from(p)
     } else {
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(format!(".thinclaw/screenshots/screen_{ts}.png"))
+        crate::platform::state_paths()
+            .screenshots_dir
+            .join(format!("screen_{ts}.png"))
     }
 }
 
@@ -108,10 +108,16 @@ async fn capture_screen(
 #[cfg(target_os = "linux")]
 async fn capture_screen(
     path: &std::path::Path,
-    _interactive: bool,
-    _window: bool,
-    _delay_secs: Option<u32>,
+    interactive: bool,
+    window: bool,
+    delay_secs: Option<u32>,
 ) -> Result<(), ToolError> {
+    if interactive || window || delay_secs.is_some() {
+        return Err(ToolError::ExecutionFailed(
+            "Interactive, window, and delayed screen capture are not supported on Windows yet. Use mode=fullscreen without delay.".to_string(),
+        ));
+    }
+
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await

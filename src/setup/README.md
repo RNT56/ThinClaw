@@ -92,9 +92,9 @@ Runs a destructive reset intended for recovery or clean-room re-onboarding. The 
 
 - clears ThinClaw-owned state from the configured database backend
 - removes the local `~/.thinclaw/` runtime directory, including `.env`, tools, channels, skills, logs, cached media, and local libSQL files
-- deletes ThinClaw-managed keychain entries such as the master key and stored provider API keys
+- deletes ThinClaw-managed OS secure-store entries such as the master key and stored provider API keys
 
-It does not uninstall the ThinClaw binary or remove launchd/systemd service definitions. Operators should stop any running ThinClaw service before invoking the reset so state is not recreated mid-wipe.
+It does not uninstall the ThinClaw binary or remove launchd, systemd, or Windows service definitions. Operators should stop any running ThinClaw service before invoking the reset so state is not recreated mid-wipe.
 
 ### Profile Lanes
 
@@ -133,13 +133,14 @@ and the onboarding TUI shell from the same step plan:
 16. Extensions
 17. Local Tools & Docker Sandbox
 18. Claude Code Sandbox
-19. Tool Approval Mode
-20. Routines
-21. Skills
-22. Background Tasks
-23. Web UI
-24. Observability
-25. Finish
+19. Codex Code Sandbox
+20. Tool Approval Mode
+21. Routines
+22. Skills
+23. Background Tasks
+24. Web UI
+25. Observability
+26. Finish
 
 The operator-facing phases are:
 

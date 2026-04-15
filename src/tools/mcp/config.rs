@@ -330,10 +330,7 @@ impl From<ConfigError> for ToolError {
 
 /// Get the default MCP servers configuration path.
 pub fn default_config_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("mcp-servers.json")
+    crate::platform::resolve_data_dir("mcp-servers.json")
 }
 
 /// Load MCP server configurations from the default location.

@@ -353,10 +353,7 @@ pub struct DiscoveredChannel {
 /// Returns ~/.thinclaw/channels/
 #[allow(dead_code)]
 pub fn default_channels_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("channels")
+    crate::platform::state_paths().channels_dir
 }
 
 #[cfg(test)]

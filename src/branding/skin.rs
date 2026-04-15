@@ -365,7 +365,7 @@ fn default_prompt_symbol() -> String {
 }
 
 fn skin_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".thinclaw").join("skins"))
+    Some(crate::platform::resolve_data_dir("skins"))
 }
 
 fn load_user_skin(name: &str) -> Option<CliSkin> {

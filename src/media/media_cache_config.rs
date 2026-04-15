@@ -128,10 +128,10 @@ impl MediaCacheConfig {
 
     /// Resolve the cache directory (expand ~).
     pub fn resolved_cache_dir(&self) -> String {
-        if self.cache_dir.starts_with("~/")
-            && let Ok(home) = std::env::var("HOME")
-        {
-            return format!("{}{}", home, &self.cache_dir[1..]);
+        if self.cache_dir == "~" || self.cache_dir.starts_with("~/") {
+            return crate::platform::expand_home_dir(&self.cache_dir)
+                .to_string_lossy()
+                .to_string();
         }
         self.cache_dir.clone()
     }

@@ -6,7 +6,7 @@ use crate::service::ServiceAction;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ServiceCommand {
-    /// Install the OS service (launchd on macOS, systemd on Linux).
+    /// Install the OS service (launchd on macOS, systemd on Linux, SCM on Windows).
     Install,
     /// Start the installed service.
     Start,
@@ -14,7 +14,7 @@ pub enum ServiceCommand {
     Stop,
     /// Show service status.
     Status,
-    /// Uninstall the OS service and remove the unit file.
+    /// Uninstall the OS service and remove the unit/plist/service entry.
     Uninstall,
 }
 

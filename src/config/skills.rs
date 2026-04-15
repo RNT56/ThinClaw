@@ -44,25 +44,16 @@ impl Default for SkillsConfig {
 
 /// Get the default user skills directory (~/.thinclaw/skills/).
 fn default_skills_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("skills")
+    crate::platform::state_paths().skills_dir
 }
 
 /// Get the default installed skills directory (~/.thinclaw/installed_skills/).
 fn default_installed_skills_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("installed_skills")
+    crate::platform::state_paths().installed_skills_dir
 }
 
 fn default_quarantine_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("skills_quarantine")
+    crate::platform::resolve_data_dir("skills_quarantine")
 }
 
 impl SkillsConfig {

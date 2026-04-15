@@ -41,9 +41,7 @@ impl HygieneConfig {
             enabled: self.enabled,
             retention_days: self.retention_days,
             cadence_hours: self.cadence_hours,
-            state_dir: dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".thinclaw"),
+            state_dir: crate::platform::resolve_thinclaw_home(),
         }
     }
 }

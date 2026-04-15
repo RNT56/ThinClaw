@@ -114,6 +114,10 @@ pub(crate) async fn settings_set_handler(
         "claude_code_max_turns" => body.value.as_u64().map(|n| (None, Some(n as u32))),
         _ => None,
     };
+    let codex_update: Option<Option<String>> = match key.as_str() {
+        "codex_code_model" => Some(body.value.as_str().map(|v| v.to_string())),
+        _ => None,
+    };
 
     let stream_mode_update: Option<(&'static str, crate::channels::StreamMode)> = match key.as_str()
     {
@@ -150,6 +154,11 @@ pub(crate) async fn settings_set_handler(
     if let (Some(jm), Some((model, max_turns))) = (state.job_manager.clone(), cc_update) {
         tokio::spawn(async move {
             jm.update_claude_code_settings(model, max_turns).await;
+        });
+    }
+    if let (Some(jm), Some(model)) = (state.job_manager.clone(), codex_update) {
+        tokio::spawn(async move {
+            jm.update_codex_code_settings(model).await;
         });
     }
 

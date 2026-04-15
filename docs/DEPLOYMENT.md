@@ -17,7 +17,7 @@ For onboarding details, use [../src/setup/README.md](../src/setup/README.md). Fo
 | Mode | Best For | Main Shape |
 |---|---|---|
 | Local standalone | laptop, workstation, single-user local run | `thinclaw run --no-onboard` |
-| Long-running service | Mac Mini, home server, Linux box, VPS | launchd or systemd user service |
+| Long-running service | Mac Mini, home server, Linux box, Windows workstation/server, VPS | launchd, systemd user service, or Windows Service Control Manager |
 | Remote gateway | controlled LAN or Tailscale access | bind gateway to non-loopback host |
 | Scrappy backend | desktop app + remote or local ThinClaw runtime | Scrappy talks to ThinClaw over the gateway |
 
@@ -59,6 +59,15 @@ http://127.0.0.1:3000
 ```
 
 Use this path when ThinClaw and your browser are on the same machine.
+
+Windows quick path:
+
+```powershell
+thinclaw onboard
+thinclaw run --no-onboard
+```
+
+If you are using a release install on Windows, prefer the MSI for PATH integration and service-friendly installs. The portable ZIP is supported for manual or side-by-side installs.
 
 ## Build From Source
 
@@ -110,6 +119,7 @@ ThinClaw ships with service helpers for:
 
 - macOS `launchd`
 - Linux `systemd --user`
+- Windows Service Control Manager
 
 The service path runs:
 
@@ -130,6 +140,12 @@ thinclaw service uninstall
 ```
 
 The service manager is the right path when you want ThinClaw always available on a dedicated host.
+
+Windows notes:
+
+- `thinclaw service install` registers ThinClaw with the Windows Service Control Manager.
+- Service logs are written under the ThinClaw runtime logs directory.
+- Setup, status, and reset flows use OS secure-store wording on Windows; they do not require Unix shell syntax.
 
 ## Remote Gateway Access
 
@@ -164,6 +180,16 @@ For safer remote access, prefer:
 - a reverse proxy you control
 
 Treat tunnels as optional integrations, not default behavior.
+
+PowerShell equivalent:
+
+```powershell
+$env:GATEWAY_ENABLED = "true"
+$env:GATEWAY_HOST = "0.0.0.0"
+$env:GATEWAY_PORT = "3000"
+$env:GATEWAY_AUTH_TOKEN = "replace-with-a-long-random-token"
+thinclaw run --no-onboard
+```
 
 ## Scrappy Connection Model
 
@@ -233,6 +259,22 @@ You probably built the default `light` profile. Rebuild with:
 ```bash
 cargo build --release --features full
 ```
+
+### Windows browser or sandbox fallback is unavailable
+
+Check:
+
+- Docker Desktop is installed and running if you need the browser fallback or Docker-backed sandbox
+- Chrome, Edge, or Brave is installed for local browser automation
+- `thinclaw doctor` or `thinclaw status` output is being read on Windows-native terms rather than Unix shell setup examples
+
+### Windows secrets or service setup looks wrong
+
+Check:
+
+- onboarding completed on the same Windows account that will run ThinClaw
+- the Windows OS secure store is available for local installs, or `SECRETS_MASTER_KEY` is set for CI/container flows
+- `thinclaw service status` reflects the Windows Service Control Manager state after install/start
 
 ### Setup docs and deployment docs disagree
 

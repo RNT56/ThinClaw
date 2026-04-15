@@ -3,6 +3,7 @@
 //! Provides platform-specific keychain support:
 //! - macOS: security-framework (Keychain Services)
 //! - Linux: secret-service (GNOME Keyring, KWallet)
+//! - Windows: Credential Manager with DPAPI-protected payloads
 //!
 //! # Example
 //!
@@ -453,10 +454,245 @@ mod platform {
 }
 
 // ============================================================================
+// Windows implementation using Credential Manager + DPAPI
+// ============================================================================
+
+#[cfg(target_os = "windows")]
+mod platform {
+    use std::collections::HashMap;
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr::{null, null_mut};
+    use std::slice;
+    use std::sync::{Mutex, OnceLock};
+
+    use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, GetLastError, LocalFree};
+    use windows_sys::Win32::Security::Credentials::{
+        CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree,
+        CredReadW, CredWriteW,
+    };
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
+    };
+
+    use super::*;
+
+    fn get_cache() -> &'static Mutex<HashMap<String, Vec<u8>>> {
+        static CACHE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        OsStr::new(value).encode_wide().chain(Some(0)).collect()
+    }
+
+    fn target_name(account: &str) -> String {
+        format!("{SERVICE_NAME}/{account}")
+    }
+
+    fn win_error(context: &str) -> SecretError {
+        let code = unsafe { GetLastError() };
+        SecretError::KeychainError(format!("{context}: win32 error {code}"))
+    }
+
+    fn protect_bytes(bytes: &[u8]) -> Result<Vec<u8>, SecretError> {
+        let mut input = CRYPT_INTEGER_BLOB {
+            cbData: bytes.len() as u32,
+            pbData: bytes.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: null_mut(),
+        };
+
+        let ok = unsafe {
+            CryptProtectData(
+                &mut input,
+                null(),
+                null(),
+                null(),
+                null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        };
+        if ok == 0 {
+            return Err(win_error("Failed to protect secure-store payload"));
+        }
+
+        let protected =
+            unsafe { slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
+        unsafe {
+            let _ = LocalFree(output.pbData as _);
+        }
+        Ok(protected)
+    }
+
+    fn unprotect_bytes(bytes: &[u8]) -> Result<Vec<u8>, SecretError> {
+        let mut input = CRYPT_INTEGER_BLOB {
+            cbData: bytes.len() as u32,
+            pbData: bytes.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: null_mut(),
+        };
+
+        let ok = unsafe {
+            CryptUnprotectData(
+                &mut input,
+                null_mut(),
+                null(),
+                null(),
+                null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output,
+            )
+        };
+        if ok == 0 {
+            return Err(win_error("Failed to unprotect secure-store payload"));
+        }
+
+        let decrypted =
+            unsafe { slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
+        unsafe {
+            let _ = LocalFree(output.pbData as _);
+        }
+        Ok(decrypted)
+    }
+
+    fn store_credential(account: &str, value: &[u8]) -> Result<(), SecretError> {
+        let encrypted = protect_bytes(value)?;
+        let target_name = target_name(account);
+        let mut target = wide(&target_name);
+        let mut username = wide(account);
+
+        let credential = CREDENTIALW {
+            Flags: 0,
+            Type: CRED_TYPE_GENERIC,
+            TargetName: target.as_mut_ptr(),
+            Comment: null_mut(),
+            LastWritten: Default::default(),
+            CredentialBlobSize: encrypted.len() as u32,
+            CredentialBlob: encrypted.as_ptr() as *mut u8,
+            Persist: CRED_PERSIST_LOCAL_MACHINE,
+            AttributeCount: 0,
+            Attributes: null_mut(),
+            TargetAlias: null_mut(),
+            UserName: username.as_mut_ptr(),
+        };
+
+        let ok = unsafe { CredWriteW(&credential, 0) };
+        if ok == 0 {
+            return Err(win_error(
+                "Failed to write Windows Credential Manager entry",
+            ));
+        }
+
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(account.to_string(), value.to_vec());
+        }
+
+        Ok(())
+    }
+
+    fn read_credential(account: &str) -> Result<Option<Vec<u8>>, SecretError> {
+        if let Ok(cache) = get_cache().lock()
+            && let Some(value) = cache.get(account)
+        {
+            return Ok(Some(value.clone()));
+        }
+
+        let target_name = target_name(account);
+        let target = wide(&target_name);
+        let mut credential_ptr: *mut CREDENTIALW = null_mut();
+
+        let ok = unsafe { CredReadW(target.as_ptr(), CRED_TYPE_GENERIC, 0, &mut credential_ptr) };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            if err == ERROR_NOT_FOUND {
+                return Ok(None);
+            }
+            return Err(win_error("Failed to read Windows Credential Manager entry"));
+        }
+
+        let credential = unsafe { &*credential_ptr };
+        let encrypted = unsafe {
+            slice::from_raw_parts(
+                credential.CredentialBlob,
+                credential.CredentialBlobSize as usize,
+            )
+        }
+        .to_vec();
+        unsafe {
+            CredFree(credential_ptr as *mut _);
+        }
+
+        let decrypted = unprotect_bytes(&encrypted)?;
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.insert(account.to_string(), decrypted.clone());
+        }
+        Ok(Some(decrypted))
+    }
+
+    fn delete_credential(account: &str) -> Result<(), SecretError> {
+        let target_name = target_name(account);
+        let target = wide(&target_name);
+        let ok = unsafe { CredDeleteW(target.as_ptr(), CRED_TYPE_GENERIC, 0) };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            if err != ERROR_NOT_FOUND {
+                return Err(win_error(
+                    "Failed to delete Windows Credential Manager entry",
+                ));
+            }
+        }
+
+        if let Ok(mut cache) = get_cache().lock() {
+            cache.remove(account);
+        }
+        Ok(())
+    }
+
+    pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
+        store_credential(MASTER_KEY_ACCOUNT, key)
+    }
+
+    pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
+        read_credential(MASTER_KEY_ACCOUNT)?.ok_or_else(|| {
+            SecretError::KeychainError("Master key not found in Windows secure store".to_string())
+        })
+    }
+
+    pub async fn delete_master_key() -> Result<(), SecretError> {
+        delete_credential(MASTER_KEY_ACCOUNT)
+    }
+
+    pub async fn has_master_key() -> bool {
+        matches!(read_credential(MASTER_KEY_ACCOUNT), Ok(Some(_)))
+    }
+
+    pub async fn store_api_key(account: &str, value: &str) -> Result<(), SecretError> {
+        store_credential(account, value.as_bytes())
+    }
+
+    pub async fn get_api_key(account: &str) -> Option<String> {
+        read_credential(account)
+            .ok()
+            .flatten()
+            .and_then(|value| String::from_utf8(value).ok())
+    }
+
+    pub async fn delete_api_key(account: &str) -> Result<(), SecretError> {
+        delete_credential(account)
+    }
+}
+
+// ============================================================================
 // Fallback for unsupported platforms
 // ============================================================================
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod platform {
     use super::*;
 
@@ -507,6 +743,9 @@ pub use platform::{
 
 /// Keychain account name for the Claude Code API key.
 pub const CLAUDE_CODE_API_KEY_ACCOUNT: &str = "claude_code_api_key";
+
+/// Keychain account name for the Codex/OpenAI API key used by Codex containers.
+pub const CODEX_CODE_API_KEY_ACCOUNT: &str = "codex_code_api_key";
 
 /// Parse a hex string to bytes.
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, SecretError> {

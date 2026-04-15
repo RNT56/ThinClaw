@@ -171,11 +171,7 @@ pub fn clawhub_prepare_install(
 
     match entry {
         Some(entry) => {
-            let install_dir = dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".thinclaw")
-                .join("tools")
-                .join(&entry.name);
+            let install_dir = crate::platform::state_paths().tools_dir.join(&entry.name);
 
             Ok(InstallResult {
                 plugin_name: entry.name.clone(),
@@ -812,12 +808,9 @@ pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
     };
 
     // Determine the routines directory.
-    let dir = params.routines_dir.unwrap_or_else(|| {
-        dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".thinclaw")
-            .join("routines")
-    });
+    let dir = params
+        .routines_dir
+        .unwrap_or_else(|| crate::platform::resolve_data_dir("routines"));
 
     std::fs::create_dir_all(&dir)
         .map_err(|e| format!("Failed to create routines directory: {}", e))?;

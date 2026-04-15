@@ -672,6 +672,15 @@ pub struct Settings {
     #[serde(default)]
     pub claude_code_max_turns: Option<u32>,
 
+    // === Step 13: Codex Code ===
+    /// Whether the Codex CLI sandbox is enabled.
+    #[serde(default)]
+    pub codex_code_enabled: bool,
+
+    /// Optional Codex model override (e.g. "gpt-5.3-codex").
+    #[serde(default)]
+    pub codex_code_model: Option<String>,
+
     // === Step 14: Web UI ===
     /// WebChat theme preference: "light", "dark", or "system".
     #[serde(default = "default_webchat_theme")]
@@ -1749,10 +1758,7 @@ impl Settings {
 
     /// Get the default settings file path (~/.thinclaw/settings.json).
     pub fn default_path() -> std::path::PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".thinclaw")
-            .join("settings.json")
+        crate::platform::state_paths().settings_file
     }
 
     /// Load settings from disk, returning default if not found.
@@ -1770,10 +1776,7 @@ impl Settings {
 
     /// Default TOML config file path (~/.thinclaw/config.toml).
     pub fn default_toml_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".thinclaw")
-            .join("config.toml")
+        crate::platform::state_paths().config_file
     }
 
     /// Load settings from a TOML file.

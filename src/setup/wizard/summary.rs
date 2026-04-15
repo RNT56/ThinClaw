@@ -57,7 +57,10 @@ impl SetupWizard {
         }
 
         match self.settings.secrets_master_key_source {
-            KeySource::Keychain => println!("  Security: OS keychain"),
+            KeySource::Keychain => println!(
+                "  Security: {}",
+                crate::platform::secure_store::display_name()
+            ),
             KeySource::Env => println!("  Security: environment variable"),
             KeySource::None => println!("  Security: disabled"),
         }
@@ -193,6 +196,15 @@ impl SetupWizard {
             println!("  Claude Code: enabled (model: {})", model);
         }
 
+        if self.settings.codex_code_enabled {
+            let model = self
+                .settings
+                .codex_code_model
+                .as_deref()
+                .unwrap_or("gpt-5.3-codex");
+            println!("  Codex: enabled (model: {})", model);
+        }
+
         if self.settings.webchat_skin.is_some()
             || self.settings.webchat_theme != "system"
             || self.settings.webchat_accent_color.is_some()
@@ -279,6 +291,20 @@ impl SetupWizard {
             Ok(p) => p,
             Err(_) => return, // Can't determine our own path
         };
+
+        if cfg!(target_os = "windows") {
+            let parent = current_exe
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            print_info(&format!(
+                "Tip: add ThinClaw to your PATH in PowerShell:\n  \
+                 setx PATH \"$env:PATH;{}\"\n  \
+                 $env:PATH = \"$env:PATH;{}\"",
+                parent, parent
+            ));
+            return;
+        }
 
         // Choose symlink target based on platform
         let symlink_dir = if cfg!(target_os = "macos") {

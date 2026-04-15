@@ -2457,10 +2457,7 @@ impl TrajectoryLogger {
 }
 
 fn default_trajectory_root() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("trajectories")
+    crate::platform::resolve_data_dir("trajectories")
 }
 
 fn collect_jsonl_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {

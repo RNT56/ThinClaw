@@ -10,7 +10,7 @@
 //! 1. Fetch latest version info from the releases API
 //! 2. Compare with current version
 //! 3. Download the new binary (if desired)
-//! 4. Replace the current binary (atomic rename)
+//! 4. Apply the platform-native install flow
 
 use std::path::PathBuf;
 
@@ -135,6 +135,94 @@ pub fn is_newer_version(current: &str, available: &str) -> bool {
 fn backup_binary_path() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("thinclaw"));
     exe.with_extension("bak")
+}
+
+#[cfg(target_os = "windows")]
+fn staged_windows_asset_path(download_url: &str, version: &str) -> PathBuf {
+    let file_name = url::Url::parse(download_url)
+        .ok()
+        .and_then(|url| {
+            url.path_segments()
+                .and_then(|segments| segments.last().map(str::to_string))
+        })
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| format!("thinclaw-{version}-windows-update.bin"));
+
+    std::env::temp_dir()
+        .join("thinclaw-updates")
+        .join(file_name)
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_update_asset(
+    branding: &TerminalBranding,
+    download_url: &str,
+    bytes: &[u8],
+    version: &str,
+) -> anyhow::Result<()> {
+    let staged_path = staged_windows_asset_path(download_url, version);
+    if let Some(parent) = staged_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&staged_path, bytes)?;
+
+    println!(
+        "{}",
+        branding.key_value("Staged asset", staged_path.display())
+    );
+
+    let extension = staged_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some("msi") => {
+            println!(
+                "{}",
+                branding.accent("Launching the Windows installer via msiexec...")
+            );
+            let status = std::process::Command::new("msiexec")
+                .args(["/i"])
+                .arg(&staged_path)
+                .args(["/passive"])
+                .status()?;
+            if !status.success() {
+                anyhow::bail!(
+                    "msiexec failed for {} (exit code {:?})",
+                    staged_path.display(),
+                    status.code()
+                );
+            }
+            println!(
+                "{}",
+                branding.good(format!(
+                    "Installer launched for v{}. Close ThinClaw if Windows asks before finishing the upgrade.",
+                    version
+                ))
+            );
+        }
+        Some("zip") => {
+            println!(
+                "{}",
+                branding.warn(format!(
+                    "Downloaded the portable ZIP to {}. Extract it and replace the portable ThinClaw files after ThinClaw exits.",
+                    staged_path.display()
+                ))
+            );
+        }
+        _ => {
+            println!(
+                "{}",
+                branding.warn(format!(
+                    "Downloaded the Windows update asset to {}. Run it after ThinClaw exits.",
+                    staged_path.display()
+                ))
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Fetch the latest release info from the API.
@@ -381,6 +469,17 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
                 )
             );
 
+            #[cfg(target_os = "windows")]
+            {
+                apply_windows_update_asset(
+                    &branding,
+                    download_url,
+                    bytes.as_ref(),
+                    &release.version,
+                )?;
+                return Ok(());
+            }
+
             // Backup current binary
             let current = std::env::current_exe()?;
             let backup = backup_binary_path();
@@ -410,6 +509,18 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
 
         UpdateCommand::Rollback => {
             branding.print_banner("Update", Some("Rollback to the previous build"));
+
+            #[cfg(target_os = "windows")]
+            {
+                println!(
+                    "{}",
+                    branding.warn(
+                        "Windows rollback is installer-based. Reinstall the previous MSI/ZIP instead of swapping the running executable."
+                    )
+                );
+                return Ok(());
+            }
+
             let backup = backup_binary_path();
             if !backup.exists() {
                 println!(

@@ -2,7 +2,7 @@
 //!
 //! This command is intentionally destructive: it clears ThinClaw-owned
 //! database state, removes the local `~/.thinclaw` runtime directory, and
-//! deletes ThinClaw-managed keychain entries so onboarding can start cleanly.
+//! deletes ThinClaw-managed OS secure-store entries so onboarding can start cleanly.
 
 #[cfg(feature = "postgres")]
 use std::collections::HashSet;
@@ -14,7 +14,7 @@ use clap::Args;
 
 use crate::config::{DatabaseBackend, DatabaseConfig};
 use crate::db::Database;
-use crate::secrets::keychain::{
+use crate::platform::secure_store::{
     CLAUDE_CODE_API_KEY_ACCOUNT, delete_api_key, delete_master_key, get_api_key, has_master_key,
 };
 use crate::setup::{confirm, print_warning};
@@ -89,12 +89,12 @@ pub async fn run_reset_command(cmd: ResetCommand) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     branding.print_banner("Reset", Some("Clear ThinClaw runtime state"));
     print_warning(
-        "Full reset deletes ThinClaw state from the configured database, ~/.thinclaw, and ThinClaw-managed keychain entries.",
+        "Full reset deletes ThinClaw state from the configured database, ~/.thinclaw, and ThinClaw-managed OS secure-store entries.",
     );
     println!(
         "{}",
         branding.body(
-            "It does not uninstall the ThinClaw binary or remove launchd/systemd service definitions."
+            "It does not uninstall the ThinClaw binary or remove launchd/systemd/Windows service definitions."
         )
     );
     println!(
@@ -117,7 +117,7 @@ pub async fn run_reset_command(cmd: ResetCommand) -> anyhow::Result<()> {
     };
 
     let local_result = reset_local_state(&thinclaw_home_dir())?;
-    let keychain_result = reset_keychain_entries().await;
+    let secure_store_result = reset_secure_store_entries().await;
 
     println!("{}", branding.good("ThinClaw reset complete."));
     println!("{}", branding.key_value("Database", db_result.describe()));
@@ -127,7 +127,7 @@ pub async fn run_reset_command(cmd: ResetCommand) -> anyhow::Result<()> {
     );
     println!(
         "{}",
-        branding.key_value("Keychain", keychain_result.describe())
+        branding.key_value("OS secure store", secure_store_result.describe())
     );
     println!();
     println!(
@@ -156,10 +156,7 @@ fn confirm_full_reset() -> anyhow::Result<()> {
 }
 
 fn thinclaw_home_dir() -> PathBuf {
-    crate::bootstrap::thinclaw_env_path()
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".thinclaw"))
+    crate::platform::resolve_thinclaw_home()
 }
 
 async fn reset_database(config: &DatabaseConfig) -> anyhow::Result<ResetStepResult> {
@@ -305,7 +302,7 @@ fn reset_local_state(path: &std::path::Path) -> anyhow::Result<ResetStepResult> 
     )))
 }
 
-async fn reset_keychain_entries() -> ResetStepResult {
+async fn reset_secure_store_entries() -> ResetStepResult {
     let mut removed = Vec::new();
     let mut failures = Vec::new();
 
@@ -316,7 +313,7 @@ async fn reset_keychain_entries() -> ResetStepResult {
         }
     }
 
-    for account in known_keychain_accounts() {
+    for account in known_secure_store_accounts() {
         if get_api_key(&account).await.is_none() {
             continue;
         }
@@ -329,10 +326,10 @@ async fn reset_keychain_entries() -> ResetStepResult {
 
     match (removed.is_empty(), failures.is_empty()) {
         (true, true) => ResetStepResult::Skipped(
-            "no ThinClaw-managed keychain entries were present".to_string(),
+            "no ThinClaw-managed OS secure-store entries were present".to_string(),
         ),
         (_, true) => ResetStepResult::Completed(format!(
-            "removed {} ThinClaw-managed keychain entr{}",
+            "removed {} ThinClaw-managed OS secure-store entr{}",
             removed.len(),
             if removed.len() == 1 { "y" } else { "ies" }
         )),
@@ -345,7 +342,7 @@ async fn reset_keychain_entries() -> ResetStepResult {
     }
 }
 
-fn known_keychain_accounts() -> Vec<String> {
+fn known_secure_store_accounts() -> Vec<String> {
     let mut accounts: Vec<String> = crate::config::provider_catalog::catalog()
         .values()
         .map(|endpoint| endpoint.secret_name.to_string())
@@ -375,11 +372,13 @@ impl ResetStepResult {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
-    fn known_keychain_accounts_include_claude_key_and_are_unique() {
-        let accounts = known_keychain_accounts();
+    fn known_secure_store_accounts_include_claude_key_and_are_unique() {
+        let accounts = known_secure_store_accounts();
         assert!(accounts.contains(&CLAUDE_CODE_API_KEY_ACCOUNT.to_string()));
 
         let deduped: HashSet<String> = accounts.iter().cloned().collect();

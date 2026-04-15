@@ -37,9 +37,7 @@ pub struct HygieneConfig {
 
 impl Default for HygieneConfig {
     fn default() -> Self {
-        let state_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".thinclaw");
+        let state_dir = crate::platform::resolve_thinclaw_home();
 
         Self {
             enabled: true,

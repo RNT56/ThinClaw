@@ -56,7 +56,7 @@ pub use self::llm::{
 };
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
-pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
+pub use self::sandbox::{ClaudeCodeConfig, CodexCodeConfig, SandboxModeConfig};
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
 pub use self::tunnel::{
@@ -191,6 +191,7 @@ pub struct Config {
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub codex_code: CodexCodeConfig,
     pub skills: SkillsConfig,
     pub experiments: ExperimentsConfig,
     pub observability: crate::observability::ObservabilityConfig,
@@ -316,6 +317,7 @@ impl Config {
             routines: RoutineConfig::resolve(settings)?,
             sandbox: SandboxModeConfig::resolve(settings)?,
             claude_code: ClaudeCodeConfig::resolve(settings)?,
+            codex_code: CodexCodeConfig::resolve(settings)?,
             skills: SkillsConfig::resolve(settings)?,
             experiments: ExperimentsConfig::resolve(settings)?,
             observability: crate::observability::ObservabilityConfig {
@@ -517,7 +519,7 @@ pub async fn refresh_secrets(secrets: &dyn crate::secrets::SecretsStore, user_id
 ///
 /// Resolution order:
 /// 1. Env/overlay (`optional_env`)
-/// 2. OS keychain
+/// 2. OS secure store
 /// 3. Encrypted secrets store
 /// 4. Provider-specific legacy env aliases
 pub async fn resolve_provider_secret_value(
@@ -532,7 +534,7 @@ pub async fn resolve_provider_secret_value(
         return Some(value);
     }
 
-    if let Some(value) = crate::secrets::keychain::get_api_key(secret_name).await
+    if let Some(value) = crate::platform::secure_store::get_api_key(secret_name).await
         && !value.trim().is_empty()
     {
         return Some(value);

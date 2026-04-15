@@ -25,9 +25,9 @@ impl std::fmt::Debug for SecretsConfig {
 }
 
 impl SecretsConfig {
-    /// Auto-detect secrets master key from env var, then OS keychain.
+    /// Auto-detect secrets master key from env var, then OS secure store.
     ///
-    /// Sequential probe: SECRETS_MASTER_KEY env var first, then OS keychain.
+    /// Sequential probe: SECRETS_MASTER_KEY env var first, then OS secure store.
     /// No saved "source" needed; just try each source in order.
     pub(crate) async fn resolve() -> Result<Self, ConfigError> {
         use crate::settings::KeySource;
@@ -35,8 +35,8 @@ impl SecretsConfig {
         let (master_key, source) = if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
             (Some(SecretString::from(env_key)), KeySource::Env)
         } else {
-            // Probe the OS keychain; if a key is stored, use it
-            match crate::secrets::keychain::get_master_key().await {
+            // Probe the OS secure store; if a key is stored, use it
+            match crate::platform::secure_store::get_master_key().await {
                 Ok(key_bytes) => {
                     let key_hex: String = key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
                     (Some(SecretString::from(key_hex)), KeySource::Keychain)

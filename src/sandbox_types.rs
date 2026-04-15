@@ -28,10 +28,21 @@ mod fallback {
         pub env_var: String,
     }
 
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum JobMode {
         Worker,
         ClaudeCode,
+        CodexCode,
+    }
+
+    impl JobMode {
+        pub fn as_str(&self) -> &'static str {
+            match self {
+                Self::Worker => "worker",
+                Self::ClaudeCode => "claude_code",
+                Self::CodexCode => "codex_code",
+            }
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,12 +53,18 @@ mod fallback {
         Failed,
     }
 
-    #[derive(Debug)]
-    pub struct ContainerJobConfig;
+    #[derive(Debug, Clone)]
+    pub struct ContainerJobConfig {
+        pub claude_code_enabled: bool,
+        pub codex_code_enabled: bool,
+    }
 
     impl Default for ContainerJobConfig {
         fn default() -> Self {
-            Self
+            Self {
+                claude_code_enabled: false,
+                codex_code_enabled: false,
+            }
         }
     }
 
@@ -85,11 +102,13 @@ mod fallback {
     }
 
     #[derive(Debug)]
-    pub struct ContainerJobManager;
+    pub struct ContainerJobManager {
+        config: ContainerJobConfig,
+    }
 
     impl ContainerJobManager {
-        pub fn new(_config: ContainerJobConfig, _token_store: TokenStore) -> Self {
-            Self
+        pub fn new(config: ContainerJobConfig, _token_store: TokenStore) -> Self {
+            Self { config }
         }
 
         pub async fn create_job(
@@ -118,6 +137,16 @@ mod fallback {
             _model: Option<String>,
             _max_turns: Option<u32>,
         ) {
+        }
+
+        pub async fn update_codex_code_settings(&self, _model: Option<String>) {}
+
+        pub fn claude_code_enabled(&self) -> bool {
+            self.config.claude_code_enabled
+        }
+
+        pub fn codex_code_enabled(&self) -> bool {
+            self.config.codex_code_enabled
         }
     }
 }

@@ -78,9 +78,7 @@ struct BlockFromStoreFile {
 }
 
 fn default_pairing_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
+    crate::platform::resolve_thinclaw_home()
 }
 
 fn safe_channel_key(channel: &str) -> Result<String, PairingStoreError> {

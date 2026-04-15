@@ -437,7 +437,7 @@ impl Agent {
                 "  /summarize        Summarize current thread\n",
                 "  /suggest          Suggest next steps\n",
                 "\n",
-                "  /restart          Restart agent (requires launchd/systemd to relaunch)\n",
+                "  /restart          Restart agent (requires launchd/systemd/Windows SCM to relaunch)\n",
                 "  /quit             Exit",
             ))),
 

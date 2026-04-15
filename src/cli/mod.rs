@@ -195,10 +195,19 @@ pub enum Command {
     #[command(subcommand)]
     Sessions(SessionCommand),
 
-    /// Manage OS service (launchd / systemd)
+    /// Manage OS service (launchd / systemd / Windows Service Control Manager)
     #[cfg(feature = "repl")]
     #[command(subcommand)]
     Service(ServiceCommand),
+
+    /// Internal Windows SCM entrypoint.
+    #[cfg(all(feature = "repl", target_os = "windows"))]
+    #[command(name = "__windows-service", hide = true)]
+    WindowsServiceRuntime {
+        /// Preserve the configured ThinClaw home for the service account.
+        #[arg(long)]
+        home: Option<std::path::PathBuf>,
+    },
 
     /// Probe external dependencies and validate configuration
     Doctor,
@@ -260,6 +269,23 @@ pub enum Command {
 
         /// Claude model to use (e.g. "sonnet", "opus").
         #[arg(long, default_value = "sonnet")]
+        model: String,
+    },
+
+    /// Run as a Codex bridge inside a Docker container (internal use).
+    /// Spawns the `codex` CLI and streams output back to the orchestrator.
+    #[cfg(feature = "docker-sandbox")]
+    CodexBridge {
+        /// Job ID to execute.
+        #[arg(long)]
+        job_id: uuid::Uuid,
+
+        /// URL of the orchestrator's internal API.
+        #[arg(long, default_value = "http://host.docker.internal:50051")]
+        orchestrator_url: String,
+
+        /// Codex model to use (e.g. "gpt-5.3-codex").
+        #[arg(long, default_value = "gpt-5.3-codex")]
         model: String,
     },
 

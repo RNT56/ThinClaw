@@ -72,6 +72,82 @@ jobs:
       - name: Compile tests (no run)
         run: cargo test --no-run ${{ matrix.cargo-args }}
 
+  macos-host-regression:
+    name: macOS Host Regression
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-host-regression
+      - name: cargo check
+        run: cargo check --features full
+      - name: Compile tests (no run)
+        run: cargo test --no-run --features full
+      - name: Host runtime smoke
+        run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+
+  windows-host-matrix:
+    name: "Windows Host: ${{ matrix.name }}"
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: light
+            cargo-args: ""
+          - name: full
+            cargo-args: "--features full"
+          - name: desktop
+            cargo-args: "--no-default-features --features desktop"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ matrix.name }}
+      - name: cargo check
+        run: cargo check ${{ matrix.cargo-args }}
+      - name: Compile tests (no run)
+        run: cargo test --no-run ${{ matrix.cargo-args }}
+
+  windows-smoke:
+    name: Windows Smoke
+    runs-on: windows-2022
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-smoke
+      - name: Host runtime smoke
+        run: cargo test --features full --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+      - name: Shell launcher smoke
+        run: cargo test --features full launcher_has_expected_prefix_args -- --nocapture
+      - name: State-path smoke
+        run: cargo test --features full state_paths_share_same_root -- --nocapture
+      - name: Windows path-escape smoke
+        run: cargo test --features full detect_path_escape_understands_windows_absolute_paths -- --nocapture
+      - name: Service adapter smoke
+        run: cargo test --features full run_checked_succeeds_on_zero_exit -- --nocapture
+      - name: Interpreter selection smoke
+        run: cargo test --features full test_interpreter_for -- --nocapture
+      - name: Signal attachment override smoke
+        run: cargo test --features full signal_attachment_dir_prefers_override_env -- --nocapture
+
   db-contract-libsql:
     name: DB Contract (libSQL)
     runs-on: ubuntu-latest

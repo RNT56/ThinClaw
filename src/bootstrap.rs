@@ -10,10 +10,7 @@ use std::path::PathBuf;
 
 /// Path to the ThinClaw-specific `.env` file: `~/.thinclaw/.env`.
 pub fn thinclaw_env_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join(".env")
+    crate::platform::state_paths().env_file
 }
 
 /// Load env vars from `~/.thinclaw/.env` (in addition to the standard `.env`).
@@ -185,9 +182,7 @@ pub async fn migrate_disk_to_db(
     store: &dyn crate::db::Database,
     user_id: &str,
 ) -> Result<(), MigrationError> {
-    let thinclaw_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw");
+    let thinclaw_dir = crate::platform::state_paths().home;
     let legacy_settings_path = thinclaw_dir.join("settings.json");
 
     if !legacy_settings_path.exists() {

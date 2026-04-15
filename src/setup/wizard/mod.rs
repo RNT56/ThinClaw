@@ -251,6 +251,7 @@ impl SetupWizard {
                 Step::Extensions,
                 Step::DockerSandbox,
                 Step::ClaudeCode,
+                Step::CodexCode,
                 Step::ToolApproval,
                 Step::Routines,
                 Step::Skills,
@@ -300,7 +301,7 @@ impl SetupWizard {
             "Secret Protection",
             "Choose how API keys and sensitive values are protected.",
             "Trust boundaries should be explicit before provider credentials are stored.",
-            Some("Use your OS keychain when available."),
+            Some("Use your OS secure store when available."),
         );
         push_step(
             Step::InferenceProvider,
@@ -412,6 +413,14 @@ impl SetupWizard {
             "Claude Code Sandbox",
             "Configure optional Claude Code worker integration.",
             "Only required if your workflow depends on Claude sandbox execution.",
+            None,
+        );
+        push_step(
+            Step::CodexCode,
+            Phase::CapabilitiesAutomation,
+            "Codex Sandbox",
+            "Configure optional Codex CLI worker integration.",
+            "Only required if your workflow depends on Codex sandbox execution.",
             None,
         );
         push_step(
@@ -691,6 +700,10 @@ impl SetupWizard {
             }
             WizardStepId::ClaudeCode => {
                 self.step_claude_code().await?;
+                Ok(StepStatus::Completed)
+            }
+            WizardStepId::CodexCode => {
+                self.step_codex_code().await?;
                 Ok(StepStatus::Completed)
             }
             WizardStepId::ToolApproval => {

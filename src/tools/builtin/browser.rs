@@ -219,6 +219,10 @@ impl BrowserTool {
             vec![
                 r"C:\Program Files\Google\Chrome\Application\chrome.exe",
                 r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
             ]
         };
 
@@ -226,6 +230,26 @@ impl BrowserTool {
             let p = PathBuf::from(path);
             if p.exists() {
                 return Some(p);
+            }
+        }
+
+        let path_env = std::env::var_os("PATH")?;
+        let path_names: &[&str] = if cfg!(target_os = "windows") {
+            &["chrome.exe", "msedge.exe", "brave.exe"]
+        } else {
+            &[
+                "google-chrome",
+                "google-chrome-stable",
+                "chromium",
+                "chromium-browser",
+            ]
+        };
+        for dir in std::env::split_paths(&path_env) {
+            for binary in path_names {
+                let candidate = dir.join(binary);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
         None
@@ -296,13 +320,16 @@ impl BrowserTool {
         }
 
         // Neither local Chrome nor Docker available.
-        Err(ToolError::ExecutionFailed(
+        Err(ToolError::ExecutionFailed(if cfg!(target_os = "windows") {
+            "Chrome, Edge, or Brave not found. Install a supported local browser, or install Docker Desktop and set BROWSER_DOCKER=always."
+                .to_string()
+        } else {
             "Chrome/Chromium not found. Either install Google Chrome \
              (https://www.google.com/chrome), or install Docker and set \
              BROWSER_DOCKER=always. On macOS: brew install --cask google-chrome. \
              On Linux: apt install chromium-browser."
-                .to_string(),
-        ))
+                .to_string()
+        }))
     }
 
     /// Launch a local Chrome binary and store the instance.

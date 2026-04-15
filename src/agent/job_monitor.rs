@@ -1,6 +1,6 @@
-//! Background job monitor that forwards Claude Code output to the main agent loop.
+//! Background job monitor that forwards container coding agent output to the main agent loop.
 //!
-//! When the main agent kicks off a sandbox job (especially Claude Code), this
+//! When the main agent kicks off a sandbox job (especially a container coding agent), this
 //! monitor subscribes to the broadcast event channel and injects relevant
 //! assistant messages back into the channel manager's stream. This lets the
 //! main agent see what the sub-agent is producing and surface it to the user.
@@ -55,7 +55,7 @@ pub fn spawn_job_monitor(
                             let msg = IncomingMessage::new(
                                 "job_monitor",
                                 "system",
-                                format!("[Job {}] Claude Code: {}", short_id, content),
+                                format!("[Job {}] Container agent: {}", short_id, content),
                             );
                             if inject_tx.send(msg).await.is_err() {
                                 tracing::debug!(

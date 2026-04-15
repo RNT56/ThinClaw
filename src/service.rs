@@ -3,9 +3,10 @@
 //! Generates and manages platform-native service definitions:
 //! - **macOS**: launchd plist at `~/Library/LaunchAgents/com.thinclaw.daemon.plist`
 //! - **Linux**: systemd user unit at `~/.config/systemd/user/thinclaw.service`
+//! - **Windows**: Service Control Manager entry backed by a ThinClaw wrapper
 //!
-//! The installed service runs `thinclaw run` (the default agent mode) and is
-//! configured to restart automatically on failure.
+//! The installed service runs `thinclaw run --no-onboard` (via a Windows wrapper
+//! on that platform) and is configured to restart automatically on failure.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -13,9 +14,15 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 const SERVICE_LABEL: &str = "com.thinclaw.daemon";
+#[cfg(target_os = "linux")]
 const SYSTEMD_UNIT: &str = "thinclaw.service";
+#[cfg(target_os = "windows")]
+const WINDOWS_SERVICE_NAME: &str = "thinclaw";
+#[cfg(target_os = "windows")]
+const WINDOWS_SERVICE_DISPLAY_NAME: &str = "ThinClaw";
 
-// ── Public dispatch ─────────────────────────────────────────────
+#[cfg(target_os = "windows")]
+pub const WINDOWS_SERVICE_RUNTIME_COMMAND: &str = "__windows-service";
 
 /// Route a service subcommand to the appropriate handler.
 pub fn handle_command(command: &ServiceAction) -> Result<()> {
@@ -38,44 +45,137 @@ pub enum ServiceAction {
     Uninstall,
 }
 
-// ── Install ─────────────────────────────────────────────────────
-
 fn install() -> Result<()> {
-    // Warn if onboarding hasn't been completed — the service runs with
-    // --no-onboard so it will fail to start without a valid config.
     if !onboarding_completed() {
-        println!("⚠  WARNING: Onboarding has not been completed.");
-        println!("   The service runs headless and cannot show the setup wizard.");
-        println!("   Please run 'thinclaw onboard' first, then re-run 'thinclaw service install'.");
+        println!("WARNING: Onboarding has not been completed.");
+        println!("  The service runs headless and cannot show the setup wizard.");
+        println!("  Please run 'thinclaw onboard' first, then re-run 'thinclaw service install'.");
         println!();
     }
 
-    if cfg!(target_os = "macos") {
-        install_macos()
-    } else if cfg!(target_os = "linux") {
-        install_linux()
-    } else {
-        bail!("Service management is only supported on macOS and Linux");
+    #[cfg(target_os = "macos")]
+    {
+        return install_macos();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return install_linux();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return windows_impl::install();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        bail!("Service management is only supported on macOS, Linux, and Windows");
+    }
+}
+
+fn start() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return start_macos();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return start_linux();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return windows_impl::start();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        bail!("Service management is only supported on macOS, Linux, and Windows");
+    }
+}
+
+fn stop() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return stop_macos();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return stop_linux();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return windows_impl::stop();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        bail!("Service management is only supported on macOS, Linux, and Windows");
+    }
+}
+
+fn status() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        return status_macos();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return status_linux();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return windows_impl::status();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        bail!("Service management is only supported on macOS, Linux, and Windows");
+    }
+}
+
+fn uninstall() -> Result<()> {
+    let _ = stop();
+
+    #[cfg(target_os = "macos")]
+    {
+        return uninstall_macos();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return uninstall_linux();
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return windows_impl::uninstall();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        bail!("Service management is only supported on macOS, Linux, and Windows");
     }
 }
 
 /// Check whether onboarding has been completed by looking for
 /// the `ONBOARD_COMPLETED=true` env var (set by the wizard in `~/.thinclaw/.env`).
 fn onboarding_completed() -> bool {
-    // Load thinclaw .env so we can check ONBOARD_COMPLETED even if it's not
-    // exported in the current shell session.
     let _ = dotenvy::dotenv();
-    let home = dirs::home_dir();
-    if let Some(home) = home {
-        let env_file = home.join(".thinclaw").join(".env");
-        let _ = dotenvy::from_path(&env_file);
-    }
+    let _ = dotenvy::from_path(crate::platform::state_paths().env_file);
 
     std::env::var("ONBOARD_COMPLETED")
         .map(|v| v == "true")
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "macos")]
 fn install_macos() -> Result<()> {
     let file = macos_plist_path()?;
     if let Some(parent) = file.parent() {
@@ -144,6 +244,7 @@ fn install_macos() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn install_linux() -> Result<()> {
     let file = linux_unit_path()?;
     if let Some(parent) = file.parent() {
@@ -175,109 +276,107 @@ fn install_linux() -> Result<()> {
     Ok(())
 }
 
-// ── Start ───────────────────────────────────────────────────────
+#[cfg(target_os = "macos")]
+fn start_macos() -> Result<()> {
+    let plist = macos_plist_path()?;
+    if !plist.exists() {
+        bail!("Service not installed. Run `thinclaw service install` first.");
+    }
+    run_checked(Command::new("launchctl").arg("load").arg("-w").arg(&plist))?;
+    run_checked(Command::new("launchctl").arg("start").arg(SERVICE_LABEL))?;
+    println!("Service started");
+    Ok(())
+}
 
-fn start() -> Result<()> {
-    if cfg!(target_os = "macos") {
-        let plist = macos_plist_path()?;
-        if !plist.exists() {
-            bail!("Service not installed. Run `thinclaw service install` first.");
+#[cfg(target_os = "linux")]
+fn start_linux() -> Result<()> {
+    run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
+    run_checked(Command::new("systemctl").args(["--user", "start", SYSTEMD_UNIT]))?;
+    println!("Service started");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn stop_macos() -> Result<()> {
+    let plist = macos_plist_path()?;
+    run_checked(Command::new("launchctl").arg("stop").arg(SERVICE_LABEL)).ok();
+    run_checked(
+        Command::new("launchctl")
+            .arg("unload")
+            .arg("-w")
+            .arg(&plist),
+    )
+    .ok();
+    println!("Service stopped");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn stop_linux() -> Result<()> {
+    run_checked(Command::new("systemctl").args(["--user", "stop", SYSTEMD_UNIT])).ok();
+    println!("Service stopped");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn status_macos() -> Result<()> {
+    let out = run_capture(Command::new("launchctl").arg("list"))?;
+    let running = out.lines().any(|line| line.contains(SERVICE_LABEL));
+    println!(
+        "Service: {}",
+        if running {
+            "running/loaded"
+        } else {
+            "not loaded"
         }
-        run_checked(Command::new("launchctl").arg("load").arg("-w").arg(&plist))?;
-        run_checked(Command::new("launchctl").arg("start").arg(SERVICE_LABEL))?;
-        println!("Service started");
-        Ok(())
-    } else if cfg!(target_os = "linux") {
-        run_checked(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
-        run_checked(Command::new("systemctl").args(["--user", "start", SYSTEMD_UNIT]))?;
-        println!("Service started");
-        Ok(())
-    } else {
-        bail!("Service management is only supported on macOS and Linux");
-    }
+    );
+    println!("Unit: {}", macos_plist_path()?.display());
+    Ok(())
 }
 
-// ── Stop ────────────────────────────────────────────────────────
-
-fn stop() -> Result<()> {
-    if cfg!(target_os = "macos") {
-        let plist = macos_plist_path()?;
-        run_checked(Command::new("launchctl").arg("stop").arg(SERVICE_LABEL)).ok();
-        run_checked(
-            Command::new("launchctl")
-                .arg("unload")
-                .arg("-w")
-                .arg(&plist),
-        )
-        .ok();
-        println!("Service stopped");
-        Ok(())
-    } else if cfg!(target_os = "linux") {
-        run_checked(Command::new("systemctl").args(["--user", "stop", SYSTEMD_UNIT])).ok();
-        println!("Service stopped");
-        Ok(())
-    } else {
-        bail!("Service management is only supported on macOS and Linux");
-    }
+#[cfg(target_os = "linux")]
+fn status_linux() -> Result<()> {
+    let state = run_capture(Command::new("systemctl").args(["--user", "is-active", SYSTEMD_UNIT]))
+        .unwrap_or_else(|_| "unknown".into());
+    println!("Service state: {}", state.trim());
+    println!("Unit: {}", linux_unit_path()?.display());
+    Ok(())
 }
 
-// ── Status ──────────────────────────────────────────────────────
-
-fn status() -> Result<()> {
-    if cfg!(target_os = "macos") {
-        let out = run_capture(Command::new("launchctl").arg("list"))?;
-        let running = out.lines().any(|line| line.contains(SERVICE_LABEL));
-        println!(
-            "Service: {}",
-            if running {
-                "running/loaded"
-            } else {
-                "not loaded"
-            }
-        );
-        println!("Unit: {}", macos_plist_path()?.display());
-        Ok(())
-    } else if cfg!(target_os = "linux") {
-        let state =
-            run_capture(Command::new("systemctl").args(["--user", "is-active", SYSTEMD_UNIT]))
-                .unwrap_or_else(|_| "unknown".into());
-        println!("Service state: {}", state.trim());
-        println!("Unit: {}", linux_unit_path()?.display());
-        Ok(())
-    } else {
-        bail!("Service management is only supported on macOS and Linux");
+#[cfg(target_os = "macos")]
+fn uninstall_macos() -> Result<()> {
+    let file = macos_plist_path()?;
+    if file.exists() {
+        std::fs::remove_file(&file)
+            .with_context(|| format!("failed to remove {}", file.display()))?;
     }
+    println!("Service uninstalled ({})", file.display());
+    Ok(())
 }
 
-// ── Uninstall ───────────────────────────────────────────────────
+#[cfg(target_os = "linux")]
+fn uninstall_linux() -> Result<()> {
+    let file = linux_unit_path()?;
+    if file.exists() {
+        std::fs::remove_file(&file)
+            .with_context(|| format!("failed to remove {}", file.display()))?;
+    }
+    run_checked(Command::new("systemctl").args(["--user", "daemon-reload"])).ok();
+    println!("Service uninstalled ({})", file.display());
+    Ok(())
+}
 
-fn uninstall() -> Result<()> {
-    // Stop first (ignore errors, service might not be running)
-    stop().ok();
-
-    if cfg!(target_os = "macos") {
-        let file = macos_plist_path()?;
-        if file.exists() {
-            std::fs::remove_file(&file)
-                .with_context(|| format!("failed to remove {}", file.display()))?;
+#[cfg(target_os = "windows")]
+pub fn run_windows_service_dispatcher(home_override: Option<PathBuf>) -> Result<()> {
+    if let Some(home) = home_override {
+        // SAFETY: The hidden Windows service runtime command runs during early
+        // process setup before any worker threads are spawned.
+        unsafe {
+            std::env::set_var("THINCLAW_HOME", home);
         }
-        println!("Service uninstalled ({})", file.display());
-        Ok(())
-    } else if cfg!(target_os = "linux") {
-        let file = linux_unit_path()?;
-        if file.exists() {
-            std::fs::remove_file(&file)
-                .with_context(|| format!("failed to remove {}", file.display()))?;
-        }
-        run_checked(Command::new("systemctl").args(["--user", "daemon-reload"])).ok();
-        println!("Service uninstalled ({})", file.display());
-        Ok(())
-    } else {
-        bail!("Service management is only supported on macOS and Linux");
     }
+    windows_impl::run_dispatcher()
 }
-
-// ── Path helpers ────────────────────────────────────────────────
 
 fn macos_plist_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not find home directory")?;
@@ -287,6 +386,7 @@ fn macos_plist_path() -> Result<PathBuf> {
         .join(format!("{SERVICE_LABEL}.plist")))
 }
 
+#[cfg(target_os = "linux")]
 fn linux_unit_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not find home directory")?;
     Ok(home
@@ -297,11 +397,8 @@ fn linux_unit_path() -> Result<PathBuf> {
 }
 
 fn thinclaw_logs_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not find home directory")?;
-    Ok(home.join(".thinclaw").join("logs"))
+    Ok(crate::platform::state_paths().logs_dir)
 }
-
-// ── Shell helpers ───────────────────────────────────────────────
 
 fn run_checked(command: &mut Command) -> Result<()> {
     let output = command.output().context("failed to spawn command")?;
@@ -329,10 +426,478 @@ fn xml_escape(raw: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-// ── Tests ───────────────────────────────────────────────────────
+#[cfg(target_os = "windows")]
+mod windows_impl {
+    use std::ffi::OsString;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use anyhow::{Context, Result, anyhow};
+    use windows_service::service::{
+        ServiceAccess, ServiceAction, ServiceActionType, ServiceControl, ServiceControlAccept,
+        ServiceErrorControl, ServiceExitCode, ServiceFailureActions, ServiceFailureResetPeriod,
+        ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+    };
+    use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+    use windows_service::service_dispatcher;
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+    use windows_service::{
+        Error as WinServiceError, Result as WinServiceResult, define_windows_service,
+    };
+
+    use super::{
+        WINDOWS_SERVICE_DISPLAY_NAME, WINDOWS_SERVICE_NAME, WINDOWS_SERVICE_RUNTIME_COMMAND,
+    };
+
+    const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
+
+    define_windows_service!(ffi_service_main, service_main);
+
+    pub(super) fn install() -> Result<()> {
+        std::fs::create_dir_all(crate::platform::state_paths().logs_dir.clone())
+            .context("failed to create ThinClaw logs directory")?;
+
+        let manager_access = ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE;
+        let service_manager = ServiceManager::local_computer(None::<&str>, manager_access)
+            .context("failed to connect to the Windows Service Control Manager")?;
+
+        let service_info = service_info()?;
+        let service_access = ServiceAccess::QUERY_STATUS
+            | ServiceAccess::QUERY_CONFIG
+            | ServiceAccess::CHANGE_CONFIG
+            | ServiceAccess::START
+            | ServiceAccess::STOP
+            | ServiceAccess::DELETE;
+
+        let service = match service_manager.create_service(&service_info, service_access) {
+            Ok(service) => service,
+            Err(_) => {
+                let service = service_manager
+                    .open_service(WINDOWS_SERVICE_NAME, service_access)
+                    .with_context(|| {
+                        format!("failed to create or open Windows service '{WINDOWS_SERVICE_NAME}'")
+                    })?;
+                service
+                    .change_config(&service_info)
+                    .context("failed to update Windows service configuration")?;
+                service
+            }
+        };
+
+        service
+            .set_description("ThinClaw background runtime service")
+            .context("failed to set Windows service description")?;
+
+        let failure_actions = ServiceFailureActions {
+            reset_period: ServiceFailureResetPeriod::After(Duration::from_secs(24 * 60 * 60)),
+            reboot_msg: None,
+            command: None,
+            actions: Some(vec![
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(5),
+                },
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(15),
+                },
+                ServiceAction {
+                    action_type: ServiceActionType::Restart,
+                    delay: Duration::from_secs(30),
+                },
+            ]),
+        };
+        service
+            .update_failure_actions(failure_actions)
+            .context("failed to configure Windows service recovery actions")?;
+        service
+            .set_failure_actions_on_non_crash_failures(true)
+            .context("failed to enable Windows service recovery on non-crash failures")?;
+
+        println!(
+            "Installed Windows service: {}",
+            WINDOWS_SERVICE_DISPLAY_NAME
+        );
+        println!("  Start with: thinclaw service start");
+        Ok(())
+    }
+
+    pub(super) fn start() -> Result<()> {
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .context("failed to connect to the Windows Service Control Manager")?;
+        let service = manager
+            .open_service(
+                WINDOWS_SERVICE_NAME,
+                ServiceAccess::QUERY_STATUS | ServiceAccess::START,
+            )
+            .with_context(|| {
+                format!(
+                    "Windows service '{}' is not installed. Run `thinclaw service install` first.",
+                    WINDOWS_SERVICE_NAME
+                )
+            })?;
+
+        let status = service
+            .query_status()
+            .context("failed to query Windows service status")?;
+        if status.current_state == ServiceState::Running {
+            println!("Service already running");
+            return Ok(());
+        }
+
+        service
+            .start(&[] as &[&std::ffi::OsStr])
+            .context("failed to start Windows service")?;
+        let status = wait_for_state(&service, ServiceState::Running, Duration::from_secs(20))
+            .context("Windows service did not reach the running state")?;
+
+        println!(
+            "Service started (state: {}, PID: {})",
+            state_label(status.current_state),
+            status.process_id.unwrap_or_default()
+        );
+        Ok(())
+    }
+
+    pub(super) fn stop() -> Result<()> {
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .context("failed to connect to the Windows Service Control Manager")?;
+        let service = manager
+            .open_service(
+                WINDOWS_SERVICE_NAME,
+                ServiceAccess::QUERY_STATUS | ServiceAccess::STOP,
+            )
+            .with_context(|| {
+                format!(
+                    "Windows service '{}' is not installed. Run `thinclaw service install` first.",
+                    WINDOWS_SERVICE_NAME
+                )
+            })?;
+
+        let status = service
+            .query_status()
+            .context("failed to query Windows service status")?;
+        if status.current_state == ServiceState::Stopped {
+            println!("Service already stopped");
+            return Ok(());
+        }
+
+        service.stop().context("failed to stop Windows service")?;
+        let status = wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(20))
+            .context("Windows service did not stop cleanly")?;
+
+        println!(
+            "Service stopped (state: {})",
+            state_label(status.current_state)
+        );
+        Ok(())
+    }
+
+    pub(super) fn status() -> Result<()> {
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .context("failed to connect to the Windows Service Control Manager")?;
+        let service = manager
+            .open_service(
+                WINDOWS_SERVICE_NAME,
+                ServiceAccess::QUERY_STATUS | ServiceAccess::QUERY_CONFIG,
+            )
+            .with_context(|| {
+                format!(
+                    "Windows service '{}' is not installed. Run `thinclaw service install` first.",
+                    WINDOWS_SERVICE_NAME
+                )
+            })?;
+
+        let status = service
+            .query_status()
+            .context("failed to query Windows service status")?;
+        let config = service
+            .query_config()
+            .context("failed to query Windows service configuration")?;
+
+        println!("Service state: {}", state_label(status.current_state));
+        println!("Service name: {}", WINDOWS_SERVICE_NAME);
+        println!("Display name: {}", WINDOWS_SERVICE_DISPLAY_NAME);
+        println!("Startup: {:?}", config.start_type);
+        println!("Binary: {}", config.executable_path.display());
+        if let Some(pid) = status.process_id {
+            println!("PID: {}", pid);
+        }
+        Ok(())
+    }
+
+    pub(super) fn uninstall() -> Result<()> {
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .context("failed to connect to the Windows Service Control Manager")?;
+        let service = manager
+            .open_service(
+                WINDOWS_SERVICE_NAME,
+                ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
+            )
+            .with_context(|| {
+                format!(
+                    "Windows service '{}' is not installed. Nothing to uninstall.",
+                    WINDOWS_SERVICE_NAME
+                )
+            })?;
+
+        if let Ok(status) = service.query_status()
+            && status.current_state != ServiceState::Stopped
+        {
+            let _ = service.stop();
+            let _ = wait_for_state(&service, ServiceState::Stopped, Duration::from_secs(20));
+        }
+
+        service
+            .delete()
+            .context("failed to mark the Windows service for deletion")?;
+        println!("Service uninstalled ({})", WINDOWS_SERVICE_DISPLAY_NAME);
+        Ok(())
+    }
+
+    pub(super) fn run_dispatcher() -> Result<()> {
+        service_dispatcher::start(WINDOWS_SERVICE_NAME, ffi_service_main)
+            .context("failed to start Windows service dispatcher")
+    }
+
+    fn service_main(_arguments: Vec<OsString>) {
+        if let Err(error) = run_service() {
+            append_manager_log(&format!("Windows service runtime failed: {error}"));
+        }
+    }
+
+    fn run_service() -> WinServiceResult<()> {
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+
+        let event_handler = move |control_event| -> ServiceControlHandlerResult {
+            match control_event {
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                ServiceControl::Stop => {
+                    let _ = shutdown_tx.send(());
+                    ServiceControlHandlerResult::NoError
+                }
+                _ => ServiceControlHandlerResult::NotImplemented,
+            }
+        };
+
+        let status_handle = service_control_handler::register(WINDOWS_SERVICE_NAME, event_handler)?;
+
+        status_handle.set_service_status(ServiceStatus {
+            service_type: SERVICE_TYPE,
+            current_state: ServiceState::StartPending,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::NO_ERROR,
+            checkpoint: 1,
+            wait_hint: Duration::from_secs(10),
+            process_id: None,
+        })?;
+
+        let mut child = spawn_runtime_child().map_err(WinServiceError::Winapi)?;
+
+        status_handle.set_service_status(ServiceStatus {
+            service_type: SERVICE_TYPE,
+            current_state: ServiceState::Running,
+            controls_accepted: ServiceControlAccept::STOP,
+            exit_code: ServiceExitCode::NO_ERROR,
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        })?;
+
+        loop {
+            match shutdown_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    status_handle.set_service_status(ServiceStatus {
+                        service_type: SERVICE_TYPE,
+                        current_state: ServiceState::StopPending,
+                        controls_accepted: ServiceControlAccept::empty(),
+                        exit_code: ServiceExitCode::NO_ERROR,
+                        checkpoint: 1,
+                        wait_hint: Duration::from_secs(15),
+                        process_id: None,
+                    })?;
+
+                    terminate_child(&mut child);
+
+                    status_handle.set_service_status(ServiceStatus {
+                        service_type: SERVICE_TYPE,
+                        current_state: ServiceState::Stopped,
+                        controls_accepted: ServiceControlAccept::empty(),
+                        exit_code: ServiceExitCode::NO_ERROR,
+                        checkpoint: 0,
+                        wait_hint: Duration::default(),
+                        process_id: None,
+                    })?;
+                    return Ok(());
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+
+            if let Some(exit) = child.try_wait().map_err(WinServiceError::Winapi)? {
+                let code = exit.code().unwrap_or(1);
+                if code == 0 {
+                    status_handle.set_service_status(ServiceStatus {
+                        service_type: SERVICE_TYPE,
+                        current_state: ServiceState::Stopped,
+                        controls_accepted: ServiceControlAccept::empty(),
+                        exit_code: ServiceExitCode::NO_ERROR,
+                        checkpoint: 0,
+                        wait_hint: Duration::default(),
+                        process_id: None,
+                    })?;
+                    return Ok(());
+                }
+
+                append_manager_log(&format!(
+                    "ThinClaw runtime exited unexpectedly with code {code}; letting SCM restart it"
+                ));
+
+                status_handle.set_service_status(ServiceStatus {
+                    service_type: SERVICE_TYPE,
+                    current_state: ServiceState::Stopped,
+                    controls_accepted: ServiceControlAccept::empty(),
+                    exit_code: ServiceExitCode::ServiceSpecific(code.max(1) as u32),
+                    checkpoint: 0,
+                    wait_hint: Duration::default(),
+                    process_id: None,
+                })?;
+                return Err(WinServiceError::Winapi(std::io::Error::other(format!(
+                    "ThinClaw runtime exited with code {code}"
+                ))));
+            }
+        }
+    }
+
+    fn spawn_runtime_child() -> std::io::Result<Child> {
+        let exe = std::env::current_exe()?;
+        let logs_dir = crate::platform::state_paths().logs_dir;
+        std::fs::create_dir_all(&logs_dir)?;
+
+        let stdout = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(logs_dir.join("service.stdout.log"))?;
+        let stderr = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(logs_dir.join("service.stderr.log"))?;
+
+        let mut cmd = Command::new(exe);
+        cmd.arg("run")
+            .arg("--no-onboard")
+            .env("THINCLAW_SERVICE_MANAGER", "windows")
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr))
+            .stdin(Stdio::null());
+
+        if let Some(home) = std::env::var_os("THINCLAW_HOME") {
+            cmd.env("THINCLAW_HOME", home);
+        }
+
+        cmd.spawn()
+    }
+
+    fn terminate_child(child: &mut Child) {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+
+        let _ = child.kill();
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(15) {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(250)),
+                Err(_) => return,
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    fn wait_for_state(
+        service: &windows_service::service::Service,
+        target: ServiceState,
+        timeout: Duration,
+    ) -> Result<ServiceStatus> {
+        let started = Instant::now();
+        loop {
+            let status = service
+                .query_status()
+                .context("failed to query Windows service status")?;
+            if status.current_state == target {
+                return Ok(status);
+            }
+            if started.elapsed() >= timeout {
+                return Err(anyhow!(
+                    "timed out waiting for service state {} (last state: {})",
+                    state_label(target),
+                    state_label(status.current_state)
+                ));
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    fn service_info() -> Result<ServiceInfo> {
+        let exe = std::env::current_exe().context("failed to resolve current executable")?;
+        let home = crate::platform::state_paths().home;
+
+        Ok(ServiceInfo {
+            name: OsString::from(WINDOWS_SERVICE_NAME),
+            display_name: OsString::from(WINDOWS_SERVICE_DISPLAY_NAME),
+            service_type: SERVICE_TYPE,
+            start_type: ServiceStartType::AutoStart,
+            error_control: ServiceErrorControl::Normal,
+            executable_path: exe,
+            launch_arguments: vec![
+                OsString::from(WINDOWS_SERVICE_RUNTIME_COMMAND),
+                OsString::from("--home"),
+                home.into_os_string(),
+            ],
+            dependencies: vec![],
+            account_name: None,
+            account_password: None,
+        })
+    }
+
+    fn state_label(state: ServiceState) -> &'static str {
+        match state {
+            ServiceState::Stopped => "stopped",
+            ServiceState::StartPending => "start-pending",
+            ServiceState::StopPending => "stop-pending",
+            ServiceState::Running => "running",
+            ServiceState::ContinuePending => "continue-pending",
+            ServiceState::PausePending => "pause-pending",
+            ServiceState::Paused => "paused",
+        }
+    }
+
+    fn append_manager_log(message: &str) {
+        let logs_dir = crate::platform::state_paths().logs_dir;
+        if std::fs::create_dir_all(&logs_dir).is_err() {
+            return;
+        }
+        let path = logs_dir.join("service.manager.log");
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(
+                file,
+                "[{}] {}",
+                chrono::Utc::now().to_rfc3339(),
+                message.trim()
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
+    use crate::platform::shell_launcher;
     use crate::service::*;
 
     #[test]
@@ -348,28 +913,44 @@ mod tests {
 
     #[test]
     fn run_capture_reads_stdout() {
-        let out = run_capture(Command::new("sh").args(["-c", "echo hello"]))
-            .expect("stdout capture should succeed");
+        let mut command = shell_launcher().std_command("echo hello");
+        let out = run_capture(&mut command).expect("stdout capture should succeed");
         assert_eq!(out.trim(), "hello");
     }
 
     #[test]
     fn run_capture_falls_back_to_stderr() {
-        let out = run_capture(Command::new("sh").args(["-c", "echo warn 1>&2"]))
-            .expect("stderr capture should succeed");
+        let script = if cfg!(target_os = "windows") {
+            "echo warn 1>&2"
+        } else {
+            "echo warn 1>&2"
+        };
+        let mut command = shell_launcher().std_command(script);
+        let out = run_capture(&mut command).expect("stderr capture should succeed");
         assert_eq!(out.trim(), "warn");
     }
 
     #[test]
     fn run_checked_errors_on_non_zero_exit() {
-        let err = run_checked(Command::new("sh").args(["-c", "exit 17"]))
-            .expect_err("non-zero exit should error");
+        let script = if cfg!(target_os = "windows") {
+            "exit /B 17"
+        } else {
+            "exit 17"
+        };
+        let mut command = shell_launcher().std_command(script);
+        let err = run_checked(&mut command).expect_err("non-zero exit should error");
         assert!(err.to_string().contains("command failed"));
     }
 
     #[test]
     fn run_checked_succeeds_on_zero_exit() {
-        assert!(run_checked(Command::new("sh").args(["-c", "exit 0"])).is_ok());
+        let script = if cfg!(target_os = "windows") {
+            "exit /B 0"
+        } else {
+            "exit 0"
+        };
+        let mut command = shell_launcher().std_command(script);
+        assert!(run_checked(&mut command).is_ok());
     }
 
     #[cfg(target_os = "macos")]
@@ -392,6 +973,12 @@ mod tests {
             s.ends_with(".config/systemd/user/thinclaw.service"),
             "unexpected path: {s}"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_runtime_command_is_hidden_internal_name() {
+        assert_eq!(WINDOWS_SERVICE_RUNTIME_COMMAND, "__windows-service");
     }
 
     #[test]

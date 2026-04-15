@@ -6,6 +6,7 @@
 //! - `gateway status` — show gateway status
 
 use clap::Subcommand;
+use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
 
 use crate::terminal_branding::TerminalBranding;
 
@@ -29,6 +30,21 @@ pub enum GatewayCommand {
     /// Stop a running gateway
     Stop,
 
+    /// Restart or refresh the managed gateway process
+    Reload {
+        /// Port to listen on (default: from GATEWAY_PORT env or 3000)
+        #[arg(short, long)]
+        port: Option<u16>,
+
+        /// Host to bind to (default: from GATEWAY_HOST env or "127.0.0.1")
+        #[arg(long)]
+        host: Option<String>,
+
+        /// Run in foreground (don't daemonize)
+        #[arg(long)]
+        foreground: bool,
+    },
+
     /// Show gateway status
     Status,
 }
@@ -48,6 +64,14 @@ pub async fn run_gateway_command(cmd: GatewayCommand) -> anyhow::Result<()> {
             TerminalBranding::current().print_banner("Gateway", Some("Stop the web cockpit"));
             stop_gateway().await
         }
+        GatewayCommand::Reload {
+            port,
+            host,
+            foreground,
+        } => {
+            TerminalBranding::current().print_banner("Gateway", Some("Reload the web cockpit"));
+            reload_gateway(port, host, foreground).await
+        }
         GatewayCommand::Status => {
             TerminalBranding::current().print_banner("Gateway", Some("Inspect the web cockpit"));
             gateway_status().await
@@ -57,10 +81,24 @@ pub async fn run_gateway_command(cmd: GatewayCommand) -> anyhow::Result<()> {
 
 /// PID file location.
 fn pid_file_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(home)
-        .join(".thinclaw")
-        .join("gateway.pid")
+    crate::platform::state_paths().gateway_pid_file
+}
+
+fn pid_is_running(pid: u32) -> bool {
+    let mut system = System::new_all();
+    system.refresh_processes(ProcessesToUpdate::All, false);
+    system.process(Pid::from_u32(pid)).is_some()
+}
+
+fn terminate_pid(pid: u32) -> bool {
+    let mut system = System::new_all();
+    system.refresh_processes(ProcessesToUpdate::All, false);
+    if let Some(process) = system.process(Pid::from_u32(pid)) {
+        return process
+            .kill_with(Signal::Term)
+            .unwrap_or_else(|| process.kill());
+    }
+    false
 }
 
 /// Start the gateway.
@@ -78,13 +116,7 @@ async fn start_gateway(
         && let Ok(pid) = contents.trim().parse::<u32>()
     {
         // Check if process is alive.
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let alive = pid_is_running(pid);
 
         if alive {
             anyhow::bail!(
@@ -136,13 +168,18 @@ async fn start_gateway(
 
         // The actual gateway runs as part of `thinclaw run`. In foreground mode,
         // we tell the user to use `thinclaw run` with gateway enabled.
-        println!(
-            "{}",
-            branding.body(format!(
+        let command_text = if cfg!(target_os = "windows") {
+            format!(
+                "Run with gateway enabled:\n\n  $env:GATEWAY_ENABLED = \"true\"; $env:GATEWAY_HOST = \"{}\"; $env:GATEWAY_PORT = \"{}\"; thinclaw run\n",
+                gw_host, gw_port
+            )
+        } else {
+            format!(
                 "Run with gateway enabled:\n\n  GATEWAY_ENABLED=true GATEWAY_HOST={} GATEWAY_PORT={} thinclaw run\n",
                 gw_host, gw_port
-            ))
-        );
+            )
+        };
+        println!("{}", branding.body(command_text));
 
         // Clean up PID file.
         let _ = std::fs::remove_file(&pid_path);
@@ -181,6 +218,18 @@ async fn start_gateway(
     Ok(())
 }
 
+async fn reload_gateway(
+    port: Option<u16>,
+    host: Option<String>,
+    foreground: bool,
+) -> anyhow::Result<()> {
+    let pid_path = pid_file_path();
+    if pid_path.exists() {
+        let _ = stop_gateway().await;
+    }
+    start_gateway(port, host, foreground).await
+}
+
 /// Stop a running gateway.
 async fn stop_gateway() -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
@@ -198,21 +247,16 @@ async fn stop_gateway() -> anyhow::Result<()> {
         .parse()
         .map_err(|_| anyhow::anyhow!("Invalid PID in {}", pid_path.display()))?;
 
-    // Send SIGTERM.
-    let status = std::process::Command::new("kill")
-        .args([&pid.to_string()])
-        .status()?;
-
-    if status.success() {
+    if terminate_pid(pid) {
         println!(
             "  {}",
-            branding.good(format!("Sent SIGTERM to gateway (PID {})", pid))
+            branding.good(format!("Stopped gateway process (PID {})", pid))
         );
     } else {
         println!(
             "  {}",
             branding.warn(format!(
-                "Failed to send signal to PID {} (process may have already exited)",
+                "Failed to stop PID {} (process may have already exited)",
                 pid
             ))
         );
@@ -232,13 +276,7 @@ async fn gateway_status() -> anyhow::Result<()> {
         && let Ok(contents) = std::fs::read_to_string(&pid_path)
         && let Ok(pid) = contents.trim().parse::<u32>()
     {
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let alive = pid_is_running(pid);
 
         if alive {
             Some((pid, true))

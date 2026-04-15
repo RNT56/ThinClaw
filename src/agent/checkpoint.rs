@@ -78,10 +78,7 @@ pub struct CheckpointManager {
 
 impl Default for CheckpointManager {
     fn default() -> Self {
-        let shadow_root = dirs::home_dir()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-            .join(".thinclaw")
-            .join("checkpoints");
+        let shadow_root = crate::platform::resolve_data_dir("checkpoints");
         Self {
             enabled: false,
             max_checkpoints: DEFAULT_MAX_CHECKPOINTS,

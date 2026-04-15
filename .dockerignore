@@ -1,4 +1,5 @@
 target/
+target*/
 .git/
 .env
 .env.*
@@ -6,3 +7,4 @@ target/
 !CLAUDE.md
 node_modules/
 tools-src/
+.cargo-codex-home/

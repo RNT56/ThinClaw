@@ -129,6 +129,7 @@ pub enum WizardStepId {
     Extensions,
     DockerSandbox,
     ClaudeCode,
+    CodexCode,
     ToolApproval,
     Routines,
     Skills,

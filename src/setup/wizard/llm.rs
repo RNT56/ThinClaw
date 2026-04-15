@@ -536,7 +536,7 @@ impl SetupWizard {
 
     async fn has_provider_secret(&mut self, env_var: &str, secret_name: &str) -> bool {
         std::env::var(env_var).is_ok()
-            || crate::secrets::keychain::get_api_key(secret_name)
+            || crate::platform::secure_store::get_api_key(secret_name)
                 .await
                 .is_some()
             || self.has_saved_secret(secret_name).await
@@ -553,7 +553,7 @@ impl SetupWizard {
             return Some(value);
         }
 
-        if let Some(value) = crate::secrets::keychain::get_api_key(secret_name).await
+        if let Some(value) = crate::platform::secure_store::get_api_key(secret_name).await
             && !value.trim().is_empty()
         {
             return Some(value);

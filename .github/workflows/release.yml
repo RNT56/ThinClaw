@@ -86,6 +86,26 @@ jobs:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
 
+  windows-runtime-smoke:
+    needs:
+      - plan
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.92.0
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: windows-release-smoke
+      - name: Host runtime smoke
+        run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+
   # Build and packages all the platform-specific things
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
@@ -351,11 +371,12 @@ jobs:
   host:
     needs:
       - plan
+      - windows-runtime-smoke
       - build-local-artifacts
       - build-global-artifacts
       - build-wasm-extensions
     # Only run if we're "publishing", and only if plan, local, global, and wasm didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.windows-runtime-smoke.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

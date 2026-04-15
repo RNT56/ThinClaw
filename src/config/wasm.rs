@@ -40,10 +40,7 @@ impl Default for WasmConfig {
 
 /// Get the default tools directory (~/.thinclaw/tools/).
 fn default_tools_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
-        .join("tools")
+    crate::platform::state_paths().tools_dir
 }
 
 impl WasmConfig {

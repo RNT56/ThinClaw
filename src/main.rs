@@ -59,6 +59,7 @@ fn restart_is_managed_by_service() -> bool {
         || std::env::var_os("JOURNAL_STREAM").is_some()
         || std::env::var_os("SYSTEMD_EXEC_PID").is_some()
         || std::env::var_os("LAUNCH_JOB_NAME").is_some()
+        || std::env::var_os("THINCLAW_SERVICE_MANAGER").is_some()
 }
 
 fn relaunch_current_process() -> anyhow::Result<()> {
@@ -110,6 +111,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing(cli.debug);
             return thinclaw::cli::run_service_command(service_cmd);
+        }
+        #[cfg(all(feature = "repl", target_os = "windows"))]
+        Some(Command::WindowsServiceRuntime { home }) => {
+            return thinclaw::service::run_windows_service_dispatcher(home.clone());
         }
         Some(Command::Doctor) => {
             init_cli_tracing(cli.debug);
@@ -193,6 +198,15 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             init_worker_tracing();
             return run_claude_bridge(*job_id, orchestrator_url, *max_turns, model).await;
+        }
+        #[cfg(feature = "docker-sandbox")]
+        Some(Command::CodexBridge {
+            job_id,
+            orchestrator_url,
+            model,
+        }) => {
+            init_worker_tracing();
+            return run_codex_bridge(*job_id, orchestrator_url, model).await;
         }
         Some(Command::Onboard {
             skip_auth,
@@ -414,13 +428,23 @@ async fn main() -> anyhow::Result<()> {
         if config.sandbox.enabled && docker_status.is_ok() {
             let token_store = TokenStore::new();
 
-            // Resolve Claude Code API key: env var > OS keychain > (OAuth fallback in config)
+            // Resolve Claude Code API key: env var > OS secure store > (OAuth fallback in config)
             let claude_code_api_key = match std::env::var("ANTHROPIC_API_KEY").ok() {
                 Some(key) => Some(key),
                 None => {
-                    // Check OS keychain for API key stored by the wizard
-                    thinclaw::secrets::keychain::get_api_key(
-                        thinclaw::secrets::keychain::CLAUDE_CODE_API_KEY_ACCOUNT,
+                    // Check the OS secure store for the API key stored by the wizard
+                    thinclaw::platform::secure_store::get_api_key(
+                        thinclaw::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
+                    )
+                    .await
+                }
+            };
+
+            let codex_code_api_key = match std::env::var("OPENAI_API_KEY").ok() {
+                Some(key) => Some(key),
+                None => {
+                    thinclaw::platform::secure_store::get_api_key(
+                        thinclaw::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
                     )
                     .await
                 }
@@ -433,10 +457,16 @@ async fn main() -> anyhow::Result<()> {
                 orchestrator_port: 50051,
                 claude_code_api_key,
                 claude_code_oauth_token: thinclaw::config::ClaudeCodeConfig::extract_oauth_token(),
+                claude_code_enabled: config.claude_code.enabled,
                 claude_code_model: config.claude_code.model.clone(),
                 claude_code_max_turns: config.claude_code.max_turns,
                 claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
                 claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+                codex_code_api_key,
+                codex_code_enabled: config.codex_code.enabled,
+                codex_code_model: config.codex_code.model.clone(),
+                codex_code_memory_limit_mb: config.codex_code.memory_limit_mb,
+                codex_code_home_dir: config.codex_code.home_dir.clone(),
             };
             let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
@@ -472,6 +502,12 @@ async fn main() -> anyhow::Result<()> {
                     "Claude Code sandbox mode available (model: {}, max_turns: {})",
                     config.claude_code.model,
                     config.claude_code.max_turns
+                );
+            }
+            if config.codex_code.enabled {
+                tracing::info!(
+                    "Codex sandbox mode available (model: {})",
+                    config.codex_code.model
                 );
             }
             Some(jm)
@@ -1007,6 +1043,7 @@ async fn main() -> anyhow::Result<()> {
             sandbox_enabled: config.sandbox.enabled,
             docker_status,
             claude_code_enabled: config.claude_code.enabled,
+            codex_code_enabled: config.codex_code.enabled,
             routines_enabled: config.routines.enabled,
             skills_enabled: config.skills.enabled,
             channels: channel_names,

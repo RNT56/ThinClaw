@@ -29,6 +29,13 @@ use tokio::sync::{mpsc, watch};
 use crate::context::JobContext;
 use crate::tools::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};
 
+fn default_audio_recording_path(extension: &str) -> PathBuf {
+    let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+    crate::platform::state_paths()
+        .audio_dir
+        .join(format!("recording_{ts}.{extension}"))
+}
+
 /// Talk mode configuration.
 #[derive(Debug, Clone)]
 pub struct TalkModeConfig {
@@ -188,10 +195,7 @@ impl TalkModeRuntime {
         let _ = self.event_tx.send(TalkModeEvent::RecordingStarted).await;
 
         let ext = self.config.audio_format.extension();
-        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        let path = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(format!(".thinclaw/audio/recording_{ts}.{ext}"));
+        let path = default_audio_recording_path(ext);
 
         // Ensure directory exists
         if let Some(parent) = path.parent() {
@@ -234,6 +238,7 @@ async fn record_audio(
     path: &std::path::Path,
     duration_secs: u32,
     sample_rate: u32,
+    _device_name: Option<&str>,
 ) -> Result<(), ToolError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -299,6 +304,7 @@ async fn record_audio(
     path: &std::path::Path,
     duration_secs: u32,
     sample_rate: u32,
+    _device_name: Option<&str>,
 ) -> Result<(), ToolError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -336,10 +342,54 @@ async fn record_audio(
 
 /// Record audio on Windows.
 #[cfg(target_os = "windows")]
+async fn list_windows_audio_devices() -> Result<Vec<String>, ToolError> {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-list_devices",
+            "true",
+            "-f",
+            "dshow",
+            "-i",
+            "dummy",
+        ])
+        .output()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("ffmpeg: {e}")))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut devices = Vec::new();
+    let mut in_audio_section = false;
+    for line in stderr.lines() {
+        let trimmed = line.trim();
+        if trimmed.contains("DirectShow audio devices") {
+            in_audio_section = true;
+            continue;
+        }
+        if in_audio_section && trimmed.contains("Alternative name") {
+            continue;
+        }
+        if in_audio_section
+            && let Some(start) = trimmed.find('"')
+            && let Some(end) = trimmed[start + 1..].find('"')
+        {
+            devices.push(trimmed[start + 1..start + 1 + end].to_string());
+        }
+    }
+    if devices.is_empty() {
+        return Err(ToolError::ExecutionFailed(
+            "No Windows microphone devices found via ffmpeg/dshow.".to_string(),
+        ));
+    }
+    Ok(devices)
+}
+
+#[cfg(target_os = "windows")]
 async fn record_audio(
     path: &std::path::Path,
     duration_secs: u32,
     sample_rate: u32,
+    device_name: Option<&str>,
 ) -> Result<(), ToolError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -347,12 +397,21 @@ async fn record_audio(
             .map_err(|e| ToolError::ExecutionFailed(format!("Create audio dir: {e}")))?;
     }
 
+    let device = if let Some(device) = device_name.filter(|value| !value.trim().is_empty()) {
+        device.to_string()
+    } else if let Ok(device) = std::env::var("THINCLAW_MICROPHONE_DEVICE") {
+        device
+    } else {
+        let mut devices = list_windows_audio_devices().await?;
+        devices.remove(0)
+    };
+
     let ffmpeg = Command::new("ffmpeg")
         .args([
             "-f",
             "dshow",
             "-i",
-            "audio=default",
+            &format!("audio={device}"),
             "-ar",
             &sample_rate.to_string(),
             "-ac",
@@ -367,9 +426,9 @@ async fn record_audio(
         .map_err(|e| ToolError::ExecutionFailed(format!("ffmpeg: {e}")))?;
 
     if !ffmpeg.status.success() {
-        return Err(ToolError::ExecutionFailed(
-            "Audio recording failed. Install ffmpeg.".to_string(),
-        ));
+        return Err(ToolError::ExecutionFailed(format!(
+            "Audio recording failed for Windows device '{device}'. Install ffmpeg or set THINCLAW_MICROPHONE_DEVICE/device_name to a valid DirectShow microphone."
+        )));
     }
 
     Ok(())
@@ -549,6 +608,10 @@ impl Tool for TalkModeTool {
                     "type": "string",
                     "description": "Language hint (ISO 639-1). Default: en",
                     "default": "en"
+                },
+                "device_name": {
+                    "type": "string",
+                    "description": "Optional microphone device override. On Windows this maps to a DirectShow device name and also falls back to THINCLAW_MICROPHONE_DEVICE."
                 }
             },
             "required": []
@@ -572,15 +635,13 @@ impl Tool for TalkModeTool {
             .get("language")
             .and_then(|v| v.as_str())
             .unwrap_or("en");
+        let device_name = params.get("device_name").and_then(|v| v.as_str());
 
         // Generate temp file path
-        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        let path = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join(format!(".thinclaw/audio/recording_{ts}.wav"));
+        let path = default_audio_recording_path("wav");
 
         // Record audio
-        record_audio(&path, duration, 16000).await?;
+        record_audio(&path, duration, 16000, device_name).await?;
 
         // Transcribe using the configured backend
         // IC-007: Use optional_env to see bridge-injected vars

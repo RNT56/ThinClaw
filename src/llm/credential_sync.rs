@@ -6,7 +6,9 @@ use std::time::Duration;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 
-use crate::config::{ClaudeCodeConfig, clear_synced_oauth_vars, replace_synced_oauth_vars};
+use crate::config::{
+    ClaudeCodeConfig, CodexCodeConfig, clear_synced_oauth_vars, replace_synced_oauth_vars,
+};
 use crate::settings::{
     OAuthCredentialSourceConfig, OAuthCredentialSourceKind, ProviderCredentialMode,
     ProvidersSettings,
@@ -127,7 +129,7 @@ pub fn oauth_source_location_hint(kind: OAuthCredentialSourceKind) -> String {
             }
         }
         OAuthCredentialSourceKind::OpenAiCodex => default_codex_auth_path()
-            .unwrap_or_else(|| PathBuf::from("~/.codex/auth.json"))
+            .unwrap_or_else(|| CodexCodeConfig::resolved_auth_file_path())
             .display()
             .to_string(),
         OAuthCredentialSourceKind::JsonFile => "Configured JSON file".to_string(),
@@ -243,7 +245,7 @@ fn resolve_custom_source(
 }
 
 fn default_codex_auth_path() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".codex").join("auth.json"))
+    Some(CodexCodeConfig::resolved_auth_file_path())
 }
 
 fn current_fingerprints(sources: &[ResolvedOAuthSource]) -> HashMap<String, String> {

@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env, parse_string_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
@@ -107,6 +109,19 @@ pub struct ClaudeCodeConfig {
     pub allowed_tools: Vec<String>,
 }
 
+/// Codex CLI sandbox configuration.
+#[derive(Debug, Clone)]
+pub struct CodexCodeConfig {
+    /// Whether Codex sandbox mode is available.
+    pub enabled: bool,
+    /// Host directory containing Codex auth/config files.
+    pub home_dir: PathBuf,
+    /// Codex model to use (for example "gpt-5.3-codex").
+    pub model: String,
+    /// Memory limit in MB for Codex containers.
+    pub memory_limit_mb: u64,
+}
+
 /// Default allowed tools for Claude Code inside containers.
 ///
 /// These cover all standard Claude Code tools needed for autonomous operation.
@@ -145,6 +160,17 @@ impl Default for ClaudeCodeConfig {
             max_turns: 50,
             memory_limit_mb: 4096,
             allowed_tools: default_claude_code_allowed_tools(),
+        }
+    }
+}
+
+impl Default for CodexCodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            home_dir: default_codex_home_dir(),
+            model: "gpt-5.3-codex".to_string(),
+            memory_limit_mb: 4096,
         }
     }
 }
@@ -237,6 +263,75 @@ impl ClaudeCodeConfig {
                 .unwrap_or(defaults.allowed_tools),
         })
     }
+}
+
+impl CodexCodeConfig {
+    /// Load from environment variables only (used inside containers where
+    /// there is no database or full config).
+    pub fn from_env() -> Self {
+        let defaults = Settings::default();
+        match Self::resolve(&defaults) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to resolve CodexCodeConfig: {e}, using defaults");
+                Self::default()
+            }
+        }
+    }
+
+    pub fn auth_file_path(&self) -> PathBuf {
+        Self::auth_file_path_for_home(&self.home_dir)
+    }
+
+    pub fn auth_file_path_for_home(home_dir: &Path) -> PathBuf {
+        home_dir.join("auth.json")
+    }
+
+    pub fn resolved_home_dir() -> PathBuf {
+        configured_codex_home_dir().unwrap_or_else(default_codex_home_dir)
+    }
+
+    pub fn resolved_auth_file_path() -> PathBuf {
+        Self::auth_file_path_for_home(&Self::resolved_home_dir())
+    }
+
+    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+        let defaults = Self::default();
+        let db_enabled = settings.codex_code_enabled;
+        let db_model = settings
+            .codex_code_model
+            .as_deref()
+            .unwrap_or(&defaults.model);
+
+        Ok(Self {
+            enabled: parse_bool_env("CODEX_CODE_ENABLED", db_enabled)?,
+            home_dir: configured_codex_home_dir().unwrap_or(defaults.home_dir),
+            model: parse_string_env("CODEX_CODE_MODEL", db_model.to_string())?,
+            memory_limit_mb: parse_optional_env(
+                "CODEX_CODE_MEMORY_LIMIT_MB",
+                defaults.memory_limit_mb,
+            )?,
+        })
+    }
+}
+
+fn configured_codex_home_dir() -> Option<PathBuf> {
+    optional_env("CODEX_HOME")
+        .ok()
+        .flatten()
+        .map(PathBuf::from)
+        .or_else(|| {
+            optional_env("CODEX_CONFIG_DIR")
+                .ok()
+                .flatten()
+                .map(PathBuf::from)
+        })
+}
+
+fn default_codex_home_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codex")
 }
 
 /// Parse the OAuth access token from a Claude Code credentials JSON blob.

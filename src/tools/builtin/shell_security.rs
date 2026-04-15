@@ -350,6 +350,7 @@ pub(super) const SAFE_BINS: &[&str] = &[
     "date",
     "which",
     "whereis",
+    "where",
     "whoami",
     "env",
     "printenv",
@@ -381,10 +382,15 @@ pub(super) const SAFE_BINS: &[&str] = &[
     // Desktop (open files in default app)
     "open",     // macOS
     "xdg-open", // Linux
+    "explorer", // Windows
     // Clipboard
     "pbcopy",  // macOS
     "pbpaste", // macOS
     "xclip",   // Linux
+    "clip",    // Windows
+    "cmd",     // Windows
+    "powershell",
+    "pwsh",
     // Common utilities
     "tee",
     "xargs",
@@ -412,7 +418,11 @@ pub(super) fn extract_binary_name(cmd: &str) -> Option<String> {
     for token in tokens.by_ref() {
         if !token.contains('=') {
             // This is the actual command — extract basename
-            let basename = token.rsplit('/').next().unwrap_or(token);
+            let basename = token
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(token)
+                .trim_matches('"');
             return Some(basename.to_string());
         }
     }
@@ -674,9 +684,7 @@ fn scanner_source_name(source: ScannerPathSource) -> &'static str {
 }
 
 fn thinclaw_home_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".thinclaw")
+    crate::platform::resolve_thinclaw_home()
 }
 
 fn scanner_cache_dir() -> PathBuf {
@@ -978,6 +986,7 @@ pub(super) fn check_safe_bins_forced(cmd: &str) -> bool {
 /// Those are handled by the safe-bins allowlist + user approval system.
 pub(super) fn detect_path_escape(cmd: &str, base_dir: &Path) -> Option<String> {
     let base_str = base_dir.to_string_lossy();
+    let windows_temp_dir = std::env::temp_dir().to_string_lossy().to_string();
 
     // Tokenize the command by whitespace and common shell delimiters
     // We look for tokens that start with `/` (absolute paths) or contain `..`
@@ -1002,8 +1011,11 @@ pub(super) fn detect_path_escape(cmd: &str, base_dir: &Path) -> Option<String> {
             }
         }
 
+        let is_windows_absolute =
+            token.starts_with("\\\\") || token.chars().nth(1).is_some_and(|ch| ch == ':');
+
         // Only check absolute path tokens from here on
-        if !token.starts_with('/') {
+        if !token.starts_with('/') && !is_windows_absolute {
             continue;
         }
 
@@ -1020,6 +1032,18 @@ pub(super) fn detect_path_escape(cmd: &str, base_dir: &Path) -> Option<String> {
         // Allow `/tmp` (frequently needed for temp files in builds)
         if token.starts_with("/tmp") {
             continue;
+        }
+
+        if is_windows_absolute {
+            if token.starts_with(base_str.as_ref()) || token.starts_with(&windows_temp_dir) {
+                continue;
+            }
+            if token.starts_with(r"C:\Windows\System32")
+                || token.starts_with(r"C:\Program Files")
+                || token.starts_with(r"C:\Program Files (x86)")
+            {
+                continue;
+            }
         }
 
         // Allow common tool paths that are invoked, not accessed
@@ -1300,6 +1324,20 @@ mod tests {
         assert_eq!(
             classify_hard_block("LD_PRELOAD=/tmp/evil.so cargo test"),
             Some("library injection via environment variable")
+        );
+    }
+
+    #[test]
+    fn detect_path_escape_understands_windows_absolute_paths() {
+        let base = Path::new(r"C:\Users\alice\.thinclaw\projects");
+        assert!(
+            detect_path_escape(r#"type "C:\Users\alice\.thinclaw\projects\demo.txt""#, base)
+                .is_none()
+        );
+        assert!(detect_path_escape(r#"type C:\Windows\System32\cmd.exe"#, base).is_none());
+        assert_eq!(
+            detect_path_escape(r#"type \\server\share\secrets.txt"#, base),
+            Some(r#"\\server\share\secrets.txt"#.to_string())
         );
     }
 }
