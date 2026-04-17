@@ -148,7 +148,8 @@ You can run ThinClaw:
 | Docker browser fallback | Supported | Supported | Docker Desktop |
 | Camera / microphone capture | Supported | Supported | Supported with `ffmpeg` |
 | Signal attachments | Supported | Supported | Supported, override with `SIGNAL_ATTACHMENTS_DIR` when needed |
-| Apple Mail / iMessage channels | Supported | Unsupported | Unsupported |
+| Apple Mail / iMessage (native) | Supported | Unsupported | Unsupported |
+| iMessage via BlueBubbles | Supported | Supported | Supported |
 
 ## Core Capabilities
 
@@ -158,7 +159,7 @@ You can run ThinClaw:
 - Humanist Cockpit onboarding with shared CLI/TUI readiness framing, shared skin palettes, and saved follow-up notes
 - Shared terminal skin system across boot, REPL, full-screen TUI, onboarding TUI, setup prompts, and human-readable CLI subcommands
 - Built-in ASCII-art skins plus user-defined TOML skins from `~/.thinclaw/skins/`
-- Hybrid delivery across native channels and packaged WASM channels, with platform formatting/rendering guidance owned by the channel layer instead of hard-coded in prompt assembly
+- Hybrid delivery across native channels (Telegram, Signal, Discord, Slack, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail) and packaged WASM channels, with platform formatting/rendering guidance owned by the channel layer instead of hard-coded in prompt assembly
 - Workspace-backed memory with search, citations, and identity files
 - Extension support through built-in tools, WASM tools, and MCP servers
 - Multi-provider LLM routing, failover, and cost controls

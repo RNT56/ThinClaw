@@ -33,7 +33,10 @@ use tokio::task::JoinHandle;
 use crate::channels::manager::ChannelManager;
 use crate::channels::wasm::loader::WasmChannelLoader;
 use crate::channels::wasm::router::WasmChannelRouter;
-use crate::channels::wasm::{RegisteredEndpoint, SharedWasmChannel};
+use crate::channels::wasm::{
+    RegisteredEndpoint, SharedWasmChannel, WasmChannelHostConfig, apply_channel_host_config,
+    inject_channel_credentials_from_secrets,
+};
 use crate::secrets::SecretsStore;
 
 /// Configuration for the channel watcher.
@@ -83,6 +86,8 @@ pub struct ChannelWatcher {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// User scope for secret lookup.
     user_id: String,
+    /// Host runtime values that must be re-applied to hot-loaded channels.
+    host_config: WasmChannelHostConfig,
 }
 
 impl ChannelWatcher {
@@ -102,6 +107,7 @@ impl ChannelWatcher {
             webhook_router: None,
             secrets_store: None,
             user_id: "default".to_string(),
+            host_config: WasmChannelHostConfig::default(),
         }
     }
 
@@ -119,6 +125,12 @@ impl ChannelWatcher {
     ) -> Self {
         self.secrets_store = Some(store);
         self.user_id = user_id.into();
+        self
+    }
+
+    /// Set host runtime values that must be injected into hot-loaded channels.
+    pub fn with_host_config(mut self, host_config: WasmChannelHostConfig) -> Self {
+        self.host_config = host_config;
         self
     }
 
@@ -170,6 +182,7 @@ impl ChannelWatcher {
         let webhook_router = self.webhook_router.clone();
         let secrets_store = self.secrets_store.clone();
         let user_id = self.user_id.clone();
+        let host_config = self.host_config.clone();
 
         let handle = tokio::spawn(async move {
             tracing::info!(
@@ -190,6 +203,7 @@ impl ChannelWatcher {
                     webhook_router.as_ref(),
                     secrets_store.as_deref(),
                     &user_id,
+                    &host_config,
                 )
                 .await
                 {
@@ -219,6 +233,7 @@ impl ChannelWatcher {
         webhook_router: Option<&Arc<WasmChannelRouter>>,
         secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
         user_id: &str,
+        host_config: &WasmChannelHostConfig,
     ) -> Result<(), String> {
         // Scan current .wasm files
         let mut current_files: HashMap<String, SystemTime> = HashMap::new();
@@ -261,6 +276,7 @@ impl ChannelWatcher {
                         webhook_router,
                         secrets_store,
                         user_id,
+                        host_config,
                     )
                     .await
                     {
@@ -296,6 +312,7 @@ impl ChannelWatcher {
                             if let Some(router) = webhook_router {
                                 router.unregister(name).await;
                             }
+                            loader.invalidate(name).await;
 
                             // Load new
                             match Self::load_and_add(
@@ -306,6 +323,7 @@ impl ChannelWatcher {
                                 webhook_router,
                                 secrets_store,
                                 user_id,
+                                host_config,
                             )
                             .await
                             {
@@ -352,6 +370,7 @@ impl ChannelWatcher {
             if let Some(router) = webhook_router {
                 router.unregister(&name).await;
             }
+            loader.invalidate(&name).await;
             known_guard.remove(&name);
             tracing::info!(channel = %name, "WASM channel hot-removed");
         }
@@ -368,6 +387,7 @@ impl ChannelWatcher {
         webhook_router: Option<&Arc<WasmChannelRouter>>,
         secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
         user_id: &str,
+        host_config: &WasmChannelHostConfig,
     ) -> Result<(), String> {
         let wasm_path = dir.join(format!("{}.wasm", name));
         let cap_path = dir.join(format!("{}.capabilities.json", name));
@@ -387,6 +407,58 @@ impl ChannelWatcher {
         let channel_name = loaded.name().to_string();
         let channel_arc = Arc::new(loaded.channel);
 
+        let webhook_secret = match secrets_store {
+            Some(store) => store
+                .get_decrypted(user_id, &secret_name)
+                .await
+                .ok()
+                .map(|secret| secret.expose().to_string()),
+            None => None,
+        };
+
+        let runtime_update_count = apply_channel_host_config(
+            &channel_arc,
+            &channel_name,
+            host_config,
+            webhook_secret.as_deref(),
+        )
+        .await;
+        if runtime_update_count > 0 {
+            tracing::info!(
+                channel = %channel_name,
+                runtime_updates = runtime_update_count,
+                "Injected host runtime config into hot-loaded channel"
+            );
+        }
+
+        if let Some(store) = secrets_store {
+            match inject_channel_credentials_from_secrets(
+                &channel_arc,
+                store,
+                &channel_name,
+                user_id,
+            )
+            .await
+            {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!(
+                            channel = %channel_name,
+                            credentials_injected = count,
+                            "Injected credentials into hot-loaded channel"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        error = %error,
+                        "Failed to inject credentials into hot-loaded channel"
+                    );
+                }
+            }
+        }
+
         channel_manager
             .hot_add(Box::new(SharedWasmChannel::new(Arc::clone(&channel_arc))))
             .await
@@ -405,14 +477,6 @@ impl ChannelWatcher {
                 } else {
                     registered
                 }
-            };
-            let webhook_secret = match secrets_store {
-                Some(store) => store
-                    .get_decrypted(user_id, &secret_name)
-                    .await
-                    .ok()
-                    .map(|secret| secret.expose().to_string()),
-                None => None,
             };
             router
                 .register(channel_arc, endpoints, webhook_secret, secret_header)
@@ -435,6 +499,7 @@ impl ChannelWatcher {
             self.webhook_router.as_ref(),
             self.secrets_store.as_deref(),
             &self.user_id,
+            &self.host_config,
         )
         .await
     }

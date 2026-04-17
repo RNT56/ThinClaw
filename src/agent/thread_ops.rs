@@ -33,6 +33,12 @@ use crate::history::ConversationKind as HistoryConversationKind;
 use crate::identity::ResolvedIdentity;
 use crate::llm::ChatMessage;
 
+const DIRECT_THREAD_ROLE_KEY: &str = "direct_thread_role";
+const DIRECT_THREAD_ROLE_MAIN: &str = "main";
+const ORIGIN_CHANNEL_KEY: &str = "origin_channel";
+const LAST_ACTIVE_CHANNEL_KEY: &str = "last_active_channel";
+const SEEN_CHANNELS_KEY: &str = "seen_channels";
+
 fn to_history_conversation_kind(
     kind: crate::identity::ConversationKind,
 ) -> HistoryConversationKind {
@@ -85,6 +91,14 @@ fn detect_user_correction_signal(role: &str, content: &str) -> u32 {
     }
 
     0
+}
+
+fn direct_thread_role_from_metadata(metadata: &serde_json::Value) -> Option<&str> {
+    metadata
+        .get(DIRECT_THREAD_ROLE_KEY)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 impl Agent {
@@ -235,7 +249,167 @@ impl Agent {
             );
             return None;
         }
+        self.update_direct_conversation_metadata(&store, thread_id, message, identity)
+            .await;
         Some(store)
+    }
+
+    async fn update_direct_conversation_metadata(
+        &self,
+        store: &Arc<dyn Database>,
+        thread_id: Uuid,
+        message: &IncomingMessage,
+        identity: &ResolvedIdentity,
+    ) {
+        if !matches!(
+            identity.conversation_kind,
+            crate::identity::ConversationKind::Direct
+        ) {
+            return;
+        }
+
+        let Ok(Some(metadata)) = store.get_conversation_metadata(thread_id).await else {
+            return;
+        };
+
+        let mut updates: Vec<(&str, serde_json::Value)> = Vec::new();
+        let current_role = direct_thread_role_from_metadata(&metadata);
+
+        if current_role.is_none() && message.thread_id.is_none() {
+            updates.push((
+                DIRECT_THREAD_ROLE_KEY,
+                serde_json::json!(DIRECT_THREAD_ROLE_MAIN),
+            ));
+        }
+
+        if metadata
+            .get(ORIGIN_CHANNEL_KEY)
+            .is_none_or(|value| value.is_null())
+        {
+            updates.push((
+                ORIGIN_CHANNEL_KEY,
+                serde_json::json!(message.channel.clone()),
+            ));
+        }
+
+        updates.push((
+            LAST_ACTIVE_CHANNEL_KEY,
+            serde_json::json!(message.channel.clone()),
+        ));
+
+        let mut seen_channels: Vec<String> = metadata
+            .get(SEEN_CHANNELS_KEY)
+            .and_then(|value| value.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !seen_channels
+            .iter()
+            .any(|channel| channel == &message.channel)
+        {
+            seen_channels.push(message.channel.clone());
+            seen_channels.sort();
+            seen_channels.dedup();
+            updates.push((SEEN_CHANNELS_KEY, serde_json::json!(seen_channels)));
+        }
+
+        if updates.is_empty() {
+            return;
+        }
+
+        for (key, value) in updates {
+            if let Err(err) = store
+                .update_conversation_metadata_field(thread_id, key, &value)
+                .await
+            {
+                tracing::debug!(
+                    thread = %thread_id,
+                    key,
+                    error = %err,
+                    "Failed to update direct conversation metadata"
+                );
+            }
+        }
+    }
+
+    async fn primary_direct_conversation_id(&self, identity: &ResolvedIdentity) -> Option<Uuid> {
+        if !matches!(
+            identity.conversation_kind,
+            crate::identity::ConversationKind::Direct
+        ) {
+            return None;
+        }
+
+        let store = self.store().map(Arc::clone)?;
+        let summaries = store
+            .list_actor_conversations_for_recall(
+                &identity.principal_id,
+                &identity.actor_id,
+                false,
+                50,
+            )
+            .await
+            .ok()?;
+
+        if summaries.is_empty() {
+            return None;
+        }
+
+        let mut fallback = None;
+        for summary in summaries {
+            fallback.get_or_insert(summary.id);
+            let Ok(Some(metadata)) = store.get_conversation_metadata(summary.id).await else {
+                continue;
+            };
+            if direct_thread_role_from_metadata(&metadata) == Some(DIRECT_THREAD_ROLE_MAIN)
+                || summary.thread_type.as_deref() == Some("assistant")
+            {
+                return Some(summary.id);
+            }
+        }
+
+        fallback
+    }
+
+    pub(super) async fn maybe_hydrate_primary_direct_thread(&self, message: &IncomingMessage) {
+        if message.thread_id.is_some() {
+            return;
+        }
+
+        let identity = message.resolved_identity();
+        if !matches!(
+            identity.conversation_kind,
+            crate::identity::ConversationKind::Direct
+        ) {
+            return;
+        }
+
+        let Some(primary_thread_id) = self.primary_direct_conversation_id(&identity).await else {
+            return;
+        };
+
+        self.maybe_hydrate_thread(message, &primary_thread_id.to_string())
+            .await;
+
+        if let Some(session) = self
+            .session_manager
+            .session_for_thread(primary_thread_id)
+            .await
+        {
+            self.session_manager
+                .register_direct_main_thread_for_scope(
+                    crate::agent::session_manager::SessionManager::scope_id_for_user_id(
+                        &identity.principal_id,
+                    ),
+                    primary_thread_id,
+                    session,
+                )
+                .await;
+        }
     }
 
     fn compact_text_preview(text: &str) -> String {
@@ -542,6 +716,9 @@ impl Agent {
                     .as_ref()
                     .and_then(|runtime| runtime.last_context_pressure),
             );
+            runtime.post_compaction_context = existing_runtime
+                .as_ref()
+                .and_then(|saved| saved.post_compaction_context.clone());
         })
         .await
         {
@@ -770,6 +947,16 @@ impl Agent {
         let mut chat_messages: Vec<ChatMessage> = Vec::new();
         let msg_count;
 
+        let conversation_metadata = if let Some(ref store) = store {
+            store
+                .get_conversation_metadata(thread_uuid)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
         let runtime = if let Some(ref store) = store {
             let db_messages = store
                 .list_conversation_messages(thread_uuid)
@@ -831,6 +1018,22 @@ impl Agent {
                 Arc::clone(&session),
             )
             .await;
+
+        if matches!(
+            identity.conversation_kind,
+            crate::identity::ConversationKind::Direct
+        ) && conversation_metadata.as_ref().is_some_and(|metadata| {
+            direct_thread_role_from_metadata(metadata) == Some(DIRECT_THREAD_ROLE_MAIN)
+                || metadata.get("thread_type").and_then(|value| value.as_str()) == Some("assistant")
+        }) {
+            self.session_manager
+                .register_direct_main_thread_for_scope(
+                    register_scope_id,
+                    thread_uuid,
+                    Arc::clone(&session),
+                )
+                .await;
+        }
 
         if let Some(runtime) = runtime {
             if let Some(owner) = runtime.owner_agent_id.clone() {

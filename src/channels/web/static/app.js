@@ -2891,6 +2891,11 @@ function renderExtensionCard(ext) {
     card.appendChild(errorDiv);
   }
 
+  const diagnosticsDiv = renderChannelDiagnostics(ext);
+  if (diagnosticsDiv) {
+    card.appendChild(diagnosticsDiv);
+  }
+
   // Show "coming soon" note for non-Telegram channels that are configured but not fully supported yet
   if (ext.kind === 'wasm_channel' && ext.name !== 'telegram'
       && (ext.activation_status === 'configured' || ext.active)) {
@@ -2911,19 +2916,41 @@ function renderExtensionCard(ext) {
       activeLabel.className = 'ext-active-label';
       activeLabel.textContent = 'Active';
       actions.appendChild(activeLabel);
+      if (ext.reconnect_supported) {
+        var reconnectBtn = document.createElement('button');
+        reconnectBtn.className = 'btn-ext activate';
+        reconnectBtn.textContent = 'Reconnect';
+        reconnectBtn.addEventListener('click', function() { reconnectExtension(ext.name); });
+        actions.appendChild(reconnectBtn);
+      }
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'pairing') {
       var pairingLabel = document.createElement('span');
       pairingLabel.className = 'ext-pairing-label';
       pairingLabel.textContent = 'Awaiting Pairing';
       actions.appendChild(pairingLabel);
+      if (ext.reconnect_supported) {
+        var reconnectPairingBtn = document.createElement('button');
+        reconnectPairingBtn.className = 'btn-ext activate';
+        reconnectPairingBtn.textContent = 'Reconnect';
+        reconnectPairingBtn.addEventListener('click', function() { reconnectExtension(ext.name); });
+        actions.appendChild(reconnectPairingBtn);
+      }
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'failed') {
-      var restartBtn = document.createElement('button');
-      restartBtn.className = 'btn-ext activate';
-      restartBtn.textContent = 'Restart';
-      restartBtn.addEventListener('click', restartGateway);
-      actions.appendChild(restartBtn);
+      if (ext.reconnect_supported) {
+        var failedReconnectBtn = document.createElement('button');
+        failedReconnectBtn.className = 'btn-ext activate';
+        failedReconnectBtn.textContent = 'Reconnect';
+        failedReconnectBtn.addEventListener('click', function() { reconnectExtension(ext.name); });
+        actions.appendChild(failedReconnectBtn);
+      } else {
+        var restartBtn = document.createElement('button');
+        restartBtn.className = 'btn-ext activate';
+        restartBtn.textContent = 'Restart';
+        restartBtn.addEventListener('click', restartGateway);
+        actions.appendChild(restartBtn);
+      }
       actions.appendChild(createReconfigureButton(ext.name));
     } else {
       // installed or configured: show Setup button
@@ -2996,6 +3023,75 @@ function activateExtension(name) {
       loadExtensions();
     })
     .catch((err) => showToast('Activate failed: ' + err.message, 'error'));
+}
+
+function reconnectExtension(name) {
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/reconnect', { method: 'POST' })
+    .then((res) => {
+      if (!res.success) {
+        showToast('Reconnect failed: ' + res.message, 'error');
+      } else {
+        showToast(res.message || ('Reconnected ' + name), 'success');
+      }
+      loadExtensions();
+    })
+    .catch((err) => showToast('Reconnect failed: ' + err.message, 'error'));
+}
+
+function renderChannelDiagnostics(ext) {
+  const diag = ext && ext.channel_diagnostics;
+  if (!diag || typeof diag !== 'object') return null;
+
+  const parts = [];
+  if (diag.transport_mode) parts.push('Mode: ' + diag.transport_mode);
+  if (diag.transport_preference) parts.push('Preference: ' + diag.transport_preference);
+  if (diag.transport_override) parts.push('Override: ' + diag.transport_override);
+  if (diag.last_inbound_at) {
+    parts.push('Last inbound: ' + formatRelativeTime(diag.last_inbound_at));
+  } else if (diag.transport_mode === 'polling' && diag.last_poll_success_at) {
+    parts.push('Last poll: ' + formatRelativeTime(diag.last_poll_success_at));
+  }
+  if (diag.unhealthy_reason) {
+    parts.push('Health: ' + diag.unhealthy_reason);
+  } else if (diag.transport_reason) {
+    parts.push('Reason: ' + diag.transport_reason);
+  } else if (diag.last_transport_error) {
+    parts.push('Last error: ' + diag.last_transport_error);
+  }
+
+  if (!parts.length) return null;
+
+  const note = document.createElement('div');
+  note.className = 'ext-note ui-resource-note';
+  note.textContent = parts.join(' · ');
+
+  const detail = [];
+  if (diag.expected_webhook_url && diag.transport_mode === 'webhook') {
+    detail.push('Expected webhook: ' + diag.expected_webhook_url);
+  }
+  if (diag.host_tunnel_url) {
+    detail.push('Host tunnel URL: ' + diag.host_tunnel_url);
+  }
+  if (diag.host_transport_reason) {
+    detail.push('Webhook policy: ' + diag.host_transport_reason);
+  }
+  if (diag.registered_webhook_url) {
+    detail.push('Registered webhook: ' + diag.registered_webhook_url);
+  }
+  if (diag.registered_webhook_error) {
+    detail.push('Telegram webhook error: ' + diag.registered_webhook_error);
+  }
+  if (diag.last_poll_error) {
+    detail.push('Poll error: ' + diag.last_poll_error);
+  }
+  if (diag.last_transport_error) {
+    detail.push('Last transport error: ' + diag.last_transport_error);
+  }
+  if (detail.length) {
+    note.title = detail.join('\n');
+  }
+
+  return note;
 }
 
 function removeExtension(name) {
@@ -7849,6 +7945,7 @@ const SETTINGS_SCHEMA = {
     icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="18" height="14" x="3" y="7" rx="2"/><path d="M12 7V3"/><path d="M15 3h-6"/><circle cx="9" cy="13" r="2"/><circle cx="15" cy="13" r="2"/><path d="M9 18h6"/></svg>',
     fields: [
       { key: 'agent.name', label: 'Agent name', type: 'text', desc: 'How the agent identifies itself' },
+      { key: 'user_timezone', label: 'User timezone', type: 'text', desc: 'IANA timezone used for schedules and daily context (for example Europe/Berlin or America/New_York)', nullable: true },
       { key: 'agent.personality_pack', label: 'Personality pack', type: 'select', options: [{value: 'balanced', label: 'balanced'}, {value: 'professional', label: 'professional'}, {value: 'creative_partner', label: 'creative_partner'}, {value: 'research_assistant', label: 'research_assistant'}, {value: 'mentor', label: 'mentor'}, {value: 'minimal', label: 'minimal'}], desc: 'Default personality pack for new workspace identity and cross-surface copy' },
       { key: 'agent.max_parallel_jobs', label: 'Max parallel jobs', type: 'number', desc: 'Concurrent job limit', min: 1, max: 20 },
       { key: 'agent.job_timeout_secs', label: 'Job timeout (seconds)', type: 'number', desc: 'Max time before a job is killed', min: 60 },
@@ -7875,6 +7972,7 @@ const SETTINGS_SCHEMA = {
     fields: [
       { key: 'channels.telegram_owner_id', label: 'Owner ID', type: 'number', desc: 'Telegram user ID — bot only responds to this user', nullable: true },
       { key: 'channels.telegram_stream_mode', label: 'Stream Mode', type: 'select', options: [{value: '', label: 'Disabled (Wait for full context)'}, {value: 'edit', label: 'Full Edit (Live updates)'}, {value: 'status', label: 'Typing Indicator/Status Bar'}], desc: 'Progressive partial message rendering', nullable: true },
+      { key: 'channels.telegram_transport_mode', label: 'Transport mode', type: 'select', options: [{value: 'auto', label: 'Auto (Prefer webhook)'}, {value: 'polling', label: 'Polling only'}], desc: 'Webhook when public ingress is truly usable; otherwise polling. Polling only disables webhook registration.' },
       { key: 'channels.telegram_subagent_session_mode', label: 'Subagent session mode', type: 'select', options: [{value: 'temp_topic', label: 'Temporary topic'}, {value: 'reply_chain', label: 'Reply chain fallback'}, {value: 'compact_off', label: 'Compact off'}], desc: 'How Telegram should surface temporary subagent sessions when available' },
     ]
   },
@@ -7929,6 +8027,19 @@ const SETTINGS_SCHEMA = {
       { key: 'channels.apple_mail_poll_interval', label: 'Poll interval (s)', type: 'number', desc: 'Seconds between Envelope Index checks', min: 5, max: 120, nullable: true },
       { key: 'channels.apple_mail_unread_only', label: 'Unread only', type: 'bool', desc: 'Only process unread messages' },
       { key: 'channels.apple_mail_mark_as_read', label: 'Mark as read', type: 'bool', desc: 'Mark messages as read after processing' },
+    ]
+  },
+  'Channels — BlueBubbles': {
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="9" cy="7" r="4"/><circle cx="17" cy="9" r="3"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/></svg>',
+    fields: [
+      { key: 'channels.bluebubbles_enabled', label: 'Enabled', type: 'bool', desc: 'Enable BlueBubbles iMessage bridge (cross-platform)' },
+      { key: 'channels.bluebubbles_server_url', label: 'Server URL', type: 'text', desc: 'BlueBubbles server (e.g. http://192.168.1.50:1234)', nullable: true },
+      { key: 'channels.bluebubbles_password', label: 'Password', type: 'password', desc: 'BlueBubbles server password', nullable: true },
+      { key: 'channels.bluebubbles_webhook_host', label: 'Webhook host', type: 'text', desc: 'Webhook listen address (default: 127.0.0.1)', nullable: true },
+      { key: 'channels.bluebubbles_webhook_port', label: 'Webhook port', type: 'number', desc: 'Webhook listen port (default: 8645)', min: 1, max: 65535, nullable: true },
+      { key: 'channels.bluebubbles_webhook_path', label: 'Webhook path', type: 'text', desc: 'Webhook URL path (default: /bluebubbles-webhook)', nullable: true },
+      { key: 'channels.bluebubbles_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated phone/email (empty = all)', nullable: true },
+      { key: 'channels.bluebubbles_send_read_receipts', label: 'Send read receipts', type: 'bool', desc: 'Send read receipts (requires Private API on server)', nullable: true },
     ]
   },
   'Channels — Gmail': {
@@ -7994,6 +8105,7 @@ const SENSITIVE_KEYS = new Set([
   'channels.slack_bot_token',
   'channels.slack_app_token',
   'channels.gateway_auth_token',
+  'channels.bluebubbles_password',
 ]);
 
 // --- Provider Vault ---
@@ -10369,7 +10481,7 @@ function renderSettings() {
   // --- Subtabs ---
   const subtabGroups = {
     'General': ['Presentation', 'Notifications', 'Heartbeat', 'Agent', 'Smart Routing', 'Safety', 'Features'],
-    'Channels': ['Channels — Telegram', 'Channels — Signal', 'Channels — Discord', 'Channels — Slack', 'Channels — Nostr', 'Channels — iMessage', 'Channels — Apple Mail', 'Channels — Gmail', 'Channels — Web Gateway'],
+    'Channels': ['Channels — Telegram', 'Channels — Signal', 'Channels — Discord', 'Channels — Slack', 'Channels — Nostr', 'Channels — iMessage', 'Channels — BlueBubbles', 'Channels — Apple Mail', 'Channels — Gmail', 'Channels — Web Gateway'],
     'Advanced': [],
   };
 

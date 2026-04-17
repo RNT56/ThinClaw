@@ -818,7 +818,6 @@ impl AppBuilder {
                 wasm_tool_runtime.clone(),
                 self.config.wasm.tools_dir.clone(),
                 self.config.channels.wasm_channels_dir.clone(),
-                self.config.tunnel.public_url.clone(),
                 "default".to_string(),
                 self.db.clone(),
                 catalog_entries.clone(),
@@ -957,8 +956,15 @@ impl AppBuilder {
 
     /// Run all init phases in order and return the assembled components.
     pub async fn build_all(mut self) -> Result<AppComponents, anyhow::Error> {
+        let build_all_start = std::time::Instant::now();
+
+        let phase_start = std::time::Instant::now();
         self.init_database().await?;
+        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis(), "Startup phase: database");
+
+        let phase_start = std::time::Instant::now();
         self.init_secrets().await?;
+        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis(), "Startup phase: secrets");
 
         let providers_settings = self.providers_settings.clone().unwrap_or_default();
         let primed_oauth_credentials =
@@ -1026,6 +1032,13 @@ impl AppBuilder {
             Arc::new(tokio::sync::Mutex::new(tracker))
         };
 
+        if let Err(err) = crate::timezone::set_user_timezone_override(
+            "default",
+            self.config.heartbeat.user_timezone.as_deref(),
+        ) {
+            tracing::warn!("Failed to initialize live timezone override: {}", err);
+        }
+
         let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
             crate::agent::cost_guard::CostGuardConfig {
                 max_cost_per_day_cents: self.config.agent.max_cost_per_day_cents,
@@ -1083,9 +1096,11 @@ impl AppBuilder {
             )) as Arc<dyn LlmProvider>
         });
 
+        let phase_start = std::time::Instant::now();
         let (safety, tools, embeddings, workspace) = self
             .init_tools(&llm, cheap_llm.as_ref(), Some(Arc::clone(&cost_tracker)))
             .await?;
+        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis(), "Startup phase: tools");
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -1094,6 +1109,7 @@ impl AppBuilder {
         // via ExtensionManager::set_lifecycle_audit_hook() wired below.
         let audit_hook = Arc::new(AuditLogHook::new());
 
+        let phase_start = std::time::Instant::now();
         let (
             mcp_session_manager,
             wasm_tool_runtime,
@@ -1101,6 +1117,7 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
         ) = self.init_extensions(&tools, &hooks).await?;
+        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis(), "Startup phase: extensions");
 
         // Wire the lifecycle audit hook into the extension manager so
         // install/activate/remove events are recorded for the UI.
@@ -1148,24 +1165,56 @@ impl AppBuilder {
             }
 
             // ── Timezone sync: Settings <-> USER.md ──────────────────────
-            // 1. If wizard set a timezone but USER.md is still empty, pre-fill it
-            //    so the bootstrap conversation doesn't need to ask again.
-            // 2. If the agent already captured a timezone in USER.md (via bootstrap),
-            //    sync it back to Settings so heartbeat/routines use the right TZ.
-            let wizard_tz = self.config.heartbeat.user_timezone.clone();
-            if let Some(user_md_tz) = ws.extract_user_timezone().await {
-                // Agent already captured timezone in USER.md — sync to Settings
-                if wizard_tz.as_deref() != Some(&user_md_tz) {
-                    tracing::info!("Syncing USER.md timezone '{}' back to Settings", user_md_tz);
-                    if let Some(ref db) = self.db {
-                        let _ = db
-                            .set_setting("default", "user_timezone", &serde_json::json!(user_md_tz))
-                            .await;
+            // Shared USER.md is the durable prompt-facing source, while the DB
+            // setting drives runtime config. On startup we reconcile them, then
+            // refresh future routine fire times in the effective timezone.
+            let configured_tz = self.config.heartbeat.user_timezone.clone();
+            let user_md_tz = ws.extract_user_timezone().await;
+            let effective_tz = user_md_tz.clone().or(configured_tz.clone());
+
+            if let Err(err) =
+                crate::timezone::set_user_timezone_override("default", effective_tz.as_deref())
+            {
+                tracing::warn!("Failed to refresh live timezone override: {}", err);
+            }
+
+            if let Err(err) = ws.sync_user_timezone(effective_tz.as_deref()).await {
+                tracing::warn!("Failed to sync workspace timezone documents: {}", err);
+            }
+
+            if let Some(ref db) = self.db {
+                if effective_tz != configured_tz {
+                    match effective_tz.as_deref() {
+                        Some(tz) => {
+                            if let Err(err) = db
+                                .set_setting("default", "user_timezone", &serde_json::json!(tz))
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to sync timezone setting from USER.md: {}",
+                                    err
+                                );
+                            }
+                        }
+                        None => {
+                            if let Err(err) = db.delete_setting("default", "user_timezone").await {
+                                tracing::warn!("Failed to clear timezone setting: {}", err);
+                            }
+                        }
                     }
                 }
-            } else if let Some(ref tz) = wizard_tz {
-                // Wizard detected timezone but USER.md is empty — pre-fill
-                let _ = ws.inject_user_timezone(tz).await;
+
+                let preserve_due = user_md_tz.as_deref() == configured_tz.as_deref();
+                if let Err(err) = crate::timezone::refresh_user_routine_timezones(
+                    db,
+                    "default",
+                    effective_tz.as_deref(),
+                    preserve_due,
+                )
+                .await
+                {
+                    tracing::warn!("Failed to refresh routine schedules for timezone: {}", err);
+                }
             }
 
             if embeddings.is_some() {
@@ -1316,6 +1365,11 @@ impl AppBuilder {
         tracing::info!(
             "Tool registry initialized with {} total tools",
             tools.count()
+        );
+
+        tracing::info!(
+            elapsed_ms = build_all_start.elapsed().as_millis(),
+            "Startup phase: build_all total"
         );
 
         Ok(AppComponents {

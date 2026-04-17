@@ -42,6 +42,8 @@ pub async fn list_extensions(ext_mgr: &Arc<ExtensionManager>) -> ApiResult<Vec<E
             } else {
                 None
             };
+            let reconnect_supported =
+                ext.kind == crate::extensions::ExtensionKind::WasmChannel && ext.name == "telegram";
             ExtensionInfo {
                 name: ext.name,
                 kind: ext.kind.to_string(),
@@ -53,6 +55,8 @@ pub async fn list_extensions(ext_mgr: &Arc<ExtensionManager>) -> ApiResult<Vec<E
                 needs_setup: ext.needs_setup,
                 activation_status,
                 activation_error: ext.activation_error,
+                channel_diagnostics: None,
+                reconnect_supported,
             }
         })
         .collect();

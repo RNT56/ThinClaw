@@ -56,5 +56,3 @@ via `osascript -e 'tell application "Mail" to launch'`.
 | **Real-time** | Polling (10s default) | Pub/Sub push |
 | **Platform** | macOS only | Any |
 | **Setup** | One env var | GCP project + OAuth |
-
-See [tools-docs/apple-mail.md](../tools-docs/apple-mail.md) for full details.

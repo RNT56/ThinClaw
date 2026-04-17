@@ -892,7 +892,7 @@ impl Default for EmbeddingsSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NotificationSettings {
     /// Preferred channel for proactive notifications.
-    /// e.g. "telegram", "imessage", "signal", "web".
+    /// e.g. "telegram", "imessage", "bluebubbles", "signal", "web".
     /// None = broadcast to web only (safe default).
     #[serde(default)]
     pub preferred_channel: Option<String>,
@@ -1017,6 +1017,11 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub telegram_stream_mode: Option<String>,
 
+    /// Telegram transport mode.
+    /// Supported values: "auto" and "polling".
+    #[serde(default = "default_telegram_transport_mode")]
+    pub telegram_transport_mode: String,
+
     /// How Telegram should surface temporary subagent sessions.
     /// Supported values: "temp_topic", "reply_chain", "compact_off".
     #[serde(default = "default_telegram_subagent_session_mode")]
@@ -1094,6 +1099,39 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub gmail_allowed_senders: Option<String>,
 
+    // === BlueBubbles (cross-platform iMessage bridge) ===
+    /// Whether BlueBubbles channel is enabled.
+    #[serde(default)]
+    pub bluebubbles_enabled: bool,
+
+    /// BlueBubbles server URL (e.g. "http://192.168.1.50:1234").
+    #[serde(default)]
+    pub bluebubbles_server_url: Option<String>,
+
+    /// BlueBubbles server password.
+    #[serde(default)]
+    pub bluebubbles_password: Option<String>,
+
+    /// BlueBubbles webhook listen host (default: "127.0.0.1").
+    #[serde(default)]
+    pub bluebubbles_webhook_host: Option<String>,
+
+    /// BlueBubbles webhook listen port (default: 8645).
+    #[serde(default)]
+    pub bluebubbles_webhook_port: Option<u16>,
+
+    /// BlueBubbles webhook URL path (default: "/bluebubbles-webhook").
+    #[serde(default)]
+    pub bluebubbles_webhook_path: Option<String>,
+
+    /// BlueBubbles allowed contacts (comma-separated phone/email, empty = all).
+    #[serde(default)]
+    pub bluebubbles_allow_from: Option<String>,
+
+    /// Whether to send read receipts via BlueBubbles (default: true).
+    #[serde(default)]
+    pub bluebubbles_send_read_receipts: Option<bool>,
+
     // === iMessage (macOS only) ===
     /// Whether iMessage channel is enabled.
     #[serde(default)]
@@ -1168,6 +1206,7 @@ impl Default for ChannelSettings {
             signal_group_allow_from: None,
             telegram_owner_id: None,
             telegram_stream_mode: None,
+            telegram_transport_mode: default_telegram_transport_mode(),
             telegram_subagent_session_mode: default_telegram_subagent_session_mode(),
             discord_enabled: false,
             discord_bot_token: None,
@@ -1186,6 +1225,14 @@ impl Default for ChannelSettings {
             gmail_subscription_id: None,
             gmail_topic_id: None,
             gmail_allowed_senders: None,
+            bluebubbles_enabled: false,
+            bluebubbles_server_url: None,
+            bluebubbles_password: None,
+            bluebubbles_webhook_host: None,
+            bluebubbles_webhook_port: None,
+            bluebubbles_webhook_path: None,
+            bluebubbles_allow_from: None,
+            bluebubbles_send_read_receipts: None,
             imessage_enabled: false,
             imessage_allow_from: None,
             imessage_poll_interval: None,
@@ -1471,6 +1518,10 @@ fn default_cli_skin() -> String {
 
 fn default_telegram_subagent_session_mode() -> String {
     "temp_topic".to_string()
+}
+
+fn default_telegram_transport_mode() -> String {
+    "auto".to_string()
 }
 
 fn default_true() -> bool {
@@ -2379,6 +2430,21 @@ mod tests {
             restored.channels.telegram_subagent_session_mode,
             "reply_chain"
         );
+    }
+
+    #[test]
+    fn test_telegram_transport_mode_defaults_and_round_trip() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.channels.telegram_transport_mode, "auto");
+
+        settings
+            .set("channels.telegram_transport_mode", "polling")
+            .unwrap();
+        assert_eq!(settings.channels.telegram_transport_mode, "polling");
+
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+        assert_eq!(restored.channels.telegram_transport_mode, "polling");
     }
 
     /// Regression test: numeric-looking chat IDs stored as JSON strings in the

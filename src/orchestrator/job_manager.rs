@@ -366,19 +366,32 @@ impl ContainerJobManager {
     }
 
     /// Get or create a Docker connection.
+    ///
+    /// Supports late-binding: if Docker was not running at startup, the first
+    /// job request that needs Docker will trigger a fresh connection attempt.
+    /// If a cached connection goes stale (Docker restarted), a ping failure
+    /// triggers automatic reconnection.
     async fn docker(&self) -> Result<bollard::Docker, OrchestratorError> {
+        // Fast path: reuse cached connection if it's still alive.
         {
             let guard = self.docker.read().await;
             if let Some(ref d) = *guard {
-                return Ok(d.clone());
+                if d.ping().await.is_ok() {
+                    return Ok(d.clone());
+                }
+                // Cached connection is stale — fall through to reconnect.
+                tracing::info!("Cached Docker connection stale, reconnecting...");
             }
         }
+
+        // Slow path: connect (or reconnect) to Docker.
         let docker = connect_docker()
             .await
             .map_err(|e| OrchestratorError::Docker {
                 reason: e.to_string(),
             })?;
         *self.docker.write().await = Some(docker.clone());
+        tracing::info!("Docker connection established");
         Ok(docker)
     }
 

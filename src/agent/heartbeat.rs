@@ -351,6 +351,7 @@ impl HeartbeatRunner {
             metadata: serde_json::json!({
                 "source": "heartbeat",
             }),
+            attachments: Vec::new(),
         };
 
         if let Err(e) = tx.send(response).await {
@@ -428,7 +429,7 @@ pub fn cap_daily_log(content: &str, max_bytes: usize) -> String {
 /// to avoid token explosion, and returns a formatted string.
 pub async fn build_daily_context(workspace: &crate::workspace::Workspace) -> String {
     let mut daily_context = String::new();
-    let today = chrono::Utc::now().date_naive();
+    let today = workspace.local_today();
 
     if let Ok(doc) = workspace.today_log().await
         && !doc.content.trim().is_empty()

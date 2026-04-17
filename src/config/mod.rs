@@ -42,8 +42,8 @@ pub use self::agent::AgentConfig;
 pub(crate) use self::agent::resolve_personality_pack_from_settings;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
-    ChannelsConfig, CliConfig, DiscordChannelConfig, GatewayConfig, HttpConfig, NostrConfig,
-    SignalConfig, SlackChannelConfig, TelegramConfig,
+    BlueBubblesChannelConfig, ChannelsConfig, CliConfig, DiscordChannelConfig, GatewayConfig,
+    HttpConfig, NostrConfig, SignalConfig, SlackChannelConfig, TelegramConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
 pub use self::embeddings::EmbeddingsConfig;

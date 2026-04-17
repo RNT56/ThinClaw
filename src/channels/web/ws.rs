@@ -21,9 +21,9 @@ use uuid::Uuid;
 
 use crate::agent::submission::Submission;
 use crate::channels::IncomingMessage;
+use crate::channels::web::identity_helpers::gateway_identity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::{WsClientMessage, WsServerMessage};
-use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 
 /// Tracks active WebSocket connections.
 pub struct WsConnectionTracker {
@@ -160,24 +160,11 @@ async fn handle_client_message(
     match msg {
         WsClientMessage::Message { content, thread_id } => {
             let mut incoming = IncomingMessage::new("gateway", user_id, &content);
-            let stable_external_conversation_key = match thread_id.as_deref() {
-                Some(thread_id) => format!(
-                    "gateway://direct/{}/actor/{}/thread/{}",
-                    state.user_id, state.actor_id, thread_id
-                ),
-                None => format!(
-                    "gateway://direct/{}/actor/{}",
-                    state.user_id, state.actor_id
-                ),
-            };
-            incoming = incoming.with_identity(ResolvedIdentity {
-                principal_id: state.user_id.clone(),
-                actor_id: state.actor_id.clone(),
-                conversation_scope_id: scope_id_from_key(&stable_external_conversation_key),
-                conversation_kind: ConversationKind::Direct,
-                raw_sender_id: state.actor_id.clone(),
-                stable_external_conversation_key,
-            });
+            incoming = incoming.with_identity(gateway_identity(
+                user_id,
+                &state.actor_id,
+                thread_id.as_deref(),
+            ));
             if let Some(ref tid) = thread_id {
                 incoming = incoming.with_thread(tid);
                 incoming = incoming.with_metadata(serde_json::json!({
@@ -252,41 +239,17 @@ async fn handle_client_message(
             };
 
             let mut msg = IncomingMessage::new("gateway", user_id, content);
+            msg = msg.with_identity(gateway_identity(
+                user_id,
+                &state.actor_id,
+                thread_id.as_deref(),
+            ));
             if let Some(ref tid) = thread_id {
                 msg = msg.with_thread(tid);
                 msg = msg.with_metadata(serde_json::json!({
                     "thread_id": tid,
                     "actor_id": state.actor_id,
                 }));
-                msg = msg.with_identity(ResolvedIdentity {
-                    principal_id: state.user_id.clone(),
-                    actor_id: state.actor_id.clone(),
-                    conversation_scope_id: scope_id_from_key(&format!(
-                        "gateway://direct/{}/actor/{}/thread/{}",
-                        state.user_id, state.actor_id, tid
-                    )),
-                    conversation_kind: ConversationKind::Direct,
-                    raw_sender_id: state.actor_id.clone(),
-                    stable_external_conversation_key: format!(
-                        "gateway://direct/{}/actor/{}/thread/{}",
-                        state.user_id, state.actor_id, tid
-                    ),
-                });
-            } else {
-                msg = msg.with_identity(ResolvedIdentity {
-                    principal_id: state.user_id.clone(),
-                    actor_id: state.actor_id.clone(),
-                    conversation_scope_id: scope_id_from_key(&format!(
-                        "gateway://direct/{}/actor/{}",
-                        state.user_id, state.actor_id
-                    )),
-                    conversation_kind: ConversationKind::Direct,
-                    raw_sender_id: state.actor_id.clone(),
-                    stable_external_conversation_key: format!(
-                        "gateway://direct/{}/actor/{}",
-                        state.user_id, state.actor_id
-                    ),
-                });
             }
             let tx_guard = state.msg_tx.read().await;
             if let Some(ref tx) = *tx_guard {

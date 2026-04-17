@@ -1,13 +1,40 @@
 //! Time utility tool.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
+use chrono_tz::Tz;
 
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
 /// Tool for getting current time and date operations.
 pub struct TimeTool;
+
+fn resolve_requested_timezone(
+    params: &serde_json::Value,
+    ctx: &JobContext,
+) -> Result<Tz, ToolError> {
+    match params.get("timezone").and_then(|value| value.as_str()) {
+        Some(raw) => crate::timezone::parse_timezone(raw).ok_or_else(|| {
+            ToolError::InvalidParameters(format!(
+                "invalid timezone '{}'; use an IANA timezone like 'Europe/Berlin'",
+                raw
+            ))
+        }),
+        None => Ok(crate::timezone::resolve_effective_timezone(
+            Some(&ctx.user_id),
+            None,
+        )),
+    }
+}
+
+fn parse_rfc3339_timestamp(
+    value: &str,
+    field_name: &str,
+) -> Result<DateTime<FixedOffset>, ToolError> {
+    DateTime::parse_from_rfc3339(value)
+        .map_err(|err| ToolError::InvalidParameters(format!("invalid {}: {}", field_name, err)))
+}
 
 #[async_trait]
 impl Tool for TimeTool {
@@ -39,6 +66,10 @@ impl Tool for TimeTool {
                 "timestamp2": {
                     "type": "string",
                     "description": "Second timestamp (for diff operation)"
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "Optional IANA timezone for now/parse/format operations (defaults to the user's effective timezone)"
                 }
             },
             "required": ["operation"]
@@ -48,7 +79,7 @@ impl Tool for TimeTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -56,24 +87,47 @@ impl Tool for TimeTool {
 
         let result = match operation {
             "now" => {
+                let tz = resolve_requested_timezone(&params, ctx)?;
                 let now = Utc::now();
+                let local = now.with_timezone(&tz);
                 serde_json::json!({
                     "iso": now.to_rfc3339(),
                     "unix": now.timestamp(),
-                    "unix_millis": now.timestamp_millis()
+                    "unix_millis": now.timestamp_millis(),
+                    "timezone": tz.to_string(),
+                    "local_iso": local.to_rfc3339(),
+                    "local_date": local.format("%Y-%m-%d").to_string(),
+                    "local_time": local.format("%H:%M:%S").to_string()
                 })
             }
             "parse" => {
                 let timestamp = require_str(&params, "timestamp")?;
-
-                let dt: DateTime<Utc> = timestamp.parse().map_err(|e| {
-                    ToolError::InvalidParameters(format!("invalid timestamp: {}", e))
-                })?;
+                let tz = resolve_requested_timezone(&params, ctx)?;
+                let dt = parse_rfc3339_timestamp(timestamp, "timestamp")?;
+                let utc = dt.with_timezone(&Utc);
+                let local = dt.with_timezone(&tz);
 
                 serde_json::json!({
-                    "iso": dt.to_rfc3339(),
-                    "unix": dt.timestamp(),
-                    "unix_millis": dt.timestamp_millis()
+                    "iso": utc.to_rfc3339(),
+                    "unix": utc.timestamp(),
+                    "unix_millis": utc.timestamp_millis(),
+                    "timezone": tz.to_string(),
+                    "local_iso": local.to_rfc3339(),
+                    "offset_seconds": dt.offset().local_minus_utc()
+                })
+            }
+            "format" => {
+                let timestamp = require_str(&params, "timestamp")?;
+                let format = require_str(&params, "format")?;
+                let tz = resolve_requested_timezone(&params, ctx)?;
+                let dt = parse_rfc3339_timestamp(timestamp, "timestamp")?;
+                let local = dt.with_timezone(&tz);
+
+                serde_json::json!({
+                    "formatted": local.format(format).to_string(),
+                    "timezone": tz.to_string(),
+                    "local_iso": local.to_rfc3339(),
+                    "iso": dt.with_timezone(&Utc).to_rfc3339()
                 })
             }
             "diff" => {
@@ -81,12 +135,8 @@ impl Tool for TimeTool {
 
                 let ts2 = require_str(&params, "timestamp2")?;
 
-                let dt1: DateTime<Utc> = ts1.parse().map_err(|e| {
-                    ToolError::InvalidParameters(format!("invalid timestamp: {}", e))
-                })?;
-                let dt2: DateTime<Utc> = ts2.parse().map_err(|e| {
-                    ToolError::InvalidParameters(format!("invalid timestamp2: {}", e))
-                })?;
+                let dt1 = parse_rfc3339_timestamp(ts1, "timestamp")?.with_timezone(&Utc);
+                let dt2 = parse_rfc3339_timestamp(ts2, "timestamp2")?.with_timezone(&Utc);
 
                 let diff = dt2.signed_duration_since(dt1);
 

@@ -606,7 +606,6 @@ mod tests {
             None,
             std::path::PathBuf::from("/tmp/thinclaw-test-tools"),
             std::path::PathBuf::from("/tmp/thinclaw-test-channels"),
-            None,
             "test".to_string(),
             None,
             Vec::new(),

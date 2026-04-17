@@ -117,3 +117,55 @@ pub struct OrgInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub technical_contact: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::OktaAction;
+
+    #[test]
+    fn parses_get_profile_action() {
+        let action: OktaAction = serde_json::from_value(serde_json::json!({
+            "action": "get_profile"
+        }))
+        .unwrap();
+
+        match action {
+            OktaAction::GetProfile => {}
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_profile_preserves_arbitrary_fields() {
+        let action: OktaAction = serde_json::from_value(serde_json::json!({
+            "action": "update_profile",
+            "fields": {
+                "firstName": "Alice",
+                "department": "Engineering"
+            }
+        }))
+        .unwrap();
+
+        match action {
+            OktaAction::UpdateProfile { fields } => {
+                assert_eq!(fields["firstName"], "Alice");
+                assert_eq!(fields["department"], "Engineering");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_search_apps_query() {
+        let action: OktaAction = serde_json::from_value(serde_json::json!({
+            "action": "search_apps",
+            "query": "github"
+        }))
+        .unwrap();
+
+        match action {
+            OktaAction::SearchApps { query } => assert_eq!(query, "github"),
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+}

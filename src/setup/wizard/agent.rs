@@ -221,6 +221,11 @@ impl SetupWizard {
         {
             channels.push("nostr".to_string());
         }
+        if self.settings.channels.bluebubbles_enabled
+            && self.settings.channels.bluebubbles_server_url.is_some()
+        {
+            channels.push("bluebubbles".to_string());
+        }
 
         if channels.len() == 1 {
             // Only web — no external channels configured
@@ -255,6 +260,7 @@ impl SetupWizard {
                 "discord" => "discord   — Discord bot".to_string(),
                 "slack" => "slack     — Slack workspace".to_string(),
                 "nostr" => "nostr     — Nostr relay".to_string(),
+                "bluebubbles" => "bluebubbles — iMessage (via BlueBubbles)".to_string(),
                 other => other.to_string(),
             })
             .collect();
@@ -341,6 +347,18 @@ impl SetupWizard {
                 if !id.is_empty() {
                     self.settings.notifications.recipient = Some(id);
                 } else {
+                    self.settings.notifications.recipient = Some("default".to_string());
+                }
+            }
+            "bluebubbles" => {
+                print_info("Enter your phone number or Apple ID for BlueBubbles notifications.");
+                let contact = input("Phone number or Apple ID (e.g., +4917612345678)")
+                    .map_err(SetupError::Io)?;
+                if !contact.is_empty() {
+                    self.settings.notifications.recipient = Some(contact);
+                } else {
+                    print_info("No recipient set — BlueBubbles notifications disabled.");
+                    self.settings.notifications.preferred_channel = Some("web".to_string());
                     self.settings.notifications.recipient = Some("default".to_string());
                 }
             }

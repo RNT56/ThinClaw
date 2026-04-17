@@ -222,6 +222,14 @@ struct TelegramUser {
 
     /// Username (without @).
     username: Option<String>,
+
+    /// True if private-chat forum topic mode is enabled for the bot.
+    #[serde(default)]
+    has_topics_enabled: Option<bool>,
+
+    /// True if users may create/delete private-chat topics for the bot.
+    #[serde(default)]
+    allows_users_to_create_topics: Option<bool>,
 }
 
 /// Telegram Chat object.
@@ -323,12 +331,48 @@ const SUBAGENT_GC_INTERVAL_SECS: u64 = 5 * 60;
 /// https://core.telegram.org/bots/api#sendmessage
 const TELEGRAM_MAX_MESSAGE_LENGTH: usize = 4096;
 
+/// Workspace path for transport mode telemetry.
+const TRANSPORT_MODE_PATH: &str = "state/transport_mode";
+/// Workspace path for the configured transport preference.
+const TRANSPORT_PREFERENCE_PATH: &str = "state/transport_preference";
+/// Workspace path for a human-readable transport selection reason.
+const TRANSPORT_REASON_PATH: &str = "state/transport_reason";
+/// Workspace path for the expected webhook URL.
+const EXPECTED_WEBHOOK_URL_PATH: &str = "state/expected_webhook_url";
+/// Workspace path for last webhook registration timestamp.
+const LAST_WEBHOOK_REGISTER_AT_PATH: &str = "state/last_webhook_register_at";
+/// Workspace path for last webhook registration error text.
+const LAST_WEBHOOK_REGISTER_ERROR_PATH: &str = "state/last_webhook_register_error";
+/// Workspace path for last polling start timestamp.
+const LAST_POLL_STARTED_AT_PATH: &str = "state/last_poll_started_at";
+/// Workspace path for last polling success timestamp.
+const LAST_POLL_SUCCESS_AT_PATH: &str = "state/last_poll_success_at";
+/// Workspace path for last polling error.
+const LAST_POLL_ERROR_PATH: &str = "state/last_poll_error";
+/// Workspace path for last inbound update timestamp.
+const LAST_INBOUND_AT_PATH: &str = "state/last_inbound_at";
+/// Workspace path for last emitted update identifier.
+const LAST_EMITTED_UPDATE_ID_PATH: &str = "state/last_emitted_update_id";
+/// Workspace path for the most recent transport error.
+const LAST_TRANSPORT_ERROR_PATH: &str = "state/last_transport_error";
+/// Workspace path for whether private bot topics are enabled.
+const PRIVATE_TOPICS_ENABLED_PATH: &str = "state/private_topics_enabled";
+/// Workspace path for whether users may create private-chat topics.
+const PRIVATE_TOPICS_ALLOW_USER_CREATE_PATH: &str = "state/private_topics_allow_user_create";
+/// Workspace path for managed durable private-chat topic mappings.
+const MANAGED_PRIVATE_TOPICS_PATH: &str = "state/managed_private_topics";
+/// Workspace path prefix for last active thread per chat.
+/// Key: `state/last_active_thread/{chat_id}`, value: `message_thread_id`.
+/// Used as a fallback for sendChatAction when the metadata lacks a thread ID
+/// (Telegram quirk: the General topic omits message_thread_id).
+const LAST_ACTIVE_THREAD_PREFIX: &str = "state/last_active_thread/";
+
 // ============================================================================
 // Channel Metadata
 // ============================================================================
 
 /// Metadata stored with emitted messages for response routing.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TelegramMessageMetadata {
     /// Chat ID where the message was received.
     chat_id: i64,
@@ -386,6 +430,10 @@ fn conversation_scope_id(chat_id: i64, message_thread_id: Option<i64>, is_privat
     }
 }
 
+fn normalized_message_thread_id(message_thread_id: Option<i64>) -> Option<i64> {
+    message_thread_id.filter(|thread_id| *thread_id > 0)
+}
+
 fn external_conversation_key(
     chat_id: i64,
     message_thread_id: Option<i64>,
@@ -403,8 +451,8 @@ fn external_conversation_key(
 /// Channel configuration injected by host.
 ///
 /// The host injects runtime values like tunnel_url and webhook_secret.
-/// The channel doesn't need to know about polling vs webhook mode - it just
-/// checks if tunnel_url is set to determine behavior.
+/// Telegram transport is selected from the host-provided preference plus the
+/// effective tunnel URL that survived suitability checks.
 #[derive(Debug, Deserialize)]
 struct TelegramConfig {
     /// Bot username (without @) for mention detection in groups.
@@ -429,14 +477,39 @@ struct TelegramConfig {
     respond_to_all_group_messages: bool,
 
     /// Public tunnel URL for webhook mode (injected by host from global settings).
-    /// When set, webhook mode is enabled and polling is disabled.
+    /// When set and transport_preference allows it, webhook mode is enabled.
     #[serde(default)]
     tunnel_url: Option<String>,
+
+    /// Original host tunnel URL before Telegram-specific suitability filtering.
+    #[serde(default)]
+    host_tunnel_url: Option<String>,
+
+    /// Whether the host determined that webhook ingress is publicly reachable.
+    #[serde(default)]
+    host_webhook_capable: bool,
+
+    /// Host explanation for why webhook transport is not currently suitable.
+    #[serde(default)]
+    host_transport_reason: Option<String>,
 
     /// Secret token for webhook validation (injected by host from secrets store).
     /// Telegram will include this in the X-Telegram-Bot-Api-Secret-Token header.
     #[serde(default)]
     webhook_secret: Option<String>,
+
+    /// How Telegram ingress should be chosen.
+    /// Supported values: "auto" and "polling".
+    #[serde(
+        default,
+        alias = "telegram_transport_mode",
+        alias = "channels.telegram_transport_mode"
+    )]
+    transport_preference: Option<String>,
+
+    /// Human-readable explanation for the chosen transport when polling is forced.
+    #[serde(default)]
+    transport_reason: Option<String>,
 
     /// How subagent activity should be surfaced in Telegram.
     /// Supported values: "temp_topic", "reply_chain", "compact_off".
@@ -446,6 +519,43 @@ struct TelegramConfig {
         alias = "channels.telegram_subagent_session_mode"
     )]
     subagent_session_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedPrivateTopicKind {
+    Onboarding,
+    General,
+}
+
+impl ManagedPrivateTopicKind {
+    fn from_response_thread_id(thread_id: Option<&str>) -> Option<Self> {
+        match thread_id.map(str::trim).filter(|value| !value.is_empty()) {
+            Some("bootstrap") | Some("onboarding") => Some(Self::Onboarding),
+            Some("boot") | Some("general") => Some(Self::General),
+            _ => None,
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Onboarding => "Onboarding",
+            Self::General => "General",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct ManagedPrivateTopicRegistry {
+    #[serde(default)]
+    chats: std::collections::HashMap<String, ManagedPrivateTopicState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct ManagedPrivateTopicState {
+    #[serde(default)]
+    onboarding_thread_id: Option<i64>,
+    #[serde(default)]
+    general_thread_id: Option<i64>,
 }
 
 // ============================================================================
@@ -492,6 +602,35 @@ impl TelegramSubagentSessionMode {
 impl Default for TelegramSubagentSessionMode {
     fn default() -> Self {
         Self::TempTopic
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramTransportPreference {
+    Auto,
+    Polling,
+}
+
+impl TelegramTransportPreference {
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" | "automatic" | "webhook" => Some(Self::Auto),
+            "polling" | "poll" | "off" | "disabled" => Some(Self::Polling),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Polling => "polling",
+        }
+    }
+}
+
+impl Default for TelegramTransportPreference {
+    fn default() -> Self {
+        Self::Auto
     }
 }
 
@@ -563,8 +702,11 @@ fn classify_status_update(update: &StatusUpdate) -> Option<TelegramStatusAction>
     match update.status {
         StatusType::Thinking => Some(TelegramStatusAction::Typing),
         StatusType::Done | StatusType::Interrupted => None,
-        // Tool telemetry can be noisy in chat; keep it as typing-only UX.
-        StatusType::ToolStarted | StatusType::ToolCompleted | StatusType::ToolResult => None,
+        // Telegram doesn't have a rich activity rail like the WebUI, so
+        // surface concise visible notices for tool lifecycle events.
+        StatusType::ToolStarted | StatusType::ToolCompleted | StatusType::ToolResult => {
+            status_message_for_user(update).map(TelegramStatusAction::Notify)
+        }
         StatusType::Status => {
             if let Some(event) = parse_subagent_event(&update.message) {
                 return Some(TelegramStatusAction::Subagent(event));
@@ -740,7 +882,8 @@ fn now_epoch_secs() -> u64 {
 }
 
 fn maybe_close_orphaned_topic(session: &StoredSubagentSession) {
-    if TelegramSubagentSessionMode::from_str(&session.mode) != Some(TelegramSubagentSessionMode::TempTopic)
+    if TelegramSubagentSessionMode::from_str(&session.mode)
+        != Some(TelegramSubagentSessionMode::TempTopic)
     {
         return;
     }
@@ -1291,14 +1434,68 @@ impl Guest for TelegramChannel {
         let _ = channel_host::workspace_write(SUBAGENT_SESSION_MODE_PATH, subagent_mode.as_str());
         run_subagent_session_gc(true);
 
-        // Mode is determined by whether the host injected a tunnel_url
-        // If tunnel is configured, use webhooks. Otherwise, use polling.
-        let mut webhook_mode = config.tunnel_url.is_some();
+        let transport_preference = config
+            .transport_preference
+            .as_deref()
+            .and_then(TelegramTransportPreference::from_str)
+            .unwrap_or_default();
+        let transport_reason = config
+            .transport_reason
+            .clone()
+            .or_else(|| match transport_preference {
+                TelegramTransportPreference::Polling => {
+                    Some("operator forced polling".to_string())
+                }
+                TelegramTransportPreference::Auto
+                    if config.host_webhook_capable
+                        && config.host_tunnel_url.is_some()
+                        && config.tunnel_url.is_none() =>
+                {
+                    Some("runtime fallback forced polling after webhook instability".to_string())
+                }
+                TelegramTransportPreference::Auto if !config.host_webhook_capable => config
+                    .host_transport_reason
+                    .clone()
+                    .or_else(|| Some("no suitable public HTTPS webhook URL is available".to_string())),
+                TelegramTransportPreference::Auto => None,
+            });
+
+        let mut webhook_mode =
+            transport_preference == TelegramTransportPreference::Auto && config.tunnel_url.is_some();
+        let expected_webhook_url = if webhook_mode {
+            config
+                .tunnel_url
+                .as_ref()
+                .map(|url| format!("{}/webhook/telegram", url.trim_end_matches('/')))
+        } else {
+            None
+        };
+
+        write_workspace_state(
+            TRANSPORT_MODE_PATH,
+            if webhook_mode { "webhook" } else { "polling" },
+        );
+        write_workspace_state(TRANSPORT_PREFERENCE_PATH, transport_preference.as_str());
+        if let Some(reason) = transport_reason.as_deref() {
+            write_workspace_state(TRANSPORT_REASON_PATH, reason);
+        } else {
+            clear_workspace_state(TRANSPORT_REASON_PATH);
+        }
+        write_workspace_state(
+            EXPECTED_WEBHOOK_URL_PATH,
+            expected_webhook_url.as_deref().unwrap_or(""),
+        );
+        clear_workspace_state(LAST_WEBHOOK_REGISTER_ERROR_PATH);
+        clear_workspace_state(LAST_POLL_ERROR_PATH);
+        clear_transport_error();
+        clear_workspace_state(PRIVATE_TOPICS_ENABLED_PATH);
+        clear_workspace_state(PRIVATE_TOPICS_ALLOW_USER_CREATE_PATH);
+        probe_private_topic_settings();
 
         if webhook_mode {
             channel_host::log(
                 channel_host::LogLevel::Info,
-                "Webhook mode enabled (tunnel configured)",
+                "Webhook mode enabled (public ingress available)",
             );
 
             // Register webhook with Telegram API
@@ -1309,6 +1506,9 @@ impl Guest for TelegramChannel {
                 );
 
                 if let Err(e) = register_webhook(tunnel_url, config.webhook_secret.as_deref()) {
+                    write_workspace_state(LAST_WEBHOOK_REGISTER_AT_PATH, &now_millis_string());
+                    write_workspace_state(LAST_WEBHOOK_REGISTER_ERROR_PATH, &e);
+                    set_transport_error(&e);
                     channel_host::log(
                         channel_host::LogLevel::Error,
                         &format!(
@@ -1320,17 +1520,28 @@ impl Guest for TelegramChannel {
                     // getUpdates works, then flip the mode flag.
                     let _ = delete_webhook();
                     webhook_mode = false;
+                    write_workspace_state(TRANSPORT_MODE_PATH, "polling");
+                } else {
+                    write_workspace_state(LAST_WEBHOOK_REGISTER_AT_PATH, &now_millis_string());
+                    clear_workspace_state(LAST_WEBHOOK_REGISTER_ERROR_PATH);
+                    clear_transport_error();
                 }
             }
         } else {
             channel_host::log(
                 channel_host::LogLevel::Info,
-                "Polling mode enabled (no tunnel configured)",
+                &format!(
+                    "Polling mode enabled ({})",
+                    transport_reason
+                        .as_deref()
+                        .unwrap_or("no suitable public webhook URL")
+                ),
             );
 
             // Delete any existing webhook before polling
             // Telegram doesn't allow getUpdates while a webhook is active
             if let Err(e) = delete_webhook() {
+                set_transport_error(&e);
                 channel_host::log(
                     channel_host::LogLevel::Warn,
                     &format!("Failed to delete webhook (may not exist): {}", e),
@@ -1394,6 +1605,7 @@ impl Guest for TelegramChannel {
         let update: TelegramUpdate = match serde_json::from_str(body_str) {
             Ok(u) => u,
             Err(e) => {
+                set_transport_error(&format!("Invalid webhook payload: {}", e));
                 channel_host::log(
                     channel_host::LogLevel::Error,
                     &format!("Failed to parse Telegram update: {}", e),
@@ -1405,6 +1617,7 @@ impl Guest for TelegramChannel {
 
         // Handle the update
         handle_update(update);
+        clear_transport_error();
 
         // Always respond 200 quickly (Telegram expects fast responses)
         json_response(200, serde_json::json!({"ok": true}))
@@ -1412,6 +1625,7 @@ impl Guest for TelegramChannel {
 
     fn on_poll() {
         run_subagent_session_gc(false);
+        write_workspace_state(LAST_POLL_STARTED_AT_PATH, &now_millis_string());
         // Read last offset from workspace storage
         let offset = match channel_host::workspace_read(POLLING_STATE_PATH) {
             Some(s) => s.parse::<i64>().unwrap_or(0),
@@ -1461,10 +1675,10 @@ impl Guest for TelegramChannel {
             Ok(response) => {
                 if response.status != 200 {
                     let body_str = String::from_utf8_lossy(&response.body);
-                    channel_host::log(
-                        channel_host::LogLevel::Error,
-                        &format!("getUpdates returned {}: {}", response.status, body_str),
-                    );
+                    let error = format!("getUpdates returned {}: {}", response.status, body_str);
+                    write_workspace_state(LAST_POLL_ERROR_PATH, &error);
+                    set_transport_error(&error);
+                    channel_host::log(channel_host::LogLevel::Error, &error);
                     return;
                 }
 
@@ -1474,6 +1688,9 @@ impl Guest for TelegramChannel {
 
                 match api_response {
                     Ok(resp) if resp.ok => {
+                        write_workspace_state(LAST_POLL_SUCCESS_AT_PATH, &now_millis_string());
+                        clear_workspace_state(LAST_POLL_ERROR_PATH);
+                        clear_transport_error();
                         if let Some(updates) = resp.result {
                             let mut new_offset = offset;
 
@@ -1502,27 +1719,27 @@ impl Guest for TelegramChannel {
                         }
                     }
                     Ok(resp) => {
-                        channel_host::log(
-                            channel_host::LogLevel::Error,
-                            &format!(
-                                "Telegram API error: {}",
-                                resp.description.unwrap_or_else(|| "unknown".to_string())
-                            ),
+                        let error = format!(
+                            "Telegram API error: {}",
+                            resp.description.unwrap_or_else(|| "unknown".to_string())
                         );
+                        write_workspace_state(LAST_POLL_ERROR_PATH, &error);
+                        set_transport_error(&error);
+                        channel_host::log(channel_host::LogLevel::Error, &error);
                     }
                     Err(e) => {
-                        channel_host::log(
-                            channel_host::LogLevel::Error,
-                            &format!("Failed to parse getUpdates response: {}", e),
-                        );
+                        let error = format!("Failed to parse getUpdates response: {}", e);
+                        write_workspace_state(LAST_POLL_ERROR_PATH, &error);
+                        set_transport_error(&error);
+                        channel_host::log(channel_host::LogLevel::Error, &error);
                     }
                 }
             }
             Err(e) => {
-                channel_host::log(
-                    channel_host::LogLevel::Error,
-                    &format!("getUpdates request failed: {}", e),
-                );
+                let error = format!("getUpdates request failed: {}", e);
+                write_workspace_state(LAST_POLL_ERROR_PATH, &error);
+                set_transport_error(&error);
+                channel_host::log(channel_host::LogLevel::Error, &error);
             }
         }
     }
@@ -1530,13 +1747,17 @@ impl Guest for TelegramChannel {
     fn on_respond(response: AgentResponse) -> Result<(), String> {
         let metadata: TelegramMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
+        let mut target_thread_id =
+            resolve_outgoing_message_thread_id(&metadata, response.thread_id.as_deref());
 
         channel_host::log(
             channel_host::LogLevel::Info,
             &format!(
-                "on_respond: chat_id={}, message_thread_id={:?}, is_private={}, metadata_json={}",
+                "on_respond: chat_id={}, metadata_thread_id={:?}, target_thread_id={:?}, requested_thread_id={:?}, is_private={}, metadata_json={}",
                 metadata.chat_id,
                 metadata.message_thread_id,
+                target_thread_id,
+                response.thread_id,
                 metadata.is_private,
                 response.metadata_json
             ),
@@ -1545,6 +1766,10 @@ impl Guest for TelegramChannel {
         // Convert standard Markdown (from LLM output) to Telegram-safe HTML
         let html_content = markdown_to_telegram_html(&response.content);
         let chunks = split_message(&html_content, TELEGRAM_MAX_MESSAGE_LENGTH);
+
+        // Track whether we've already attempted a thread recovery for this
+        // response. We only retry once to avoid infinite loops.
+        let mut thread_recovered = false;
 
         for (i, chunk) in chunks.iter().enumerate() {
             // Unconditionally set reply_to = None. If we reply_to a message directly, Telegram
@@ -1559,7 +1784,7 @@ impl Guest for TelegramChannel {
                 chunk,
                 reply_to,
                 Some("HTML"),
-                metadata.message_thread_id,
+                target_thread_id,
             );
 
             match result {
@@ -1575,6 +1800,44 @@ impl Guest for TelegramChannel {
                         ),
                     );
                 }
+                Err(SendError::ThreadNotFound(detail)) if !thread_recovered => {
+                    // The managed topic was deleted by the user. Invalidate the
+                    // cached thread_id and re-resolve (which creates a new topic).
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!(
+                            "Managed thread not found ({}), invalidating and recreating",
+                            detail
+                        ),
+                    );
+
+                    // Invalidate both managed topic kinds for this chat — we
+                    // don't know which one was targeted, but they share the chat.
+                    if metadata.is_private {
+                        if let Some(kind) = ManagedPrivateTopicKind::from_response_thread_id(
+                            response.thread_id.as_deref(),
+                        ) {
+                            invalidate_managed_private_topic(metadata.chat_id, kind);
+                        }
+                    }
+
+                    // Re-resolve the thread_id (this will create a new topic)
+                    target_thread_id = resolve_outgoing_message_thread_id(
+                        &metadata,
+                        response.thread_id.as_deref(),
+                    );
+                    thread_recovered = true;
+
+                    // Retry this chunk with the new thread_id
+                    send_message(
+                        metadata.chat_id,
+                        chunk,
+                        reply_to,
+                        Some("HTML"),
+                        target_thread_id,
+                    )
+                    .map_err(|e| format!("Retry after thread recreation also failed: {}", e))?;
+                }
                 Err(SendError::ParseEntities(detail)) => {
                     channel_host::log(
                         channel_host::LogLevel::Warn,
@@ -1589,12 +1852,17 @@ impl Guest for TelegramChannel {
                         plain_chunk,
                         reply_to,
                         None,
-                        metadata.message_thread_id,
+                        target_thread_id,
                     )
                     .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
                 }
                 Err(e) => return Err(e.to_string()),
             }
+        }
+
+        if should_precreate_general_topic(&metadata, response.thread_id.as_deref()) {
+            let _ =
+                ensure_managed_private_topic(metadata.chat_id, ManagedPrivateTopicKind::General);
         }
 
         Ok(())
@@ -1619,6 +1887,11 @@ impl Guest for TelegramChannel {
             }
         };
 
+        if should_ensure_general_topic_after_status(&metadata, &update) {
+            let _ =
+                ensure_managed_private_topic(metadata.chat_id, ManagedPrivateTopicKind::General);
+        }
+
         match action {
             TelegramStatusAction::Typing => {
                 // POST /sendChatAction with action "typing"
@@ -1627,7 +1900,23 @@ impl Guest for TelegramChannel {
                     "action": "typing"
                 });
 
-                if let Some(thread_id) = metadata.message_thread_id {
+                // Resolve the forum thread ID for the typing indicator.
+                // Telegram's "General" topic quirk: the API omits
+                // message_thread_id for messages in the General topic, so
+                // metadata.message_thread_id may be None even though the
+                // conversation is happening inside a thread.
+                //
+                // Universal fallback: use the last active thread for this
+                // chat (persisted on every incoming message). This covers
+                // the General topic, user-created threads, and bot-created
+                // threads — any case where the metadata lacks a thread ID.
+                let effective_thread_id = metadata.message_thread_id.or_else(|| {
+                    let path = format!("{}{}", LAST_ACTIVE_THREAD_PREFIX, metadata.chat_id);
+                    channel_host::workspace_read(&path)
+                        .and_then(|v| v.parse::<i64>().ok())
+                });
+
+                if let Some(thread_id) = effective_thread_id {
                     payload["message_thread_id"] = serde_json::json!(thread_id);
                 }
 
@@ -1711,6 +2000,9 @@ impl Guest for TelegramChannel {
 enum SendError {
     /// Telegram returned 400 with "can't parse entities" (Markdown issue).
     ParseEntities(String),
+    /// Telegram returned 400 with "message thread not found" — the forum topic
+    /// was deleted. Callers should invalidate the cached thread_id and retry.
+    ThreadNotFound(String),
     /// Any other failure.
     Other(String),
 }
@@ -1719,6 +2011,7 @@ impl std::fmt::Display for SendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SendError::ParseEntities(detail) => write!(f, "parse entities error: {}", detail),
+            SendError::ThreadNotFound(detail) => write!(f, "thread not found: {}", detail),
             SendError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -1778,6 +2071,12 @@ fn send_message(
                 let body_str = String::from_utf8_lossy(&http_response.body);
                 if body_str.contains("can't parse entities") {
                     return Err(SendError::ParseEntities(body_str.to_string()));
+                }
+                // Telegram returns this when the forum topic was deleted by the user.
+                if body_str.contains("message thread not found")
+                    || body_str.contains("TOPIC_ID_INVALID")
+                {
+                    return Err(SendError::ThreadNotFound(body_str.to_string()));
                 }
                 return Err(SendError::Other(format!(
                     "Telegram API returned 400: {}",
@@ -1897,6 +2196,352 @@ fn escape_html(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn write_workspace_state(path: &str, value: &str) {
+    if let Err(error) = channel_host::workspace_write(path, value) {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            &format!(
+                "Failed to persist Telegram transport state at {}: {}",
+                path, error
+            ),
+        );
+    }
+}
+
+fn clear_workspace_state(path: &str) {
+    write_workspace_state(path, "");
+}
+
+fn now_millis_string() -> String {
+    channel_host::now_millis().to_string()
+}
+
+fn set_transport_error(message: &str) {
+    write_workspace_state(LAST_TRANSPORT_ERROR_PATH, message);
+}
+
+fn clear_transport_error() {
+    clear_workspace_state(LAST_TRANSPORT_ERROR_PATH);
+}
+
+fn read_bool_workspace_state(path: &str) -> Option<bool> {
+    channel_host::workspace_read(path).and_then(|raw| match raw.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    })
+}
+
+fn probe_private_topic_settings() {
+    let headers = serde_json::json!({}).to_string();
+    let response = match channel_host::http_request(
+        "GET",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe",
+        &headers,
+        None,
+        None,
+    ) {
+        Ok(response) => response,
+        Err(error) => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!(
+                    "Failed to probe Telegram bot topic settings via getMe: {}",
+                    error
+                ),
+            );
+            return;
+        }
+    };
+
+    if response.status != 200 {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            &format!(
+                "Telegram getMe returned {} while probing topic settings: {}",
+                response.status,
+                String::from_utf8_lossy(&response.body)
+            ),
+        );
+        return;
+    }
+
+    let api_response: TelegramApiResponse<TelegramUser> =
+        match serde_json::from_slice(&response.body) {
+            Ok(value) => value,
+            Err(error) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to parse Telegram getMe response: {}", error),
+                );
+                return;
+            }
+        };
+
+    if !api_response.ok {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            &format!(
+                "Telegram getMe probe failed: {}",
+                api_response
+                    .description
+                    .unwrap_or_else(|| "unknown error".to_string())
+            ),
+        );
+        return;
+    }
+
+    if let Some(bot) = api_response.result {
+        if let Some(enabled) = bot.has_topics_enabled {
+            write_workspace_state(
+                PRIVATE_TOPICS_ENABLED_PATH,
+                if enabled { "true" } else { "false" },
+            );
+        } else {
+            clear_workspace_state(PRIVATE_TOPICS_ENABLED_PATH);
+        }
+
+        if let Some(allowed) = bot.allows_users_to_create_topics {
+            write_workspace_state(
+                PRIVATE_TOPICS_ALLOW_USER_CREATE_PATH,
+                if allowed { "true" } else { "false" },
+            );
+        } else {
+            clear_workspace_state(PRIVATE_TOPICS_ALLOW_USER_CREATE_PATH);
+        }
+
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "Telegram private topics probe: enabled={:?}, users_can_create={:?}",
+                bot.has_topics_enabled, bot.allows_users_to_create_topics
+            ),
+        );
+    }
+}
+
+fn read_managed_private_topic_registry() -> ManagedPrivateTopicRegistry {
+    channel_host::workspace_read(MANAGED_PRIVATE_TOPICS_PATH)
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_managed_private_topic_registry(registry: &ManagedPrivateTopicRegistry) {
+    match serde_json::to_string(registry) {
+        Ok(serialized) => write_workspace_state(MANAGED_PRIVATE_TOPICS_PATH, &serialized),
+        Err(error) => channel_host::log(
+            channel_host::LogLevel::Warn,
+            &format!(
+                "Failed to serialize managed Telegram topic registry: {}",
+                error
+            ),
+        ),
+    }
+}
+
+fn managed_private_topic_id(
+    state: &ManagedPrivateTopicState,
+    kind: ManagedPrivateTopicKind,
+) -> Option<i64> {
+    match kind {
+        ManagedPrivateTopicKind::Onboarding => state.onboarding_thread_id,
+        ManagedPrivateTopicKind::General => state.general_thread_id,
+    }
+}
+
+fn set_managed_private_topic_id(
+    state: &mut ManagedPrivateTopicState,
+    kind: ManagedPrivateTopicKind,
+    thread_id: Option<i64>,
+) {
+    match kind {
+        ManagedPrivateTopicKind::Onboarding => state.onboarding_thread_id = thread_id,
+        ManagedPrivateTopicKind::General => state.general_thread_id = thread_id,
+    }
+}
+
+/// Invalidate a persisted managed topic thread_id (e.g. because the topic was
+/// deleted by the user). The next call to `ensure_managed_private_topic` will
+/// re-create it.
+fn invalidate_managed_private_topic(chat_id: i64, kind: ManagedPrivateTopicKind) {
+    let mut registry = read_managed_private_topic_registry();
+    let chat_key = chat_id.to_string();
+    if let Some(state) = registry.chats.get_mut(&chat_key) {
+        set_managed_private_topic_id(state, kind, None);
+        write_managed_private_topic_registry(&registry);
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "Invalidated stale managed Telegram topic {:?} for chat {} (will recreate on next use)",
+                kind, chat_id
+            ),
+        );
+    }
+}
+
+fn edit_forum_topic(chat_id: i64, message_thread_id: i64, name: &str) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "chat_id": chat_id,
+        "message_thread_id": message_thread_id,
+        "name": name,
+    });
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize payload: {}", e))?;
+    let headers = serde_json::json!({ "Content-Type": "application/json" });
+    let response = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editForumTopic",
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    )
+    .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!(
+            "Telegram API returned status {}: {}",
+            response.status, body_str
+        ));
+    }
+
+    let api_response: TelegramApiResponse<bool> = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    if api_response.ok {
+        Ok(())
+    } else {
+        Err(api_response
+            .description
+            .unwrap_or_else(|| "unknown edit topic error".to_string()))
+    }
+}
+
+fn ensure_managed_private_topic(chat_id: i64, kind: ManagedPrivateTopicKind) -> Option<i64> {
+    if matches!(
+        read_bool_workspace_state(PRIVATE_TOPICS_ENABLED_PATH),
+        Some(false)
+    ) {
+        return None;
+    }
+
+    let mut registry = read_managed_private_topic_registry();
+    let chat_key = chat_id.to_string();
+    let state = registry.chats.entry(chat_key).or_default();
+
+    // Fast path: if we already have a persisted thread_id for this kind, reuse it.
+    // We no longer probe via editForumTopic because Telegram returns HTTP 400
+    // ("topic name was not changed") when the name is identical, which the old
+    // code misinterpreted as "topic is stale" — causing a new General topic on
+    // every startup.
+    //
+    // If the persisted thread_id turns out to be invalid (topic was deleted by
+    // the user), the send_message call will fail and the caller can handle it.
+    if let Some(existing_thread_id) = managed_private_topic_id(state, kind) {
+        channel_host::log(
+            channel_host::LogLevel::Debug,
+            &format!(
+                "Reusing persisted managed Telegram topic {:?} for chat {} (thread {})",
+                kind, chat_id, existing_thread_id
+            ),
+        );
+        return Some(existing_thread_id);
+    }
+
+    // No persisted thread_id — create the topic for the first time.
+    match create_forum_topic(chat_id, kind.display_name()) {
+        Ok(thread_id) => {
+            set_managed_private_topic_id(state, kind, Some(thread_id));
+            write_managed_private_topic_registry(&registry);
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                &format!(
+                    "Created managed Telegram topic '{}' for chat {} (thread {})",
+                    kind.display_name(),
+                    chat_id,
+                    thread_id
+                ),
+            );
+            Some(thread_id)
+        }
+        Err(error) => {
+            write_managed_private_topic_registry(&registry);
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!(
+                    "Failed to create managed Telegram topic '{}' for chat {}: {}",
+                    kind.display_name(),
+                    chat_id,
+                    error
+                ),
+            );
+            None
+        }
+    }
+}
+
+fn resolve_outgoing_message_thread_id(
+    metadata: &TelegramMessageMetadata,
+    response_thread_id: Option<&str>,
+) -> Option<i64> {
+    if metadata.is_private {
+        if let Some(kind) = ManagedPrivateTopicKind::from_response_thread_id(response_thread_id) {
+            return ensure_managed_private_topic(metadata.chat_id, kind)
+                .or(metadata.message_thread_id);
+        }
+    }
+
+    response_thread_id
+        .and_then(|thread_id| thread_id.trim().parse::<i64>().ok())
+        .filter(|thread_id| *thread_id > 0)
+        .or(metadata.message_thread_id)
+}
+
+fn should_precreate_general_topic(
+    metadata: &TelegramMessageMetadata,
+    response_thread_id: Option<&str>,
+) -> bool {
+    metadata.is_private
+        && ManagedPrivateTopicKind::from_response_thread_id(response_thread_id)
+            == Some(ManagedPrivateTopicKind::Onboarding)
+}
+
+fn tool_result_deleted_path(update: &StatusUpdate) -> Option<String> {
+    if update.status != StatusType::ToolResult {
+        return None;
+    }
+
+    let (header, body) = update.message.split_once('\n')?;
+    if !header
+        .trim()
+        .eq_ignore_ascii_case("Tool result: memory_delete")
+    {
+        return None;
+    }
+
+    let payload: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    if !payload
+        .get("status")
+        .and_then(|value| value.as_str())
+        .is_some_and(|status| status.eq_ignore_ascii_case("deleted"))
+    {
+        return None;
+    }
+
+    payload
+        .get("path")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+}
+
+fn should_ensure_general_topic_after_status(
+    metadata: &TelegramMessageMetadata,
+    update: &StatusUpdate,
+) -> bool {
+    metadata.is_private
+        && tool_result_deleted_path(update)
+            .is_some_and(|path| path.eq_ignore_ascii_case("BOOTSTRAP.md"))
+}
+
 // ============================================================================
 // Webhook Management
 // ============================================================================
@@ -1952,7 +2597,7 @@ fn delete_webhook() -> Result<(), String> {
 ///
 /// Called during on_start() when tunnel_url is configured.
 fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<(), String> {
-    let webhook_url = format!("{}/webhook/telegram", tunnel_url);
+    let webhook_url = format!("{}/webhook/telegram", tunnel_url.trim_end_matches('/'));
 
     // Build setWebhook request body
     let mut body = serde_json::json!({
@@ -2039,6 +2684,9 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
 
 /// Process a Telegram update and emit messages if applicable.
 fn handle_update(update: TelegramUpdate) {
+    write_workspace_state(LAST_INBOUND_AT_PATH, &now_millis_string());
+    write_workspace_state(LAST_EMITTED_UPDATE_ID_PATH, &update.update_id.to_string());
+
     // Handle regular messages
     if let Some(message) = update.message {
         handle_message(message);
@@ -2123,6 +2771,8 @@ fn handle_message(message: TelegramMessage) {
             if !is_allowed {
                 if dm_policy == "pairing" {
                     // Upsert pairing request and send reply
+                    let normalized_thread_id =
+                        normalized_message_thread_id(message.message_thread_id);
                     let meta = serde_json::json!({
                         "chat_id": message.chat.id,
                         "user_id": from.id,
@@ -2135,12 +2785,12 @@ fn handle_message(message: TelegramMessage) {
                         "conversation_kind": conversation_kind(is_private),
                         "conversation_scope_id": conversation_scope_id(
                             message.chat.id,
-                            message.message_thread_id,
+                            normalized_thread_id,
                             is_private,
                         ),
                         "external_conversation_key": external_conversation_key(
                             message.chat.id,
-                            message.message_thread_id,
+                            normalized_thread_id,
                             is_private,
                         ),
                         "raw_sender_id": from.id.to_string(),
@@ -2210,22 +2860,26 @@ fn handle_message(message: TelegramMessage) {
     };
 
     // Build metadata for response routing
+    // Telegram private chats can now run in threaded mode. When Telegram
+    // supplies a message_thread_id for a private chat topic, preserve it so
+    // typing, replies, and WebUI sync stay inside that specific topic.
+    let normalized_thread_id = normalized_message_thread_id(message.message_thread_id);
     let stable_sender_id = from.id.to_string();
     let metadata = TelegramMessageMetadata {
         chat_id: message.chat.id,
         message_id: message.message_id,
         user_id: from.id,
         is_private,
-        message_thread_id: message.message_thread_id,
+        message_thread_id: normalized_thread_id,
         conversation_kind: Some(conversation_kind(is_private).to_string()),
         conversation_scope_id: Some(conversation_scope_id(
             message.chat.id,
-            message.message_thread_id,
+            normalized_thread_id,
             is_private,
         )),
         external_conversation_key: Some(external_conversation_key(
             message.chat.id,
-            message.message_thread_id,
+            normalized_thread_id,
             is_private,
         )),
         raw_sender_id: Some(stable_sender_id.clone()),
@@ -2269,7 +2923,7 @@ fn handle_message(message: TelegramMessage) {
             "handle_message: chat_id={}, message_id={}, message_thread_id={:?}, is_private={}, chat_type={}",
             message.chat.id,
             message.message_id,
-            message.message_thread_id,
+            normalized_thread_id,
             is_private,
             message.chat.chat_type
         ),
@@ -2279,10 +2933,21 @@ fn handle_message(message: TelegramMessage) {
         user_id: from.id.to_string(),
         user_name: Some(user_name),
         content: content_to_emit,
-        thread_id: message.message_thread_id.map(|id| id.to_string()),
+        thread_id: normalized_thread_id.map(|id| id.to_string()),
         metadata_json,
         attachments,
     });
+
+    // Persist the active thread for this chat so that sendChatAction can
+    // target the correct forum topic even when Telegram omits the thread ID
+    // (e.g., the General topic).  Any incoming message updates this, so the
+    // typing indicator always targets the most recent thread.
+    if let Some(thread_id) = normalized_thread_id {
+        write_workspace_state(
+            &format!("{}{}", LAST_ACTIVE_THREAD_PREFIX, message.chat.id),
+            &thread_id.to_string(),
+        );
+    }
 
     channel_host::log(
         channel_host::LogLevel::Info,
@@ -2290,7 +2955,7 @@ fn handle_message(message: TelegramMessage) {
             "Emitted message from user {} in chat {} (thread: {:?}, attachments: {})",
             from.id,
             message.chat.id,
-            message.message_thread_id,
+            normalized_thread_id,
             media_descriptors.len()
         ),
     );
@@ -2618,6 +3283,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_transport_preference_aliases() {
+        assert_eq!(
+            TelegramTransportPreference::from_str("auto"),
+            Some(TelegramTransportPreference::Auto)
+        );
+        assert_eq!(
+            TelegramTransportPreference::from_str("webhook"),
+            Some(TelegramTransportPreference::Auto)
+        );
+        assert_eq!(
+            TelegramTransportPreference::from_str("poll"),
+            Some(TelegramTransportPreference::Polling)
+        );
+        assert_eq!(
+            TelegramTransportPreference::from_str("disabled"),
+            Some(TelegramTransportPreference::Polling)
+        );
+        assert_eq!(TelegramTransportPreference::from_str("mystery"), None);
+    }
+
+    #[test]
     fn test_clean_message_text() {
         // Without bot_username: strips any leading @mention
         assert_eq!(clean_message_text("/start hello", None), "hello");
@@ -2933,6 +3619,143 @@ mod tests {
     }
 
     #[test]
+    fn test_normalized_message_thread_id_preserves_private_topics() {
+        assert_eq!(normalized_message_thread_id(Some(61419)), Some(61419));
+        assert_eq!(normalized_message_thread_id(None), None);
+        assert_eq!(normalized_message_thread_id(Some(7)), Some(7));
+    }
+
+    #[test]
+    fn test_private_topic_metadata_keeps_direct_scope_key() {
+        assert_eq!(
+            conversation_scope_id(42, Some(61419), true),
+            "telegram:direct:42"
+        );
+        assert_eq!(
+            external_conversation_key(42, Some(61419), true),
+            "telegram://direct/42"
+        );
+    }
+
+    #[test]
+    fn test_managed_private_topic_kind_aliases() {
+        assert_eq!(
+            ManagedPrivateTopicKind::from_response_thread_id(Some("bootstrap")),
+            Some(ManagedPrivateTopicKind::Onboarding)
+        );
+        assert_eq!(
+            ManagedPrivateTopicKind::from_response_thread_id(Some("onboarding")),
+            Some(ManagedPrivateTopicKind::Onboarding)
+        );
+        assert_eq!(
+            ManagedPrivateTopicKind::from_response_thread_id(Some("boot")),
+            Some(ManagedPrivateTopicKind::General)
+        );
+        assert_eq!(
+            ManagedPrivateTopicKind::from_response_thread_id(Some("general")),
+            Some(ManagedPrivateTopicKind::General)
+        );
+        assert_eq!(
+            ManagedPrivateTopicKind::from_response_thread_id(Some("61419")),
+            None
+        );
+        assert_eq!(ManagedPrivateTopicKind::from_response_thread_id(None), None);
+    }
+
+    #[test]
+    fn test_tool_result_deleted_path_detects_bootstrap_delete() {
+        let update = StatusUpdate {
+            status: StatusType::ToolResult,
+            message:
+                "Tool result: memory_delete\n{\"status\":\"deleted\",\"path\":\"BOOTSTRAP.md\"}"
+                    .to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            tool_result_deleted_path(&update),
+            Some("BOOTSTRAP.md".to_string())
+        );
+    }
+
+    #[test]
+    fn test_tool_result_deleted_path_ignores_other_tools() {
+        let update = StatusUpdate {
+            status: StatusType::ToolResult,
+            message: "Tool result: memory_read\n{\"status\":\"ok\",\"path\":\"BOOTSTRAP.md\"}"
+                .to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(tool_result_deleted_path(&update), None);
+    }
+
+    #[test]
+    fn test_should_ensure_general_topic_after_status_only_for_private_bootstrap_delete() {
+        let update = StatusUpdate {
+            status: StatusType::ToolResult,
+            message:
+                "Tool result: memory_delete\n{\"status\":\"deleted\",\"path\":\"BOOTSTRAP.md\"}"
+                    .to_string(),
+            metadata_json: "{}".to_string(),
+        };
+        let private_metadata = TelegramMessageMetadata {
+            chat_id: 42,
+            message_id: 7,
+            user_id: 1,
+            is_private: true,
+            message_thread_id: Some(61419),
+            conversation_kind: Some("direct".to_string()),
+            conversation_scope_id: Some("telegram:direct:42".to_string()),
+            external_conversation_key: Some("telegram://direct/42".to_string()),
+            raw_sender_id: Some("telegram:user:1".to_string()),
+            stable_sender_id: Some("telegram:user:1".to_string()),
+            subagent_session_mode: None,
+        };
+        let mut group_metadata = private_metadata.clone();
+        group_metadata.is_private = false;
+
+        assert!(should_ensure_general_topic_after_status(
+            &private_metadata,
+            &update
+        ));
+        assert!(!should_ensure_general_topic_after_status(
+            &group_metadata,
+            &update
+        ));
+    }
+
+    #[test]
+    fn test_should_precreate_general_topic_only_for_private_onboarding_alias() {
+        let metadata = TelegramMessageMetadata {
+            chat_id: 42,
+            message_id: 7,
+            user_id: 1,
+            is_private: true,
+            message_thread_id: Some(61419),
+            conversation_kind: Some("direct".to_string()),
+            conversation_scope_id: Some("telegram:direct:42".to_string()),
+            external_conversation_key: Some("telegram://direct/42".to_string()),
+            raw_sender_id: Some("telegram:user:1".to_string()),
+            stable_sender_id: Some("telegram:user:1".to_string()),
+            subagent_session_mode: None,
+        };
+        let mut group_metadata = metadata.clone();
+        group_metadata.is_private = false;
+
+        assert!(should_precreate_general_topic(&metadata, Some("bootstrap")));
+        assert!(should_precreate_general_topic(
+            &metadata,
+            Some("onboarding")
+        ));
+        assert!(!should_precreate_general_topic(&metadata, Some("boot")));
+        assert!(!should_precreate_general_topic(
+            &group_metadata,
+            Some("bootstrap")
+        ));
+    }
+
+    #[test]
     fn test_classify_status_update_thinking() {
         let update = StatusUpdate {
             status: StatusType::Thinking,
@@ -2990,25 +3813,35 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_status_update_tool_started_ignored() {
+    fn test_classify_status_update_tool_started_notify() {
         let update = StatusUpdate {
             status: StatusType::ToolStarted,
             message: "Tool started: http_request".to_string(),
             metadata_json: "{}".to_string(),
         };
 
-        assert_eq!(classify_status_update(&update), None);
+        assert_eq!(
+            classify_status_update(&update),
+            Some(TelegramStatusAction::Notify(
+                "Tool started: http_request".to_string()
+            ))
+        );
     }
 
     #[test]
-    fn test_classify_status_update_tool_completed_ignored() {
+    fn test_classify_status_update_tool_completed_notify() {
         let update = StatusUpdate {
             status: StatusType::ToolCompleted,
             message: "Tool completed: http_request (ok)".to_string(),
             metadata_json: "{}".to_string(),
         };
 
-        assert_eq!(classify_status_update(&update), None);
+        assert_eq!(
+            classify_status_update(&update),
+            Some(TelegramStatusAction::Notify(
+                "Tool completed: http_request (ok)".to_string()
+            ))
+        );
     }
 
     #[test]
@@ -3044,14 +3877,19 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_status_update_tool_result_ignored() {
+    fn test_classify_status_update_tool_result_notify() {
         let update = StatusUpdate {
             status: StatusType::ToolResult,
             message: "Tool result: http_request ...".to_string(),
             metadata_json: "{}".to_string(),
         };
 
-        assert_eq!(classify_status_update(&update), None);
+        assert_eq!(
+            classify_status_update(&update),
+            Some(TelegramStatusAction::Notify(
+                "Tool result: http_request ...".to_string()
+            ))
+        );
     }
 
     #[test]
@@ -3234,7 +4072,8 @@ mod tests {
                     parent_thread_id: None,
                     topic_thread_id: None,
                     mode: "reply_chain".to_string(),
-                    last_touched_epoch_secs: now.saturating_sub((SUBAGENT_SESSION_STORE_CAP + 3 - idx) as u64),
+                    last_touched_epoch_secs: now
+                        .saturating_sub((SUBAGENT_SESSION_STORE_CAP + 3 - idx) as u64),
                 },
             );
         }

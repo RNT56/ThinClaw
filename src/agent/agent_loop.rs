@@ -59,6 +59,25 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     }
 }
 
+fn telegram_startup_thread_id(
+    hook_name: &str,
+    target_channel: &str,
+    bootstrap_pending: bool,
+) -> Option<&'static str> {
+    if target_channel != "telegram" {
+        return None;
+    }
+
+    match hook_name {
+        // During first-run bootstrap we keep the recurring boot hook in the
+        // onboarding thread so General is only created once setup is complete.
+        "boot" if bootstrap_pending => Some("bootstrap"),
+        "boot" => Some("boot"),
+        "bootstrap" => Some("bootstrap"),
+        _ => None,
+    }
+}
+
 /// Core dependencies for the agent.
 ///
 /// Bundles the shared components to reduce argument count.
@@ -1033,6 +1052,21 @@ impl Agent {
             .and_then(|hb| hb.notify_user.as_deref())
             .unwrap_or("default");
 
+        let bootstrap_doc = match workspace.read(crate::workspace::paths::BOOTSTRAP).await {
+            Ok(doc) => Some(doc),
+            Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => None,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to read BOOTSTRAP.md: {} — skipping first-run hook",
+                    e
+                );
+                None
+            }
+        };
+        let bootstrap_pending = bootstrap_doc
+            .as_ref()
+            .is_some_and(|doc| !crate::agent::heartbeat::is_effectively_empty(&doc.content));
+
         // ── 1. BOOT.md — runs on every startup ────────────────────────
         match workspace.read(crate::workspace::paths::BOOT).await {
             Ok(doc) => {
@@ -1046,7 +1080,7 @@ impl Agent {
                     // LLM always has this context, even if it skips tool calls.
                     let mut context_sections = Vec::new();
 
-                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    let today = workspace.local_today().format("%Y-%m-%d").to_string();
                     let ctx_docs = [
                         ("HEARTBEAT.md", "HEARTBEAT.md"),
                         ("MEMORY.md", "MEMORY.md"),
@@ -1075,8 +1109,14 @@ impl Agent {
                         )
                     };
 
-                    self.run_startup_hook("boot", &enriched_content, target_channel, notify_user)
-                        .await;
+                    self.run_startup_hook(
+                        "boot",
+                        &enriched_content,
+                        target_channel,
+                        notify_user,
+                        telegram_startup_thread_id("boot", target_channel, bootstrap_pending),
+                    )
+                    .await;
                 } else {
                     tracing::debug!("BOOT.md is empty/template-only — skipping");
                 }
@@ -1090,15 +1130,21 @@ impl Agent {
         }
 
         // ── 2. BOOTSTRAP.md — runs only on first run ──────────────────
-        match workspace.read(crate::workspace::paths::BOOTSTRAP).await {
-            Ok(doc) => {
-                if !crate::agent::heartbeat::is_effectively_empty(&doc.content) {
+        match bootstrap_doc {
+            Some(doc) => {
+                if bootstrap_pending {
                     tracing::info!(
                         "Executing BOOTSTRAP.md first-run hook (target channel: {})",
                         target_channel,
                     );
-                    self.run_startup_hook("bootstrap", &doc.content, target_channel, notify_user)
-                        .await;
+                    self.run_startup_hook(
+                        "bootstrap",
+                        &doc.content,
+                        target_channel,
+                        notify_user,
+                        telegram_startup_thread_id("bootstrap", target_channel, bootstrap_pending),
+                    )
+                    .await;
 
                     // Replace BOOTSTRAP.md content with a sentinel so it
                     // only runs once. We write a marker instead of deleting
@@ -1138,15 +1184,9 @@ impl Agent {
                     tracing::debug!("BOOTSTRAP.md is empty/template-only — skipping");
                 }
             }
-            Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
+            None => {
                 tracing::debug!(
                     "No BOOTSTRAP.md found — first-run hook already executed or not configured"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to read BOOTSTRAP.md: {} — skipping first-run hook",
-                    e
                 );
             }
         }
@@ -1160,6 +1200,7 @@ impl Agent {
         content: &str,
         target_channel: &str,
         notify_user: &str,
+        broadcast_thread_id: Option<&str>,
     ) {
         // Build a synthetic IncomingMessage from the hook content.
         // The channel is set to the hook name (e.g. "boot", "bootstrap")
@@ -1170,7 +1211,10 @@ impl Agent {
         match self.handle_message(&message).await {
             Ok(Some(response)) if !response.is_empty() => {
                 // Send the response to the user's preferred notification channel.
-                let out = OutgoingResponse::text(&response);
+                let out = match broadcast_thread_id {
+                    Some(thread_id) => OutgoingResponse::text(&response).in_thread(thread_id),
+                    None => OutgoingResponse::text(&response),
+                };
                 if let Err(e) = self
                     .channels
                     .broadcast(target_channel, notify_user, out.clone())
@@ -1307,6 +1351,8 @@ impl Agent {
         // Hydrate thread from DB if it's a historical thread not in memory
         if let Some(ref external_thread_id) = message.thread_id {
             self.maybe_hydrate_thread(message, external_thread_id).await;
+        } else {
+            self.maybe_hydrate_primary_direct_thread(message).await;
         }
 
         // Resolve session and thread
@@ -1521,6 +1567,11 @@ impl Agent {
         message: &IncomingMessage,
     ) -> Result<Option<String>, Error> {
         let trajectory_logger = TrajectoryLogger::new();
+        if let Some(ref external_thread_id) = message.thread_id {
+            self.maybe_hydrate_thread(message, external_thread_id).await;
+        } else {
+            self.maybe_hydrate_primary_direct_thread(message).await;
+        }
         let identity = message.resolved_identity();
         let (session, thread_id) = self
             .session_manager
@@ -1601,6 +1652,11 @@ impl Agent {
     /// and any case where the caller wants `deliver=false` semantics.
     /// The message is persisted to the DB but no LLM call is made.
     pub async fn inject_context(&self, message: &IncomingMessage) -> Result<(), Error> {
+        if let Some(ref external_thread_id) = message.thread_id {
+            self.maybe_hydrate_thread(message, external_thread_id).await;
+        } else {
+            self.maybe_hydrate_primary_direct_thread(message).await;
+        }
         let identity = message.resolved_identity();
         let (_, thread_id) = self
             .session_manager
@@ -1650,13 +1706,11 @@ async fn upsert_heartbeat_routine(
     hb_config: &HeartbeatConfig,
 ) -> Result<(), Error> {
     use crate::agent::routine::{
-        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
-        normalize_cron_expr,
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, heartbeat_schedule_hint,
+        next_fire_for_routine,
     };
 
-    let interval_mins = (hb_config.interval_secs / 60).max(1);
-    let cron_5field = format!("*/{} * * * *", interval_mins);
-    let schedule = normalize_cron_expr(&cron_5field);
+    let schedule = heartbeat_schedule_hint(hb_config.interval_secs);
 
     let action = RoutineAction::Heartbeat {
         light_context: hb_config.light_context,
@@ -1666,6 +1720,22 @@ async fn upsert_heartbeat_routine(
         active_end_hour: hb_config.active_end_hour,
         target: hb_config.target.clone(),
         max_iterations: hb_config.max_iterations,
+        interval_secs: Some(hb_config.interval_secs.max(1)),
+    };
+    let notify = NotifyConfig {
+        channel: hb_config.notify_channel.clone(),
+        user: hb_config
+            .notify_user
+            .clone()
+            .unwrap_or_else(|| "default".to_string()),
+        on_attention: true,
+        on_failure: true,
+        on_success: false,
+    };
+    let guardrails = RoutineGuardrails {
+        cooldown: std::time::Duration::from_secs((hb_config.interval_secs / 2).max(1)),
+        max_concurrent: 1,
+        dedup_window: None,
     };
 
     let existing = store.get_routine_by_name("default", "__heartbeat__").await;
@@ -1677,35 +1747,38 @@ async fn upsert_heartbeat_routine(
                 Trigger::Cron { schedule: s } => *s != schedule,
                 _ => true,
             };
-            let notify_changed = routine.notify.channel != hb_config.notify_channel
-                || routine.notify.user
-                    != hb_config
-                        .notify_user
-                        .clone()
-                        .unwrap_or_else(|| "default".to_string());
+            let notify_changed = routine.notify.channel != notify.channel
+                || routine.notify.user != notify.user
+                || routine.notify.on_attention != notify.on_attention
+                || routine.notify.on_failure != notify.on_failure
+                || routine.notify.on_success != notify.on_success;
+            let action_changed = routine.action.type_tag() != action.type_tag()
+                || routine.action.to_config_json() != action.to_config_json();
+            let guardrails_changed = routine.guardrails.cooldown != guardrails.cooldown
+                || routine.guardrails.max_concurrent != guardrails.max_concurrent
+                || routine.guardrails.dedup_window != guardrails.dedup_window;
+            let needs_next_fire = routine.next_fire_at.is_none();
 
-            if trigger_changed || notify_changed || !routine.enabled {
+            if trigger_changed
+                || notify_changed
+                || action_changed
+                || guardrails_changed
+                || !routine.enabled
+                || needs_next_fire
+            {
                 routine.trigger = Trigger::Cron {
                     schedule: schedule.clone(),
                 };
-                routine.next_fire_at = next_cron_fire(&schedule).unwrap_or(None);
                 routine.enabled = true;
                 routine.action = action;
-                routine.notify = NotifyConfig {
-                    channel: hb_config.notify_channel.clone(),
-                    user: hb_config
-                        .notify_user
-                        .clone()
-                        .unwrap_or_else(|| "default".to_string()),
-                    on_attention: true,
-                    on_failure: true,
-                    on_success: false,
-                };
-                routine.guardrails = RoutineGuardrails {
-                    cooldown: std::time::Duration::from_secs(hb_config.interval_secs / 2),
-                    max_concurrent: 1,
-                    dedup_window: None,
-                };
+                routine.notify = notify;
+                routine.guardrails = guardrails;
+                routine.next_fire_at = next_fire_for_routine(
+                    &routine,
+                    hb_config.user_timezone.as_deref(),
+                    chrono::Utc::now(),
+                )
+                .unwrap_or(None);
                 routine.updated_at = chrono::Utc::now();
                 store.update_routine(&routine).await.map_err(|e| {
                     Error::Database(crate::error::DatabaseError::Query(e.to_string()))
@@ -1722,8 +1795,7 @@ async fn upsert_heartbeat_routine(
         }
         Ok(None) => {
             // Create new heartbeat routine
-            let next_fire = next_cron_fire(&schedule).unwrap_or(None);
-            let routine = Routine {
+            let mut routine = Routine {
                 id: uuid::Uuid::new_v4(),
                 name: "__heartbeat__".to_string(),
                 description: "Periodic background awareness check — reads HEARTBEAT.md and acts on checklist items".to_string(),
@@ -1732,27 +1804,22 @@ async fn upsert_heartbeat_routine(
                 enabled: true,
                 trigger: Trigger::Cron { schedule: schedule.clone() },
                 action,
-                guardrails: RoutineGuardrails {
-                    cooldown: std::time::Duration::from_secs(hb_config.interval_secs / 2),
-                    max_concurrent: 1,
-                    dedup_window: None,
-                },
-                notify: NotifyConfig {
-                    channel: hb_config.notify_channel.clone(),
-                    user: hb_config.notify_user.clone()
-                        .unwrap_or_else(|| "default".to_string()),
-                    on_attention: true,
-                    on_failure: true,
-                    on_success: false, // HEARTBEAT_OK = silent
-                },
+                guardrails,
+                notify,
                 last_run_at: None,
-                next_fire_at: next_fire,
+                next_fire_at: None,
                 run_count: 0,
                 consecutive_failures: 0,
                 state: serde_json::json!({}),
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             };
+            routine.next_fire_at = next_fire_for_routine(
+                &routine,
+                hb_config.user_timezone.as_deref(),
+                chrono::Utc::now(),
+            )
+            .unwrap_or(None);
 
             store
                 .create_routine(&routine)
@@ -1763,7 +1830,7 @@ async fn upsert_heartbeat_routine(
                 "Created heartbeat routine: id={}, schedule='{}', next_fire={:?}",
                 routine.id,
                 schedule,
-                next_fire
+                routine.next_fire_at
             );
         }
         Err(e) => {
@@ -1776,7 +1843,7 @@ async fn upsert_heartbeat_routine(
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_for_preview;
+    use super::{telegram_startup_thread_id, truncate_for_preview};
 
     #[test]
     fn test_truncate_short_input() {
@@ -1838,5 +1905,22 @@ mod tests {
         let result = truncate_for_preview(input, 8);
         // 'h','e','l','l','o',' ','世','界' = 8 chars
         assert_eq!(result, "hello 世界...");
+    }
+
+    #[test]
+    fn test_telegram_startup_thread_id_routes_first_run_boots_to_onboarding() {
+        assert_eq!(
+            telegram_startup_thread_id("boot", "telegram", true),
+            Some("bootstrap")
+        );
+        assert_eq!(
+            telegram_startup_thread_id("bootstrap", "telegram", true),
+            Some("bootstrap")
+        );
+        assert_eq!(
+            telegram_startup_thread_id("boot", "telegram", false),
+            Some("boot")
+        );
+        assert_eq!(telegram_startup_thread_id("bootstrap", "web", true), None);
     }
 }

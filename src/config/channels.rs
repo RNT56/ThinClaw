@@ -23,6 +23,8 @@ pub struct ChannelsConfig {
     pub imessage: Option<IMessageChannelConfig>,
     #[cfg(target_os = "macos")]
     pub apple_mail: Option<AppleMailChannelConfig>,
+    /// BlueBubbles iMessage bridge (cross-platform — any OS).
+    pub bluebubbles: Option<BlueBubblesChannelConfig>,
     /// Directory containing WASM channel modules (default: ~/.thinclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -31,6 +33,8 @@ pub struct ChannelsConfig {
     pub telegram_owner_id: Option<i64>,
     /// Telegram stream mode fallback for Wasm Channel.
     pub telegram_stream_mode: Option<String>,
+    /// Telegram transport mode fallback for Wasm Channel.
+    pub telegram_transport_mode: String,
     /// Telegram subagent session mode fallback for Wasm Channel.
     pub telegram_subagent_session_mode: String,
     /// Discord stream mode fallback for Wasm Channel.
@@ -252,6 +256,10 @@ impl ChannelsConfig {
                 .or(settings.channels.telegram_owner_id),
             telegram_stream_mode: optional_env("TELEGRAM_STREAM_MODE")?
                 .or(settings.channels.telegram_stream_mode.clone()),
+            telegram_transport_mode: normalize_telegram_transport_mode(
+                optional_env("TELEGRAM_TRANSPORT_MODE")?
+                    .unwrap_or_else(|| settings.channels.telegram_transport_mode.clone()),
+            ),
             telegram_subagent_session_mode: normalize_telegram_subagent_session_mode(
                 optional_env("TELEGRAM_SUBAGENT_SESSION_MODE")?
                     .unwrap_or_else(|| settings.channels.telegram_subagent_session_mode.clone()),
@@ -266,6 +274,7 @@ impl ChannelsConfig {
             imessage: Self::resolve_imessage()?,
             #[cfg(target_os = "macos")]
             apple_mail: Self::resolve_apple_mail(settings)?,
+            bluebubbles: Self::resolve_bluebubbles(settings)?,
         })
     }
 
@@ -409,6 +418,20 @@ fn normalize_telegram_subagent_session_mode(value: impl AsRef<str>) -> String {
     }
 }
 
+fn normalize_telegram_transport_mode(value: impl AsRef<str>) -> String {
+    match value.as_ref().trim().to_ascii_lowercase().as_str() {
+        "" | "auto" | "automatic" | "webhook" => "auto".to_string(),
+        "polling" | "poll" | "off" | "disabled" => "polling".to_string(),
+        other => {
+            tracing::warn!(
+                value = %other,
+                "Unknown Telegram transport mode; falling back to auto"
+            );
+            "auto".to_string()
+        }
+    }
+}
+
 /// iMessage channel configuration (macOS only).
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
@@ -450,6 +473,28 @@ pub struct GmailChannelConfig {
     pub label_filters: Vec<String>,
     /// Maximum message body size in bytes.
     pub max_message_size_bytes: usize,
+}
+
+/// BlueBubbles iMessage bridge configuration (cross-platform).
+///
+/// Connects to a BlueBubbles server running on a Mac to send/receive
+/// iMessages over REST API + webhooks. Works on any platform.
+#[derive(Debug, Clone)]
+pub struct BlueBubblesChannelConfig {
+    /// BlueBubbles server URL (e.g. "http://192.168.1.50:1234").
+    pub server_url: String,
+    /// Server password for API authentication.
+    pub password: SecretString,
+    /// Webhook listen host (default: "127.0.0.1").
+    pub webhook_host: String,
+    /// Webhook listen port (default: 8645).
+    pub webhook_port: u16,
+    /// Webhook URL path (default: "/bluebubbles-webhook").
+    pub webhook_path: String,
+    /// Allowed phone numbers / email addresses (empty = allow all).
+    pub allow_from: Vec<String>,
+    /// Whether to send read receipts (requires Private API on the server).
+    pub send_read_receipts: bool,
 }
 
 impl ChannelsConfig {
@@ -637,6 +682,78 @@ impl ChannelsConfig {
         }))
     }
 
+    fn resolve_bluebubbles(
+        settings: &Settings,
+    ) -> Result<Option<BlueBubblesChannelConfig>, ConfigError> {
+        let enabled = if settings.channels.bluebubbles_enabled {
+            true
+        } else {
+            parse_bool_env("BLUEBUBBLES_ENABLED", false)?
+        };
+        if !enabled {
+            return Ok(None);
+        }
+
+        let server_url = optional_env("BLUEBUBBLES_SERVER_URL")?
+            .or(settings.channels.bluebubbles_server_url.clone())
+            .ok_or(ConfigError::InvalidValue {
+                key: "BLUEBUBBLES_SERVER_URL".to_string(),
+                message: "BLUEBUBBLES_SERVER_URL is required when BLUEBUBBLES_ENABLED=true"
+                    .to_string(),
+            })?;
+
+        let password = optional_env("BLUEBUBBLES_PASSWORD")?
+            .or(settings.channels.bluebubbles_password.clone())
+            .ok_or(ConfigError::InvalidValue {
+                key: "BLUEBUBBLES_PASSWORD".to_string(),
+                message: "BLUEBUBBLES_PASSWORD is required when BLUEBUBBLES_ENABLED=true"
+                    .to_string(),
+            })?;
+
+        let webhook_host = optional_env("BLUEBUBBLES_WEBHOOK_HOST")?
+            .or(settings.channels.bluebubbles_webhook_host.clone())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+
+        let webhook_port: u16 = optional_env("BLUEBUBBLES_WEBHOOK_PORT")?
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e: std::num::ParseIntError| ConfigError::InvalidValue {
+                key: "BLUEBUBBLES_WEBHOOK_PORT".to_string(),
+                message: format!("must be an integer: {e}"),
+            })?
+            .or(settings.channels.bluebubbles_webhook_port)
+            .unwrap_or(8645);
+
+        let webhook_path = optional_env("BLUEBUBBLES_WEBHOOK_PATH")?
+            .or(settings.channels.bluebubbles_webhook_path.clone())
+            .unwrap_or_else(|| "/bluebubbles-webhook".to_string());
+
+        let allow_from = optional_env("BLUEBUBBLES_ALLOW_FROM")?
+            .or(settings.channels.bluebubbles_allow_from.clone())
+            .map(|s| {
+                s.split(',')
+                    .map(|e| e.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let send_read_receipts = optional_env("BLUEBUBBLES_SEND_READ_RECEIPTS")?
+            .map(|s| s.to_lowercase() == "true" || s == "1")
+            .or(settings.channels.bluebubbles_send_read_receipts)
+            .unwrap_or(true);
+
+        Ok(Some(BlueBubblesChannelConfig {
+            server_url,
+            password: SecretString::from(password),
+            webhook_host,
+            webhook_port,
+            webhook_path,
+            allow_from,
+            send_read_receipts,
+        }))
+    }
+
     fn resolve_gmail() -> Result<Option<GmailChannelConfig>, ConfigError> {
         let enabled = parse_bool_env("GMAIL_ENABLED", false)?;
         if !enabled {
@@ -757,5 +874,15 @@ mod tests {
             normalize_telegram_subagent_session_mode("mystery"),
             "temp_topic"
         );
+    }
+
+    #[test]
+    fn normalize_telegram_transport_mode_accepts_aliases() {
+        assert_eq!(normalize_telegram_transport_mode("auto"), "auto");
+        assert_eq!(normalize_telegram_transport_mode("automatic"), "auto");
+        assert_eq!(normalize_telegram_transport_mode("webhook"), "auto");
+        assert_eq!(normalize_telegram_transport_mode("poll"), "polling");
+        assert_eq!(normalize_telegram_transport_mode("disabled"), "polling");
+        assert_eq!(normalize_telegram_transport_mode("mystery"), "auto");
     }
 }

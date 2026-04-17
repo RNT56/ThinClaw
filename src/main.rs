@@ -28,13 +28,13 @@ use thinclaw::{
         run_tool_command, run_trajectory_command,
     },
     config::Config,
-    hooks::bootstrap_hooks,
     pairing::PairingStore,
 };
 
 use thinclaw::channels::GmailChannel;
 #[cfg(target_os = "macos")]
 use thinclaw::channels::IMessageChannel;
+use thinclaw::channels::{BlueBubblesChannel, BlueBubblesConfig};
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use thinclaw::setup::{SetupConfig, SetupWizard};
@@ -384,6 +384,9 @@ async fn main() -> anyhow::Result<()> {
     // ── Orchestrator / container job manager ────────────────────────────
 
     // Proactive Docker detection
+    let phase_start = std::time::Instant::now();
+    // Docker status is used in feature-gated blocks (docker-sandbox, repl boot screen).
+    #[allow(unused_variables)]
     let docker_status = if config.sandbox.enabled {
         let detection = thinclaw::sandbox::check_docker().await;
         match detection.status {
@@ -392,13 +395,13 @@ async fn main() -> anyhow::Result<()> {
             }
             thinclaw::sandbox::DockerStatus::NotInstalled => {
                 tracing::warn!(
-                    "Docker is not installed -- sandbox disabled for this session. {}",
+                    "Docker is not installed -- sandbox features pending. {}",
                     detection.platform.install_hint()
                 );
             }
             thinclaw::sandbox::DockerStatus::NotRunning => {
                 tracing::warn!(
-                    "Docker is installed but not running -- sandbox disabled for this session. {}",
+                    "Docker is installed but not running -- sandbox features will activate when Docker starts. {}",
                     detection.platform.start_hint()
                 );
             }
@@ -408,10 +411,11 @@ async fn main() -> anyhow::Result<()> {
     } else {
         thinclaw::sandbox::DockerStatus::Disabled
     };
+    tracing::info!(elapsed_ms = phase_start.elapsed().as_millis(), "Startup phase: docker detection");
 
     let job_event_tx: Option<
         tokio::sync::broadcast::Sender<(uuid::Uuid, thinclaw::channels::web::types::SseEvent)>,
-    > = if config.sandbox.enabled && docker_status.is_ok() {
+    > = if config.sandbox.enabled {
         let (tx, _) = tokio::sync::broadcast::channel(256);
         Some(tx)
     } else {
@@ -425,7 +429,7 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "docker-sandbox")]
     let container_job_manager: Option<Arc<ContainerJobManager>> =
-        if config.sandbox.enabled && docker_status.is_ok() {
+        if config.sandbox.enabled {
             let token_store = TokenStore::new();
 
             // Resolve Claude Code API key: env var > OS secure store > (OAuth fallback in config)
@@ -498,17 +502,32 @@ async fn main() -> anyhow::Result<()> {
             });
 
             if config.claude_code.enabled {
-                tracing::info!(
-                    "Claude Code sandbox mode available (model: {}, max_turns: {})",
-                    config.claude_code.model,
-                    config.claude_code.max_turns
-                );
+                if docker_status.is_ok() {
+                    tracing::info!(
+                        "Claude Code sandbox mode available (model: {}, max_turns: {})",
+                        config.claude_code.model,
+                        config.claude_code.max_turns
+                    );
+                } else {
+                    tracing::info!(
+                        "Claude Code sandbox mode configured (model: {}, max_turns: {}) — will activate when Docker starts",
+                        config.claude_code.model,
+                        config.claude_code.max_turns
+                    );
+                }
             }
             if config.codex_code.enabled {
-                tracing::info!(
-                    "Codex sandbox mode available (model: {})",
-                    config.codex_code.model
-                );
+                if docker_status.is_ok() {
+                    tracing::info!(
+                        "Codex sandbox mode available (model: {})",
+                        config.codex_code.model
+                    );
+                } else {
+                    tracing::info!(
+                        "Codex sandbox mode configured (model: {}) — will activate when Docker starts",
+                        config.codex_code.model
+                    );
+                }
             }
             Some(jm)
         } else {
@@ -714,6 +733,29 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Add BlueBubbles iMessage bridge if configured and not CLI-only mode.
+    // Cross-platform — works on any OS with a BlueBubbles server on a Mac.
+    if !cli.cli_only
+        && let Some(ref bb_config) = config.channels.bluebubbles
+    {
+        let channel_config = BlueBubblesConfig::from(bb_config);
+        match BlueBubblesChannel::init(channel_config).await {
+            Ok(bb_channel) => {
+                channel_names.push("bluebubbles".to_string());
+                channels.add(Box::new(bb_channel)).await;
+                tracing::info!("BlueBubbles iMessage channel enabled (webhook mode)");
+                if bb_config.allow_from.is_empty() {
+                    tracing::warn!(
+                        "BlueBubbles channel has empty allow_from list — ALL messages will be accepted."
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize BlueBubbles channel");
+            }
+        }
+    }
+
     // Add Gmail channel if configured and not CLI-only mode.
     if !cli.cli_only
         && let Some(ref gmail_config) = config.channels.gmail
@@ -851,6 +893,7 @@ async fn main() -> anyhow::Result<()> {
                             content: text,
                             thread_id,
                             metadata: serde_json::Value::Null,
+                            attachments: Vec::new(),
                         },
                     )
                     .await
@@ -861,26 +904,10 @@ async fn main() -> anyhow::Result<()> {
         },
     )));
 
-    let active_tool_names = components.tools.list().await;
+    // NOTE: bootstrap_hooks() is already called inside AppBuilder::build_all()
+    // (app.rs). Do NOT call it again here — that would double-register bundled
+    // hooks and emit a spurious "Replacing existing hook" WARN.
 
-    let hook_bootstrap = bootstrap_hooks(
-        &components.hooks,
-        components.workspace.as_ref(),
-        &config.wasm.tools_dir,
-        &config.channels.wasm_channels_dir,
-        &active_tool_names,
-        &loaded_wasm_channel_names,
-        &components.dev_loaded_tool_names,
-    )
-    .await;
-    tracing::info!(
-        bundled = hook_bootstrap.bundled_hooks,
-        plugin = hook_bootstrap.plugin_hooks,
-        workspace = hook_bootstrap.workspace_hooks,
-        outbound_webhooks = hook_bootstrap.outbound_webhooks,
-        errors = hook_bootstrap.errors,
-        "Lifecycle hooks initialized"
-    );
 
     // Create session manager (shared between agent and web gateway)
     let session_manager =
@@ -1099,7 +1126,7 @@ async fn main() -> anyhow::Result<()> {
                     rt,
                     ps,
                     router,
-                    config.channels.telegram_owner_id,
+                    thinclaw::channels::wasm::WasmChannelHostConfig::from_config(&config),
                 )
                 .await;
             tracing::info!("Channel runtime wired into extension manager for hot-activation");
@@ -1279,7 +1306,10 @@ async fn main() -> anyhow::Result<()> {
         use thinclaw::channels::wasm::channel_watcher::ChannelWatcher;
 
         let mut watcher = ChannelWatcher::new(channels_dir, loader, Arc::clone(&channels))
-            .with_webhook_router(wasm_router);
+            .with_webhook_router(wasm_router)
+            .with_host_config(
+                thinclaw::channels::wasm::WasmChannelHostConfig::from_config(&config),
+            );
         if let Some(ref secrets_store) = components.secrets_store {
             watcher = watcher.with_secrets_store(Arc::clone(secrets_store), "default");
         }

@@ -76,6 +76,83 @@ pub fn llm_signals_completion(response: &str) -> bool {
     positive_phrases.iter().any(|p| lower.contains(p))
 }
 
+// ── Binary resolution ──────────────────────────────────────────────
+
+/// Known macOS fallback paths for CLI tools.
+///
+/// On macOS, Homebrew installs binaries to `/opt/homebrew/bin/` (Apple Silicon)
+/// or `/usr/local/bin/` (Intel) which may not be in `$PATH` for all launch
+/// contexts (e.g., processes spawned by launchd, cron, or some IDEs).
+///
+/// **Note:** The Tailscale binary at
+/// `/Applications/Tailscale.app/Contents/MacOS/Tailscale` is the **GUI app**,
+/// NOT the CLI tool. Running it from a terminal causes a fatal
+/// `BundleIdentifier` crash. The Tailscale CLI must be installed through
+/// the Tailscale menubar app (click the icon → "Install CLI") or via
+/// `brew install tailscale`. Only the Homebrew/CLI paths are listed here.
+#[cfg(target_os = "macos")]
+const MACOS_BINARY_FALLBACKS: &[(&str, &str)] = &[
+    ("cloudflared", "/opt/homebrew/bin/cloudflared"),
+    ("ngrok", "/opt/homebrew/bin/ngrok"),
+    // Tailscale CLI installed via Homebrew (Apple Silicon)
+    ("tailscale", "/opt/homebrew/bin/tailscale"),
+    // Tailscale CLI installed via Homebrew (Intel Mac)
+    ("tailscale", "/usr/local/bin/tailscale"),
+    // Docker CLI installed via Homebrew (Apple Silicon)
+    ("docker", "/opt/homebrew/bin/docker"),
+];
+
+/// Resolve the path to a CLI binary.
+///
+/// 1. Checks `$PATH` via `which` (Unix) / `where` (Windows).
+/// 2. On macOS, falls back to known Homebrew install locations.
+///
+/// Returns the binary name unchanged if it's in `$PATH`, or the
+/// absolute path to the fallback binary if found there.
+pub fn resolve_binary(name: &str) -> String {
+    // Check PATH first
+    #[cfg(unix)]
+    {
+        let found_in_path = std::process::Command::new("which")
+            .arg(name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if found_in_path {
+            return name.to_string();
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let found_in_path = std::process::Command::new("where")
+            .arg(name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if found_in_path {
+            return name.to_string();
+        }
+    }
+
+    // macOS fallback: check known Homebrew paths
+    #[cfg(target_os = "macos")]
+    for &(bin_name, fallback_path) in MACOS_BINARY_FALLBACKS {
+        if bin_name == name && std::path::Path::new(fallback_path).exists() {
+            return fallback_path.to_string();
+        }
+    }
+
+    // Not found anywhere — return the name and let the caller handle the error
+    name.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use crate::util::{floor_char_boundary, llm_signals_completion};

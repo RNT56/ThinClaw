@@ -98,15 +98,25 @@ pub struct DockerDetection {
     pub platform: Platform,
 }
 
+/// Maximum time (seconds) to spend on the entire Docker detection sequence.
+///
+/// Docker socket probes + CLI fallbacks can individually time out if the
+/// daemon is installed but not running.  Without this ceiling the startup
+/// path would block for 120+ seconds (the bollard default request timeout).
+const DOCKER_DETECT_TIMEOUT_SECS: u64 = 10;
+
 /// Check whether Docker is installed and running.
 ///
 /// 1. Checks if `docker` binary exists on PATH
 /// 2. If found, tries to connect and ping the Docker daemon via `connect_docker()`
 /// 3. Returns `Available`, `NotInstalled`, or `NotRunning`
+///
+/// The entire probe is wrapped in a [`DOCKER_DETECT_TIMEOUT_SECS`] ceiling
+/// so it never stalls the startup spinner for more than a few seconds.
 pub async fn check_docker() -> DockerDetection {
     let platform = Platform::current();
 
-    // Step 1: Check if docker binary is on PATH
+    // Step 1: Check if docker binary is on PATH (fast — just stat/shell out)
     if !docker_binary_exists() {
         return DockerDetection {
             status: DockerStatus::NotInstalled,
@@ -114,28 +124,41 @@ pub async fn check_docker() -> DockerDetection {
         };
     }
 
-    // Step 2: Try to connect to the daemon
-    if crate::sandbox::connect_docker().await.is_ok() {
-        return DockerDetection {
-            status: DockerStatus::Available,
-            platform,
-        };
-    }
+    // Step 2: Socket probes + CLI fallback, with an overall timeout ceiling.
+    let probed = tokio::time::timeout(
+        std::time::Duration::from_secs(DOCKER_DETECT_TIMEOUT_SECS),
+        async {
+            // Try socket-level connection first (fast when Docker is running)
+            if crate::sandbox::connect_docker().await.is_ok() {
+                return DockerStatus::Available;
+            }
 
-    // Windows fallback: if the named pipe probe fails but docker CLI can still
-    // reach the daemon/server, treat Docker as available.
-    #[cfg(windows)]
-    if docker_cli_daemon_reachable() {
-        return DockerDetection {
-            status: DockerStatus::Available,
-            platform,
-        };
-    }
+            // Windows / macOS fallback: if the socket probe fails but docker CLI can
+            // still reach the daemon, treat Docker as available. On macOS this covers
+            // Docker Desktop versions that move the socket, OrbStack, Colima with a
+            // non-default socket path, etc.
+            #[cfg(any(windows, target_os = "macos"))]
+            if docker_cli_daemon_reachable() {
+                return DockerStatus::Available;
+            }
 
-    DockerDetection {
-        status: DockerStatus::NotRunning,
-        platform,
-    }
+            DockerStatus::NotRunning
+        },
+    )
+    .await;
+
+    let status = match probed {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::debug!(
+                "Docker detection timed out after {}s — treating as not running",
+                DOCKER_DETECT_TIMEOUT_SECS
+            );
+            DockerStatus::NotRunning
+        }
+    };
+
+    DockerDetection { status, platform }
 }
 
 /// Check if the `docker` binary exists on PATH.
@@ -160,13 +183,14 @@ fn docker_binary_exists() -> bool {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn docker_cli_daemon_reachable() -> bool {
+    let docker = crate::util::resolve_binary("docker");
     let stdout = std::process::Stdio::null();
     let stderr = std::process::Stdio::null();
 
     // `docker version` requires daemon reachability for server fields.
-    let version_ok = std::process::Command::new("docker")
+    let version_ok = std::process::Command::new(&docker)
         .args(["version", "--format", "{{.Server.Version}}"])
         .stdout(stdout)
         .stderr(stderr)
@@ -178,7 +202,7 @@ fn docker_cli_daemon_reachable() -> bool {
     }
 
     // Fallback for environments where `docker version --format` behaves differently.
-    std::process::Command::new("docker")
+    std::process::Command::new(&docker)
         .args(["info", "--format", "{{.ServerVersion}}"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

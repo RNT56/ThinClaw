@@ -188,3 +188,63 @@ pub struct UpdateInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<MessageInfo>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::TelegramAction;
+
+    #[test]
+    fn get_chats_defaults_limit() {
+        let action: TelegramAction = serde_json::from_value(serde_json::json!({
+            "action": "get_chats"
+        }))
+        .unwrap();
+
+        match action {
+            TelegramAction::GetChats { limit } => assert_eq!(limit, 20),
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_messages_defaults_limit_and_cursor() {
+        let action: TelegramAction = serde_json::from_value(serde_json::json!({
+            "action": "get_messages",
+            "chat_id": 42
+        }))
+        .unwrap();
+
+        match action {
+            TelegramAction::GetMessages {
+                chat_id,
+                limit,
+                from_message_id,
+            } => {
+                assert_eq!(chat_id, 42);
+                assert_eq!(limit, 20);
+                assert_eq!(from_message_id, None);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_message_defaults_revoke_to_false() {
+        let action: TelegramAction = serde_json::from_value(serde_json::json!({
+            "action": "delete_message",
+            "message_ids": [1, 2, 3]
+        }))
+        .unwrap();
+
+        match action {
+            TelegramAction::DeleteMessage {
+                message_ids,
+                revoke,
+            } => {
+                assert_eq!(message_ids, vec![1, 2, 3]);
+                assert!(!revoke);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+}

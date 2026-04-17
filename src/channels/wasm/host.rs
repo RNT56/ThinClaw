@@ -369,33 +369,111 @@ impl ChannelHostState {
     }
 }
 
-/// In-memory workspace store for WASM channels.
+/// Workspace store for WASM channels with optional disk persistence.
 ///
-/// Persists workspace writes across callback invocations within a single
-/// channel lifetime. This allows WASM channels to maintain state (e.g.,
-/// Telegram polling offsets) between poll ticks without requiring a
-/// full database-backed workspace.
+/// Persists workspace writes across callback invocations. When a
+/// `persist_path` is configured, the store also survives process restarts
+/// by loading state from disk on construction and flushing after every
+/// batch of writes that actually changes the serialized content.
+///
+/// To minimize unnecessary I/O (e.g. ephemeral timestamp keys that change
+/// every poll tick), the store tracks the last-flushed serialized snapshot
+/// and only writes to disk when the content has actually changed.
 ///
 /// Uses `std::sync::RwLock` (not tokio) because WASM execution runs
 /// inside `spawn_blocking`.
 pub struct ChannelWorkspaceStore {
     data: std::sync::RwLock<std::collections::HashMap<String, String>>,
+    /// Optional path for disk persistence. When set, the store is loaded
+    /// from and saved to this JSON file.
+    persist_path: Option<std::path::PathBuf>,
+    /// Serialized snapshot of the last content flushed to disk.
+    /// Compared against new serialization to skip redundant writes.
+    last_flushed: std::sync::Mutex<Vec<u8>>,
 }
 
 impl ChannelWorkspaceStore {
-    /// Create a new empty workspace store.
+    /// Create a new empty workspace store (in-memory only, no disk persistence).
+    #[allow(dead_code)] // Used by tests in wrapper.rs and host.rs
     pub fn new() -> Self {
         Self {
             data: std::sync::RwLock::new(std::collections::HashMap::new()),
+            persist_path: None,
+            last_flushed: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Create a workspace store backed by a JSON file on disk.
+    ///
+    /// Loads existing state from `path` if the file exists. Subsequent
+    /// calls to [`commit_writes`] will flush the full store back to disk
+    /// only when the serialized content has actually changed.
+    pub fn with_persistence(path: std::path::PathBuf) -> Self {
+        let (data, initial_snapshot) = if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    match serde_json::from_str::<std::collections::HashMap<String, String>>(
+                        &content,
+                    ) {
+                        Ok(map) => {
+                            // Pre-compute initial snapshot for change detection
+                            let snapshot = Self::serialize_deterministic(&map)
+                                .unwrap_or_default();
+                            (map, snapshot)
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %err,
+                                "Failed to parse persisted channel workspace, starting fresh"
+                            );
+                            (std::collections::HashMap::new(), Vec::new())
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %err,
+                        "Failed to read persisted channel workspace, starting fresh"
+                    );
+                    (std::collections::HashMap::new(), Vec::new())
+                }
+            }
+        } else {
+            (std::collections::HashMap::new(), Vec::new())
+        };
+
+        tracing::debug!(
+            path = %path.display(),
+            entries = data.len(),
+            "Loaded channel workspace store from disk"
+        );
+
+        Self {
+            data: std::sync::RwLock::new(data),
+            persist_path: Some(path),
+            last_flushed: std::sync::Mutex::new(initial_snapshot),
         }
     }
 
     /// Commit pending writes from a callback execution into the store.
+    ///
+    /// If a persist path is configured, the store is flushed to disk only
+    /// when the serialized content has actually changed since the last flush.
+    /// The disk flush happens outside the data write lock to avoid blocking
+    /// concurrent readers.
     pub fn commit_writes(&self, writes: &[PendingWorkspaceWrite]) {
         if writes.is_empty() {
             return;
         }
-        if let Ok(mut data) = self.data.write() {
+
+        // Apply writes under the lock, then snapshot for out-of-lock flush.
+        let snapshot = {
+            let mut data = match self.data.write() {
+                Ok(guard) => guard,
+                Err(_poisoned) => return,
+            };
             for write in writes {
                 tracing::debug!(
                     path = %write.path,
@@ -404,6 +482,90 @@ impl ChannelWorkspaceStore {
                 );
                 data.insert(write.path.clone(), write.content.clone());
             }
+
+            // Only clone for flush if persistence is configured
+            if self.persist_path.is_some() {
+                Some(data.clone())
+            } else {
+                None
+            }
+            // data write lock is released here
+        };
+
+        // Flush to disk outside the data lock
+        if let (Some(snapshot), Some(persist_path)) = (snapshot, &self.persist_path) {
+            self.flush_if_changed(persist_path, &snapshot);
+        }
+    }
+
+    /// Serialize a HashMap deterministically using BTreeMap ordering.
+    ///
+    /// JSON serialization of HashMap is non-deterministic (iteration order
+    /// varies). Using BTreeMap ensures identical content always produces
+    /// identical bytes, enabling reliable snapshot comparison.
+    fn serialize_deterministic(
+        data: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<u8>, serde_json::Error> {
+        let sorted: std::collections::BTreeMap<_, _> = data.iter().collect();
+        serde_json::to_vec_pretty(&sorted)
+    }
+
+    /// Flush to disk only if the serialized content has changed since the
+    /// last successful flush.
+    fn flush_if_changed(
+        &self,
+        path: &std::path::Path,
+        data: &std::collections::HashMap<String, String>,
+    ) {
+        let serialized = match Self::serialize_deterministic(data) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "Failed to serialize channel workspace store"
+                );
+                return;
+            }
+        };
+
+        // Compare with last-flushed snapshot to skip redundant writes
+        if let Ok(last) = self.last_flushed.lock() {
+            if *last == serialized {
+                return; // Content unchanged, skip disk I/O
+            }
+        }
+
+        // Content changed — write to disk atomically
+        Self::write_to_disk(path, &serialized);
+
+        // Update last-flushed snapshot
+        if let Ok(mut last) = self.last_flushed.lock() {
+            *last = serialized;
+        }
+    }
+
+    /// Write serialized bytes to disk atomically (write-tmp + rename).
+    fn write_to_disk(path: &std::path::Path, serialized: &[u8]) {
+        if let Some(parent) = path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    path = %parent.display(),
+                    error = %err,
+                    "Failed to create directory for channel workspace persistence"
+                );
+                return;
+            }
+        }
+
+        let tmp_path = path.with_extension("tmp");
+        if let Err(err) = std::fs::write(&tmp_path, serialized)
+            .and_then(|()| std::fs::rename(&tmp_path, path))
+        {
+            tracing::warn!(
+                path = %path.display(),
+                error = %err,
+                "Failed to persist channel workspace store to disk"
+            );
         }
     }
 }
@@ -661,6 +823,102 @@ mod tests {
         assert_eq!(
             store.read("channels/telegram/offset"),
             Some("200".to_string())
+        );
+    }
+
+    #[test]
+    fn test_channel_workspace_store_disk_persistence_round_trip() {
+        use crate::channels::wasm::host::{ChannelWorkspaceStore, PendingWorkspaceWrite};
+        use crate::tools::wasm::WorkspaceReader;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("test_workspace.json");
+
+        // Write data with a disk-backed store
+        {
+            let store = ChannelWorkspaceStore::with_persistence(path.clone());
+            assert!(store.read("channels/telegram/state/managed_private_topics").is_none());
+
+            let writes = vec![PendingWorkspaceWrite {
+                path: "channels/telegram/state/managed_private_topics".to_string(),
+                content: r#"{"chats":{"123":{"general_thread_id":42}}}"#.to_string(),
+            }];
+            store.commit_writes(&writes);
+
+            assert_eq!(
+                store.read("channels/telegram/state/managed_private_topics"),
+                Some(r#"{"chats":{"123":{"general_thread_id":42}}}"#.to_string())
+            );
+        }
+
+        // Verify the file exists on disk
+        assert!(path.exists(), "workspace file should be persisted to disk");
+
+        // Load a fresh store from the same path — simulates a restart
+        {
+            let store2 = ChannelWorkspaceStore::with_persistence(path.clone());
+            assert_eq!(
+                store2.read("channels/telegram/state/managed_private_topics"),
+                Some(r#"{"chats":{"123":{"general_thread_id":42}}}"#.to_string()),
+                "managed topic registry should survive restart"
+            );
+        }
+    }
+
+    #[test]
+    fn test_channel_workspace_store_skips_redundant_flush() {
+        use crate::channels::wasm::host::{ChannelWorkspaceStore, PendingWorkspaceWrite};
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let path = dir.path().join("skip_redundant.json");
+
+        let store = ChannelWorkspaceStore::with_persistence(path.clone());
+
+        // First write — should create the file
+        let writes = vec![PendingWorkspaceWrite {
+            path: "channels/telegram/state/managed_private_topics".to_string(),
+            content: r#"{"chats":{"123":{"general_thread_id":42}}}"#.to_string(),
+        }];
+        store.commit_writes(&writes);
+        assert!(path.exists());
+
+        let mtime_after_first = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        // Small sleep to ensure filesystem timestamp granularity
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Second write with identical content — should NOT touch the file
+        store.commit_writes(&writes);
+
+        let mtime_after_second = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        assert_eq!(
+            mtime_after_first, mtime_after_second,
+            "Redundant write should not update the file"
+        );
+
+        // Third write with CHANGED content — should update the file
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let writes_changed = vec![PendingWorkspaceWrite {
+            path: "channels/telegram/state/managed_private_topics".to_string(),
+            content: r#"{"chats":{"123":{"general_thread_id":99}}}"#.to_string(),
+        }];
+        store.commit_writes(&writes_changed);
+
+        let mtime_after_third = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        assert_ne!(
+            mtime_after_first, mtime_after_third,
+            "Changed content should update the file"
         );
     }
 }

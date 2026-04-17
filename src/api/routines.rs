@@ -116,9 +116,14 @@ pub async fn delete_routine(
 /// Convert a `Routine` to the trimmed `RoutineInfo` for list display.
 fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
     let (trigger_type, trigger_summary) = match &r.trigger {
-        crate::agent::routine::Trigger::Cron { schedule } => {
-            ("cron".to_string(), format!("cron: {}", schedule))
-        }
+        crate::agent::routine::Trigger::Cron { schedule } => (
+            "cron".to_string(),
+            if schedule.starts_with("every ") {
+                format!("schedule: {}", schedule)
+            } else {
+                format!("cron: {}", schedule)
+            },
+        ),
         crate::agent::routine::Trigger::Event {
             pattern, channel, ..
         } => {

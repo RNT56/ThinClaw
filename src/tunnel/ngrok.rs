@@ -42,7 +42,7 @@ impl Tunnel for NgrokTunnel {
         }
         args.extend(["--log", "stdout", "--log-format", "logfmt"].map(String::from));
 
-        let mut child = Command::new("ngrok")
+        let mut child = Command::new(&crate::tunnel::resolve_binary("ngrok"))
             .args(&args)
             .env("NGROK_AUTHTOKEN", &self.auth_token)
             .stdout(std::process::Stdio::piped())

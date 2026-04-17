@@ -138,13 +138,25 @@ impl HookRegistrationSummary {
 }
 
 /// Register bundled built-in hooks that ship with ThinClaw.
+///
+/// This function is idempotent — hooks that are already registered are skipped.
+/// This is important because `bootstrap_hooks` may be called from both
+/// `AppBuilder::build_all()` (Tauri/Scrappy mode) and `main()` (CLI mode with
+/// WASM channel names that aren't available during `build_all`).
 pub async fn register_bundled_hooks(registry: &Arc<HookRegistry>) -> HookRegistrationSummary {
-    registry
-        .register_with_priority(Arc::new(AuditLogHook), 25)
-        .await;
+    let existing = registry.list().await;
+    let mut registered = 0;
+
+    let audit_hook = Arc::new(AuditLogHook);
+    if !existing.contains(&audit_hook.name().to_string()) {
+        registry
+            .register_with_priority(audit_hook, 25)
+            .await;
+        registered += 1;
+    }
 
     HookRegistrationSummary {
-        hooks: 1,
+        hooks: registered,
         outbound_webhooks: 0,
         errors: 0,
     }

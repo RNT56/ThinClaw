@@ -15,7 +15,9 @@ use tokio::sync::RwLock;
 
 use crate::channels::ChannelManager;
 use crate::channels::wasm::{
-    RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime,
+    RegisteredEndpoint, SharedWasmChannel, WasmChannelHostConfig, WasmChannelLoader,
+    WasmChannelRouter, WasmChannelRuntime, apply_channel_host_config,
+    inject_channel_credentials_from_secrets,
 };
 use crate::extensions::clawhub::CatalogCache;
 use crate::extensions::discovery::OnlineDiscovery;
@@ -55,7 +57,7 @@ struct ChannelRuntimeState {
     wasm_channel_runtime: Arc<WasmChannelRuntime>,
     pairing_store: Arc<PairingStore>,
     wasm_channel_router: Arc<WasmChannelRouter>,
-    telegram_owner_id: Option<i64>,
+    host_config: WasmChannelHostConfig,
 }
 
 /// Result of saving setup secrets and attempting activation.
@@ -89,8 +91,6 @@ pub struct ExtensionManager {
     tool_registry: Arc<ToolRegistry>,
     hooks: Option<Arc<HookRegistry>>,
     pending_auth: RwLock<HashMap<String, PendingAuth>>,
-    /// Tunnel URL for webhook configuration and remote OAuth callbacks.
-    tunnel_url: Option<String>,
     user_id: String,
     /// Optional database store for DB-backed MCP config.
     store: Option<Arc<dyn crate::db::Database>>,
@@ -117,7 +117,6 @@ impl ExtensionManager {
         wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
         wasm_tools_dir: PathBuf,
         wasm_channels_dir: PathBuf,
-        tunnel_url: Option<String>,
         user_id: String,
         store: Option<Arc<dyn crate::db::Database>>,
         catalog_entries: Vec<RegistryEntry>,
@@ -140,7 +139,6 @@ impl ExtensionManager {
             tool_registry,
             hooks,
             pending_auth: RwLock::new(HashMap::new()),
-            tunnel_url,
             user_id,
             store,
             active_channel_names: RwLock::new(HashSet::new()),
@@ -167,14 +165,14 @@ impl ExtensionManager {
         wasm_channel_runtime: Arc<WasmChannelRuntime>,
         pairing_store: Arc<PairingStore>,
         wasm_channel_router: Arc<WasmChannelRouter>,
-        telegram_owner_id: Option<i64>,
+        host_config: WasmChannelHostConfig,
     ) {
         *self.channel_runtime.write().await = Some(ChannelRuntimeState {
             channel_manager,
             wasm_channel_runtime,
             pairing_store,
             wasm_channel_router,
-            telegram_owner_id,
+            host_config,
         });
     }
 
@@ -2005,13 +2003,7 @@ impl ExtensionManager {
 
         // Verify runtime infrastructure is available and clone Arcs so we don't
         // hold the RwLock guard across awaits.
-        let (
-            channel_runtime,
-            channel_manager,
-            pairing_store,
-            wasm_channel_router,
-            telegram_owner_id,
-        ) = {
+        let (channel_runtime, channel_manager, pairing_store, wasm_channel_router, host_config) = {
             let rt_guard = self.channel_runtime.read().await;
             let rt = rt_guard.as_ref().ok_or_else(|| {
                 ExtensionError::ActivationFailed(
@@ -2024,7 +2016,7 @@ impl ExtensionManager {
                 Arc::clone(&rt.channel_manager),
                 Arc::clone(&rt.pairing_store),
                 Arc::clone(&rt.wasm_channel_router),
-                rt.telegram_owner_id,
+                rt.host_config.clone(),
             )
         };
 
@@ -2069,39 +2061,19 @@ impl ExtensionManager {
 
         let channel_arc = Arc::new(loaded.channel);
 
-        // Inject runtime config (tunnel_url, webhook_secret, owner_id)
-        {
-            let mut config_updates = std::collections::HashMap::new();
-
-            if let Some(ref tunnel_url) = self.tunnel_url {
-                config_updates.insert(
-                    "tunnel_url".to_string(),
-                    serde_json::Value::String(tunnel_url.clone()),
-                );
-            }
-
-            if let Some(ref secret) = webhook_secret {
-                config_updates.insert(
-                    "webhook_secret".to_string(),
-                    serde_json::Value::String(secret.clone()),
-                );
-            }
-
-            if channel_name == "telegram"
-                && let Some(owner_id) = telegram_owner_id
-            {
-                config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
-            }
-
-            if !config_updates.is_empty() {
-                channel_arc.update_config(config_updates).await;
-                tracing::info!(
-                    channel = %channel_name,
-                    has_tunnel = self.tunnel_url.is_some(),
-                    has_webhook_secret = webhook_secret.is_some(),
-                    "Injected runtime config into hot-activated channel"
-                );
-            }
+        let runtime_update_count = apply_channel_host_config(
+            &channel_arc,
+            &channel_name,
+            &host_config,
+            webhook_secret.as_deref(),
+        )
+        .await;
+        if runtime_update_count > 0 {
+            tracing::info!(
+                channel = %channel_name,
+                runtime_updates = runtime_update_count,
+                "Injected runtime config into hot-activated channel"
+            );
         }
 
         // Register with webhook router
@@ -2126,7 +2098,7 @@ impl ExtensionManager {
         }
 
         // Inject credentials
-        match crate::extensions::manager::inject_channel_credentials_from_secrets(
+        match inject_channel_credentials_from_secrets(
             &channel_arc,
             self.secrets.as_ref(),
             &channel_name,
@@ -2180,10 +2152,10 @@ impl ExtensionManager {
     /// Called when the user saves new secrets via the setup form for a channel
     /// that was loaded at startup (possibly without credentials).
     async fn refresh_active_channel(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
-        let router = {
+        let (router, host_config) = {
             let rt_guard = self.channel_runtime.read().await;
             match rt_guard.as_ref() {
-                Some(rt) => Arc::clone(&rt.wasm_channel_router),
+                Some(rt) => (Arc::clone(&rt.wasm_channel_router), rt.host_config.clone()),
                 None => {
                     return Ok(ActivateResult {
                         name: name.to_string(),
@@ -2241,7 +2213,7 @@ impl ExtensionManager {
                 Err(_) => format!("{}_webhook_secret", name),
             }
         };
-        if let Ok(secret) = self
+        let webhook_secret = if let Ok(secret) = self
             .secrets
             .get_decrypted(&self.user_id, &webhook_secret_name)
             .await
@@ -2249,25 +2221,18 @@ impl ExtensionManager {
             router
                 .update_secret(name, secret.expose().to_string())
                 .await;
+            Some(secret.expose().to_string())
+        } else {
+            None
+        };
 
-            // Also inject the webhook_secret into the channel's runtime config
-            let mut config_updates = std::collections::HashMap::new();
-            config_updates.insert(
-                "webhook_secret".to_string(),
-                serde_json::Value::String(secret.expose().to_string()),
-            );
-            existing_channel.update_config(config_updates).await;
-        }
-
-        // Refresh tunnel_url in case it wasn't set at startup
-        if let Some(ref tunnel_url) = self.tunnel_url {
-            let mut config_updates = std::collections::HashMap::new();
-            config_updates.insert(
-                "tunnel_url".to_string(),
-                serde_json::Value::String(tunnel_url.clone()),
-            );
-            existing_channel.update_config(config_updates).await;
-        }
+        let runtime_update_count = apply_channel_host_config(
+            &existing_channel,
+            name,
+            &host_config,
+            webhook_secret.as_deref(),
+        )
+        .await;
 
         // Re-call on_start() to trigger webhook registration with the
         // now-available credentials (e.g., setWebhook for Telegram).
@@ -2292,6 +2257,7 @@ impl ExtensionManager {
         tracing::info!(
             channel = %name,
             credentials_refreshed = cred_count,
+            runtime_updates = runtime_update_count,
             "Refreshed credentials and config on already-active channel"
         );
 
@@ -2540,53 +2506,6 @@ impl ExtensionManager {
         }
         removed
     }
-}
-
-/// Inject credentials for a channel based on naming convention.
-///
-/// Looks for secrets matching the pattern `{channel_name}_*` and injects them
-/// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
-///
-/// Returns the number of credentials injected.
-async fn inject_channel_credentials_from_secrets(
-    channel: &Arc<crate::channels::wasm::WasmChannel>,
-    secrets: &dyn SecretsStore,
-    channel_name: &str,
-    user_id: &str,
-) -> Result<usize, String> {
-    let all_secrets = secrets
-        .list(user_id)
-        .await
-        .map_err(|e| format!("Failed to list secrets: {}", e))?;
-
-    let prefix = format!("{}_", channel_name);
-    let mut count = 0;
-
-    for secret_meta in all_secrets {
-        if !secret_meta.name.starts_with(&prefix) {
-            continue;
-        }
-
-        let decrypted = match secrets.get_decrypted(user_id, &secret_meta.name).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(
-                    secret = %secret_meta.name,
-                    error = %e,
-                    "Failed to decrypt secret for channel credential injection"
-                );
-                continue;
-            }
-        };
-
-        let placeholder = secret_meta.name.to_uppercase();
-        channel
-            .set_credential(&placeholder, decrypted.expose().to_string())
-            .await;
-        count += 1;
-    }
-
-    Ok(count)
 }
 
 /// Infer the extension kind from a URL.

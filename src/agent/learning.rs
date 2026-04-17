@@ -3037,7 +3037,11 @@ mod tests {
             .list_learning_artifact_versions(user_id, Some("routine"), Some(&routine.name), 10)
             .await
             .expect("list learning artifact versions");
-        assert_eq!(artifact_versions.len(), 1, "routine mutation should be ledgered");
+        assert_eq!(
+            artifact_versions.len(),
+            1,
+            "routine mutation should be ledgered"
+        );
         let version = &artifact_versions[0];
         assert_eq!(version.status, "applied");
         assert_eq!(version.artifact_type, "routine");

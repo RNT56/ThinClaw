@@ -38,6 +38,8 @@ pub struct WasmChannelRouter {
     channels: RwLock<HashMap<String, Arc<WasmChannel>>>,
     /// Path to channel mapping for fast lookup.
     path_to_channel: RwLock<HashMap<String, String>>,
+    /// Endpoint metadata keyed by path.
+    endpoints: RwLock<HashMap<String, RegisteredEndpoint>>,
     /// Expected webhook secrets by channel name.
     secrets: RwLock<HashMap<String, String>>,
     /// Webhook secret header names by channel name (e.g., "X-Telegram-Bot-Api-Secret-Token").
@@ -50,6 +52,7 @@ impl WasmChannelRouter {
         Self {
             channels: RwLock::new(HashMap::new()),
             path_to_channel: RwLock::new(HashMap::new()),
+            endpoints: RwLock::new(HashMap::new()),
             secrets: RwLock::new(HashMap::new()),
             secret_headers: RwLock::new(HashMap::new()),
         }
@@ -77,8 +80,10 @@ impl WasmChannelRouter {
 
         // Register path mappings
         let mut path_map = self.path_to_channel.write().await;
+        let mut endpoint_map = self.endpoints.write().await;
         for endpoint in endpoints {
             path_map.insert(endpoint.path.clone(), name.clone());
+            endpoint_map.insert(endpoint.path.clone(), endpoint.clone());
             tracing::info!(
                 channel = %name,
                 path = %endpoint.path,
@@ -130,6 +135,10 @@ impl WasmChannelRouter {
         self.channels.write().await.remove(channel_name);
         self.secrets.write().await.remove(channel_name);
         self.secret_headers.write().await.remove(channel_name);
+        self.endpoints
+            .write()
+            .await
+            .retain(|_, endpoint| endpoint.channel_name != channel_name);
 
         // Remove all paths for this channel
         self.path_to_channel
@@ -149,6 +158,10 @@ impl WasmChannelRouter {
         let channel_name = path_map.get(path)?;
 
         self.channels.read().await.get(channel_name).cloned()
+    }
+
+    pub async fn get_endpoint_for_path(&self, path: &str) -> Option<RegisteredEndpoint> {
+        self.endpoints.read().await.get(path).cloned()
     }
 
     /// Validate a secret for a channel.
@@ -252,6 +265,39 @@ async fn webhook_handler(
         "Webhook request received"
     );
 
+    let endpoint = match state.router.get_endpoint_for_path(&full_path).await {
+        Some(endpoint) => endpoint,
+        None => {
+            tracing::warn!(path = %full_path, "No endpoint registered for webhook path");
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "Channel not found for path",
+                    "path": full_path
+                })),
+            );
+        }
+    };
+
+    let allowed_methods: Vec<String> = endpoint
+        .methods
+        .iter()
+        .map(|value| value.to_ascii_uppercase())
+        .collect();
+    if !allowed_methods.is_empty()
+        && !allowed_methods
+            .iter()
+            .any(|allowed| allowed == method.as_str())
+    {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            Json(serde_json::json!({
+                "error": "HTTP method not allowed",
+                "allowed_methods": allowed_methods,
+            })),
+        );
+    }
+
     // Find the channel for this path
     let channel = match state.router.get_channel_for_path(&full_path).await {
         Some(c) => c,
@@ -277,8 +323,8 @@ async fn webhook_handler(
 
     let channel_name = channel.channel_name();
 
-    // Check if secret is required
-    if state.router.requires_secret(channel_name).await {
+    // Check if secret is required for this endpoint.
+    if endpoint.require_secret {
         // Get the secret header name for this channel (from capabilities or default)
         let secret_header_name = state.router.get_secret_header(channel_name).await;
 
@@ -313,7 +359,9 @@ async fn webhook_handler(
 
         match provided_secret {
             Some(secret) => {
-                if !state.router.validate_secret(channel_name, &secret).await {
+                if !state.router.requires_secret(channel_name).await
+                    || !state.router.validate_secret(channel_name, &secret).await
+                {
                     tracing::warn!(
                         channel = %channel_name,
                         "Webhook secret validation failed"
@@ -353,7 +401,7 @@ async fn webhook_handler(
         .collect();
 
     // Call the WASM channel
-    let secret_validated = state.router.requires_secret(channel_name).await;
+    let secret_validated = endpoint.require_secret;
 
     tracing::info!(
         channel = %channel_name,

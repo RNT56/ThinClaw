@@ -19,6 +19,7 @@ mod workspace;
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -135,6 +136,32 @@ impl LibSqlBackend {
     /// in libsql, so connection setup must consume it rather than dropping the
     /// query result immediately.
     pub async fn connect(&self) -> Result<Connection, DatabaseError> {
+        const MAX_CONNECT_ATTEMPTS: u32 = 8;
+        const BASE_RETRY_DELAY_MS: u64 = 25;
+
+        for attempt in 1..=MAX_CONNECT_ATTEMPTS {
+            match self.connect_once().await {
+                Ok(conn) => return Ok(conn),
+                Err(error) if self.file_path.is_some() && attempt < MAX_CONNECT_ATTEMPTS => {
+                    let delay = Duration::from_millis(BASE_RETRY_DELAY_MS * u64::from(attempt));
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = MAX_CONNECT_ATTEMPTS,
+                        delay_ms = delay.as_millis(),
+                        path = ?self.file_path,
+                        error = %error,
+                        "libSQL connection setup failed, retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        unreachable!("connect retry loop should always return")
+    }
+
+    async fn connect_once(&self) -> Result<Connection, DatabaseError> {
         let conn = self
             .db
             .connect()

@@ -204,9 +204,10 @@ impl SetupWizard {
             ("Discord", self.settings.channels.discord_enabled),
             ("Slack", self.settings.channels.slack_enabled),
             ("Gmail", self.settings.channels.gmail_enabled),
+            ("BlueBubbles (iMessage bridge)", self.settings.channels.bluebubbles_enabled),
         ];
         #[allow(unused_mut)]
-        let mut native_keys: Vec<&str> = vec!["signal", "discord", "slack", "gmail"];
+        let mut native_keys: Vec<&str> = vec!["signal", "discord", "slack", "gmail", "bluebubbles"];
         #[cfg(target_os = "macos")]
         {
             native_options.push(("iMessage", self.settings.channels.imessage_enabled));
@@ -226,6 +227,7 @@ impl SetupWizard {
         let enable_discord = pick_native("discord");
         let enable_slack = pick_native("slack");
         let enable_gmail = pick_native("gmail");
+        let enable_bluebubbles = pick_native("bluebubbles");
         #[cfg(target_os = "macos")]
         let enable_imessage = pick_native("imessage");
         #[cfg(target_os = "macos")]
@@ -685,6 +687,84 @@ impl SetupWizard {
         #[cfg(target_os = "macos")]
         if !enable_apple_mail {
             self.settings.channels.apple_mail_enabled = false;
+        }
+
+        // BlueBubbles iMessage bridge (cross-platform)
+        if enable_bluebubbles {
+            println!();
+            #[cfg(target_os = "macos")]
+            {
+                print_info("BlueBubbles bridges iMessage via a dedicated macOS server app.");
+                print_info("Unlike the native iMessage channel (which polls chat.db read-only),");
+                print_info("BlueBubbles adds: typing indicators, read receipts, tapback reactions,");
+                print_info("group chat management, and cross-platform access from Linux/Windows.");
+                print_info("Both channels can coexist — native for lightweight local use,");
+                print_info("BlueBubbles for full-featured or remote deployments.");
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                print_info("BlueBubbles bridges iMessage from a Mac running the BlueBubbles server.");
+                print_info("It works from any platform (Linux, Windows, macOS) over REST API + webhooks.");
+            }
+            print_info("Download the server: https://bluebubbles.app/");
+            println!();
+
+            let server_url =
+                input("BlueBubbles server URL (e.g. http://192.168.1.50:1234)").map_err(SetupError::Io)?;
+            self.settings.channels.bluebubbles_server_url = Some(server_url);
+
+            let password = secret_input("BlueBubbles server password")
+                .map_err(SetupError::Io)?;
+            self.settings.channels.bluebubbles_password =
+                Some(password.expose_secret().to_string());
+
+            let webhook_host = optional_input(
+                "Webhook listen host (this machine)",
+                Some("127.0.0.1"),
+            )
+            .map_err(SetupError::Io)?;
+            if let Some(ref host) = webhook_host
+                && !host.is_empty()
+            {
+                self.settings.channels.bluebubbles_webhook_host = Some(host.clone());
+            }
+
+            let webhook_port = optional_input(
+                "Webhook listen port",
+                Some("8645"),
+            )
+            .map_err(SetupError::Io)?;
+            if let Some(ref port) = webhook_port
+                && !port.is_empty()
+            {
+                if let Ok(p) = port.parse::<u16>() {
+                    self.settings.channels.bluebubbles_webhook_port = Some(p);
+                }
+            }
+
+            let allow_from = optional_input(
+                "Allowed contacts (comma-separated phone/email, blank = all)",
+                None,
+            )
+            .map_err(SetupError::Io)?;
+            if let Some(ref af) = allow_from
+                && !af.is_empty()
+            {
+                self.settings.channels.bluebubbles_allow_from = Some(af.clone());
+            }
+
+            let send_receipts =
+                confirm("Send read receipts (requires Private API on server)?", true)
+                    .map_err(SetupError::Io)?;
+            self.settings.channels.bluebubbles_send_read_receipts = Some(send_receipts);
+
+            self.settings.channels.bluebubbles_enabled = true;
+            print_success("BlueBubbles iMessage bridge configured");
+            print_info(
+                "Make sure the BlueBubbles server is reachable from this machine before starting.",
+            );
+        } else {
+            self.settings.channels.bluebubbles_enabled = false;
         }
 
         let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =

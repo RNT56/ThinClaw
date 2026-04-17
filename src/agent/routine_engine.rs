@@ -11,7 +11,6 @@
 //! Full-job routines are delegated to the existing `Scheduler`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::{Timelike, Utc};
@@ -22,7 +21,7 @@ use uuid::Uuid;
 use crate::agent::Scheduler;
 use crate::agent::outcomes;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
+    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_fire_for_routine,
 };
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
 use crate::api::experiments as experiments_api;
@@ -42,8 +41,6 @@ pub struct RoutineEngine {
     workspace: Arc<Workspace>,
     /// Sender for notifications (routed to channel manager).
     notify_tx: mpsc::Sender<OutgoingResponse>,
-    /// Currently running routine count (across all routines).
-    running_count: Arc<AtomicUsize>,
     /// Compiled event regex cache: routine_id -> compiled regex.
     event_cache: Arc<RwLock<Vec<(Uuid, Routine, Regex)>>>,
     /// Scheduler for dispatching jobs (FullJob mode).
@@ -79,7 +76,6 @@ impl RoutineEngine {
             llm,
             workspace,
             notify_tx,
-            running_count: Arc::new(AtomicUsize::new(0)),
             event_cache: Arc::new(RwLock::new(Vec::new())),
             scheduler,
             sse_tx: None,
@@ -152,6 +148,13 @@ impl RoutineEngine {
         let cache = self.event_cache.read().await;
         let mut fired = 0;
 
+        // Query the DB once for global concurrency — single source of truth.
+        let global_running = self
+            .store
+            .count_all_running_routine_runs()
+            .await
+            .unwrap_or(0);
+
         for (_, routine, re) in cache.iter() {
             // Channel filter
             if let Trigger::Event {
@@ -179,8 +182,8 @@ impl RoutineEngine {
                 continue;
             }
 
-            // Global capacity check
-            if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
+            // Global capacity check (DB is the single source of truth)
+            if (global_running + fired as i64) >= self.config.max_concurrent_routines as i64 {
                 tracing::warn!(routine = %routine.name, "Skipped: global max concurrent reached");
                 continue;
             }
@@ -204,8 +207,16 @@ impl RoutineEngine {
             }
         };
 
+        // Query the DB once for global concurrency — single source of truth.
+        let global_running = self
+            .store
+            .count_all_running_routine_runs()
+            .await
+            .unwrap_or(0);
+        let mut spawned_this_tick: i64 = 0;
+
         for routine in routines {
-            if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
+            if (global_running + spawned_this_tick) >= self.config.max_concurrent_routines as i64 {
                 tracing::warn!("Global max concurrent routines reached, skipping remaining");
                 break;
             }
@@ -246,9 +257,12 @@ impl RoutineEngine {
                         // Update runtime state only after the event was
                         // actually enqueued; otherwise we would silently skip
                         // a scheduled heartbeat on channel/backpressure errors.
-                        let next = detail
-                            .as_ref()
-                            .and_then(|s| next_cron_fire(s).unwrap_or(None));
+                        let next = next_fire_for_routine(
+                            &routine,
+                            self.user_timezone.as_deref(),
+                            Utc::now(),
+                        )
+                        .unwrap_or(None);
                         let _ = self
                             .store
                             .update_routine_runtime(
@@ -271,6 +285,7 @@ impl RoutineEngine {
             }
 
             self.spawn_fire(routine, "cron", detail).await;
+            spawned_this_tick += 1;
         }
     }
 
@@ -324,7 +339,6 @@ impl RoutineEngine {
             llm: self.llm.clone(),
             workspace: self.workspace.clone(),
             notify_tx: self.notify_tx.clone(),
-            running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
             sse_tx: self.sse_tx.clone(),
             system_event_tx: self.system_event_tx.clone(),
@@ -367,7 +381,6 @@ impl RoutineEngine {
             llm: self.llm.clone(),
             workspace: self.workspace.clone(),
             notify_tx: self.notify_tx.clone(),
-            running_count: self.running_count.clone(),
             scheduler: self.scheduler.clone(),
             sse_tx: self.sse_tx.clone(),
             system_event_tx: self.system_event_tx.clone(),
@@ -399,33 +412,16 @@ impl RoutineEngine {
         tracing::info!("Aborted all running routine tasks");
     }
 
-    /// IC-006: Reap zombie routine runs that are still in `Running` status.
+    /// IC-006: Reap zombie routine runs that have exceeded the 10-minute TTL.
     ///
-    /// Uses the existing `cleanup_stale_routine_runs()` DB method which marks
-    /// all Running runs as Failed. This prevents slot exhaustion when the process
-    /// crashes mid-run or a routine hangs beyond the check interval.
+    /// Pure DB cleanup — marks stale `running` rows as `failed`. No in-memory
+    /// counter manipulation needed because the DB is the single source of
+    /// truth for global concurrency gating.
     pub async fn reap_zombie_runs(&self) {
         match self.store.cleanup_stale_routine_runs().await {
             Ok(reaped) => {
                 if reaped > 0 {
-                    // Bug 4 fix: use per-item fetch_sub instead of non-atomic load→store.
-                    // A bulk load→store races with concurrent fetch_sub(1) calls from
-                    // normally-completing routines, causing double-decrements that drive
-                    // running_count to 0 and permanently block new routines.
-                    for _ in 0..reaped {
-                        // saturating_sub via compare-exchange loop prevents underflow.
-                        let prev = self.running_count.fetch_update(
-                            Ordering::Relaxed,
-                            Ordering::Relaxed,
-                            |c| Some(c.saturating_sub(1)),
-                        );
-                        let _ = prev; // always succeeds; result is informational only
-                    }
-                    tracing::info!(
-                        "IC-006: Reaped {} zombie routine runs, running_count now {}",
-                        reaped,
-                        self.running_count.load(Ordering::Relaxed)
-                    );
+                    tracing::info!("IC-006: Reaped {} zombie routine runs", reaped);
                 }
             }
             Err(e) => {
@@ -480,7 +476,6 @@ struct EngineContext {
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     notify_tx: mpsc::Sender<OutgoingResponse>,
-    running_count: Arc<AtomicUsize>,
     scheduler: Option<Arc<Scheduler>>,
     /// Optional SSE broadcast sender for routine lifecycle events.
     sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
@@ -516,9 +511,6 @@ pub fn spawn_zombie_reaper(engine: Arc<RoutineEngine>) -> tokio::task::JoinHandl
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
 async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) {
-    // Increment running count (atomic: survives panics in the execution below)
-    ctx.running_count.fetch_add(1, Ordering::Relaxed);
-
     // Broadcast routine start event
     ctx.broadcast_sse(SseEvent::RoutineLifecycle {
         routine_name: routine.name.clone(),
@@ -573,6 +565,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             active_end_hour,
             target,
             max_iterations,
+            ..
         } => {
             execute_heartbeat(
                 &ctx,
@@ -618,9 +611,6 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         ),
     };
 
-    // Decrement running count
-    ctx.running_count.fetch_sub(1, Ordering::Relaxed);
-
     // Process result
     let (status, summary, tokens) = match result {
         Ok(execution) => execution,
@@ -634,13 +624,10 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     // The worker/subagent handles its own DB completion + SSE lifecycle event,
     // so skip all post-processing here to avoid conflicts.
     if status == RunStatus::Running {
-        // Still update the routine's cron schedule so next_fire_at advances
+        // Still update the routine schedule so next_fire_at advances
         let now = Utc::now();
-        let next_fire = if let Trigger::Cron { ref schedule } = routine.trigger {
-            next_cron_fire(schedule).unwrap_or(None)
-        } else {
-            None
-        };
+        let next_fire =
+            next_fire_for_routine(&routine, ctx.user_timezone.as_deref(), now).unwrap_or(None);
         let _ = ctx
             .store
             .update_routine_runtime(
@@ -677,11 +664,8 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
 
     // Update routine runtime state
     let now = Utc::now();
-    let next_fire = if let Trigger::Cron { ref schedule } = routine.trigger {
-        next_cron_fire(schedule).unwrap_or(None)
-    } else {
-        None
-    };
+    let next_fire =
+        next_fire_for_routine(&routine, ctx.user_timezone.as_deref(), now).unwrap_or(None);
 
     let new_failures = if status == RunStatus::Failed {
         routine.consecutive_failures + 1
@@ -957,10 +941,9 @@ async fn execute_heartbeat(
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // 0. Active hours check
     if let (Some(s), Some(e)) = (active_start_hour, active_end_hour) {
-        let tz = crate::timezone::resolve_timezone(
-            None,
+        let tz = crate::timezone::resolve_effective_timezone(
+            Some(&routine.user_id),
             ctx.user_timezone.as_deref(),
-            &crate::timezone::detect_system_timezone().to_string(),
         );
         let now_hour = crate::timezone::now_in_tz(tz).hour() as u8;
         let in_window = if s <= e {
@@ -1302,6 +1285,7 @@ async fn send_notification(
             "notify_user": notify.user,
             "notify_channel": notify.channel,
         }),
+        attachments: Vec::new(),
     };
 
     if let Err(e) = tx.send(response).await {
@@ -1322,8 +1306,8 @@ pub fn spawn_cron_ticker(
         loop {
             ticker.tick().await;
             engine.check_cron_triggers().await;
-            // IC-006: Reap zombie runs on each cron interval
-            engine.reap_zombie_runs().await;
+            // IC-006: Zombie reaping is handled by the dedicated spawn_zombie_reaper
+            // task (every 120s). The cron ticker only checks triggers.
         }
     })
 }

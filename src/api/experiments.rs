@@ -2588,6 +2588,12 @@ pub async fn lease_complete(
 ) -> ApiResult<ExperimentCampaignActionResponse> {
     ensure_experiments_enabled(store, user_id).await?;
     let mut lease = verified_lease(store, lease_id, token).await?;
+    if lease.status != ExperimentLeaseStatus::Claimed {
+        return Err(ApiError::InvalidInput(format!(
+            "lease is already in terminal state: {:?}",
+            lease.status
+        )));
+    }
     let mut campaign = get_campaign(store, user_id, lease.campaign_id).await?;
     let project = get_project(store, user_id, campaign.project_id).await?;
     let mut trial = get_trial(store, user_id, lease.trial_id).await?;
@@ -2759,8 +2765,23 @@ async fn finalize_trial(
     let mut non_improving = campaign.consecutive_non_improving_trials;
 
     if !success_exit {
-        trial.status = ExperimentTrialStatus::Crashed;
-        trial.decision_reason = Some("Benchmark command exited non-zero.".to_string());
+        let failure_stage = trial
+            .artifact_manifest_json
+            .get("stage")
+            .and_then(|value| value.as_str());
+        if matches!(
+            failure_stage,
+            Some("prepare" | "checkout" | "clone" | "fetch" | "run")
+        ) {
+            trial.status = ExperimentTrialStatus::InfraFailed;
+            trial.decision_reason = Some(format!(
+                "{} command exited non-zero.",
+                failure_stage.unwrap_or("runner")
+            ));
+        } else {
+            trial.status = ExperimentTrialStatus::Crashed;
+            trial.decision_reason = Some("Benchmark command exited non-zero.".to_string());
+        }
         campaign.failure_count += 1;
     } else if !has_primary_metric {
         trial.status = ExperimentTrialStatus::InfraFailed;
@@ -3486,6 +3507,25 @@ async fn execute_local_trial(
         log.push_str("== prepare ==\n");
         log.push_str(&output);
         log.push('\n');
+        let exit_code = parse_exit_code(&output).unwrap_or(1);
+        if exit_code != 0 {
+            let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
+            tokio::fs::write(&log_path, &log)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            return Ok(ExperimentRunnerCompletion {
+                exit_code: Some(exit_code),
+                metrics_json: serde_json::json!({}),
+                summary: Some(format!("Local prepare command failed with exit code {exit_code}.")),
+                runtime_ms: Some(runtime_ms),
+                attributed_cost_usd: None,
+                log_preview_path: Some(log_path.to_string_lossy().to_string()),
+                artifact_manifest_json: serde_json::json!({
+                    "stage": "prepare",
+                    "summary_json_path": run_root.join("summary.json").to_string_lossy(),
+                }),
+            });
+        }
     }
     let run_output = run_shell_command(&run_root, &project.run_command, runner).await?;
     let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
@@ -3511,6 +3551,23 @@ async fn execute_local_trial(
         &summary_json,
     );
     let exit_code = parse_exit_code(&run_output);
+    if exit_code.unwrap_or(1) != 0 {
+        return Ok(ExperimentRunnerCompletion {
+            exit_code,
+            metrics_json: serde_json::json!({}),
+            summary: Some(format!(
+                "Local benchmark command failed with exit code {}.",
+                exit_code.unwrap_or(1)
+            )),
+            runtime_ms: Some(runtime_ms),
+            attributed_cost_usd: None,
+            log_preview_path: Some(log_path.to_string_lossy().to_string()),
+            artifact_manifest_json: serde_json::json!({
+                "stage": "run",
+                "summary_json_path": summary_path.to_string_lossy(),
+            }),
+        });
+    }
     Ok(ExperimentRunnerCompletion {
         exit_code,
         metrics_json: metrics,
@@ -3522,6 +3579,7 @@ async fn execute_local_trial(
         attributed_cost_usd: None,
         log_preview_path: Some(log_path.to_string_lossy().to_string()),
         artifact_manifest_json: serde_json::json!({
+            "stage": "run",
             "summary_json_path": summary_path.to_string_lossy(),
         }),
     })
@@ -3610,6 +3668,21 @@ async fn run_command_capture(
             text.push('\n');
         }
         text.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    if !output.status.success() {
+        return Err(ApiError::Internal(format!(
+            "{binary} exited with status {}{}",
+            output
+                .status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            if text.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", text.trim())
+            }
+        )));
     }
     Ok(text)
 }
@@ -3837,22 +3910,23 @@ fn derive_outcome_opportunities(
             &pattern_key,
         );
         let evaluated_at = contract.evaluated_at.unwrap_or(contract.updated_at);
-        let aggregate = aggregates
-            .entry(pattern_key.clone())
-            .or_insert_with(|| OutcomeOpportunityAggregate {
-                kind,
-                contract_type: contract.contract_type.clone(),
-                artifact_type: artifact_type.clone(),
-                artifact_name: artifact_name.clone(),
-                routine_id: routine_id.clone(),
-                routine_name: routine_name.clone(),
-                pattern_key: pattern_key.clone(),
-                count: 0,
-                first_seen: evaluated_at,
-                last_seen: evaluated_at,
-                rank_score: 0.0,
-                linked_target_id,
-            });
+        let aggregate =
+            aggregates
+                .entry(pattern_key.clone())
+                .or_insert_with(|| OutcomeOpportunityAggregate {
+                    kind,
+                    contract_type: contract.contract_type.clone(),
+                    artifact_type: artifact_type.clone(),
+                    artifact_name: artifact_name.clone(),
+                    routine_id: routine_id.clone(),
+                    routine_name: routine_name.clone(),
+                    pattern_key: pattern_key.clone(),
+                    count: 0,
+                    first_seen: evaluated_at,
+                    last_seen: evaluated_at,
+                    rank_score: 0.0,
+                    linked_target_id,
+                });
         aggregate.count = aggregate.count.saturating_add(1);
         aggregate.first_seen = aggregate.first_seen.min(evaluated_at);
         aggregate.last_seen = aggregate.last_seen.max(evaluated_at);
@@ -3939,14 +4013,20 @@ fn find_outcome_linked_target_id(
                 .metadata
                 .get("pattern_key")
                 .and_then(|value| value.as_str());
-            asset_id.zip(artifact_name).is_some_and(|(left, right)| left == right)
-                || asset_id.zip(routine_id).is_some_and(|(left, right)| left == right)
+            asset_id
+                .zip(artifact_name)
+                .is_some_and(|(left, right)| left == right)
+                || asset_id
+                    .zip(routine_id)
+                    .is_some_and(|(left, right)| left == right)
                 || target_pattern.is_some_and(|value| value == pattern_key)
         })
         .map(|target| target.id)
 }
 
-fn outcome_aggregate_to_opportunity(aggregate: OutcomeOpportunityAggregate) -> ExperimentOpportunity {
+fn outcome_aggregate_to_opportunity(
+    aggregate: OutcomeOpportunityAggregate,
+) -> ExperimentOpportunity {
     let (summary, project_hint) = outcome_summary_and_project_hint(&aggregate);
     let id_source = format!("{}|{:?}", aggregate.pattern_key, aggregate.kind);
     let hash = blake3::hash(id_source.as_bytes()).to_hex().to_string();
@@ -4061,7 +4141,11 @@ fn outcome_summary_and_project_hint(
 fn outcome_signals(aggregate: &OutcomeOpportunityAggregate) -> Vec<String> {
     let mut signals = vec![
         "outcome-backed evidence".to_string(),
-        format!("{} negative outcome{}", aggregate.count, if aggregate.count == 1 { "" } else { "s" }),
+        format!(
+            "{} negative outcome{}",
+            aggregate.count,
+            if aggregate.count == 1 { "" } else { "s" }
+        ),
     ];
     if let Some(artifact_name) = aggregate.artifact_name.as_deref() {
         signals.push(format!("target {}", artifact_name));
@@ -4074,10 +4158,12 @@ fn outcome_signals(aggregate: &OutcomeOpportunityAggregate) -> Vec<String> {
 
 fn outcome_gpu_requirement(kind: ExperimentTargetKind) -> ExperimentGpuRequirement {
     match kind {
-        ExperimentTargetKind::TrainingCode
-        | ExperimentTargetKind::TrainingConfig => ExperimentGpuRequirement::Required,
-        ExperimentTargetKind::InferenceConfig
-        | ExperimentTargetKind::ServingConfig => ExperimentGpuRequirement::Recommended,
+        ExperimentTargetKind::TrainingCode | ExperimentTargetKind::TrainingConfig => {
+            ExperimentGpuRequirement::Required
+        }
+        ExperimentTargetKind::InferenceConfig | ExperimentTargetKind::ServingConfig => {
+            ExperimentGpuRequirement::Recommended
+        }
         _ => ExperimentGpuRequirement::NotNeeded,
     }
 }
@@ -4121,7 +4207,11 @@ fn opportunity_signals_for_usage(
     avg_latency_ms: Option<f64>,
     avg_cost_usd: Option<f64>,
 ) -> Vec<String> {
-    let mut signals = vec![format!("{} model call{}", aggregate.call_count, if aggregate.call_count == 1 { "" } else { "s" })];
+    let mut signals = vec![format!(
+        "{} model call{}",
+        aggregate.call_count,
+        if aggregate.call_count == 1 { "" } else { "s" }
+    )];
     if error_rate > 0.0 {
         signals.push(format!("{:.0}% error rate", error_rate * 100.0));
     }

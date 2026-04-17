@@ -435,13 +435,28 @@ pub async fn setup_tunnel(
     }
 
     println!();
-    print_info("Tunnel Configuration (for webhook endpoints):");
-    print_info("A tunnel exposes your local agent to the internet, enabling:");
-    print_info("  - Instant Telegram message delivery (instead of polling)");
-    print_info("  - Slack, Discord, GitHub webhooks");
+    print_info("Tunnel Configuration");
+    println!();
+    print_info("Without a tunnel, channels like Telegram use POLLING mode:");
+    print_info("  Your agent asks Telegram \"any new messages?\" every ~5 seconds.");
+    print_info("  This works reliably from anywhere (home WiFi, VPN, any network).");
+    println!();
+    print_info("With a tunnel, channels switch to WEBHOOK mode:");
+    print_info("  Telegram pushes messages to your agent INSTANTLY (< 200ms).");
+    print_info("  Also enables: Slack events, Discord interactions, GitHub webhooks.");
+    println!();
+    print_info("Why is a tunnel needed?");
+    print_info("  Webhooks require a publicly reachable HTTPS URL. Most home networks");
+    print_info("  use NAT/firewall — Telegram's servers simply cannot reach your machine");
+    print_info("  without a tunnel creating a public entrypoint.");
+    println!();
+    print_info("Recommended: Tailscale Funnel (free, zero-config, persistent hostname)");
+    print_info("  Alternatives: ngrok (free), Cloudflare Tunnel (free), or your own.");
+    print_info("  If you're unsure, skip this — polling works perfectly for most users.");
     println!();
 
-    if !confirm("Configure a tunnel?", false)? {
+    if !confirm("Configure a tunnel for instant webhook delivery?", false)? {
+        print_info("No tunnel configured. Telegram and other channels will use polling mode.");
         return Ok(TunnelSettings::default());
     }
 
@@ -556,26 +571,163 @@ async fn setup_tunnel_cloudflare(
     })
 }
 
+/// Test whether the `tailscale` CLI can actually run without crashing.
+///
+/// On macOS, the App Store version's CLI wrapper crashes with a
+/// `BundleIdentifier` error when spawned from another process.
+/// This function catches that by running `tailscale version` and
+/// checking for a clean exit.
+///
+/// Uses `resolve_binary` so that Homebrew-installed CLIs at
+/// `/opt/homebrew/bin/tailscale` are found even when that directory
+/// is not in `$PATH` (common for processes spawned by launchd/IDEs).
+fn test_tailscale_cli() -> bool {
+    let binary = crate::util::resolve_binary("tailscale");
+    let output = std::process::Command::new(&binary)
+        .arg("version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output();
+
+    match output {
+        Ok(o) => {
+            if o.status.success() {
+                return true;
+            }
+            // Check if it crashed with the known macOS issue
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if stderr.contains("BundleIdentifier") || stderr.contains("Fatal error") {
+                return false;
+            }
+            // Other non-zero exit might still mean it's installed (e.g. not logged in)
+            // but at least it didn't crash
+            true
+        }
+        Err(_) => false, // binary not found
+    }
+}
+
 fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
-    // Check if tailscale is installed
-    if !is_binary_installed("tailscale") {
+    // Check if tailscale CLI is installed AND working.
+    // On macOS, the App Store version installs a CLI shim that crashes with
+    // BundleIdentifier errors when spawned from another process.
+    let cli_working = test_tailscale_cli();
+
+    if !cli_working {
         println!();
-        print_error("'tailscale' binary not found in PATH.");
-        print_info("Install Tailscale before starting the agent:");
-        print_info("  macOS:   Download from https://tailscale.com/download/mac");
-        print_info("           or: brew install tailscale");
-        print_info("  Linux:   curl -fsSL https://tailscale.com/install.sh | sh");
-        print_info("  Windows: Download from https://tailscale.com/download/windows");
-        println!();
-        if !confirm(
-            "Continue configuring Tailscale anyway? (you can install it before starting the agent)",
-            false,
-        )? {
-            return Ok(TunnelSettings::default());
+
+        #[cfg(target_os = "macos")]
+        {
+            if is_binary_installed("tailscale") {
+                // CLI exists but crashes — the App Store BundleIdentifier issue
+                print_error("Tailscale CLI is installed but crashes when called from ThinClaw.");
+                print_info("This is a known issue with the macOS App Store version's CLI.");
+                print_info("The standalone Homebrew CLI fixes this and works alongside the app.");
+            } else if std::path::Path::new("/Applications/Tailscale.app").exists() {
+                print_info("Tailscale app is installed, but the CLI is not available.");
+            } else {
+                print_error("Tailscale is not installed.");
+            }
+
+            println!();
+
+            // Check if Homebrew is available for auto-install
+            let has_brew = std::process::Command::new("brew")
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+
+            if has_brew {
+                if confirm(
+                    "Install Tailscale CLI via Homebrew? (brew install tailscale)",
+                    true,
+                )? {
+                    print_info("Installing tailscale via Homebrew (this may take a minute)...");
+                    let install_result = std::process::Command::new("brew")
+                        .args(["install", "tailscale"])
+                        .status();
+
+                    match install_result {
+                        Ok(status) if status.success() => {
+                            if test_tailscale_cli() {
+                                print_success("Tailscale CLI installed and working!");
+                            } else {
+                                print_success("Tailscale CLI installed.");
+                                print_info(
+                                    "You may need to start the service: brew services start tailscale",
+                                );
+                            }
+                        }
+                        Ok(_) => {
+                            print_error("Homebrew install failed. Try manually: brew install tailscale");
+                            println!();
+                            if !confirm("Continue configuring anyway?", false)? {
+                                return Ok(TunnelSettings::default());
+                            }
+                        }
+                        Err(e) => {
+                            print_error(&format!("Could not run brew: {}", e));
+                            if !confirm("Continue configuring anyway?", false)? {
+                                return Ok(TunnelSettings::default());
+                            }
+                        }
+                    }
+                } else if !confirm(
+                    "Continue without installing? (install before starting the agent)",
+                    false,
+                )? {
+                    return Ok(TunnelSettings::default());
+                }
+            } else {
+                // No Homebrew
+                print_info("Homebrew is not installed. Install the Tailscale CLI manually:");
+                println!();
+                print_info("  Option 1: Install Homebrew, then: brew install tailscale");
+                print_info("  Option 2: Download from https://tailscale.com/download/mac");
+                println!();
+                if !confirm(
+                    "Continue configuring anyway? (install before starting the agent)",
+                    false,
+                )? {
+                    return Ok(TunnelSettings::default());
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            print_error("'tailscale' CLI not found in PATH.");
+            print_info("Install Tailscale before starting the agent:");
+            print_info("  Linux:   curl -fsSL https://tailscale.com/install.sh | sh");
+            print_info("  Windows: Download from https://tailscale.com/download/windows");
+            println!();
+            if !confirm(
+                "Continue configuring anyway? (install before starting the agent)",
+                false,
+            )? {
+                return Ok(TunnelSettings::default());
+            }
         }
     }
 
-    let funnel = confirm("Use Tailscale Funnel (public internet)?", true)?;
+    println!();
+    print_info("Tailscale offers two modes:");
+    println!();
+    print_info("  Funnel (public)  — Makes your agent reachable from the public internet.");
+    print_info("                     Required for Telegram/Slack/Discord webhooks.");
+    print_info("                     Your hostname (e.g. my-mac.tail1234.ts.net) becomes");
+    print_info("                     publicly resolvable with a valid HTTPS certificate.");
+    println!();
+    print_info("  Serve (tailnet)  — Only reachable from devices on YOUR Tailscale network.");
+    print_info("                     Great for private Web UI access from your phone/laptop,");
+    print_info("                     but Telegram's servers CANNOT reach it (webhooks won't work,");
+    print_info("                     Telegram will fall back to polling mode).");
+    println!();
+
+    let funnel = confirm("Use Tailscale Funnel (public internet — needed for webhooks)?", true)?;
     let hostname = optional_input("Hostname override", Some("leave empty for auto-detect"))?;
 
     let mode = if funnel {
@@ -584,6 +736,14 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
         "Serve (tailnet-only)"
     };
     print_success(&format!("Tailscale {} configured.", mode));
+    if funnel {
+        print_info("Make sure Funnel is enabled in your Tailscale admin console:");
+        print_info("  1. Visit https://login.tailscale.com/admin/dns → enable HTTPS");
+        print_info("  2. Ensure your ACL policy allows Funnel for this machine");
+    } else {
+        print_info("Note: Telegram and other webhook channels will use polling mode.");
+        print_info("You can switch to Funnel later by re-running setup or setting TUNNEL_TS_FUNNEL=true.");
+    }
     if !is_binary_installed("tailscale") {
         print_info("⚠ Remember to install 'tailscale' before running 'thinclaw run'.");
     }
@@ -650,15 +810,42 @@ fn setup_tunnel_static() -> Result<TunnelSettings, ChannelSetupError> {
     })
 }
 
-/// Check if a binary is available in PATH.
+/// Check if a binary is available in PATH or at a known fallback location.
+///
+/// Delegates to `resolve_binary` from the tunnel module, which checks
+/// PATH first and then falls back to known macOS Homebrew paths
+/// (including `/opt/homebrew/bin/tailscale` and `/usr/local/bin/tailscale`).
 fn is_binary_installed(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let resolved = crate::util::resolve_binary(name);
+
+    // resolve_binary returns the bare name if nothing was found;
+    // if it returned an absolute path, the binary exists at that path.
+    if resolved != name {
+        return true;
+    }
+
+    // resolve_binary returned the bare name — check if it's on PATH.
+    #[cfg(unix)]
+    {
+        std::process::Command::new("which")
+            .arg(name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(windows)]
+    {
+        std::process::Command::new("where")
+            .arg(name)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 /// Set up Telegram webhook secret for signature validation.
@@ -669,9 +856,10 @@ async fn setup_telegram_webhook_secret(
     tunnel: &TunnelSettings,
 ) -> Result<Option<String>, ChannelSetupError> {
     if tunnel.public_url.is_none() {
-        print_info("");
-        print_info("No tunnel configured. Telegram will use polling mode (30s+ delay).");
-        print_info("Run setup again to configure a tunnel for instant delivery.");
+        println!();
+        print_info("No tunnel configured — Telegram will use polling mode (~5s message delay).");
+        print_info("This works perfectly for most users. To switch to instant webhook delivery,");
+        print_info("configure a tunnel (Tailscale Funnel, ngrok, or Cloudflare) in setup.");
         return Ok(None);
     }
 

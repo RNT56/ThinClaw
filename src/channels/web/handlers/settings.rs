@@ -12,6 +12,24 @@ use crate::channels::web::types::*;
 
 const REDACTED_SETTING_VALUE: &str = "[REDACTED]";
 
+fn parse_timezone_setting_value(value: &serde_json::Value) -> Result<Option<String>, StatusCode> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            if crate::timezone::parse_timezone(trimmed).is_some() {
+                Ok(Some(trimmed.to_string()))
+            } else {
+                Err(StatusCode::BAD_REQUEST)
+            }
+        }
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
 fn is_sensitive_settings_key(key: &str) -> bool {
     matches!(
         key,
@@ -41,6 +59,65 @@ fn sanitize_imported_settings(
         .into_iter()
         .filter(|(key, _)| !is_sensitive_settings_key(key))
         .collect()
+}
+
+fn normalize_telegram_transport_mode(value: Option<&str>) -> String {
+    match value
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "auto" | "automatic" | "webhook" => "auto".to_string(),
+        "polling" | "poll" | "off" | "disabled" => "polling".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+fn telegram_transport_runtime_updates(
+    diagnostics: Option<&serde_json::Value>,
+    transport_mode: &str,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    let host_tunnel_url = diagnostics
+        .and_then(|diag| diag.get("host_tunnel_url"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let host_webhook_capable = diagnostics
+        .and_then(|diag| diag.get("host_webhook_capable"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let host_transport_reason = diagnostics
+        .and_then(|diag| diag.get("host_transport_reason"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    let tunnel_url_value = if transport_mode == "auto" && host_webhook_capable {
+        host_tunnel_url
+            .clone()
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null)
+    } else {
+        serde_json::Value::Null
+    };
+    let transport_reason_value = match transport_mode {
+        "polling" => serde_json::Value::String("operator forced polling".to_string()),
+        _ => host_transport_reason
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    };
+
+    std::collections::HashMap::from([
+        (
+            "transport_preference".to_string(),
+            serde_json::Value::String(transport_mode.to_string()),
+        ),
+        ("tunnel_url".to_string(), tunnel_url_value),
+        ("transport_reason".to_string(), transport_reason_value),
+    ])
 }
 
 pub(crate) async fn settings_list_handler(
@@ -109,6 +186,22 @@ pub(crate) async fn settings_set_handler(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    if key == "user_timezone" {
+        let timezone = parse_timezone_setting_value(&body.value)?;
+        crate::timezone::apply_user_timezone_change(
+            store,
+            state.workspace.as_deref(),
+            &state.user_id,
+            timezone.as_deref(),
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to apply timezone update: {}", err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
     let cc_update: Option<(Option<String>, Option<u32>)> = match key.as_str() {
         "claude_code_model" => body.value.as_str().map(|v| (Some(v.to_string()), None)),
         "claude_code_max_turns" => body.value.as_u64().map(|n| (None, Some(n as u32))),
@@ -142,6 +235,22 @@ pub(crate) async fn settings_set_handler(
         key.as_str(),
         "telegram_subagent_session_mode" | "channels.telegram_subagent_session_mode"
     );
+    let telegram_session_mode_update = telegram_session_mode_restart.then(|| {
+        serde_json::Value::String(
+            body.value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("temp_topic")
+                .to_string(),
+        )
+    });
+    let telegram_transport_mode_update = match key.as_str() {
+        "telegram_transport_mode" | "channels.telegram_transport_mode" => {
+            Some(normalize_telegram_transport_mode(body.value.as_str()))
+        }
+        _ => None,
+    };
 
     store
         .set_setting(&state.user_id, &key, &body.value)
@@ -172,10 +281,50 @@ pub(crate) async fn settings_set_handler(
 
     if let (Some(cm), true) = (state.channel_manager.clone(), telegram_session_mode_restart) {
         tokio::spawn(async move {
+            if let Some(mode) = telegram_session_mode_update {
+                let updates =
+                    std::collections::HashMap::from([("subagent_session_mode".to_string(), mode)]);
+                if let Err(error) = cm.update_channel_runtime_config("telegram", updates).await {
+                    tracing::warn!(
+                        error = %error,
+                        "Failed to stage Telegram subagent session mode update before restart"
+                    );
+                }
+            }
             if let Err(error) = cm.restart_channel("telegram").await {
                 tracing::warn!(
                     error = %error,
                     "Failed to hot-restart Telegram channel after subagent session mode update"
+                );
+            }
+        });
+    }
+
+    if let (Some(cm), Some(transport_mode)) = (
+        state.channel_manager.clone(),
+        telegram_transport_mode_update,
+    ) {
+        tokio::spawn(async move {
+            let diagnostics = cm.channel_diagnostics("telegram").await;
+            let updates = telegram_transport_runtime_updates(diagnostics.as_ref(), &transport_mode);
+            if let Err(error) = cm.update_channel_runtime_config("telegram", updates).await {
+                tracing::warn!(
+                    error = %error,
+                    transport_mode = %transport_mode,
+                    "Failed to stage Telegram transport update before restart"
+                );
+            }
+            if let Err(error) = cm.reset_channel_connection_state("telegram").await {
+                tracing::warn!(
+                    error = %error,
+                    "Failed to clear Telegram runtime fallback state before transport restart"
+                );
+            }
+            if let Err(error) = cm.restart_channel("telegram").await {
+                tracing::warn!(
+                    error = %error,
+                    transport_mode = %transport_mode,
+                    "Failed to hot-restart Telegram channel after transport mode update"
                 );
             }
         });
@@ -208,6 +357,22 @@ pub(crate) async fn settings_delete_handler(
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    if key == "user_timezone" {
+        crate::timezone::apply_user_timezone_change(
+            store,
+            state.workspace.as_deref(),
+            &state.user_id,
+            None,
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to clear timezone setting: {}", err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
     store
         .delete_setting(&state.user_id, &key)
         .await
@@ -215,6 +380,58 @@ pub(crate) async fn settings_delete_handler(
             tracing::error!("Failed to delete setting '{}': {}", key, e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    if let Some(cm) = state.channel_manager.clone() {
+        match key.as_str() {
+            "telegram_transport_mode" | "channels.telegram_transport_mode" => {
+                tokio::spawn(async move {
+                    let diagnostics = cm.channel_diagnostics("telegram").await;
+                    let updates = telegram_transport_runtime_updates(diagnostics.as_ref(), "auto");
+                    if let Err(error) = cm.update_channel_runtime_config("telegram", updates).await
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            "Failed to restore Telegram auto transport before restart"
+                        );
+                    }
+                    if let Err(error) = cm.reset_channel_connection_state("telegram").await {
+                        tracing::warn!(
+                            error = %error,
+                            "Failed to clear Telegram runtime fallback state before restoring auto transport"
+                        );
+                    }
+                    if let Err(error) = cm.restart_channel("telegram").await {
+                        tracing::warn!(
+                            error = %error,
+                            "Failed to hot-restart Telegram channel after transport mode reset"
+                        );
+                    }
+                });
+            }
+            "telegram_subagent_session_mode" | "channels.telegram_subagent_session_mode" => {
+                tokio::spawn(async move {
+                    let updates = std::collections::HashMap::from([(
+                        "subagent_session_mode".to_string(),
+                        serde_json::Value::String("temp_topic".to_string()),
+                    )]);
+                    if let Err(error) = cm.update_channel_runtime_config("telegram", updates).await
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            "Failed to restore Telegram subagent session mode before restart"
+                        );
+                    }
+                    if let Err(error) = cm.restart_channel("telegram").await {
+                        tracing::warn!(
+                            error = %error,
+                            "Failed to hot-restart Telegram channel after subagent mode reset"
+                        );
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
 
     if key.starts_with("providers.")
         || matches!(
@@ -267,6 +484,10 @@ pub(crate) async fn settings_import_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let settings = sanitize_imported_settings(body.settings);
+    let imported_timezone = match settings.get("user_timezone") {
+        Some(value) => parse_timezone_setting_value(value)?,
+        None => None,
+    };
     store
         .set_all_settings(&state.user_id, &settings)
         .await
@@ -274,6 +495,20 @@ pub(crate) async fn settings_import_handler(
             tracing::error!("Failed to import settings: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    if settings.contains_key("user_timezone") {
+        crate::timezone::apply_user_timezone_change(
+            store,
+            state.workspace.as_deref(),
+            &state.user_id,
+            imported_timezone.as_deref(),
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to apply imported timezone setting: {}", err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
 
     reload_llm_runtime(state.as_ref()).await.map_err(|e| {
         tracing::error!("Runtime reload failed after settings import: {}", e);

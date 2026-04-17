@@ -9,7 +9,8 @@
 //! We use the `sqlite3` CLI instead of `rusqlite` to avoid SQLite
 //! linkage conflicts with libsql/sqlx that already exist in the project.
 
-use std::path::PathBuf;
+use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::Duration;
@@ -33,6 +34,9 @@ const MAX_MESSAGE_LENGTH: usize = 20_000;
 
 /// Maximum single attachment size we'll read from disk (20 MB).
 const MAX_IMESSAGE_ATTACHMENT_SIZE: u64 = 20 * 1024 * 1024;
+
+/// Maximum entries in the deduplication ring buffer.
+const DEDUP_RING_CAPACITY: usize = 1000;
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -228,6 +232,70 @@ impl IMessageChannel {
         Ok(rowid)
     }
 
+    /// Find the minimum ROWID that is newer than `max_age_secs` ago.
+    ///
+    /// chat.db stores `date` as nanoseconds since Apple's CoreData epoch
+    /// (2001-01-01 00:00:00 UTC). We compute the cutoff and find the
+    /// smallest ROWID above it, falling back to `latest_rowid` if no
+    /// messages are within the window (meaning nothing recent to process).
+    async fn get_age_floor_rowid(
+        db_path: &std::path::Path,
+        max_age_secs: u64,
+        latest_rowid: i64,
+    ) -> i64 {
+        // Apple CoreData epoch offset from Unix epoch (seconds).
+        const APPLE_EPOCH_OFFSET: i64 = 978_307_200;
+
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // chat.db stores nanoseconds since Apple epoch
+        let cutoff_ns = (now_unix - APPLE_EPOCH_OFFSET - max_age_secs as i64) * 1_000_000_000;
+
+        let query = format!(
+            "SELECT MIN(ROWID) FROM message WHERE date > {cutoff_ns};"
+        );
+
+        match tokio::process::Command::new("sqlite3")
+            .arg(db_path)
+            .arg(&query)
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                match stdout.trim().parse::<i64>() {
+                    Ok(floor) if floor > 0 => {
+                        // Start just before the first message in the window
+                        // so it gets picked up by the first poll.
+                        let effective = (floor - 1).max(0);
+                        tracing::debug!(
+                            cutoff_ns,
+                            floor_rowid = floor,
+                            effective_rowid = effective,
+                            "iMessage: age-based ROWID floor computed"
+                        );
+                        effective
+                    }
+                    _ => {
+                        // No messages in window — skip everything
+                        tracing::debug!(
+                            max_age_secs,
+                            "iMessage: no messages within age window, using latest ROWID"
+                        );
+                        latest_rowid
+                    }
+                }
+            }
+            _ => {
+                tracing::debug!("iMessage: age floor query failed, using latest ROWID");
+                latest_rowid
+            }
+        }
+    }
+
     /// Poll for new messages since the given ROWID using sqlite3 CLI.
     ///
     /// Enhanced query: joins chat_message_join to detect group chats
@@ -395,6 +463,108 @@ end tell"#
     fn is_email(s: &str) -> bool {
         s.contains('@') && s.contains('.')
     }
+
+    /// Attempt to send a file attachment via AppleScript.
+    ///
+    /// This is best-effort — `send file` is unreliable on modern macOS (14+).
+    /// Returns `Ok(true)` if sent, `Ok(false)` if the AppleScript command
+    /// failed (expected on some macOS versions), `Err` on hard failures.
+    async fn send_file_via_osascript(
+        recipient: &str,
+        file_path: &Path,
+    ) -> Result<bool, ChannelError> {
+        let posix_path = file_path.to_string_lossy();
+        let escaped_recipient = escape_applescript(recipient);
+        let script = format!(
+            r#"tell application "Messages"
+    set targetService to 1st account whose service type = iMessage
+    set targetBuddy to participant "{escaped_recipient}" of targetService
+    send file (POSIX file "{posix_path}") to targetBuddy
+end tell"#
+        );
+
+        let output = tokio::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: format!("osascript file send failed: {e}"),
+            })?;
+
+        if output.status.success() {
+            tracing::debug!(
+                file = %redact(&posix_path),
+                "iMessage: attachment sent via AppleScript"
+            );
+            Ok(true)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::debug!(
+                error = %stderr,
+                "iMessage: AppleScript file send not supported on this macOS version"
+            );
+            Ok(false)
+        }
+    }
+
+    /// Send outbound media attachments to a recipient.
+    ///
+    /// Writes each [`MediaContent`] to a temporary file and attempts to send
+    /// it via AppleScript. Failures are logged but do not abort the response
+    /// (best-effort delivery since `send file` is unreliable on macOS 14+).
+    async fn send_attachments(
+        recipient: &str,
+        attachments: &[crate::media::MediaContent],
+    ) {
+        for attachment in attachments {
+            let filename = attachment
+                .filename
+                .as_deref()
+                .unwrap_or("attachment");
+
+            // Write to a temp file so osascript can reference a POSIX path
+            let tmp_dir = std::env::temp_dir().join("thinclaw_imessage");
+            if std::fs::create_dir_all(&tmp_dir).is_err() {
+                tracing::warn!("iMessage: failed to create temp dir for attachment");
+                continue;
+            }
+            let tmp_path = tmp_dir.join(filename);
+            if let Err(e) = std::fs::write(&tmp_path, &attachment.data) {
+                tracing::warn!(
+                    error = %e,
+                    "iMessage: failed to write attachment to temp file"
+                );
+                continue;
+            }
+
+            match Self::send_file_via_osascript(recipient, &tmp_path).await {
+                Ok(true) => {
+                    tracing::info!(
+                        filename = %redact(filename),
+                        "iMessage: attachment sent successfully"
+                    );
+                }
+                Ok(false) => {
+                    tracing::debug!(
+                        filename = %redact(filename),
+                        "iMessage: AppleScript file send not supported — attachment skipped"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        filename = %redact(filename),
+                        "iMessage: failed to send attachment"
+                    );
+                }
+            }
+
+            // Clean up temp file (best-effort)
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+    }
 }
 
 #[async_trait]
@@ -406,12 +576,26 @@ impl Channel for IMessageChannel {
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(64);
 
-        // Initialize to current latest ROWID so we don't replay history
-        let initial_rowid = Self::get_latest_rowid(&self.config.db_path).await?;
+        // Initialize to current latest ROWID so we don't replay history.
+        // Then apply max_message_age_secs: find the minimum ROWID that falls
+        // within the age window so we skip truly stale messages on startup.
+        let latest_rowid = Self::get_latest_rowid(&self.config.db_path).await?;
+        let initial_rowid = if self.config.max_message_age_secs > 0 {
+            Self::get_age_floor_rowid(
+                &self.config.db_path,
+                self.config.max_message_age_secs,
+                latest_rowid,
+            )
+            .await
+        } else {
+            latest_rowid
+        };
         self.last_rowid.store(initial_rowid, Ordering::Relaxed);
         tracing::info!(
-            "iMessage channel started, polling from ROWID {}",
-            initial_rowid
+            latest_rowid,
+            effective_rowid = initial_rowid,
+            max_age_secs = self.config.max_message_age_secs,
+            "iMessage channel started, polling from ROWID"
         );
 
         let db_path = self.config.db_path.clone();
@@ -422,10 +606,12 @@ impl Channel for IMessageChannel {
 
         // Spawn polling task
         tokio::spawn(async move {
-            // Deduplication set: tracks ROWIDs seen in this session to
+            // Bounded dedup ring: tracks ROWIDs seen in this session to
             // handle sqlite3 returning the same message if ROWID
             // boundaries shift (e.g., deleted messages).
-            let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
+            // Uses a VecDeque + HashSet combo capped at DEDUP_RING_CAPACITY.
+            let mut seen_set: HashSet<i64> = HashSet::new();
+            let mut seen_ring: VecDeque<i64> = VecDeque::new();
 
             loop {
                 if shutdown.load(Ordering::Relaxed) {
@@ -443,17 +629,19 @@ impl Channel for IMessageChannel {
                                 continue;
                             }
 
-                            // Deduplication
-                            if seen.contains(&msg.rowid) {
+                            // Deduplication via bounded ring buffer
+                            if seen_set.contains(&msg.rowid) {
                                 last_rowid.store(msg.rowid, Ordering::Relaxed);
                                 continue;
                             }
-                            seen.insert(msg.rowid);
+                            seen_set.insert(msg.rowid);
+                            seen_ring.push_back(msg.rowid);
 
-                            // Evict old entries from dedup set (keep last 500)
-                            if seen.len() > 500 {
-                                let min_rowid = *seen.iter().min().unwrap_or(&0);
-                                seen.remove(&min_rowid);
+                            // Evict oldest entry when ring is full
+                            while seen_ring.len() > DEDUP_RING_CAPACITY {
+                                if let Some(old) = seen_ring.pop_front() {
+                                    seen_set.remove(&old);
+                                }
                             }
 
                             // Check allow-list
@@ -538,6 +726,11 @@ impl Channel for IMessageChannel {
             .and_then(|v| v.as_str())
             .unwrap_or(&msg.user_id);
 
+        // Send outbound media attachments (best-effort)
+        if !response.attachments.is_empty() {
+            Self::send_attachments(recipient, &response.attachments).await;
+        }
+
         Self::send_via_osascript(recipient, &response.content).await
     }
 
@@ -573,6 +766,12 @@ impl Channel for IMessageChannel {
             );
             return Ok(());
         }
+
+        // Send outbound media attachments (best-effort)
+        if !response.attachments.is_empty() {
+            Self::send_attachments(user_id, &response.attachments).await;
+        }
+
         Self::send_via_osascript(user_id, &response.content).await
     }
 
@@ -584,6 +783,11 @@ impl Channel for IMessageChannel {
                 name: NAME.to_string(),
             })
         }
+    }
+
+    async fn diagnostics(&self) -> Option<serde_json::Value> {
+        let diag = Self::diagnose(&self.config).await;
+        serde_json::to_value(&diag).ok()
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
@@ -734,6 +938,17 @@ fn split_message(text: &str) -> Vec<String> {
     chunks
 }
 
+/// Redact phone numbers and email addresses from log output.
+fn redact(text: &str) -> String {
+    // Phone: 7-15 digits, optional leading +
+    let phone_re = regex::Regex::new(r"\+?\d{7,15}")
+        .unwrap_or_else(|_| regex::Regex::new(r"NEVER_MATCH").unwrap());
+    let email_re = regex::Regex::new(r"[\w.+-]+@[\w-]+\.[\w.]+")
+        .unwrap_or_else(|_| regex::Regex::new(r"NEVER_MATCH").unwrap());
+    let s = phone_re.replace_all(text, "[REDACTED]");
+    email_re.replace_all(&s, "[REDACTED]").to_string()
+}
+
 /// Escape text for safe inclusion in AppleScript strings.
 fn escape_applescript(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
@@ -809,6 +1024,14 @@ mod tests {
     }
 
     #[test]
+    fn test_split_message_exact_boundary() {
+        let text = "x".repeat(MAX_MESSAGE_LENGTH);
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), MAX_MESSAGE_LENGTH);
+    }
+
+    #[test]
     fn test_split_message_empty() {
         let chunks = split_message("");
         assert_eq!(chunks, vec![""]);
@@ -822,6 +1045,38 @@ mod tests {
         let chunks = split_message(&text);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].len(), MAX_MESSAGE_LENGTH - 5);
+    }
+
+    #[test]
+    fn test_split_message_unicode_boundary() {
+        let mut text = "a".repeat(MAX_MESSAGE_LENGTH - 1);
+        text.push('🙂');
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "a".repeat(MAX_MESSAGE_LENGTH - 1));
+        assert_eq!(chunks[1], "🙂");
+    }
+
+    #[test]
+    fn test_conversation_key_helpers() {
+        assert_eq!(IMessageChannel::conversation_kind(false), "direct");
+        assert_eq!(IMessageChannel::conversation_kind(true), "group");
+        assert_eq!(
+            IMessageChannel::conversation_scope_id("chat-1", false),
+            "imessage:direct:chat-1"
+        );
+        assert_eq!(
+            IMessageChannel::conversation_scope_id("chat-2", true),
+            "imessage:group:chat-2"
+        );
+        assert_eq!(
+            IMessageChannel::external_conversation_key("chat-3", false),
+            "imessage://direct/chat-3"
+        );
+        assert_eq!(
+            IMessageChannel::external_conversation_key("chat-4", true),
+            "imessage://group/chat-4"
+        );
     }
 
     // ── escape tests ───────────────────────────────────────────────
@@ -887,5 +1142,17 @@ mod tests {
         let json = serde_json::to_string(&diag).unwrap();
         assert!(json.contains("\"db_exists\":true"));
         assert!(json.contains("12345"));
+    }
+
+    #[test]
+    fn test_redact_replaces_phone_and_email() {
+        assert_eq!(
+            redact("Reach me at +1234567890 or user@example.com"),
+            "Reach me at [REDACTED] or [REDACTED]"
+        );
+        assert_eq!(
+            redact("No sensitive data here"),
+            "No sensitive data here"
+        );
     }
 }

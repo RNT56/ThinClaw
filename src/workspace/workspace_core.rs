@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 #[cfg(feature = "postgres")]
 use deadpool_postgres::Pool;
 use uuid::Uuid;
@@ -137,6 +137,38 @@ fn extract_markdown_fields(content: &str) -> Vec<String> {
         }
     }
     fields
+}
+
+fn upsert_timezone_line(content: &str, timezone: Option<&str>) -> String {
+    let replacement = match timezone {
+        Some(value) => format!("- **Timezone:** {}", value),
+        None => "- **Timezone:**".to_string(),
+    };
+    let mut replaced = false;
+    let mut lines = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("- **Timezone:**") || trimmed.starts_with("- **Timezone**:") {
+            lines.push(replacement.clone());
+            replaced = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    if !replaced && timezone.is_some() {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(replacement);
+    }
+
+    let mut updated = lines.join("\n");
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated
 }
 
 fn summarize_profile_json(content: &str) -> Option<String> {
@@ -405,6 +437,21 @@ impl Workspace {
         self.agent_id
     }
 
+    /// Resolve the workspace's effective timezone.
+    pub fn effective_timezone(&self) -> chrono_tz::Tz {
+        crate::timezone::resolve_effective_timezone(Some(&self.user_id), None)
+    }
+
+    /// Get today's local date for this workspace.
+    pub fn local_today(&self) -> NaiveDate {
+        crate::timezone::today_for_user(Some(&self.user_id), None)
+    }
+
+    /// Get the current local time for this workspace.
+    pub fn local_now(&self) -> chrono::DateTime<chrono_tz::Tz> {
+        crate::timezone::now_for_user(Some(&self.user_id), None)
+    }
+
     /// Clone this workspace's backend/embeddings while changing the scope.
     pub fn scoped_clone(&self, user_id: impl Into<String>, agent_id: Option<Uuid>) -> Self {
         Self {
@@ -615,7 +662,7 @@ impl Workspace {
     ///
     /// Daily logs are append-only and keyed by date.
     pub async fn today_log(&self) -> Result<MemoryDocument, WorkspaceError> {
-        let today = Utc::now().date_naive();
+        let today = self.local_today();
         self.daily_log(today).await
     }
 
@@ -671,9 +718,10 @@ impl Workspace {
     ///
     /// Daily logs are raw, append-only notes for the current day.
     pub async fn append_daily_log(&self, entry: &str) -> Result<(), WorkspaceError> {
-        let today = Utc::now().date_naive();
+        let now = self.local_now();
+        let today = now.date_naive();
         let path = format!("daily/{}.md", today.format("%Y-%m-%d"));
-        let timestamp = Utc::now().format("%H:%M:%S");
+        let timestamp = now.format("%H:%M:%S");
         let timestamped_entry = format!("[{}] {}", timestamp, entry);
         self.append(&path, &timestamped_entry).await
     }
@@ -1025,7 +1073,7 @@ impl Workspace {
         }
 
         // Today's daily log
-        let today = Utc::now().date_naive();
+        let today = self.local_today();
         if let Ok(doc) = self.daily_log(today).await
             && !doc.content.is_empty()
         {
@@ -1281,43 +1329,44 @@ impl Workspace {
     /// timezone name (e.g. "Europe/Berlin"). Returns `None` if the field
     /// is empty, missing, or contains an invalid timezone.
     pub async fn extract_user_timezone(&self) -> Option<String> {
-        let doc = self.read(paths::USER).await.ok()?;
-        for line in doc.content.lines() {
-            let trimmed = line.trim();
-            // Match "- **Timezone:** <value>" or "- **Timezone**: <value>"
-            if let Some(rest) = trimmed
-                .strip_prefix("- **Timezone:**")
-                .or_else(|| trimmed.strip_prefix("- **Timezone**:"))
-            {
-                let value = rest.trim();
-                if !value.is_empty()
-                    && !value.starts_with('_')
-                    && crate::timezone::parse_timezone(value).is_some()
-                {
-                    return Some(value.to_string());
-                }
-            }
-        }
-        None
+        self.extract_user_timezone_from_path(paths::USER).await
     }
 
-    /// Pre-populate the `**Timezone:**` field in USER.md with the given value.
-    ///
-    /// Only updates if the field is currently empty (i.e. the seed template
-    /// placeholder). Does not overwrite user-provided values.
-    pub async fn inject_user_timezone(&self, timezone: &str) -> Result<(), WorkspaceError> {
-        let doc = match self.read(paths::USER).await {
-            Ok(d) => d,
-            Err(_) => return Ok(()), // USER.md doesn't exist yet — seeder will create it
+    /// Extract the timezone value from any USER.md-style document path.
+    pub async fn extract_user_timezone_from_path(&self, path: &str) -> Option<String> {
+        let doc = self.read(path).await.ok()?;
+        crate::timezone::extract_markdown_timezone(&doc.content)
+    }
+
+    async fn set_timezone_on_path(
+        &self,
+        path: &str,
+        timezone: Option<&str>,
+        allow_missing: bool,
+    ) -> Result<(), WorkspaceError> {
+        let doc = match self.read(path).await {
+            Ok(doc) => doc,
+            Err(WorkspaceError::DocumentNotFound { .. }) if allow_missing => return Ok(()),
+            Err(err) => return Err(err),
         };
 
-        // Only inject if the field is empty (template placeholder)
-        if doc.content.contains("- **Timezone:**\n") || doc.content.ends_with("- **Timezone:**") {
-            let updated = doc
-                .content
-                .replace("- **Timezone:**", &format!("- **Timezone:** {}", timezone));
-            self.write(paths::USER, &updated).await?;
-            tracing::info!("Pre-populated USER.md timezone with '{}'", timezone);
+        let updated = upsert_timezone_line(&doc.content, timezone);
+        if updated != doc.content {
+            self.write(path, &updated).await?;
+        }
+        Ok(())
+    }
+
+    /// Sync the effective timezone into the shared USER.md and the owner's
+    /// actor-private USER.md when it exists.
+    pub async fn sync_user_timezone(&self, timezone: Option<&str>) -> Result<(), WorkspaceError> {
+        self.set_timezone_on_path(paths::USER, timezone, true)
+            .await?;
+
+        let owner_actor_path = paths::actor_user(&self.user_id);
+        if owner_actor_path != paths::USER {
+            self.set_timezone_on_path(&owner_actor_path, timezone, true)
+                .await?;
         }
         Ok(())
     }

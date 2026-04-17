@@ -16,8 +16,8 @@ use uuid::Uuid;
 
 use crate::agent::outcomes;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, next_cron_fire,
-    normalize_cron_expr,
+    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, canonicalize_schedule_expr,
+    next_schedule_fire_for_user,
 };
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
@@ -45,11 +45,12 @@ impl Tool for RoutineCreateTool {
 
     fn description(&self) -> &str {
         "Create a new routine (scheduled or event-driven task). \
-         Supports cron schedules, event pattern matching, webhooks, and manual triggers. \
+         Supports cron schedules, interval schedules like 'every 2h', event pattern matching, webhooks, and manual triggers. \
          Use this when the user wants something to happen periodically or reactively. \
          CRON FORMAT: Uses 7 fields — sec min hour dom month dow year. \
          Standard 5-field expressions (min hour dom month dow) are automatically \
-         expanded by prepending '0' (sec) and appending '*' (any year)."
+         expanded by prepending '0' (sec) and appending '*' (any year). \
+         LARGE INTERVALS: If the user means a fixed interval, prefer forms like 'every 90m', '2 hours', or '12800s'."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -71,7 +72,7 @@ impl Tool for RoutineCreateTool {
                 },
                 "schedule": {
                     "type": "string",
-                    "description": "Cron schedule expression. IMPORTANT: uses 7-field format: 'sec min hour dom month dow year'. Standard 5-field Unix cron is auto-converted. Examples: '0 9 * * MON-FRI *' = weekdays 9am; '0 0 9 * * SUN *' = every Sunday at 9am; '0 30 14 1 * * *' = 1st of month 14:30; '0 0 */2 * * * *' = every 2 hours; '0 0 10 * * MON *' = Mondays 10am. Alternatively pass 5-field standard cron like '30 9 * * MON-FRI' and it will be auto-expanded."
+                    "description": "Schedule expression. Supports standard cron plus fixed intervals like 'every 2h', '90 minutes', or '12800s'. IMPORTANT: cron uses 7 fields: 'sec min hour dom month dow year'. Standard 5-field Unix cron is auto-converted. Examples: '0 9 * * MON-FRI *' = weekdays 9am; '0 0 9 * * SUN *' = every Sunday at 9am; '0 30 14 1 * * *' = 1st of month 14:30; '0 0 */2 * * * *' = every 2 hours; 'every 90m' = every 90 minutes."
                 },
                 "event_pattern": {
                     "type": "string",
@@ -134,16 +135,14 @@ impl Tool for RoutineCreateTool {
                                 "cron trigger requires 'schedule'".to_string(),
                             )
                         })?;
-                // Normalize 5-field or 6-field expressions to the 7-field format
-                // required by the `cron` crate (sec min hour dom month dow year).
-                let schedule = normalize_cron_expr(raw_schedule);
-                // Validate the (possibly normalized) expression
-                next_cron_fire(&schedule).map_err(|e| {
+                let schedule = canonicalize_schedule_expr(raw_schedule).map_err(|e| {
                     ToolError::InvalidParameters(format!(
-                        "invalid cron schedule '{}' (normalized from '{}'): {}",
-                        schedule, raw_schedule, e
+                        "invalid schedule '{}': {}",
+                        raw_schedule, e
                     ))
                 })?;
+                next_schedule_fire_for_user(&schedule, &ctx.user_id, None)
+                    .map_err(|e| ToolError::InvalidParameters(format!("invalid schedule: {e}")))?;
                 Trigger::Cron { schedule }
             }
             "event" => {
@@ -234,7 +233,7 @@ impl Tool for RoutineCreateTool {
 
         // Compute next fire time for cron
         let next_fire = if let Trigger::Cron { ref schedule } = trigger {
-            next_cron_fire(schedule).unwrap_or(None)
+            next_schedule_fire_for_user(schedule, &ctx.user_id, None).unwrap_or(None)
         } else {
             None
         };
@@ -406,7 +405,7 @@ impl Tool for RoutineUpdateTool {
                 },
                 "schedule": {
                     "type": "string",
-                    "description": "New cron schedule (for cron triggers)"
+                    "description": "New schedule (cron or fixed interval, for scheduled triggers)"
                 },
                 "description": {
                     "type": "string",
@@ -457,15 +456,16 @@ impl Tool for RoutineUpdateTool {
         }
 
         if let Some(raw_schedule) = params.get("schedule").and_then(|v| v.as_str()) {
-            // Normalize then validate
-            let schedule = normalize_cron_expr(raw_schedule);
-            next_cron_fire(&schedule)
-                .map_err(|e| ToolError::InvalidParameters(format!("invalid cron schedule: {e}")))?;
+            let schedule = canonicalize_schedule_expr(raw_schedule)
+                .map_err(|e| ToolError::InvalidParameters(format!("invalid schedule: {e}")))?;
+            next_schedule_fire_for_user(&schedule, &ctx.user_id, None)
+                .map_err(|e| ToolError::InvalidParameters(format!("invalid schedule: {e}")))?;
 
             routine.trigger = Trigger::Cron {
                 schedule: schedule.clone(),
             };
-            routine.next_fire_at = next_cron_fire(&schedule).unwrap_or(None);
+            routine.next_fire_at =
+                next_schedule_fire_for_user(&schedule, &ctx.user_id, None).unwrap_or(None);
         }
 
         self.store

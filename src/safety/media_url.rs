@@ -79,26 +79,33 @@ impl MediaUrlConfig {
             return UrlValidation::Invalid(format!("Blocked scheme: {}", parsed.scheme()));
         }
 
-        // Check host
-        if let Some(host) = parsed.host_str() {
-            // Blocked hosts
-            for blocked in &self.blocked_hosts {
-                if host == blocked || host.ends_with(&format!(".{}", blocked)) {
-                    return UrlValidation::Invalid(format!("Blocked host: {}", host));
-                }
-            }
+        let host = match parsed.host() {
+            Some(host) => host,
+            None => return UrlValidation::Invalid("No host in URL".to_string()),
+        };
 
-            // IP address checks
-            if let Ok(ip) = host.parse::<IpAddr>() {
-                if !self.allow_loopback && ip.is_loopback() {
-                    return UrlValidation::Invalid("Loopback address not allowed".to_string());
-                }
-                if !self.allow_private_ips && is_private_ip(&ip) {
-                    return UrlValidation::Invalid("Private IP address not allowed".to_string());
-                }
+        let host_display = host.to_string();
+
+        // Blocked hosts
+        for blocked in &self.blocked_hosts {
+            if host_display == *blocked || host_display.ends_with(&format!(".{}", blocked)) {
+                return UrlValidation::Invalid(format!("Blocked host: {}", host_display));
             }
-        } else {
-            return UrlValidation::Invalid("No host in URL".to_string());
+        }
+
+        // IP address checks
+        let ip = match host {
+            url::Host::Ipv4(ip) => Some(IpAddr::V4(ip)),
+            url::Host::Ipv6(ip) => Some(IpAddr::V6(ip)),
+            url::Host::Domain(_) => None,
+        };
+        if let Some(ip) = ip {
+            if !self.allow_loopback && ip.is_loopback() {
+                return UrlValidation::Invalid("Loopback address not allowed".to_string());
+            }
+            if !self.allow_private_ips && is_private_ip(&ip) {
+                return UrlValidation::Invalid("Private IP address not allowed".to_string());
+            }
         }
 
         UrlValidation::Valid

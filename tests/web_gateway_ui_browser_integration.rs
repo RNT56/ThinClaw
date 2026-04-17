@@ -1,8 +1,8 @@
 mod db_contract {
-    #[path = "../db_contract/support.rs"]
-    pub mod support;
     #[path = "../db_contract/fixtures.rs"]
     pub mod fixtures;
+    #[path = "../db_contract/support.rs"]
+    pub mod support;
 }
 
 use std::net::SocketAddr;
@@ -338,7 +338,9 @@ async fn browser_harness_loads_learning_and_outcome_backed_research_flow() {
         .expect("opportunity summary should be a string")
         .to_string();
     assert!(
-        opportunity_summary.to_ascii_lowercase().contains("negative outcome"),
+        opportunity_summary
+            .to_ascii_lowercase()
+            .contains("negative outcome"),
         "expected outcome-backed research card, got: {opportunity_summary}"
     );
 

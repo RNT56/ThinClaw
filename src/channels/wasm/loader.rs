@@ -33,6 +33,10 @@ impl WasmChannelLoader {
         }
     }
 
+    pub async fn invalidate(&self, name: &str) {
+        self.runtime.remove(name).await;
+    }
+
     /// Load a single WASM channel from a file pair.
     ///
     /// Expects:

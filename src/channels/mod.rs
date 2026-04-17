@@ -44,6 +44,7 @@
 pub mod ack_reaction;
 #[cfg(target_os = "macos")]
 mod apple_mail;
+mod bluebubbles;
 pub mod canvas_gateway;
 mod channel;
 mod discord;
@@ -69,6 +70,7 @@ mod webhook_server;
 
 #[cfg(target_os = "macos")]
 pub use apple_mail::{AppleMailChannel, AppleMailConfig, AppleMailDiagnostic, ensure_app_running};
+pub use bluebubbles::{BlueBubblesChannel, BlueBubblesConfig, BlueBubblesDiagnostic};
 pub use channel::{
     Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
     StreamMode,

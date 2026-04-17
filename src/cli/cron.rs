@@ -6,7 +6,7 @@
 //! - `cron remove` — delete a routine by UUID or name
 //! - `cron trigger` — manually trigger a routine
 //! - `cron runs` — show recent runs for a routine
-//! - `cron lint` — validate a cron expression and show next fire times
+//! - `cron lint` — validate a schedule expression and show next fire times
 
 use std::sync::Arc;
 
@@ -33,7 +33,7 @@ pub enum CronCommand {
         /// Routine name (must be unique per user)
         name: String,
 
-        /// Cron schedule (e.g. "0 9 * * MON-FRI" or "0 */2 * * *")
+        /// Schedule (e.g. "0 9 * * MON-FRI" or "every 2h")
         #[arg(short, long)]
         schedule: String,
 
@@ -55,7 +55,7 @@ pub enum CronCommand {
         /// Routine UUID or name
         id_or_name: String,
 
-        /// New cron schedule
+        /// New schedule
         #[arg(short, long)]
         schedule: Option<String>,
 
@@ -118,9 +118,9 @@ pub enum CronCommand {
         actor: String,
     },
 
-    /// Validate a cron expression and show next fire times
+    /// Validate a schedule expression and show next fire times
     Lint {
-        /// Cron expression to validate (e.g. "0 9 * * MON-FRI")
+        /// Schedule expression to validate (e.g. "0 9 * * MON-FRI" or "every 90m")
         expression: String,
 
         /// Number of upcoming fire times to show (default: 5)
@@ -247,7 +247,7 @@ async fn list_routines(
         println!(
             "{}",
             branding.muted(
-                "Create one with: thinclaw cron add <name> --schedule '<cron>' --prompt '<prompt>'"
+                "Create one with: thinclaw cron add <name> --schedule '<schedule>' --prompt '<prompt>'"
             )
         );
         return Ok(());
@@ -351,12 +351,10 @@ async fn add_routine(
     description: Option<String>,
 ) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
-    // Auto-normalize 5/6-field to 7-field
-    let schedule = crate::agent::routine::normalize_cron_expr(&schedule);
-    crate::agent::routine::next_cron_fire(&schedule)
-        .map_err(|e| anyhow::anyhow!("Invalid cron schedule: {}", e))?;
+    let schedule = crate::agent::routine::canonicalize_schedule_expr(&schedule)
+        .map_err(|e| anyhow::anyhow!("Invalid schedule: {}", e))?;
 
-    let next_fire = crate::agent::routine::next_cron_fire(&schedule)?;
+    let next_fire = crate::agent::routine::next_schedule_fire(&schedule)?;
 
     let routine = crate::agent::routine::Routine {
         id: Uuid::new_v4(),
@@ -418,15 +416,13 @@ async fn edit_routine(
     let mut changes = Vec::new();
 
     if let Some(new_schedule) = schedule {
-        // Auto-normalize 5/6-field to 7-field, then validate.
-        let normalized = crate::agent::routine::normalize_cron_expr(&new_schedule);
-        crate::agent::routine::next_cron_fire(&normalized)
-            .map_err(|e| anyhow::anyhow!("Invalid cron schedule: {}", e))?;
+        let normalized = crate::agent::routine::canonicalize_schedule_expr(&new_schedule)
+            .map_err(|e| anyhow::anyhow!("Invalid schedule: {}", e))?;
 
         routine.trigger = crate::agent::routine::Trigger::Cron {
             schedule: normalized.clone(),
         };
-        routine.next_fire_at = crate::agent::routine::next_cron_fire(&normalized)?;
+        routine.next_fire_at = crate::agent::routine::next_schedule_fire(&normalized)?;
         changes.push(format!("schedule → {}", normalized));
     }
 
@@ -666,16 +662,27 @@ async fn show_runs(
     Ok(())
 }
 
-/// Validate a cron expression and show the next N fire times.
+/// Validate a schedule expression and show the next N fire times.
 ///
 /// This runs offline — no DB connection needed.
 fn run_lint(expression: &str, count: usize) -> anyhow::Result<()> {
-    use std::str::FromStr;
     let branding = TerminalBranding::current();
 
-    // Auto-normalize 5/6-field to 7-field so lint works with standard cron
-    let normalized = crate::agent::routine::normalize_cron_expr(expression);
-    if normalized != expression {
+    let normalized = match crate::agent::routine::canonicalize_schedule_expr(expression) {
+        Ok(schedule) => schedule,
+        Err(e) => {
+            println!(
+                "{}",
+                branding.bad(format!(
+                    "Invalid schedule expression: \"{}\"",
+                    expression.trim()
+                ))
+            );
+            println!("{}", branding.key_value("Error", e));
+            return Err(anyhow::anyhow!("Invalid schedule expression"));
+        }
+    };
+    if normalized != expression.trim() {
         println!(
             "{}",
             branding.muted(format!(
@@ -685,28 +692,28 @@ fn run_lint(expression: &str, count: usize) -> anyhow::Result<()> {
         );
     }
 
-    // Try to parse the cron expression
-    let schedule = match cron::Schedule::from_str(&normalized) {
-        Ok(s) => s,
-        Err(e) => {
-            println!(
-                "{}",
-                branding.bad(format!("Invalid cron expression: \"{}\"", normalized))
-            );
-            println!("{}", branding.key_value("Error", e));
-            return Err(anyhow::anyhow!("Invalid cron expression"));
-        }
-    };
-
     println!(
         "{}",
-        branding.good(format!("Valid cron expression: \"{}\"", normalized))
+        branding.good(format!("Valid schedule expression: \"{}\"", normalized))
     );
     println!();
 
     // Show next N fire times
     let count = count.clamp(1, 50);
-    let upcoming: Vec<_> = schedule.upcoming(chrono::Utc).take(count).collect();
+    let mut upcoming = Vec::with_capacity(count);
+    let mut cursor = chrono::Utc::now();
+    for _ in 0..count {
+        let Some(next) = crate::agent::routine::next_schedule_fire_after_in_tz(
+            &normalized,
+            chrono_tz::Tz::UTC,
+            cursor,
+        )?
+        else {
+            break;
+        };
+        cursor = next;
+        upcoming.push(next);
+    }
 
     if upcoming.is_empty() {
         println!(
@@ -826,6 +833,12 @@ mod tests {
     fn test_run_lint_weekday_schedule() {
         // Every weekday at 9 AM UTC
         let result = run_lint("0 0 9 * * MON-FRI *", 5);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_lint_interval_schedule() {
+        let result = run_lint("0 */213 * * * * *", 5);
         assert!(result.is_ok());
     }
 

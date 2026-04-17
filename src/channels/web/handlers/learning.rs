@@ -415,7 +415,10 @@ mod tests {
     use crate::history::{OutcomeContract, OutcomeObservation};
     use chrono::{Duration, Utc};
 
-    fn test_gateway_state(user_id: &str, store: Option<Arc<dyn crate::db::Database>>) -> GatewayState {
+    fn test_gateway_state(
+        user_id: &str,
+        store: Option<Arc<dyn crate::db::Database>>,
+    ) -> GatewayState {
         GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: crate::channels::web::sse::SseManager::new(),
@@ -502,7 +505,11 @@ mod tests {
             .await
             .expect("set learning.enabled");
         store
-            .set_setting(user_id, "learning.outcomes.enabled", &serde_json::json!(true))
+            .set_setting(
+                user_id,
+                "learning.outcomes.enabled",
+                &serde_json::json!(true),
+            )
             .await
             .expect("set learning.outcomes.enabled");
         store

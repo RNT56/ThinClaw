@@ -552,11 +552,16 @@ impl Agent {
             }
 
             "debug" => {
-                // Debug toggle is handled client-side in the REPL.
-                // For non-REPL channels, just acknowledge.
-                Ok(SubmissionResult::ok_with_message(
-                    "Debug toggle is handled by your client.",
-                ))
+                // Toggle debug mode on the originating channel.
+                // For WASM channels (Telegram, Slack, etc.), this controls
+                // whether tool-level status events are forwarded as messages.
+                let channel_name = &message.channel;
+                let new_state = self.channels.toggle_debug_mode(channel_name).await;
+                let label = if new_state { "on" } else { "off" };
+                Ok(SubmissionResult::ok_with_message(format!(
+                    "Debug mode {label}. Tool call details will {}be shown.",
+                    if new_state { "" } else { "not " }
+                )))
             }
 
             "skills" => {

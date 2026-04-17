@@ -53,18 +53,15 @@ pub(crate) async fn routines_summary_handler(
         .filter(|r| r.consecutive_failures > 0)
         .count() as u64;
 
-    let today_start = chrono::Utc::now()
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .map(|dt| dt.and_utc());
-    let runs_today = if let Some(start) = today_start {
-        routines
-            .iter()
-            .filter(|r| r.last_run_at.is_some_and(|ts| ts >= start))
-            .count() as u64
-    } else {
-        0
-    };
+    let today_start = crate::timezone::local_day_start_utc(
+        Some(&state.user_id),
+        None,
+        crate::timezone::today_for_user(Some(&state.user_id), None),
+    );
+    let runs_today = routines
+        .iter()
+        .filter(|r| r.last_run_at.is_some_and(|ts| ts >= today_start))
+        .count() as u64;
 
     Ok(Json(RoutineSummaryResponse {
         total,
@@ -477,9 +474,14 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 pub(crate) fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
     let (trigger_type, trigger_summary) = match &r.trigger {
-        crate::agent::routine::Trigger::Cron { schedule } => {
-            ("cron".to_string(), format!("cron: {}", schedule))
-        }
+        crate::agent::routine::Trigger::Cron { schedule } => (
+            "cron".to_string(),
+            if schedule.starts_with("every ") {
+                format!("schedule: {}", schedule)
+            } else {
+                format!("cron: {}", schedule)
+            },
+        ),
         crate::agent::routine::Trigger::Event {
             pattern, channel, ..
         } => {

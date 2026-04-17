@@ -227,6 +227,10 @@ pub async fn start_server(
             post(extensions_activate_handler),
         )
         .route(
+            "/api/extensions/{name}/reconnect",
+            post(extensions_reconnect_handler),
+        )
+        .route(
             "/api/extensions/{name}/remove",
             post(extensions_remove_handler),
         )
@@ -590,7 +594,8 @@ pub async fn start_server(
     *state.shutdown_tx.write().await = Some(shutdown_tx);
 
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app)
+        if let Err(e) =
+            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
                 tracing::info!("Web gateway shutting down");

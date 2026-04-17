@@ -599,18 +599,29 @@ pub trait RoutineStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<RoutineRun>, DatabaseError>;
     async fn count_running_routine_runs(&self, routine_id: Uuid) -> Result<i64, DatabaseError>;
+
+    /// Count ALL routine runs currently in `running` status across all routines.
+    ///
+    /// Used by the routine engine for global concurrency gating. This is the
+    /// single source of truth — replacing the previous fragile `AtomicUsize`
+    /// counter that drifted out of sync with DB state.
+    async fn count_all_running_routine_runs(&self) -> Result<i64, DatabaseError>;
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
         job_id: Uuid,
     ) -> Result<(), DatabaseError>;
 
-    /// Mark all RUNNING routine runs as failed.
+    /// Mark RUNNING routine runs older than 10 minutes as failed.
     ///
-    /// Called at startup to clean up orphaned runs from a previous process
-    /// that crashed or was killed before the worker could update the status.
-    /// Without this, routines with `max_concurrent = 1` would be permanently
-    /// blocked.
+    /// Used by the zombie reaper to clean up orphaned runs whose worker
+    /// crashed, hung, or was killed mid-execution. The 10-minute TTL
+    /// prevents the reaper from killing actively-executing worker jobs
+    /// that were dispatched recently.
+    ///
+    /// At startup, this is called to clean up runs from a previous process.
+    /// Runs started less than 10 minutes before a crash will be caught on
+    /// the next reaper cycle after the TTL window passes.
     async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError>;
 
     /// Delete all run records for a specific routine.

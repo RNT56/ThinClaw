@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use thinclaw::agent::outcomes::{self, OutcomeService};
 use thinclaw::agent::routine::RunStatus;
-use thinclaw::db::Database;
 use thinclaw::api::learning as learning_api;
+use thinclaw::db::Database;
 use thinclaw::history::ConversationKind;
 use thinclaw::safety::SafetyLayer;
 use uuid::Uuid;
@@ -476,7 +476,11 @@ async fn repeated_manual_review_reuses_existing_ledger_event() {
         .iter()
         .filter(|entry| entry.evaluator == "outcome_manual_review_v1")
         .collect::<Vec<_>>();
-    assert_eq!(manual_reviews.len(), 2, "each review should still be logged");
+    assert_eq!(
+        manual_reviews.len(),
+        2,
+        "each review should still be logged"
+    );
     assert!(
         manual_reviews
             .iter()

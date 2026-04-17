@@ -234,6 +234,78 @@ jobs:
       - name: Run schema divergence test
         run: cargo test --test schema_divergence --no-default-features --features "postgres libsql" -- --nocapture --test-threads=1
 
+  channel-crates:
+    name: "Channel Crate: ${{ matrix.name }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: telegram
+            manifest_path: channels-src/telegram/Cargo.toml
+          - name: slack
+            manifest_path: channels-src/slack/Cargo.toml
+          - name: discord
+            manifest_path: channels-src/discord/Cargo.toml
+          - name: whatsapp
+            manifest_path: channels-src/whatsapp/Cargo.toml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: channel-crate-${{ matrix.name }}
+      - name: Run channel crate tests
+        run: cargo test --manifest-path ${{ matrix.manifest_path }} -- --nocapture
+
+  tool-crates:
+    name: "Tool Crate: ${{ matrix.name }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: brave-search
+            manifest_path: tools-src/brave-search/Cargo.toml
+          - name: github
+            manifest_path: tools-src/github/Cargo.toml
+          - name: gmail
+            manifest_path: tools-src/gmail/Cargo.toml
+          - name: google-calendar
+            manifest_path: tools-src/google-calendar/Cargo.toml
+          - name: google-docs
+            manifest_path: tools-src/google-docs/Cargo.toml
+          - name: google-drive
+            manifest_path: tools-src/google-drive/Cargo.toml
+          - name: google-sheets
+            manifest_path: tools-src/google-sheets/Cargo.toml
+          - name: google-slides
+            manifest_path: tools-src/google-slides/Cargo.toml
+          - name: notion
+            manifest_path: tools-src/notion/Cargo.toml
+          - name: okta
+            manifest_path: tools-src/okta/Cargo.toml
+          - name: slack
+            manifest_path: tools-src/slack/Cargo.toml
+          - name: telegram
+            manifest_path: tools-src/telegram/Cargo.toml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: tool-crate-${{ matrix.name }}
+      - name: Run tool crate tests
+        run: cargo test --manifest-path ${{ matrix.manifest_path }} -- --nocapture
+
   tests:
     name: Run Tests
     runs-on: ubuntu-latest
@@ -283,5 +355,3 @@ jobs:
         with:
           file: codecov.json
           fail_ci_if_error: false
-      - name: Run Telegram Channel Tests
-        run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture

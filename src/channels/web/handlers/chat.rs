@@ -11,8 +11,8 @@ use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
 use crate::channels::web::identity_helpers::{
-    conversation_visible_to_actor, gateway_identity, get_or_create_gateway_assistant_conversation,
-    request_actor_id, request_user_id,
+    gateway_identity, get_or_create_gateway_assistant_conversation, request_actor_id,
+    request_user_id,
 };
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
@@ -446,15 +446,13 @@ pub(crate) async fn chat_threads_handler(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if let Ok(summaries) = store
-            .list_conversations_with_preview(&user_id, "gateway", 50)
+            .list_actor_conversations_for_recall(&user_id, &actor_id, false, 50)
             .await
         {
             let mut assistant_thread = None;
             let mut threads = Vec::new();
 
-            for s in summaries.iter().filter(|summary| {
-                conversation_visible_to_actor(summary.actor_id.as_deref(), &user_id, &actor_id)
-            }) {
+            for s in &summaries {
                 let info = ThreadInfo {
                     id: s.id,
                     state: "Idle".to_string(),
@@ -569,12 +567,19 @@ pub(crate) async fn chat_new_thread_handler(
             {
                 tracing::warn!("Failed to set conversation identity: {}", e);
             }
-            let metadata_val = serde_json::json!("thread");
-            if let Err(e) = store
-                .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
-                .await
-            {
-                tracing::warn!("Failed to set thread_type metadata: {}", e);
+            for (key, value) in [
+                ("thread_type", serde_json::json!("thread")),
+                ("direct_thread_role", serde_json::json!("side")),
+                ("origin_channel", serde_json::json!("gateway")),
+                ("last_active_channel", serde_json::json!("gateway")),
+                ("seen_channels", serde_json::json!(["gateway"])),
+            ] {
+                if let Err(e) = store
+                    .update_conversation_metadata_field(thread_id, key, &value)
+                    .await
+                {
+                    tracing::warn!("Failed to set {} metadata: {}", key, e);
+                }
             }
         });
     }

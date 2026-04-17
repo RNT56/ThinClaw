@@ -144,6 +144,10 @@ impl SetupWizard {
             println!("    - Apple Mail: enabled");
         }
 
+        if self.settings.channels.bluebubbles_enabled {
+            println!("    - BlueBubbles (iMessage): enabled");
+        }
+
         for channel_name in &self.settings.channels.wasm_channels {
             let mode = if has_tunnel { "webhook" } else { "polling" };
             println!(

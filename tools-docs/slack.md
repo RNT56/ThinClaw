@@ -22,6 +22,8 @@ Slack uses a **Bot Token** from a Slack App installed to your workspace.
    | `chat:write` | Send messages |
    | `channels:read` | List public channels |
    | `channels:history` | Read channel message history |
+   | `groups:read` | Read private channels/groups the bot is in |
+   | `groups:history` | Read private channel/group message history |
    | `reactions:write` | Add emoji reactions |
    | `users:read` | Look up user profiles |
 
@@ -59,5 +61,5 @@ Slack uses a **Bot Token** from a Slack App installed to your workspace.
 
 ## Rate Limits
 
-- 30 requests/minute, 500 requests/hour (enforced by capabilities)
+- 50 requests/minute, 1000 requests/hour (enforced by capabilities)
 - Slack also enforces per-method rate limits (typically 1 request/second for posting)

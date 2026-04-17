@@ -191,6 +191,98 @@ $env:GATEWAY_AUTH_TOKEN = "replace-with-a-long-random-token"
 thinclaw run --no-onboard
 ```
 
+## Tunnels And Webhook Delivery
+
+Channels like Telegram, Slack, and Discord support two message delivery modes:
+
+| Mode | Latency | Requirements | When Used |
+|---|---|---|---|
+| **Polling** | ~5 seconds | None — works behind any NAT/firewall | Default when no tunnel is configured |
+| **Webhook** | < 200ms | Publicly reachable HTTPS URL | When a tunnel provides a public URL |
+
+Polling is reliable and zero-config. Webhook mode requires a tunnel because most home networks use NAT — external servers (e.g. Telegram's API) cannot reach your machine directly.
+
+### Supported Tunnel Providers
+
+| Provider | Prerequisites | Persistent URL | Config |
+|---|---|---|---|
+| **Tailscale Funnel** | Tailscale app + CLI installed, Funnel enabled in admin console | Yes | `TUNNEL_PROVIDER=tailscale`, `TUNNEL_TS_FUNNEL=true` |
+| **ngrok** | `ngrok` binary, auth token | Paid plan only | `TUNNEL_PROVIDER=ngrok`, `TUNNEL_NGROK_TOKEN=...` |
+| **Cloudflare Tunnel** | `cloudflared` binary, tunnel token | Yes | `TUNNEL_PROVIDER=cloudflare`, `TUNNEL_CF_TOKEN=...` |
+| **Custom** | Your own tunnel command | Depends | `TUNNEL_PROVIDER=custom`, `TUNNEL_CUSTOM_COMMAND=...` |
+| **Static URL** | You manage the tunnel yourself | Depends | `TUNNEL_URL=https://...` |
+
+### Tailscale Setup (Recommended)
+
+Tailscale Funnel is the recommended tunnel for most users: free, zero-config persistent hostname, and built-in HTTPS.
+
+**Important:** Tailscale offers two modes:
+
+- **Funnel (public)** — makes your machine reachable from the public internet. Required for webhooks.
+- **Serve (tailnet-only)** — only reachable from devices on your Tailscale network. Good for private Web UI access, but webhook channels will fall back to polling.
+
+Prerequisites:
+
+1. Install Tailscale: https://tailscale.com/download
+2. Install the Tailscale CLI:
+   - **macOS (App Store / standalone):** Click the Tailscale menu bar icon → settings → **Install CLI**. Do NOT run the GUI binary at `/Applications/Tailscale.app/Contents/MacOS/Tailscale` directly — it is not a CLI and will crash.
+   - **macOS (Homebrew):** `brew install tailscale`
+   - **Linux:** `curl -fsSL https://tailscale.com/install.sh | sh`
+3. Enable HTTPS in the Tailscale admin console: https://login.tailscale.com/admin/dns
+4. Enable Funnel in your ACL policy: https://login.tailscale.com/admin/acls/file — ensure `"attr": ["funnel"]` is present in `nodeAttrs`
+
+Config:
+
+```env
+TUNNEL_PROVIDER=tailscale
+TUNNEL_TS_FUNNEL=true
+# Optional: override auto-detected hostname
+# TUNNEL_TS_HOSTNAME=my-host.tail1234.ts.net
+```
+
+### ngrok Setup
+
+```env
+TUNNEL_PROVIDER=ngrok
+TUNNEL_NGROK_TOKEN=your-auth-token
+# Optional: custom domain (paid plan)
+# TUNNEL_NGROK_DOMAIN=my-agent.ngrok.app
+```
+
+Get your auth token from: https://dashboard.ngrok.com/get-started/your-authtoken
+
+Install: `brew install ngrok` (macOS), `snap install ngrok` (Linux), or https://ngrok.com/download
+
+### Cloudflare Tunnel Setup
+
+```env
+TUNNEL_PROVIDER=cloudflare
+TUNNEL_CF_TOKEN=your-tunnel-token
+```
+
+Get your tunnel token from: https://one.dash.cloudflare.com/ → Networks → Tunnels
+
+Install: `brew install cloudflare/cloudflare/cloudflared` (macOS) or https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+
+### No Tunnel (Polling Mode)
+
+If no tunnel is configured, webhook channels use polling mode automatically. No action needed. This is the safest default and works from any network.
+
+### Full Environment Variable Reference
+
+| Variable | Provider | Required | Description |
+|---|---|---|---|
+| `TUNNEL_PROVIDER` | All | Yes | `tailscale`, `ngrok`, `cloudflare`, `custom`, or `none` |
+| `TUNNEL_URL` | Static | No | Skip managed tunnel, use this URL directly |
+| `TUNNEL_TS_FUNNEL` | Tailscale | For webhooks | `true` for public Funnel, `false` for tailnet-only Serve |
+| `TUNNEL_TS_HOSTNAME` | Tailscale | No | Override auto-detected hostname |
+| `TUNNEL_NGROK_TOKEN` | ngrok | Yes | ngrok auth token |
+| `TUNNEL_NGROK_DOMAIN` | ngrok | No | Custom domain (paid plan) |
+| `TUNNEL_CF_TOKEN` | Cloudflare | Yes | Cloudflare Zero Trust tunnel token |
+| `TUNNEL_CUSTOM_COMMAND` | Custom | Yes | Shell command with `{host}`/`{port}` placeholders |
+| `TUNNEL_CUSTOM_HEALTH_URL` | Custom | No | HTTP endpoint for health checks |
+| `TUNNEL_CUSTOM_URL_PATTERN` | Custom | No | Substring to match in stdout for URL extraction |
+
 ## Scrappy Connection Model
 
 ThinClaw can run behind Scrappy in two shapes:
@@ -275,6 +367,30 @@ Check:
 - onboarding completed on the same Windows account that will run ThinClaw
 - the Windows OS secure store is available for local installs, or `SECRETS_MASTER_KEY` is set for CI/container flows
 - `thinclaw service status` reflects the Windows Service Control Manager state after install/start
+
+### Tailscale tunnel crashes with `BundleIdentifiers.swift` fatal error
+
+The binary at `/Applications/Tailscale.app/Contents/MacOS/Tailscale` is the GUI app, not the CLI tool. Running it directly from a terminal crashes with:
+
+```
+Fatal error: The current bundleIdentifier is unknown to the registry
+```
+
+Fix: install the Tailscale CLI through the Tailscale menubar app:
+
+1. Click the Tailscale icon in your menu bar
+2. Go to settings
+3. Click **Install CLI**
+
+Do NOT create manual symlinks to the GUI binary. The CLI must be installed through Tailscale's own mechanism.
+
+### Telegram webhook fails with "Failed to resolve host"
+
+This means Telegram's servers cannot reach your tunnel URL. Common causes:
+
+- **Tailscale Serve (not Funnel):** `.ts.net` hostnames are only resolvable within your tailnet. Set `TUNNEL_TS_FUNNEL=true` and enable Funnel in the admin console.
+- **No tunnel configured:** Without a tunnel, Telegram automatically falls back to polling. The error is logged but not fatal.
+- **Funnel not enabled in admin console:** Visit https://login.tailscale.com/admin/dns and enable HTTPS, then ensure your ACL policy includes `"attr": ["funnel"]`.
 
 ### Setup docs and deployment docs disagree
 

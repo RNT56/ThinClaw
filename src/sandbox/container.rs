@@ -507,13 +507,25 @@ impl ContainerRunner {
 /// 6. `$XDG_RUNTIME_DIR/docker.sock` (common rootless Docker socket on Linux)
 /// 7. `/run/user/$UID/docker.sock` (rootless Docker fallback on Linux)
 pub async fn connect_docker() -> Result<Docker> {
+    /// Per-probe timeout for Docker daemon pings during startup detection.
+    /// The bollard default is 120 seconds — far too long for a startup probe.
+    /// 5 seconds is generous for a local Unix-socket ping.
+    const PROBE_TIMEOUT: u64 = 5;
+
+    /// Timeout applied to the returned Docker client for actual runtime
+    /// operations (container create, image pull, exec).  Must be long enough
+    /// for heavy operations but short enough to surface real daemon problems.
+    const RUNTIME_TIMEOUT: u64 = 30;
+
     // First try bollard defaults (checks DOCKER_HOST env var, then /var/run/docker.sock).
     // This covers Linux, OrbStack (updates the /var/run symlink), and any user with
     // DOCKER_HOST set to their runtime's socket.
     if let Ok(docker) = Docker::connect_with_local_defaults()
+        .map(|d| d.with_timeout(Duration::from_secs(PROBE_TIMEOUT)))
         && docker.ping().await.is_ok()
     {
-        return Ok(docker);
+        // Widen timeout for runtime use before returning.
+        return Ok(docker.with_timeout(Duration::from_secs(RUNTIME_TIMEOUT)));
     }
 
     #[cfg(unix)]
@@ -526,10 +538,10 @@ pub async fn connect_docker() -> Result<Docker> {
             if sock.exists() {
                 let sock_str = sock.to_string_lossy();
                 if let Ok(docker) =
-                    Docker::connect_with_socket(&sock_str, 120, bollard::API_DEFAULT_VERSION)
+                    Docker::connect_with_socket(&sock_str, PROBE_TIMEOUT, bollard::API_DEFAULT_VERSION)
                     && docker.ping().await.is_ok()
                 {
-                    return Ok(docker);
+                    return Ok(docker.with_timeout(Duration::from_secs(RUNTIME_TIMEOUT)));
                 }
             }
         }

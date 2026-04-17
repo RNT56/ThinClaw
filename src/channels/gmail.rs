@@ -1235,6 +1235,30 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_sender_malformed_angle_brackets() {
+        let msg = GmailMessage {
+            id: "2a".into(),
+            thread_id: None,
+            snippet: None,
+            label_ids: None,
+            internal_date: None,
+            payload: Some(GmailPayload {
+                headers: Some(vec![GmailHeader {
+                    name: "From".into(),
+                    value: "Bob <bob@example.com".into(),
+                }]),
+                body: None,
+                parts: None,
+                mime_type: None,
+            }),
+        };
+        assert_eq!(
+            GmailChannel::extract_sender(&msg),
+            Some("Bob <bob@example.com".into())
+        );
+    }
+
+    #[test]
     fn test_extract_subject() {
         let msg = GmailMessage {
             id: "3".into(),
@@ -1269,6 +1293,11 @@ mod tests {
         let encoded = "SGVsbG8gV29ybGQ"; // "Hello World" in base64url
         let decoded = GmailChannel::decode_base64url(encoded);
         assert_eq!(decoded, Some("Hello World".into()));
+    }
+
+    #[test]
+    fn test_decode_base64url_invalid() {
+        assert_eq!(GmailChannel::decode_base64url("???"), None);
     }
 
     #[test]
@@ -1495,5 +1524,86 @@ mod tests {
             }),
         };
         assert_eq!(GmailChannel::extract_body(&msg), "Plain text");
+    }
+
+    #[test]
+    fn test_extract_message_id_header() {
+        let msg = GmailMessage {
+            id: "11".into(),
+            thread_id: None,
+            snippet: Some("snippet".into()),
+            label_ids: None,
+            internal_date: None,
+            payload: Some(GmailPayload {
+                headers: Some(vec![
+                    GmailHeader {
+                        name: "From".into(),
+                        value: "alice@example.com".into(),
+                    },
+                    GmailHeader {
+                        name: "Message-ID".into(),
+                        value: "<id-1234@example.com>".into(),
+                    },
+                ]),
+                body: None,
+                parts: None,
+                mime_type: None,
+            }),
+        };
+        assert_eq!(
+            GmailChannel::extract_message_id_header(&msg),
+            Some("<id-1234@example.com>".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_message_id_header_missing() {
+        let msg = GmailMessage {
+            id: "12".into(),
+            thread_id: None,
+            snippet: Some("snippet".into()),
+            label_ids: None,
+            internal_date: None,
+            payload: Some(GmailPayload {
+                headers: Some(vec![GmailHeader {
+                    name: "From".into(),
+                    value: "alice@example.com".into(),
+                }]),
+                body: None,
+                parts: None,
+                mime_type: None,
+            }),
+        };
+        assert_eq!(GmailChannel::extract_message_id_header(&msg), None);
+    }
+
+    #[test]
+    fn test_extract_text_from_payload_nested_part() {
+        let payload = GmailPayload {
+            headers: None,
+            body: None,
+            parts: Some(vec![GmailPart {
+                mime_type: Some("multipart/related".into()),
+                body: None,
+                parts: Some(vec![GmailPart {
+                    mime_type: Some("text/plain".into()),
+                    body: Some(GmailBody {
+                        data: Some("UGxhaW4gbmVzdGVkIHRleHQ".into()), // "Plain nested text"
+                        size: None,
+                    }),
+                    parts: None,
+                }]),
+            }]),
+            mime_type: Some("multipart/mixed".into()),
+        };
+        let msg = GmailMessage {
+            id: "13".into(),
+            thread_id: None,
+            snippet: Some("snippet".into()),
+            label_ids: None,
+            internal_date: None,
+            payload: Some(payload),
+        };
+        assert_eq!(GmailChannel::extract_body(&msg), "Plain nested text");
     }
 }

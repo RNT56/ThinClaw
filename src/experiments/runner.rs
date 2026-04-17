@@ -50,6 +50,8 @@ pub async fn run_remote_runner(
 
     let started_at = Instant::now();
     let mut terminal_completion_attempted = false;
+    let mut completion_stage = "runner_setup".to_string();
+    let mut persisted_log_path: Option<PathBuf> = None;
 
     let result: anyhow::Result<()> = async {
         post_status(
@@ -63,6 +65,7 @@ pub async fn run_remote_runner(
         .await
         .ok();
 
+        completion_stage = "checkout".to_string();
         let checkout_dir = prepare_checkout_dir(workspace_root, lease_id)?;
         clone_checkout(&job, &checkout_dir).await?;
 
@@ -77,6 +80,7 @@ pub async fn run_remote_runner(
         let env = merge_env(&job, &credentials);
         let mut log = String::new();
         if let Some(prepare_command) = job.prepare_command.as_deref() {
+            completion_stage = "prepare".to_string();
             post_event(
                 &client,
                 gateway_url,
@@ -91,6 +95,7 @@ pub async fn run_remote_runner(
             log.push_str("== prepare ==\n");
             log.push_str(&output);
             log.push('\n');
+            ensure_shell_step_succeeded("prepare", &output)?;
         }
 
         post_event(
@@ -104,6 +109,7 @@ pub async fn run_remote_runner(
         .await
         .ok();
 
+        completion_stage = "run".to_string();
         let run_output = run_shell_command(&run_root, &job.run_command, &env).await?;
         log.push_str("== run ==\n");
         log.push_str(&run_output);
@@ -112,6 +118,7 @@ pub async fn run_remote_runner(
         tokio::fs::write(&log_path, &log)
             .await
             .with_context(|| format!("failed to write {}", log_path.display()))?;
+        persisted_log_path = Some(log_path.clone());
 
         let summary_path = run_root.join("summary.json");
         let summary_json = if summary_path.exists() {
@@ -147,6 +154,7 @@ pub async fn run_remote_runner(
         post_artifact(&client, gateway_url, lease_id, token, &artifact_log)
             .await
             .ok();
+        ensure_shell_step_succeeded("run", &run_output)?;
 
         if summary_path.exists() {
             let artifact_summary = ExperimentRunnerArtifactUpload {
@@ -176,11 +184,12 @@ pub async fn run_remote_runner(
             attributed_cost_usd: None,
             log_preview_path: Some(log_path.to_string_lossy().to_string()),
             artifact_manifest_json: serde_json::json!({
+                "stage": completion_stage,
                 "checkout_dir": checkout_dir.to_string_lossy(),
                 "summary_json_path": summary_path.to_string_lossy(),
             }),
         };
-        terminal_completion_attempted = true;
+        completion_stage = "complete".to_string();
         client
             .post(lease_url(gateway_url, lease_id, "complete"))
             .bearer_auth(token)
@@ -190,6 +199,7 @@ pub async fn run_remote_runner(
             .context("failed to complete lease")?
             .error_for_status()
             .context("lease completion request failed")?;
+        terminal_completion_attempted = true;
 
         Ok(())
     }
@@ -225,9 +235,12 @@ pub async fn run_remote_runner(
                 summary: Some(format!("Remote runner failed: {}", error_text)),
                 runtime_ms: Some(runtime_ms),
                 attributed_cost_usd: None,
-                log_preview_path: None,
+                log_preview_path: persisted_log_path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string()),
                 artifact_manifest_json: serde_json::json!({
                     "error": error_text.clone(),
+                    "stage": completion_stage,
                 }),
             };
             let _ = client
@@ -415,6 +428,21 @@ async fn run_command_capture(
         }
         text.push_str(&String::from_utf8_lossy(&output.stderr));
     }
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{binary} exited with status {}{}",
+            output
+                .status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            if text.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", text.trim())
+            }
+        ));
+    }
     Ok(text)
 }
 
@@ -423,4 +451,16 @@ fn parse_exit_code(output: &str) -> Option<i32> {
         .lines()
         .find_map(|line| line.split("__THINCLAW_EXIT_CODE__:").nth(1))
         .and_then(|value| value.trim().parse::<i32>().ok())
+}
+
+fn ensure_shell_step_succeeded(stage: &str, output: &str) -> anyhow::Result<()> {
+    let exit_code = parse_exit_code(output).unwrap_or(1);
+    if exit_code == 0 {
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "{stage} command exited with code {exit_code}: {}",
+        output.trim()
+    ))
 }

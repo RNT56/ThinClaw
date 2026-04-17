@@ -135,8 +135,12 @@ fn find_browser() -> Option<PathBuf> {
         if let Ok(output) = lookup
             && output.status.success()
         {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let path_str = stdout
+                .lines()
+                .map(|line| line.trim())
+                .find(|line| !line.is_empty());
+            if let Some(path_str) = path_str {
                 return Some(PathBuf::from(path_str));
             }
         }

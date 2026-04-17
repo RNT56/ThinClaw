@@ -554,9 +554,16 @@ impl PairingStore {
 
         let path = block_from_path(&self.base_dir, channel)?;
         fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)?;
+        file.lock_exclusive()?;
 
-        // Read existing content before opening for write
-        let content = fs::read_to_string(&path).unwrap_or_default();
+        let mut content = String::new();
+        let mut reader = file.try_clone()?;
+        reader.read_to_string(&mut content)?;
         let mut store: BlockFromStoreFile =
             serde_json::from_str(&content).unwrap_or(BlockFromStoreFile {
                 version: 1,
@@ -569,13 +576,17 @@ impl PairingStore {
             .iter()
             .any(|e| e.to_lowercase() == normalized)
         {
+            fs4::FileExt::unlock(&file)?;
             return Ok(());
         }
 
         store.block_from.push(entry);
         let json = serde_json::to_string_pretty(&store)?;
-        fs::write(&path, json)?;
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, json)?;
+        fs::rename(&tmp_path, &path)?;
 
+        fs4::FileExt::unlock(&file)?;
         Ok(())
     }
 
@@ -587,11 +598,19 @@ impl PairingStore {
         }
 
         let path = block_from_path(&self.base_dir, channel)?;
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
         };
+        file.lock_exclusive()?;
+        let mut content = String::new();
+        let mut reader = file.try_clone()?;
+        reader.read_to_string(&mut content)?;
 
         let mut store: BlockFromStoreFile =
             serde_json::from_str(&content).unwrap_or(BlockFromStoreFile {
@@ -607,9 +626,12 @@ impl PairingStore {
 
         if removed {
             let json = serde_json::to_string_pretty(&store)?;
-            fs::write(&path, json)?;
+            let tmp_path = path.with_extension("json.tmp");
+            fs::write(&tmp_path, json)?;
+            fs::rename(&tmp_path, &path)?;
         }
 
+        fs4::FileExt::unlock(&file)?;
         Ok(removed)
     }
 
@@ -693,11 +715,19 @@ impl PairingStore {
         }
 
         let path = allow_from_path(&self.base_dir, channel)?;
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
         };
+        file.lock_exclusive()?;
+        let mut content = String::new();
+        let mut reader = file.try_clone()?;
+        reader.read_to_string(&mut content)?;
 
         let mut store: AllowFromStoreFile =
             serde_json::from_str(&content).unwrap_or(AllowFromStoreFile {
@@ -713,9 +743,12 @@ impl PairingStore {
 
         if removed {
             let json = serde_json::to_string_pretty(&store)?;
-            fs::write(&path, json)?;
+            let tmp_path = path.with_extension("json.tmp");
+            fs::write(&tmp_path, json)?;
+            fs::rename(&tmp_path, &path)?;
         }
 
+        fs4::FileExt::unlock(&file)?;
         Ok(removed)
     }
 

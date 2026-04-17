@@ -538,6 +538,12 @@ pub struct ExtensionInfo {
     /// Human-readable error when activation_status is "failed".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
+    /// Channel-specific runtime diagnostics for live transport debugging.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_diagnostics: Option<serde_json::Value>,
+    /// Whether the UI can request an explicit reconnect for this extension.
+    #[serde(default)]
+    pub reconnect_supported: bool,
 }
 
 #[derive(Debug, Serialize)]

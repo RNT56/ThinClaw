@@ -22,7 +22,8 @@ use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -254,6 +255,13 @@ pub enum RoutineAction {
         /// Maximum tool iterations for this heartbeat run.
         #[serde(default = "default_max_iterations")]
         max_iterations: u32,
+        /// Exact interval for the internal heartbeat scheduler.
+        ///
+        /// Heartbeats use this persisted interval to compute `next_fire_at`
+        /// directly instead of trying to encode arbitrary second intervals
+        /// into a cron expression.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interval_secs: Option<u64>,
     },
     /// Start or resume an experiment campaign.
     ExperimentCampaign {
@@ -399,6 +407,7 @@ impl RoutineAction {
                         .get("max_iterations")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(10) as u32,
+                    interval_secs: config.get("interval_secs").and_then(|v| v.as_u64()),
                 })
             }
             "experiment_campaign" => {
@@ -468,6 +477,7 @@ impl RoutineAction {
                 active_end_hour,
                 target,
                 max_iterations,
+                interval_secs,
             } => serde_json::json!({
                 "light_context": light_context,
                 "prompt": prompt,
@@ -476,6 +486,7 @@ impl RoutineAction {
                 "active_end_hour": active_end_hour,
                 "target": target,
                 "max_iterations": max_iterations,
+                "interval_secs": interval_secs,
             }),
             RoutineAction::ExperimentCampaign {
                 project_id,
@@ -486,6 +497,23 @@ impl RoutineAction {
                 "runner_profile_id": runner_profile_id,
                 "max_trials_override": max_trials_override,
             }),
+        }
+    }
+
+    /// Resolve the effective interval for an internal heartbeat routine.
+    pub fn heartbeat_interval_secs(&self, guardrails: Option<&RoutineGuardrails>) -> Option<u64> {
+        match self {
+            RoutineAction::Heartbeat { interval_secs, .. } => interval_secs
+                .as_ref()
+                .copied()
+                .or_else(|| {
+                    guardrails.and_then(|g| {
+                        let cooldown_secs = g.cooldown.as_secs();
+                        (cooldown_secs > 0).then_some(cooldown_secs.saturating_mul(2))
+                    })
+                })
+                .map(|secs| secs.max(1)),
+            _ => None,
         }
     }
 }
@@ -597,6 +625,261 @@ pub fn content_hash(content: &str) -> u64 {
     hasher.finish()
 }
 
+#[derive(Debug, Clone)]
+enum ParsedSchedule {
+    Cron {
+        normalized: String,
+        parsed: cron::Schedule,
+    },
+    Interval {
+        seconds: u64,
+        canonical: String,
+    },
+}
+
+fn canonical_interval_schedule(seconds: u64) -> String {
+    let seconds = seconds.max(1);
+
+    if seconds.is_multiple_of(86_400) {
+        return format!("every {}d", seconds / 86_400);
+    }
+
+    if seconds.is_multiple_of(3_600) {
+        return format!("every {}h", seconds / 3_600);
+    }
+
+    if seconds.is_multiple_of(60) {
+        return format!("every {}m", seconds / 60);
+    }
+
+    format!("every {seconds}s")
+}
+
+fn interval_unit_multiplier(unit: &str) -> Option<u64> {
+    match unit
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "s" | "sec" | "secs" | "second" | "seconds" => Some(1),
+        "m" | "min" | "mins" | "minute" | "minutes" => Some(60),
+        "h" | "hr" | "hrs" | "hour" | "hours" => Some(3_600),
+        "d" | "day" | "days" => Some(86_400),
+        _ => None,
+    }
+}
+
+fn parse_named_interval(expr: &str) -> Option<u64> {
+    match expr.trim().to_ascii_lowercase().as_str() {
+        "minutely" | "every minute" => Some(60),
+        "hourly" | "every hour" => Some(3_600),
+        "daily" | "every day" => Some(86_400),
+        _ => None,
+    }
+}
+
+fn checked_interval_seconds(value: u64, multiplier: u64) -> Result<u64, RoutineError> {
+    if value == 0 {
+        return Err(RoutineError::InvalidCron {
+            reason: "interval schedules must be greater than zero".to_string(),
+        });
+    }
+
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| RoutineError::InvalidCron {
+            reason: "interval schedule is too large".to_string(),
+        })
+}
+
+fn parse_interval_schedule_seconds(expr: &str) -> Result<Option<u64>, RoutineError> {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(seconds) = parse_named_interval(trimmed) {
+        return Ok(Some(seconds));
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    let candidate = lowered
+        .strip_prefix("every ")
+        .map(str::trim)
+        .unwrap_or(lowered.trim());
+
+    if let Some(seconds) = parse_named_interval(candidate) {
+        return Ok(Some(seconds));
+    }
+
+    let mut parts = candidate.split_whitespace();
+    let Some(first) = parts.next() else {
+        return Ok(None);
+    };
+
+    let digit_end = first
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .last()
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+
+    if digit_end == 0 {
+        return Ok(None);
+    }
+
+    let value = first[..digit_end]
+        .parse::<u64>()
+        .map_err(|e| RoutineError::InvalidCron {
+            reason: format!("invalid interval value: {e}"),
+        })?;
+
+    let mut unit = first[digit_end..].to_string();
+    let remainder = parts.collect::<Vec<_>>().join(" ");
+    if !remainder.is_empty() {
+        unit.push_str(&remainder);
+    }
+
+    let Some(multiplier) = interval_unit_multiplier(&unit) else {
+        return Ok(None);
+    };
+
+    Ok(Some(checked_interval_seconds(value, multiplier)?))
+}
+
+fn parse_step_value(field: &str) -> Option<u64> {
+    let (base, step) = field.split_once('/')?;
+    if base != "*" && base != "0" {
+        return None;
+    }
+    step.parse::<u64>().ok()
+}
+
+fn parse_oversized_step_interval_seconds(schedule: &str) -> Option<u64> {
+    let fields: Vec<_> = schedule.split_whitespace().collect();
+    if fields.len() != 7 || fields[6] != "*" {
+        return None;
+    }
+
+    if let Some(step) = parse_step_value(fields[0])
+        && step > 59
+        && fields[1..6].iter().all(|field| *field == "*")
+    {
+        return Some(step);
+    }
+
+    if fields[0] == "0"
+        && let Some(step) = parse_step_value(fields[1])
+        && step > 59
+        && fields[2..6].iter().all(|field| *field == "*")
+    {
+        return step.checked_mul(60);
+    }
+
+    if fields[0] == "0"
+        && fields[1] == "0"
+        && let Some(step) = parse_step_value(fields[2])
+        && step > 23
+        && fields[3..6].iter().all(|field| *field == "*")
+    {
+        return step.checked_mul(3_600);
+    }
+
+    if fields[0] == "0"
+        && fields[1] == "0"
+        && fields[2] == "0"
+        && let Some(step) = parse_step_value(fields[3])
+        && step > 31
+        && fields[4] == "*"
+        && fields[5] == "*"
+    {
+        return step.checked_mul(86_400);
+    }
+
+    None
+}
+
+fn parse_schedule_expr(expr: &str) -> Result<ParsedSchedule, RoutineError> {
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return Err(RoutineError::InvalidCron {
+            reason: "schedule cannot be empty".to_string(),
+        });
+    }
+
+    if let Some(seconds) = parse_interval_schedule_seconds(trimmed)? {
+        return Ok(ParsedSchedule::Interval {
+            seconds,
+            canonical: canonical_interval_schedule(seconds),
+        });
+    }
+
+    let normalized = normalize_cron_expr(trimmed);
+    match cron::Schedule::from_str(&normalized) {
+        Ok(parsed) => Ok(ParsedSchedule::Cron { normalized, parsed }),
+        Err(err) => {
+            if let Some(seconds) = parse_oversized_step_interval_seconds(&normalized) {
+                return Ok(ParsedSchedule::Interval {
+                    seconds,
+                    canonical: canonical_interval_schedule(seconds),
+                });
+            }
+
+            Err(RoutineError::InvalidCron {
+                reason: err.to_string(),
+            })
+        }
+    }
+}
+
+/// Canonicalize a schedule expression for persistence.
+///
+/// Supports both cron expressions and interval schedules like `every 2h`,
+/// `90 minutes`, or `12800s`. Oversized pure step-cron expressions such as
+/// `0 */213 * * * * *` are converted into interval schedules instead of being
+/// rejected and left in a broken state.
+pub fn canonicalize_schedule_expr(expr: &str) -> Result<String, RoutineError> {
+    match parse_schedule_expr(expr)? {
+        ParsedSchedule::Cron { normalized, .. } => Ok(normalized),
+        ParsedSchedule::Interval { canonical, .. } => Ok(canonical),
+    }
+}
+
+/// Return whether a schedule depends on the user's timezone.
+///
+/// Wall-clock cron schedules are timezone-sensitive. Fixed intervals are not.
+pub fn schedule_uses_timezone(schedule: &str) -> Result<bool, RoutineError> {
+    Ok(matches!(
+        parse_schedule_expr(schedule)?,
+        ParsedSchedule::Cron { .. }
+    ))
+}
+
+/// Return whether a routine's next fire time should be refreshed when the user's
+/// timezone changes.
+pub fn routine_schedule_uses_timezone(routine: &Routine) -> Result<bool, RoutineError> {
+    if routine
+        .action
+        .heartbeat_interval_secs(Some(&routine.guardrails))
+        .is_some()
+    {
+        return Ok(false);
+    }
+
+    match &routine.trigger {
+        Trigger::Cron { schedule } => schedule_uses_timezone(schedule),
+        Trigger::SystemEvent {
+            schedule: Some(schedule),
+            ..
+        } => schedule_uses_timezone(schedule),
+        Trigger::SystemEvent { schedule: None, .. }
+        | Trigger::Event { .. }
+        | Trigger::Webhook { .. }
+        | Trigger::Manual => Ok(false),
+    }
+}
+
 /// Normalize a cron expression to the 7-field format required by the `cron` crate.
 ///
 /// The `cron` crate (v0.13) uses: `sec min hour dom month dow year`
@@ -619,20 +902,158 @@ pub fn normalize_cron_expr(expr: &str) -> String {
     }
 }
 
-/// Parse a cron expression and compute the next fire time from now.
+/// Parse a schedule expression and compute the next fire time from now.
+pub fn next_schedule_fire(schedule: &str) -> Result<Option<DateTime<Utc>>, RoutineError> {
+    next_schedule_fire_after_in_tz(schedule, Tz::UTC, Utc::now())
+}
+
+/// Parse a schedule expression and compute the next fire time from a base time.
+pub fn next_schedule_fire_after_in_tz(
+    schedule: &str,
+    tz: Tz,
+    from: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, RoutineError> {
+    match parse_schedule_expr(schedule)? {
+        ParsedSchedule::Cron { parsed, .. } => Ok(parsed
+            .after(&from.with_timezone(&tz))
+            .next()
+            .map(|next| next.with_timezone(&Utc))),
+        ParsedSchedule::Interval { seconds, .. } => {
+            let seconds = i64::try_from(seconds).unwrap_or(i64::MAX);
+            Ok(Some(from + ChronoDuration::seconds(seconds)))
+        }
+    }
+}
+
+/// Parse a schedule expression and compute the next fire time from now in a
+/// specific timezone.
+pub fn next_schedule_fire_in_tz(
+    schedule: &str,
+    tz: Tz,
+) -> Result<Option<DateTime<Utc>>, RoutineError> {
+    next_schedule_fire_after_in_tz(schedule, tz, Utc::now())
+}
+
+/// Parse a schedule expression and compute the next fire time in the user's
+/// effective timezone.
+pub fn next_schedule_fire_for_user(
+    schedule: &str,
+    user_id: &str,
+    user_setting: Option<&str>,
+) -> Result<Option<DateTime<Utc>>, RoutineError> {
+    let tz = crate::timezone::resolve_effective_timezone(Some(user_id), user_setting);
+    next_schedule_fire_in_tz(schedule, tz)
+}
+
+/// Parse a schedule expression and compute the next fire time from a base time
+/// in the user's effective timezone.
+pub fn next_schedule_fire_for_user_after(
+    schedule: &str,
+    user_id: &str,
+    user_setting: Option<&str>,
+    from: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, RoutineError> {
+    let tz = crate::timezone::resolve_effective_timezone(Some(user_id), user_setting);
+    next_schedule_fire_after_in_tz(schedule, tz, from)
+}
+
+/// Backward-compatible wrapper around [`next_schedule_fire`].
 pub fn next_cron_fire(schedule: &str) -> Result<Option<DateTime<Utc>>, RoutineError> {
-    let cron_schedule =
-        cron::Schedule::from_str(schedule).map_err(|e| RoutineError::InvalidCron {
-            reason: e.to_string(),
-        })?;
-    Ok(cron_schedule.upcoming(Utc).next())
+    next_schedule_fire(schedule)
+}
+
+/// Backward-compatible wrapper around [`next_schedule_fire_in_tz`].
+pub fn next_cron_fire_in_tz(schedule: &str, tz: Tz) -> Result<Option<DateTime<Utc>>, RoutineError> {
+    next_schedule_fire_in_tz(schedule, tz)
+}
+
+/// Backward-compatible wrapper around [`next_schedule_fire_for_user`].
+pub fn next_cron_fire_for_user(
+    schedule: &str,
+    user_id: &str,
+    user_setting: Option<&str>,
+) -> Result<Option<DateTime<Utc>>, RoutineError> {
+    next_schedule_fire_for_user(schedule, user_id, user_setting)
+}
+
+/// Produce a valid cron hint for heartbeat routines.
+///
+/// Heartbeat scheduling uses `interval_secs` directly; this cron string is a
+/// compatibility hint for storage and diagnostics so the internal routine never
+/// persists an invalid cron expression.
+pub fn heartbeat_schedule_hint(interval_secs: u64) -> String {
+    let secs = interval_secs.max(1);
+
+    if secs < 60 {
+        return format!("*/{} * * * * * *", secs);
+    }
+
+    if secs % 60 == 0 {
+        let minutes = secs / 60;
+        if minutes <= 59 {
+            return format!("0 */{} * * * * *", minutes);
+        }
+    }
+
+    if secs % 3600 == 0 {
+        let hours = secs / 3600;
+        if hours <= 23 {
+            return format!("0 0 */{} * * * *", hours);
+        }
+    }
+
+    if secs % 86_400 == 0 {
+        let days = secs / 86_400;
+        if days <= 31 {
+            return format!("0 0 0 */{} * * *", days);
+        }
+    }
+
+    "0 * * * * * *".to_string()
+}
+
+/// Compute the next fire time for a routine from the provided base time.
+pub fn next_fire_for_routine(
+    routine: &Routine,
+    user_setting: Option<&str>,
+    from: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, RoutineError> {
+    if let Some(interval_secs) = routine
+        .action
+        .heartbeat_interval_secs(Some(&routine.guardrails))
+    {
+        let seconds = i64::try_from(interval_secs).unwrap_or(i64::MAX);
+        return Ok(Some(from + ChronoDuration::seconds(seconds)));
+    }
+
+    match &routine.trigger {
+        Trigger::Cron { schedule } => {
+            next_schedule_fire_for_user_after(schedule, &routine.user_id, user_setting, from)
+        }
+        Trigger::SystemEvent {
+            schedule: Some(schedule),
+            ..
+        } => next_schedule_fire_for_user_after(schedule, &routine.user_id, user_setting, from),
+        Trigger::SystemEvent { schedule: None, .. }
+        | Trigger::Event { .. }
+        | Trigger::Webhook { .. }
+        | Trigger::Manual => Ok(None),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use chrono::{Duration as ChronoDuration, TimeZone, Utc};
+    use chrono_tz::Tz;
+    use uuid::Uuid;
+
     use crate::agent::routine::{
-        RoutineAction, RoutineGuardrails, RunStatus, Trigger, content_hash, next_cron_fire,
-        normalize_cron_expr,
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RunStatus, Trigger,
+        canonicalize_schedule_expr, content_hash, heartbeat_schedule_hint, next_cron_fire,
+        next_fire_for_routine, next_schedule_fire_after_in_tz, normalize_cron_expr,
+        routine_schedule_uses_timezone,
     };
 
     #[test]
@@ -727,6 +1148,244 @@ mod tests {
     fn test_next_cron_fire_invalid() {
         let result = next_cron_fire("not a cron");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_canonicalize_interval_schedule() {
+        assert_eq!(
+            canonicalize_schedule_expr("90 minutes").expect("interval should parse"),
+            "every 90m"
+        );
+        assert_eq!(
+            canonicalize_schedule_expr("12800s").expect("seconds interval should parse"),
+            "every 12800s"
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_oversized_cron_step_to_interval() {
+        assert_eq!(
+            canonicalize_schedule_expr("0 */213 * * * * *").expect("oversized step should convert"),
+            "every 213m"
+        );
+        assert_eq!(
+            canonicalize_schedule_expr("0 0 */36 * * * *")
+                .expect("oversized hour step should convert"),
+            "every 36h"
+        );
+    }
+
+    #[test]
+    fn test_heartbeat_schedule_hint_stays_valid_for_large_interval() {
+        assert_eq!(heartbeat_schedule_hint(12_800), "0 * * * * * *");
+        assert_eq!(heartbeat_schedule_hint(1_800), "0 */30 * * * * *");
+    }
+
+    #[test]
+    fn test_next_fire_for_heartbeat_uses_persisted_interval() {
+        let base = Utc
+            .with_ymd_and_hms(2026, 4, 16, 8, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let routine = Routine {
+            id: Uuid::new_v4(),
+            name: "__heartbeat__".to_string(),
+            description: "internal".to_string(),
+            user_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Cron {
+                schedule: "0 * * * * * *".to_string(),
+            },
+            action: RoutineAction::Heartbeat {
+                light_context: true,
+                prompt: None,
+                include_reasoning: false,
+                active_start_hour: None,
+                active_end_hour: None,
+                target: "chat".to_string(),
+                max_iterations: 10,
+                interval_secs: Some(12_800),
+            },
+            guardrails: RoutineGuardrails {
+                cooldown: Duration::from_secs(6_400),
+                max_concurrent: 1,
+                dedup_window: None,
+            },
+            notify: NotifyConfig {
+                channel: None,
+                user: "default".to_string(),
+                on_success: false,
+                on_failure: true,
+                on_attention: true,
+            },
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: base,
+            updated_at: base,
+        };
+
+        let next = next_fire_for_routine(&routine, None, base)
+            .expect("heartbeat next fire")
+            .expect("heartbeat should schedule");
+        assert_eq!(next, base + ChronoDuration::seconds(12_800));
+    }
+
+    #[test]
+    fn test_next_fire_for_heartbeat_falls_back_to_guardrail_interval() {
+        let base = Utc
+            .with_ymd_and_hms(2026, 4, 16, 8, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let routine = Routine {
+            id: Uuid::new_v4(),
+            name: "__heartbeat__".to_string(),
+            description: "internal".to_string(),
+            user_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Cron {
+                schedule: "0 */213 * * * * *".to_string(),
+            },
+            action: RoutineAction::Heartbeat {
+                light_context: true,
+                prompt: None,
+                include_reasoning: false,
+                active_start_hour: None,
+                active_end_hour: None,
+                target: "chat".to_string(),
+                max_iterations: 10,
+                interval_secs: None,
+            },
+            guardrails: RoutineGuardrails {
+                cooldown: Duration::from_secs(6_400),
+                max_concurrent: 1,
+                dedup_window: None,
+            },
+            notify: NotifyConfig {
+                channel: None,
+                user: "default".to_string(),
+                on_success: false,
+                on_failure: true,
+                on_attention: true,
+            },
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: base,
+            updated_at: base,
+        };
+
+        let next = next_fire_for_routine(&routine, None, base)
+            .expect("heartbeat next fire")
+            .expect("heartbeat should schedule");
+        assert_eq!(next, base + ChronoDuration::seconds(12_800));
+    }
+
+    #[test]
+    fn test_next_schedule_fire_after_uses_explicit_base_time() {
+        let base = Utc
+            .with_ymd_and_hms(2026, 4, 16, 13, 30, 0)
+            .single()
+            .expect("valid timestamp");
+        let next = next_schedule_fire_after_in_tz("0 0 12 * * * *", Tz::UTC, base)
+            .expect("cron should parse")
+            .expect("cron should produce next fire");
+        assert_eq!(
+            next,
+            Utc.with_ymd_and_hms(2026, 4, 17, 12, 0, 0)
+                .single()
+                .expect("valid timestamp")
+        );
+    }
+
+    #[test]
+    fn test_next_fire_for_interval_trigger_uses_interval_schedule() {
+        let base = Utc
+            .with_ymd_and_hms(2026, 4, 16, 8, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let routine = Routine {
+            id: Uuid::new_v4(),
+            name: "interval-check".to_string(),
+            description: "fixed interval".to_string(),
+            user_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Cron {
+                schedule: "every 90m".to_string(),
+            },
+            action: RoutineAction::Lightweight {
+                prompt: "Check status".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 256,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: base,
+            updated_at: base,
+        };
+
+        let next = next_fire_for_routine(&routine, None, base)
+            .expect("interval next fire")
+            .expect("interval should schedule");
+        assert_eq!(next, base + ChronoDuration::minutes(90));
+    }
+
+    #[test]
+    fn test_routine_schedule_uses_timezone_for_cron_and_interval() {
+        let base = Utc
+            .with_ymd_and_hms(2026, 4, 16, 8, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let cron_routine = Routine {
+            id: Uuid::new_v4(),
+            name: "cron".to_string(),
+            description: String::new(),
+            user_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Cron {
+                schedule: "0 0 9 * * * *".to_string(),
+            },
+            action: RoutineAction::Lightweight {
+                prompt: "Check".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 64,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: NotifyConfig::default(),
+            last_run_at: None,
+            next_fire_at: None,
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            created_at: base,
+            updated_at: base,
+        };
+        assert!(routine_schedule_uses_timezone(&cron_routine).expect("cron routine should parse"));
+
+        let interval_routine = Routine {
+            trigger: Trigger::Cron {
+                schedule: "every 2h".to_string(),
+            },
+            ..cron_routine
+        };
+        assert!(
+            !routine_schedule_uses_timezone(&interval_routine)
+                .expect("interval routine should parse")
+        );
     }
 
     // ── normalize_cron_expr tests ─────────────────────────────────────────────

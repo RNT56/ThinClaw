@@ -5,8 +5,9 @@
 //! - **Linux**: systemd user unit at `~/.config/systemd/user/thinclaw.service`
 //! - **Windows**: Service Control Manager entry backed by a ThinClaw wrapper
 //!
-//! The installed service runs `thinclaw run --no-onboard` (via a Windows wrapper
-//! on that platform) and is configured to restart automatically on failure.
+//! The installed service runs `thinclaw run` by default, or `thinclaw run --no-onboard`
+//! only when the operator explicitly forces a headless install before onboarding,
+//! and is configured to restart automatically on failure.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -46,21 +47,31 @@ pub enum ServiceAction {
 }
 
 fn install() -> Result<()> {
-    if !onboarding_completed() {
-        println!("WARNING: Onboarding has not been completed.");
-        println!("  The service runs headless and cannot show the setup wizard.");
-        println!("  Please run 'thinclaw onboard' first, then re-run 'thinclaw service install'.");
+    let onboarding_blocker = onboarding_blocker();
+    let force_install = force_service_install();
+    if let Some(ref reason) = onboarding_blocker
+        && !force_install
+    {
+        bail!(
+            "Service install blocked: onboarding is not ready ({reason}). Run `thinclaw onboard` first, or set THINCLAW_FORCE_SERVICE_INSTALL=true to bypass this guard intentionally."
+        );
+    }
+    if let Some(reason) = onboarding_blocker
+        && force_install
+    {
+        println!("WARNING: Forcing service install before onboarding is ready ({reason}).");
+        println!("  The service will start in headless bypass mode until onboarding is completed.");
         println!();
     }
 
     #[cfg(target_os = "macos")]
     {
-        install_macos()
+        install_macos(force_install)
     }
 
     #[cfg(target_os = "linux")]
     {
-        install_linux()
+        install_linux(force_install)
     }
 
     #[cfg(target_os = "windows")]
@@ -164,19 +175,37 @@ fn uninstall() -> Result<()> {
     }
 }
 
-/// Check whether onboarding has been completed by looking for
-/// the `ONBOARD_COMPLETED=true` env var (set by the wizard in `~/.thinclaw/.env`).
-fn onboarding_completed() -> bool {
-    let _ = dotenvy::dotenv();
-    let _ = dotenvy::from_path(crate::platform::state_paths().env_file);
-
-    std::env::var("ONBOARD_COMPLETED")
-        .map(|v| v == "true")
+fn force_service_install() -> bool {
+    std::env::var("THINCLAW_FORCE_SERVICE_INSTALL")
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false)
 }
 
+fn onboarding_blocker() -> Option<String> {
+    let _ = dotenvy::dotenv();
+    let _ = dotenvy::from_path(crate::platform::state_paths().env_file);
+
+    #[cfg(any(feature = "postgres", feature = "libsql"))]
+    {
+        crate::setup::check_onboard_needed(None, false)
+    }
+
+    #[cfg(not(any(feature = "postgres", feature = "libsql")))]
+    {
+        None
+    }
+}
+
+fn service_run_args(force_no_onboard: bool) -> Vec<&'static str> {
+    let mut args = vec!["run"];
+    if force_no_onboard || onboarding_blocker().is_some() {
+        args.push("--no-onboard");
+    }
+    args
+}
+
 #[cfg(target_os = "macos")]
-fn install_macos() -> Result<()> {
+fn install_macos(force_no_onboard: bool) -> Result<()> {
     let file = macos_plist_path()?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
@@ -188,6 +217,10 @@ fn install_macos() -> Result<()> {
 
     let stdout = logs_dir.join("daemon.stdout.log");
     let stderr = logs_dir.join("daemon.stderr.log");
+    let service_args = service_run_args(force_no_onboard)
+        .into_iter()
+        .map(|arg| format!("    <string>{}</string>\n", xml_escape(arg)))
+        .collect::<String>();
 
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -199,9 +232,7 @@ fn install_macos() -> Result<()> {
   <key>ProgramArguments</key>
   <array>
     <string>{exe}</string>
-    <string>run</string>
-    <string>--no-onboard</string>
-  </array>
+{service_args}  </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -234,6 +265,7 @@ fn install_macos() -> Result<()> {
         path = xml_escape(
             &std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/usr/local/bin".to_string())
         ),
+        service_args = service_args,
         stdout = xml_escape(&stdout.display().to_string()),
         stderr = xml_escape(&stderr.display().to_string()),
     );
@@ -245,13 +277,14 @@ fn install_macos() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn install_linux() -> Result<()> {
+fn install_linux(force_no_onboard: bool) -> Result<()> {
     let file = linux_unit_path()?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
+    let exec_args = service_run_args(force_no_onboard).join(" ");
     let unit = format!(
         "[Unit]\n\
          Description=ThinClaw daemon\n\
@@ -259,13 +292,14 @@ fn install_linux() -> Result<()> {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart=\"{exe}\" run --no-onboard\n\
+         ExecStart=\"{exe}\" {exec_args}\n\
          Restart=always\n\
          RestartSec=3\n\
          \n\
          [Install]\n\
          WantedBy=default.target\n",
         exe = exe.display(),
+        exec_args = exec_args,
     );
 
     std::fs::write(&file, unit)?;
@@ -788,9 +822,10 @@ mod windows_impl {
             .open(logs_dir.join("service.stderr.log"))?;
 
         let mut cmd = Command::new(exe);
-        cmd.arg("run")
-            .arg("--no-onboard")
-            .env("THINCLAW_SERVICE_MANAGER", "windows")
+        for arg in super::service_run_args(false) {
+            cmd.arg(arg);
+        }
+        cmd.env("THINCLAW_SERVICE_MANAGER", "windows")
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .stdin(Stdio::null());

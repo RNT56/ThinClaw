@@ -4,7 +4,7 @@
 //! and agent startup orchestration.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -20,7 +20,7 @@ use thinclaw::channels::wasm::{
 use thinclaw::config::Config;
 use thinclaw::pairing::PairingStore;
 use thinclaw::secrets::SecretsStore;
-use thinclaw::settings::Settings;
+
 
 const STARTUP_SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
 
@@ -333,6 +333,7 @@ pub(crate) async fn setup_wasm_channels(
     let wasm_router = Arc::new(WasmChannelRouter::new());
     let mut channels: Vec<(String, Box<dyn thinclaw::channels::Channel>)> = Vec::new();
     let mut channel_names: Vec<String> = Vec::new();
+    let host_config = thinclaw::channels::wasm::WasmChannelHostConfig::from_config(config);
 
     for loaded in results.loaded {
         let channel_name = loaded.name().to_string();
@@ -363,59 +364,19 @@ pub(crate) async fn setup_wasm_channels(
 
         let channel_arc = Arc::new(loaded.channel);
 
-        {
-            let mut config_updates = std::collections::HashMap::new();
-
-            if let Some(ref tunnel_url) = config.tunnel.public_url {
-                config_updates.insert(
-                    "tunnel_url".to_string(),
-                    serde_json::Value::String(tunnel_url.clone()),
-                );
-            }
-
-            if let Some(ref secret) = webhook_secret {
-                config_updates.insert(
-                    "webhook_secret".to_string(),
-                    serde_json::Value::String(secret.clone()),
-                );
-            }
-
-            // Inject owner_id and stream_mode for Telegram so the bot only responds to the bound user.
-            if channel_name == "telegram" {
-                if let Some(owner_id) = config.channels.telegram_owner_id {
-                    config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
-                }
-
-                let stream_mode = std::env::var("TELEGRAM_STREAM_MODE")
-                    .ok()
-                    .or(config.channels.telegram_stream_mode.clone())
-                    .unwrap_or_default();
-
-                if !stream_mode.is_empty() {
-                    config_updates
-                        .insert("stream_mode".to_string(), serde_json::json!(stream_mode));
-                }
-            } else if channel_name == "discord" {
-                let stream_mode = std::env::var("DISCORD_STREAM_MODE")
-                    .ok()
-                    .or(config.channels.discord_stream_mode.clone())
-                    .unwrap_or_default();
-
-                if !stream_mode.is_empty() {
-                    config_updates
-                        .insert("stream_mode".to_string(), serde_json::json!(stream_mode));
-                }
-            }
-
-            if !config_updates.is_empty() {
-                channel_arc.update_config(config_updates).await;
-                tracing::info!(
-                    channel = %channel_name,
-                    has_tunnel = config.tunnel.public_url.is_some(),
-                    has_webhook_secret = webhook_secret.is_some(),
-                    "Injected runtime config into channel"
-                );
-            }
+        let runtime_update_count = thinclaw::channels::wasm::apply_channel_host_config(
+            &channel_arc,
+            &channel_name,
+            &host_config,
+            webhook_secret.as_deref(),
+        )
+        .await;
+        if runtime_update_count > 0 {
+            tracing::info!(
+                channel = %channel_name,
+                runtime_updates = runtime_update_count,
+                "Injected runtime config into channel"
+            );
         }
 
         tracing::info!(
@@ -434,7 +395,14 @@ pub(crate) async fn setup_wasm_channels(
             )
             .await;
         if let Some(secrets) = secrets_store {
-            match inject_channel_credentials(&channel_arc, secrets.as_ref(), &channel_name).await {
+            match thinclaw::channels::wasm::inject_channel_credentials_from_secrets(
+                &channel_arc,
+                secrets.as_ref(),
+                &channel_name,
+                "default",
+            )
+            .await
+            {
                 Ok(count) => {
                     if count > 0 {
                         tracing::info!(
@@ -515,118 +483,10 @@ mod tests {
 }
 
 /// Check if onboarding is needed and return the reason.
+///
+/// Delegates to the canonical implementation in [`thinclaw::setup`] so that
+/// both the binary entry point and the library crate share the same logic.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 pub(crate) fn check_onboard_needed(toml_path: Option<&Path>, no_db: bool) -> Option<String> {
-    if no_db {
-        return None;
-    }
-
-    let mut settings = Settings::load();
-    let resolved_toml_path: PathBuf = toml_path
-        .map(PathBuf::from)
-        .unwrap_or_else(Settings::default_toml_path);
-    if let Ok(Some(toml_settings)) = Settings::load_toml(&resolved_toml_path) {
-        settings.merge_from(&toml_settings);
-    }
-
-    let bootstrap_path = thinclaw::bootstrap::thinclaw_env_path()
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("bootstrap.json");
-    let bootstrap_json: serde_json::Value = std::fs::read_to_string(&bootstrap_path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or(serde_json::Value::Null);
-
-    let env_backend = std::env::var("DATABASE_BACKEND").ok();
-    let settings_backend = settings.database_backend.clone();
-    let configured_libsql = matches!(
-        env_backend.as_deref().or(settings_backend.as_deref()),
-        Some("libsql" | "sqlite" | "turso")
-    );
-
-    let has_db = std::env::var("DATABASE_URL").is_ok()
-        || std::env::var("LIBSQL_PATH").is_ok()
-        || std::env::var("LIBSQL_URL").is_ok()
-        || settings.database_url.is_some()
-        || settings.libsql_path.is_some()
-        || settings.libsql_url.is_some()
-        || bootstrap_json
-            .get("database_url")
-            .and_then(|value| value.as_str())
-            .is_some()
-        || configured_libsql
-        || thinclaw::config::default_libsql_path().exists();
-
-    if !has_db {
-        return Some("Database not configured".to_string());
-    }
-
-    let onboard_completed = std::env::var("ONBOARD_COMPLETED")
-        .map(|v| v == "true")
-        .unwrap_or(false)
-        || settings.onboard_completed
-        || bootstrap_json
-            .get("onboard_completed")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-
-    if onboard_completed {
-        return None;
-    }
-
-    // No explicit completion marker — treat as first run
-    Some("First run".to_string())
-}
-
-/// Inject credentials for a channel based on naming convention.
-///
-/// Looks for secrets matching the pattern `{channel_name}_*` and injects them
-/// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
-pub(crate) async fn inject_channel_credentials(
-    channel: &Arc<thinclaw::channels::wasm::WasmChannel>,
-    secrets: &dyn SecretsStore,
-    channel_name: &str,
-) -> anyhow::Result<usize> {
-    let all_secrets = secrets
-        .list("default")
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
-
-    let prefix = format!("{}_", channel_name);
-    let mut count = 0;
-
-    for secret_meta in all_secrets {
-        if !secret_meta.name.starts_with(&prefix) {
-            continue;
-        }
-
-        let decrypted = match secrets.get_decrypted("default", &secret_meta.name).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(
-                    secret = %secret_meta.name,
-                    error = %e,
-                    "Failed to decrypt secret for channel credential injection"
-                );
-                continue;
-            }
-        };
-
-        let placeholder = secret_meta.name.to_uppercase();
-
-        tracing::debug!(
-            channel = %channel_name,
-            secret = %secret_meta.name,
-            placeholder = %placeholder,
-            "Injecting credential"
-        );
-
-        channel
-            .set_credential(&placeholder, decrypted.expose().to_string())
-            .await;
-        count += 1;
-    }
-
-    Ok(count)
+    thinclaw::setup::check_onboard_needed(toml_path, no_db)
 }

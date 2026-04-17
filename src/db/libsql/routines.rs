@@ -390,6 +390,26 @@ impl RoutineStore for LibSqlBackend {
         }
     }
 
+    async fn count_all_running_routine_runs(&self) -> Result<i64, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) as cnt FROM routine_runs WHERE status = 'running'",
+                (),
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(get_i64(&row, 0)),
+            None => Ok(0),
+        }
+    }
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
@@ -407,17 +427,23 @@ impl RoutineStore for LibSqlBackend {
 
     async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError> {
         let conn = self.connect().await?;
-        let now = fmt_ts(&Utc::now());
+        let now = Utc::now();
+        let now_str = fmt_ts(&now);
+        // Only reap runs that have been in 'running' status for > 10 minutes.
+        // This prevents killing actively-executing worker jobs that were
+        // dispatched recently (e.g. heartbeat jobs taking 30-60s).
+        let cutoff = fmt_ts(&(now - chrono::Duration::try_minutes(10).unwrap()));
         let count = conn
             .execute(
                 r#"
                 UPDATE routine_runs SET
                     status = 'failed',
                     completed_at = ?1,
-                    result_summary = 'Orphaned: process restarted while routine was running'
+                    result_summary = 'Orphaned: routine exceeded 10-minute TTL'
                 WHERE status = 'running'
+                  AND started_at < ?2
                 "#,
-                params![now],
+                params![now_str, cutoff],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;

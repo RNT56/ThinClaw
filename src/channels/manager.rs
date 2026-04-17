@@ -22,6 +22,7 @@ struct ChannelCounters {
     errors: AtomicU64,
     last_message_at: std::sync::RwLock<Option<String>>,
     last_error: std::sync::RwLock<Option<String>>,
+    last_error_at: std::sync::RwLock<Option<String>>,
 }
 
 impl Default for ChannelCounters {
@@ -32,6 +33,7 @@ impl Default for ChannelCounters {
             errors: AtomicU64::new(0),
             last_message_at: std::sync::RwLock::new(None),
             last_error: std::sync::RwLock::new(None),
+            last_error_at: std::sync::RwLock::new(None),
         }
     }
 }
@@ -93,9 +95,13 @@ impl ChannelManager {
     }
 
     fn record_channel_error(counter: &ChannelCounters, error: &ChannelError) {
+        let failed_at = Utc::now().to_rfc3339();
         counter.errors.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut guard) = counter.last_error.write() {
             *guard = Some(error.to_string());
+        }
+        if let Ok(mut guard) = counter.last_error_at.write() {
+            *guard = Some(failed_at);
         }
     }
 
@@ -388,6 +394,13 @@ impl ChannelManager {
             .and_then(|channel| channel.formatting_hints())
     }
 
+    /// Return channel-specific diagnostics when the implementation exposes them.
+    pub async fn channel_diagnostics(&self, channel_name: &str) -> Option<serde_json::Value> {
+        let channels = self.channels.read().await;
+        let channel = channels.get(channel_name)?;
+        channel.diagnostics().await
+    }
+
     /// Return live `ChannelStatusEntry` list for `openclaw_channel_status_list`.
     ///
     /// Combines channel names with real atomic counters and uptime.
@@ -408,22 +421,31 @@ impl ChannelManager {
                 (0, 0, 0)
             };
 
-            let (last_message_at, last_error) = if let Some(c) = counters_guard.get(name.as_str()) {
+            let (last_message_at, last_error, last_error_at) =
+                if let Some(c) = counters_guard.get(name.as_str()) {
                 (
                     c.last_message_at
                         .read()
                         .ok()
                         .and_then(|guard| guard.clone()),
                     c.last_error.read().ok().and_then(|guard| guard.clone()),
+                    c.last_error_at.read().ok().and_then(|guard| guard.clone()),
                 )
             } else {
-                (None, None)
+                (None, None, None)
+            };
+            let state = if let (Some(error), Some(failed_at)) =
+                (last_error.clone(), last_error_at.clone())
+            {
+                ChannelViewState::Failed { error, failed_at }
+            } else {
+                ChannelViewState::Running { uptime_secs }
             };
 
             entries.push(ChannelStatusEntry {
                 name: name.clone(),
                 channel_type: name.clone(),
-                state: ChannelViewState::Running { uptime_secs },
+                state,
                 last_message_at,
                 last_error,
                 messages_received: received,
@@ -499,6 +521,38 @@ impl ChannelManager {
         }
     }
 
+    /// Update channel-specific runtime config values before an in-place restart.
+    pub async fn update_channel_runtime_config(
+        &self,
+        channel_name: &str,
+        updates: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<(), ChannelError> {
+        let channels = self.channels.read().await;
+        let Some(channel) = channels.get(channel_name) else {
+            return Err(ChannelError::SendFailed {
+                name: channel_name.to_string(),
+                reason: "Channel not found".to_string(),
+            });
+        };
+        channel.update_runtime_config(updates).await;
+        Ok(())
+    }
+
+    /// Clear transient connection state before a manual reconnect.
+    pub async fn reset_channel_connection_state(
+        &self,
+        channel_name: &str,
+    ) -> Result<(), ChannelError> {
+        let channels = self.channels.read().await;
+        let Some(channel) = channels.get(channel_name) else {
+            return Err(ChannelError::SendFailed {
+                name: channel_name.to_string(),
+                reason: "Channel not found".to_string(),
+            });
+        };
+        channel.reset_connection_state().await
+    }
+
     /// Restart a channel in-place: shutdown → re-start → merge new stream.
     ///
     /// The channel stays registered in the map so `respond()`/`broadcast()`
@@ -567,6 +621,19 @@ impl ChannelManager {
 
         tracing::info!(channel = %name, "Channel restarted successfully");
         Ok(())
+    }
+
+    /// Toggle debug mode on a specific channel.
+    ///
+    /// Returns the new debug state (`true` = on, `false` = off).
+    /// For channels that don't support debug mode (e.g., REPL), returns `false`.
+    pub async fn toggle_debug_mode(&self, channel_name: &str) -> bool {
+        let channels = self.channels.read().await;
+        if let Some(channel) = channels.get(channel_name) {
+            channel.toggle_debug_mode().await
+        } else {
+            false
+        }
     }
 }
 

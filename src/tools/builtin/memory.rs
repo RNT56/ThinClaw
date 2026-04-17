@@ -333,17 +333,49 @@ impl SessionSearchTool {
     async fn recent_conversation_metadata(
         &self,
         principal_id: &str,
+        actor_id: &str,
         channel: Option<&str>,
+        direct_scope: bool,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, ToolError> {
-        let Some(channel) = channel else {
-            return Ok(Vec::new());
+        let recent = if direct_scope && channel.is_none() {
+            self.store
+                .list_actor_conversations_for_recall(principal_id, actor_id, false, limit as i64)
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Transcript listing failed: {}", e))
+                })?
+        } else {
+            let Some(channel) = channel else {
+                return Ok(Vec::new());
+            };
+            let recent = self
+                .store
+                .list_conversations_with_preview(principal_id, channel, limit as i64)
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Transcript listing failed: {}", e))
+                })?;
+            if direct_scope {
+                recent
+                    .into_iter()
+                    .filter(|conversation| {
+                        conversation.conversation_kind == crate::history::ConversationKind::Direct
+                            && match conversation
+                                .actor_id
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                            {
+                                Some(conversation_actor_id) => conversation_actor_id == actor_id,
+                                None => actor_id == principal_id,
+                            }
+                    })
+                    .collect()
+            } else {
+                recent
+            }
         };
-        let recent = self
-            .store
-            .list_conversations_with_preview(principal_id, channel, limit as i64)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Transcript listing failed: {}", e)))?;
         Ok(recent
             .into_iter()
             .map(|conversation| {
@@ -375,6 +407,7 @@ impl Tool for SessionSearchTool {
     fn description(&self) -> &str {
         "Search DB-backed conversation transcripts for prior messages, decisions, and workflow history. \
          Use before answering questions about prior work or repeated conversations. \
+         In direct chats this follows the actor's linked history across channels by default. \
          This searches conversation history only, not workspace documents."
     }
 
@@ -395,12 +428,12 @@ impl Tool for SessionSearchTool {
                 },
                 "include_current_thread": {
                     "type": "boolean",
-                    "description": "If true, constrain search to the current thread when thread metadata is available.",
+                    "description": "If true, constrain search to the current thread when thread metadata is available. In direct chats the default is false so linked history can be searched.",
                     "default": true
                 },
                 "all_channels": {
                     "type": "boolean",
-                    "description": "If true, search all channels for this actor/user scope. If false (default), search is limited to the current channel.",
+                    "description": "If true, search all channels for this actor/user scope. In direct chats linked cross-channel history is searched by default.",
                     "default": false
                 },
                 "summarize_sessions": {
@@ -425,14 +458,15 @@ impl Tool for SessionSearchTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(8)
             .clamp(1, 25) as usize;
+        let direct_scope = job_conversation_kind(&ctx.metadata) == IdentityConversationKind::Direct;
         let include_current_thread = params
             .get("include_current_thread")
             .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+            .unwrap_or(!direct_scope);
         let all_channels = params
             .get("all_channels")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .unwrap_or(direct_scope);
 
         let (principal_id, actor_id, _include_group_history, _conversation_id) =
             self.current_scope_filters(ctx);
@@ -463,7 +497,9 @@ impl Tool for SessionSearchTool {
             let recent = self
                 .recent_conversation_metadata(
                     &principal_id,
+                    &actor_id,
                     channel_filter.as_deref(),
+                    direct_scope,
                     result_limit,
                 )
                 .await?;
@@ -1306,5 +1342,68 @@ mod session_search_smoke_tests {
                 .is_some()
         );
         assert!(summarizer.calls() >= 1);
+    }
+
+    #[tokio::test]
+    async fn session_search_direct_defaults_to_cross_channel_actor_history() {
+        let (db, _guard) = crate::testing::test_db().await;
+
+        let telegram_conversation = db
+            .create_conversation("telegram", "user-1", Some("tg-thread"))
+            .await
+            .expect("create telegram conversation");
+        db.update_conversation_identity(
+            telegram_conversation,
+            Some("user-1"),
+            Some(crate::identity::scope_id_from_key("principal:user-1")),
+            crate::history::ConversationKind::Direct,
+            Some("telegram://direct/user-1"),
+        )
+        .await
+        .expect("set telegram identity");
+        db.add_conversation_message(telegram_conversation, "user", "telegram ping from mobile")
+            .await
+            .expect("insert telegram message");
+
+        let gateway_conversation = db
+            .create_conversation("gateway", "user-1", Some("gateway-thread"))
+            .await
+            .expect("create gateway conversation");
+        db.update_conversation_identity(
+            gateway_conversation,
+            Some("user-1"),
+            Some(crate::identity::scope_id_from_key("principal:user-1")),
+            crate::history::ConversationKind::Direct,
+            Some("gateway://direct/user-1/actor/user-1/thread/gateway-thread"),
+        )
+        .await
+        .expect("set gateway identity");
+        db.add_conversation_message(gateway_conversation, "user", "local web note")
+            .await
+            .expect("insert gateway message");
+
+        let mut ctx = make_ctx();
+        ctx.metadata = serde_json::json!({
+            "channel": "gateway",
+            "thread_id": "gateway-thread",
+            "conversation_kind": "direct",
+        });
+
+        let tool = SessionSearchTool::new(Arc::clone(&db));
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "query": "telegram ping"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("session_search should succeed");
+
+        let first = output.result["results"]
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("expected at least one result");
+        assert_eq!(first["channel"], serde_json::json!("telegram"));
     }
 }

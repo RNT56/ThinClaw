@@ -176,7 +176,12 @@ impl ToolPolicyManager {
     /// Load the persisted policy manager from settings, falling back to
     /// allow-all when settings are unavailable.
     pub fn load_from_settings() -> Self {
-        crate::settings::Settings::load().tool_policies
+        let mut settings = crate::settings::Settings::load();
+        let toml_path = crate::settings::Settings::default_toml_path();
+        if let Ok(Some(toml_settings)) = crate::settings::Settings::load_toml(&toml_path) {
+            settings.merge_from(&toml_settings);
+        }
+        settings.tool_policies
     }
 
     /// Resolve the effective `(channel, group_id)` scope from job metadata.

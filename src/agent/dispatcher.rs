@@ -381,6 +381,43 @@ impl Agent {
 
         // Build context with messages that we'll mutate during the loop
         let mut context_messages = initial_messages;
+        let mut prefixed_context: Vec<ChatMessage> = Vec::new();
+
+        prefixed_context.push(ChatMessage::system(
+            "Channel transcript guidance: when the user asks about prior Telegram, WebUI, or other channel conversations, use session_search to inspect transcript history. Do not use communication/action tools like telegram_actions to read transcript history or infer account login state; those tools perform live platform actions only.",
+        ));
+
+        if matches!(
+            identity.conversation_kind,
+            crate::identity::ConversationKind::Direct
+        ) && let Some(store) = self.store().map(Arc::clone)
+            && let Ok(mut conversations) = store
+                .list_actor_conversations_for_recall(
+                    &identity.principal_id,
+                    &identity.actor_id,
+                    false,
+                    8,
+                )
+                .await
+        {
+            conversations.retain(|summary| summary.id != thread_id);
+            if !conversations.is_empty() {
+                let recall = crate::history::LinkedConversationRecall::new(
+                    identity.principal_id.clone(),
+                    identity.actor_id.clone(),
+                    false,
+                    conversations,
+                );
+                if let Some(block) = recall.compact_block() {
+                    prefixed_context.push(ChatMessage::system(block));
+                }
+            }
+        }
+
+        for message in prefixed_context.into_iter().rev() {
+            context_messages.insert(0, message);
+        }
+
         let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
         if let Some(store) = self.store().map(Arc::clone)
             && let Ok(Some(runtime)) = crate::agent::load_thread_runtime(&store, thread_id).await

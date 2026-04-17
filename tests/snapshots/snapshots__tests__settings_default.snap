@@ -50,6 +50,7 @@ expression: settings
     "signal_group_allow_from": null,
     "telegram_owner_id": null,
     "telegram_stream_mode": null,
+    "telegram_transport_mode": "auto",
     "telegram_subagent_session_mode": "temp_topic",
     "discord_enabled": false,
     "discord_bot_token": null,
@@ -258,5 +259,12 @@ expression: settings
     "allow_remote_runners": true,
     "ui_visibility": "hidden_until_enabled",
     "default_promotion_mode": "branch_pr_draft"
+  },
+  "tool_policies": {
+    "default_policy": {
+      "mode": "allow_all"
+    },
+    "channel_policies": {},
+    "group_policies": {}
   }
 }

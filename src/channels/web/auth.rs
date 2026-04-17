@@ -8,12 +8,12 @@
 //!    comma-separated). If TRUSTED_PROXY_IPS is empty/unset, only loopback IPs are trusted.
 
 use axum::{
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use subtle::ConstantTimeEq;
 
 /// Shared auth state injected via axum middleware state.
@@ -71,14 +71,10 @@ pub async fn auth_middleware(
 ) -> Response {
     // Check trusted-proxy mode first (if configured)
     if let Some(ref proxy_header) = auth.trusted_proxy_header {
-        // Extract source IP from the connection address.
-        // We intentionally do NOT trust X-Forwarded-For for the proxy-IP check
-        // itself (that would be circular). The request.extensions() ConnectInfo
-        // gives us the direct TCP peer, which is the reverse proxy.
-        let source_ip = headers
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<IpAddr>().ok());
+        let source_ip = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip());
 
         if let Some(ip) = source_ip
             && is_trusted_ip(&ip, &auth.trusted_proxy_ips)
@@ -91,21 +87,6 @@ pub async fn auth_middleware(
                 "Trusted-proxy auth accepted"
             );
             return next.run(request).await;
-        }
-
-        // For loopback connections (no X-Real-IP header), check if the proxy
-        // header is present and loopback is trusted
-        if source_ip.is_none() && auth.trusted_proxy_ips.is_empty() {
-            // No X-Real-IP means likely a direct loopback connection
-            if let Some(user_header) = headers.get(proxy_header.as_str())
-                && user_header.to_str().is_ok()
-            {
-                tracing::debug!(
-                    proxy_header = %proxy_header,
-                    "Trusted-proxy auth accepted (loopback)"
-                );
-                return next.run(request).await;
-            }
         }
     }
 

@@ -117,19 +117,44 @@ impl ChannelHealthMonitor {
                             }
                             Err(e) => {
                                 state.consecutive_failures += 1;
+                                let consecutive_failures = state.consecutive_failures;
+                                let restart_attempts = state.restart_attempts;
                                 tracing::warn!(
                                     channel = %name,
                                     error = %e,
-                                    consecutive = state.consecutive_failures,
-                                    restarts = state.restart_attempts,
+                                    consecutive = consecutive_failures,
+                                    restarts = restart_attempts,
                                     max_restarts = config.max_restart_attempts,
                                     "Channel health check failed"
                                 );
 
+                                let mut restart_threshold = 2;
+                                if name == "telegram" {
+                                    drop(states_lock);
+                                    if let Some(diagnostics) =
+                                        manager.channel_diagnostics(name).await
+                                    {
+                                        let transport_mode = diagnostics
+                                            .get("transport_mode")
+                                            .and_then(|value| value.as_str());
+                                        let transport_override = diagnostics
+                                            .get("transport_override")
+                                            .and_then(|value| value.as_str());
+                                        if transport_mode == Some("webhook")
+                                            && transport_override == Some("polling")
+                                        {
+                                            restart_threshold = 1;
+                                        }
+                                    }
+                                    states_lock = states.write().await;
+                                }
+
+                                let state = states_lock.entry(name.clone()).or_default();
+
                                 // Auto-restart if enabled and within limits
                                 if config.auto_restart
                                     && state.restart_attempts < config.max_restart_attempts
-                                    && state.consecutive_failures >= 2
+                                    && state.consecutive_failures >= restart_threshold
                                 {
                                     state.restart_attempts += 1;
                                     state.in_cooldown = true;

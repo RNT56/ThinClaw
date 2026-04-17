@@ -1,7 +1,6 @@
 //! HTTP request tool.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,6 +12,7 @@ use crate::context::JobContext;
 use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::url_guard::{OutboundUrlGuardOptions, validate_outbound_url};
 use crate::tools::wasm::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
 
 #[cfg(feature = "html-to-markdown")]
@@ -50,22 +50,17 @@ impl HttpTool {
                 if attempt.previous().len() >= 10 {
                     attempt.error("too many redirects")
                 } else {
-                    // Validate each redirect target before following it.
-                    let url = attempt.url();
-                    let scheme = url.scheme();
-                    if scheme != "https" && scheme != "http" {
-                        attempt.stop()
-                    } else if let Some(host) = url.host_str() {
-                        let host_lower = host.to_lowercase();
-                        if host_lower == "localhost"
-                            || host_lower.ends_with(".localhost")
-                            || host_lower == "127.0.0.1"
-                            || host_lower == "::1"
-                        {
-                            attempt.stop()
-                        } else {
-                            attempt.follow()
-                        }
+                    if validate_outbound_url(
+                        attempt.url().as_str(),
+                        &OutboundUrlGuardOptions {
+                            require_https: true,
+                            upgrade_http_to_https: false,
+                            allowlist: Vec::new(),
+                        },
+                    )
+                    .is_ok()
+                    {
+                        attempt.follow()
                     } else {
                         attempt.stop()
                     }
@@ -106,126 +101,14 @@ impl HttpTool {
 }
 
 fn validate_url(url: &str, url_allowlist: &[String]) -> Result<reqwest::Url, ToolError> {
-    // Silently upgrade http:// to https:// — the agent frequently writes http://
-    // in tool calls even when the site supports HTTPS. This avoids confusing errors.
-    let url = if let Some(rest) = url.strip_prefix("http://") {
-        tracing::debug!("[http] Upgrading http:// to https:// for {}", rest);
-        std::borrow::Cow::Owned(format!("https://{}", rest))
-    } else {
-        std::borrow::Cow::Borrowed(url)
-    };
-    let url = url.as_ref();
-
-    let parsed = reqwest::Url::parse(url)
-        .map_err(|e| ToolError::InvalidParameters(format!("invalid URL: {}", e)))?;
-
-    if parsed.scheme() != "https" {
-        return Err(ToolError::NotAuthorized(format!(
-            "only https:// URLs are allowed (got '{}')",
-            parsed.scheme()
-        )));
-    }
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| ToolError::InvalidParameters("URL missing host".to_string()))?;
-
-    let host_lower = host.to_lowercase();
-    if host_lower == "localhost" || host_lower.ends_with(".localhost") {
-        return Err(ToolError::NotAuthorized(
-            "localhost is not allowed".to_string(),
-        ));
-    }
-
-    // Domain allowlist check
-    if !url_allowlist.is_empty() {
-        let allowed = url_allowlist.iter().any(|pattern| {
-            if let Some(suffix) = pattern.strip_prefix("*.") {
-                // Glob: *.example.com matches example.com and sub.example.com
-                host_lower == suffix || host_lower.ends_with(&format!(".{}", suffix))
-            } else {
-                host_lower == *pattern
-            }
-        });
-        if !allowed {
-            return Err(ToolError::NotAuthorized(format!(
-                "host '{}' is not in the URL allowlist",
-                host
-            )));
-        }
-    }
-
-    // Check literal IP addresses
-    if let Ok(ip) = host.parse::<IpAddr>()
-        && is_disallowed_ip(&ip)
-    {
-        return Err(ToolError::NotAuthorized(
-            "private or local IPs are not allowed".to_string(),
-        ));
-    }
-
-    // Resolve hostname and check all resolved IPs against the blocklist.
-    // This prevents DNS rebinding where a hostname resolves to a private IP.
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let socket_addr = format!("{}:{}", host, port);
-    if let Ok(addrs) = socket_addr.to_socket_addrs() {
-        for addr in addrs {
-            if is_disallowed_ip(&addr.ip()) {
-                return Err(ToolError::NotAuthorized(format!(
-                    "hostname '{}' resolves to disallowed IP {}",
-                    host,
-                    addr.ip()
-                )));
-            }
-        }
-    }
-
-    Ok(parsed)
-}
-
-fn is_disallowed_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_multicast()
-                || v4.is_unspecified()
-                || *v4 == std::net::Ipv4Addr::new(169, 254, 169, 254)
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-                || v6.is_multicast()
-                || v6.is_unspecified()
-                // Block IPv4-mapped IPv6 addresses (::ffff:x.x.x.x)
-                // These can bypass IPv4 checks when the kernel maps them back.
-                || is_ipv4_mapped_v6_private(v6)
-        }
-    }
-}
-
-/// Check if an IPv6 address is an IPv4-mapped address (::ffff:x.x.x.x)
-/// pointing to a private/local IPv4 range. Attackers use these to bypass
-/// IPv4 SSRF checks.
-fn is_ipv4_mapped_v6_private(v6: &std::net::Ipv6Addr) -> bool {
-    let segments = v6.segments();
-    // IPv4-mapped: first 5 segments are 0, 6th is 0xffff
-    if segments[0..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff {
-        let v4 = std::net::Ipv4Addr::new(
-            (segments[6] >> 8) as u8,
-            (segments[6] & 0xff) as u8,
-            (segments[7] >> 8) as u8,
-            (segments[7] & 0xff) as u8,
-        );
-        return v4.is_private()
-            || v4.is_loopback()
-            || v4.is_link_local()
-            || v4.is_unspecified()
-            || v4 == std::net::Ipv4Addr::new(169, 254, 169, 254);
-    }
-    false
+    validate_outbound_url(
+        url,
+        &OutboundUrlGuardOptions {
+            require_https: true,
+            upgrade_http_to_https: true,
+            allowlist: url_allowlist.to_vec(),
+        },
+    )
 }
 
 #[cfg(feature = "html-to-markdown")]
@@ -587,37 +470,33 @@ mod tests {
     #[test]
     fn test_validate_url_rejects_private_ip_literal() {
         let err = validate_url("https://192.168.1.1/api", &[]).unwrap_err();
-        assert!(err.to_string().contains("private"));
+        assert!(err.to_string().contains("not allowed"));
     }
 
     #[test]
     fn test_validate_url_rejects_loopback_ip() {
         let err = validate_url("https://127.0.0.1/api", &[]).unwrap_err();
-        assert!(err.to_string().contains("private"));
+        assert!(err.to_string().contains("not allowed"));
     }
 
     #[test]
     fn test_validate_url_rejects_link_local() {
         let err = validate_url("https://169.254.169.254/latest/meta-data/", &[]).unwrap_err();
-        assert!(err.to_string().contains("private"));
+        assert!(err.to_string().contains("not allowed"));
     }
 
     #[test]
     fn test_is_disallowed_ip_covers_ranges() {
-        use std::net::Ipv4Addr;
-
         // Private ranges
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
+        assert!(validate_url("https://10.0.0.1/test", &[]).is_err());
+        assert!(validate_url("https://172.16.0.1/test", &[]).is_err());
+        assert!(validate_url("https://192.168.0.1/test", &[]).is_err());
         // Loopback
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(validate_url("https://127.0.0.1/test", &[]).is_err());
         // Cloud metadata
-        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(
-            169, 254, 169, 254
-        ))));
+        assert!(validate_url("https://169.254.169.254/latest/meta-data/", &[]).is_err());
         // Public
-        assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(validate_url("https://8.8.8.8/test", &[]).is_ok());
     }
 
     #[test]
@@ -942,9 +821,8 @@ mod tests {
     #[test]
     fn test_ipv4_mapped_v6_loopback_blocked() {
         // ::ffff:127.0.0.1 — IPv4-mapped loopback
-        let ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
         assert!(
-            is_disallowed_ip(&ip),
+            validate_url("https://[::ffff:127.0.0.1]/data", &[]).is_err(),
             "IPv4-mapped loopback should be blocked"
         );
     }
@@ -952,9 +830,8 @@ mod tests {
     #[test]
     fn test_ipv4_mapped_v6_private_blocked() {
         // ::ffff:192.168.1.1 — IPv4-mapped private
-        let ip: IpAddr = "::ffff:192.168.1.1".parse().unwrap();
         assert!(
-            is_disallowed_ip(&ip),
+            validate_url("https://[::ffff:192.168.1.1]/data", &[]).is_err(),
             "IPv4-mapped private should be blocked"
         );
     }
@@ -962,9 +839,8 @@ mod tests {
     #[test]
     fn test_ipv4_mapped_v6_public_allowed() {
         // ::ffff:8.8.8.8 — IPv4-mapped public
-        let ip: IpAddr = "::ffff:8.8.8.8".parse().unwrap();
         assert!(
-            !is_disallowed_ip(&ip),
+            validate_url("https://[::ffff:8.8.8.8]/data", &[]).is_ok(),
             "IPv4-mapped public should be allowed"
         );
     }
@@ -972,9 +848,8 @@ mod tests {
     #[test]
     fn test_ipv4_mapped_v6_metadata_blocked() {
         // ::ffff:169.254.169.254 — IPv4-mapped cloud metadata
-        let ip: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
         assert!(
-            is_disallowed_ip(&ip),
+            validate_url("https://[::ffff:169.254.169.254]/data", &[]).is_err(),
             "IPv4-mapped cloud metadata should be blocked"
         );
     }

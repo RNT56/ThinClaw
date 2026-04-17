@@ -1848,6 +1848,18 @@ impl Store {
         Ok(row.get("cnt"))
     }
 
+    /// Count ALL currently running routine runs across all routines.
+    pub async fn count_all_running_routine_runs(&self) -> Result<i64, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                "SELECT COUNT(*) as cnt FROM routine_runs WHERE status = 'running'",
+                &[],
+            )
+            .await?;
+        Ok(row.get("cnt"))
+    }
+
     /// Link a routine run to a dispatched job.
     pub async fn link_routine_run_to_job(
         &self,
@@ -1863,20 +1875,26 @@ impl Store {
         Ok(())
     }
 
-    /// Mark all RUNNING routine runs as failed (startup cleanup).
+    /// Mark RUNNING routine runs older than 10 minutes as failed (zombie reaping).
+    ///
+    /// Only reaps runs that have been in `running` status for more than
+    /// 10 minutes. This prevents the reaper from killing actively-executing
+    /// worker jobs that were dispatched recently.
     pub async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError> {
         let conn = self.conn().await?;
         let now = Utc::now();
+        let cutoff = now - chrono::Duration::try_minutes(10).unwrap();
         let count = conn
             .execute(
                 r#"
                 UPDATE routine_runs SET
                     status = 'failed',
                     completed_at = $1,
-                    result_summary = 'Orphaned: process restarted while routine was running'
+                    result_summary = 'Orphaned: routine exceeded 10-minute TTL'
                 WHERE status = 'running'
+                  AND started_at < $2
                 "#,
-                &[&now],
+                &[&now, &cutoff],
             )
             .await?;
         Ok(count)

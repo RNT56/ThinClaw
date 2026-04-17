@@ -523,6 +523,16 @@ impl Tool for PromptManageTool {
         } else {
             target.to_string()
         };
+        let owner_actor_user = if target == paths::USER {
+            Some(paths::actor_user(&ctx.user_id))
+        } else {
+            None
+        };
+        let timezone_sync_target = target == paths::USER
+            && (resolved_target == paths::USER
+                || owner_actor_user
+                    .as_deref()
+                    .is_some_and(|path| resolved_target == path));
         let before = self
             .workspace
             .read(&resolved_target)
@@ -530,6 +540,11 @@ impl Tool for PromptManageTool {
             .ok()
             .map(|doc| doc.content)
             .unwrap_or_default();
+        let before_timezone = if timezone_sync_target {
+            crate::timezone::extract_markdown_timezone(&before)
+        } else {
+            None
+        };
 
         let next_content = match operation.as_str() {
             "replace" => require_str(&params, "content")?.to_string(),
@@ -562,6 +577,10 @@ impl Tool for PromptManageTool {
         };
         validate_prompt_content(&next_content)?;
         validate_prompt_safety(target, &next_content)?;
+        if target == paths::USER {
+            crate::timezone::validate_markdown_timezone_field(&next_content)
+                .map_err(ToolError::InvalidParameters)?;
+        }
 
         self.workspace
             .write(&resolved_target, &next_content)
@@ -579,6 +598,11 @@ impl Tool for PromptManageTool {
             .ok()
             .map(|doc| doc.content)
             .unwrap_or_default();
+        let after_timezone = if timezone_sync_target {
+            crate::timezone::extract_markdown_timezone(&after)
+        } else {
+            None
+        };
 
         let version_label = Some(Utc::now().to_rfc3339());
         let provenance = serde_json::json!({
@@ -601,6 +625,19 @@ impl Tool for PromptManageTool {
             provenance,
         )
         .await;
+
+        if timezone_sync_target && before_timezone != after_timezone {
+            crate::timezone::apply_user_timezone_change(
+                &self.store,
+                Some(self.workspace.as_ref()),
+                &ctx.user_id,
+                after_timezone.as_deref(),
+            )
+            .await
+            .map_err(|err| {
+                ToolError::ExecutionFailed(format!("failed to apply timezone update: {}", err))
+            })?;
+        }
 
         let result = serde_json::json!({
             "status": "updated",

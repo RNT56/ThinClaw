@@ -332,6 +332,7 @@ impl Channel for NostrChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::SecretString;
 
     #[test]
     fn test_thread_id_deterministic() {
@@ -342,5 +343,63 @@ mod tests {
         let id2 = NostrChannel::thread_id_from_pubkey(&pubkey);
         assert_eq!(id1, id2);
         assert!(Uuid::parse_str(&id1).is_ok());
+    }
+
+    #[test]
+    fn test_name_is_nostr() {
+        let config = NostrConfig {
+            private_key: SecretString::from("0000000000000000000000000000000000000000000000000000000000000001"),
+            relays: vec!["wss://relay.example".into()],
+            allow_from: vec![],
+        };
+        let channel = NostrChannel::new(config).unwrap();
+        assert_eq!(channel.name(), "nostr");
+    }
+
+    #[test]
+    fn test_parse_keys_rejects_invalid_secret() {
+        let config = NostrConfig {
+            private_key: SecretString::from("not-a-secret"),
+            relays: vec![],
+            allow_from: vec![],
+        };
+        assert!(NostrChannel::parse_keys(&config).is_err());
+    }
+
+    #[test]
+    fn test_parse_keys_accepts_valid_hex_private_key() {
+        let config = NostrConfig {
+            private_key: SecretString::from("0000000000000000000000000000000000000000000000000000000000000001"),
+            relays: vec![],
+            allow_from: vec![],
+        };
+        assert!(NostrChannel::parse_keys(&config).is_ok());
+    }
+
+    #[test]
+    fn test_thread_id_for_different_pubkeys() {
+        let pubkey1 =
+            PublicKey::from_hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap();
+        let pubkey2 =
+            PublicKey::from_hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81799")
+                .unwrap();
+        assert_ne!(
+            NostrChannel::thread_id_from_pubkey(&pubkey1),
+            NostrChannel::thread_id_from_pubkey(&pubkey2)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_skips_non_pubkey_recipients() {
+        let channel = NostrChannel::new(NostrConfig {
+            private_key: SecretString::from("0000000000000000000000000000000000000000000000000000000000000001"),
+            relays: vec![],
+            allow_from: vec![],
+        })
+        .unwrap();
+
+        let result = channel.broadcast("default", OutgoingResponse::text("hello")).await;
+        assert!(result.is_ok());
     }
 }

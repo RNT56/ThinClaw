@@ -1,5 +1,6 @@
 //! Channel trait and message types.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -106,6 +107,8 @@ pub struct OutgoingResponse {
     pub thread_id: Option<String>,
     /// Channel-specific metadata for the response.
     pub metadata: serde_json::Value,
+    /// Optional outbound media attachments (images, files, etc.).
+    pub attachments: Vec<MediaContent>,
 }
 
 impl OutgoingResponse {
@@ -115,12 +118,19 @@ impl OutgoingResponse {
             content: content.into(),
             thread_id: None,
             metadata: serde_json::Value::Null,
+            attachments: Vec::new(),
         }
     }
 
     /// Set the thread ID for the response.
     pub fn in_thread(mut self, thread_id: impl Into<String>) -> Self {
         self.thread_id = Some(thread_id.into());
+        self
+    }
+
+    /// Attach outbound media files to the response.
+    pub fn with_attachments(mut self, attachments: Vec<MediaContent>) -> Self {
+        self.attachments = attachments;
         self
     }
 }
@@ -455,8 +465,31 @@ pub trait Channel: Send + Sync {
         // No-op by default
     }
 
+    /// Update channel-specific runtime config values without recreating the channel object.
+    ///
+    /// Useful for WASM-backed channels whose startup config needs to be adjusted
+    /// before a restart (for example Telegram transport policy changes).
+    async fn update_runtime_config(&self, _updates: HashMap<String, serde_json::Value>) {
+        // No-op by default
+    }
+
+    /// Clear transient connection/runtime state before a manual reconnect.
+    ///
+    /// This should not be used for routine health-monitor restarts because
+    /// some channels intentionally persist fallback state across restarts.
+    async fn reset_connection_state(&self) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
     /// Check if the channel is healthy.
     async fn health_check(&self) -> Result<(), ChannelError>;
+
+    /// Return channel-specific diagnostics for UI/status surfaces.
+    ///
+    /// Default implementation exposes no diagnostics.
+    async fn diagnostics(&self) -> Option<serde_json::Value> {
+        None
+    }
 
     /// React to a message with an emoji.
     ///
@@ -497,6 +530,20 @@ pub trait Channel: Send + Sync {
     /// Default implementation does nothing (for channels without typing support).
     async fn send_typing(&self, _chat_id: &str) -> Result<(), ChannelError> {
         Ok(())
+    }
+
+    /// Toggle debug mode for this channel and return the new state.
+    ///
+    /// When debug mode is on, tool-level status events (ToolStarted,
+    /// ToolCompleted, ToolResult) are forwarded to the channel. When off
+    /// (default), they are silently suppressed to avoid spamming chat
+    /// channels with one message per tool call.
+    ///
+    /// Default implementation returns `false` (no-op for channels that
+    /// don't support runtime debug toggling, like the REPL which has its
+    /// own local toggle).
+    async fn toggle_debug_mode(&self) -> bool {
+        false
     }
 }
 

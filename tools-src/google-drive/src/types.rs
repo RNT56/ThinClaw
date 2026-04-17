@@ -267,3 +267,87 @@ pub struct ListPermissionsResult {
 pub struct ListSharedDrivesResult {
     pub drives: Vec<SharedDrive>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GoogleDriveAction;
+
+    #[test]
+    fn list_files_defaults_page_size_and_corpora() {
+        let action: GoogleDriveAction = serde_json::from_value(serde_json::json!({
+            "action": "list_files"
+        }))
+        .unwrap();
+
+        match action {
+            GoogleDriveAction::ListFiles {
+                query,
+                page_size,
+                order_by,
+                corpora,
+                drive_id,
+                page_token,
+            } => {
+                assert_eq!(query, None);
+                assert_eq!(page_size, 25);
+                assert_eq!(order_by, None);
+                assert_eq!(corpora, "user");
+                assert_eq!(drive_id, None);
+                assert_eq!(page_token, None);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upload_file_defaults_mime_type() {
+        let action: GoogleDriveAction = serde_json::from_value(serde_json::json!({
+            "action": "upload_file",
+            "name": "notes.txt",
+            "content": "hello"
+        }))
+        .unwrap();
+
+        match action {
+            GoogleDriveAction::UploadFile {
+                name,
+                content,
+                mime_type,
+                parent_id,
+                description,
+            } => {
+                assert_eq!(name, "notes.txt");
+                assert_eq!(content, "hello");
+                assert_eq!(mime_type, "text/plain");
+                assert_eq!(parent_id, None);
+                assert_eq!(description, None);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn share_file_defaults_role_to_reader() {
+        let action: GoogleDriveAction = serde_json::from_value(serde_json::json!({
+            "action": "share_file",
+            "file_id": "file-123",
+            "email": "alice@example.com"
+        }))
+        .unwrap();
+
+        match action {
+            GoogleDriveAction::ShareFile {
+                file_id,
+                email,
+                role,
+                message,
+            } => {
+                assert_eq!(file_id, "file-123");
+                assert_eq!(email, "alice@example.com");
+                assert_eq!(role, "reader");
+                assert_eq!(message, None);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+}

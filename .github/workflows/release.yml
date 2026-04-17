@@ -153,6 +153,7 @@ jobs:
           key: ${{ join(matrix.targets, '-') }}
           cache-provider: ${{ matrix.cache_provider }}
       - name: Install dist
+        shell: ${{ matrix.install_dist.shell || (runner.os == 'Windows' && 'pwsh') || 'bash' }}
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
       - name: Fetch local artifacts
@@ -195,9 +196,11 @@ jobs:
             done
           done < "$CHECKSUMS"
       - name: Install dependencies
+        shell: ${{ (runner.os == 'Windows' && 'pwsh') || 'bash' }}
         run: |
           ${{ matrix.packages_install }}
       - name: Build artifacts
+        shell: ${{ (runner.os == 'Windows' && 'pwsh') || 'bash' }}
         run: |
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json

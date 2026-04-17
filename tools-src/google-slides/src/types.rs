@@ -273,3 +273,91 @@ pub struct BatchUpdateResult {
     pub presentation_id: String,
     pub replies: Vec<serde_json::Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GoogleSlidesAction;
+
+    #[test]
+    fn create_slide_defaults_layout_and_insertion_index() {
+        let action: GoogleSlidesAction = serde_json::from_value(serde_json::json!({
+            "action": "create_slide",
+            "presentation_id": "pres-123"
+        }))
+        .unwrap();
+
+        match action {
+            GoogleSlidesAction::CreateSlide {
+                presentation_id,
+                insertion_index,
+                layout,
+            } => {
+                assert_eq!(presentation_id, "pres-123");
+                assert_eq!(insertion_index, None);
+                assert_eq!(layout, "BLANK");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_all_text_defaults_match_case() {
+        let action: GoogleSlidesAction = serde_json::from_value(serde_json::json!({
+            "action": "replace_all_text",
+            "presentation_id": "pres-123",
+            "find": "hello",
+            "replace": "hi"
+        }))
+        .unwrap();
+
+        match action {
+            GoogleSlidesAction::ReplaceAllText {
+                presentation_id,
+                find,
+                replace,
+                match_case,
+            } => {
+                assert_eq!(presentation_id, "pres-123");
+                assert_eq!(find, "hello");
+                assert_eq!(replace, "hi");
+                assert!(match_case);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_shape_defaults_to_text_box() {
+        let action: GoogleSlidesAction = serde_json::from_value(serde_json::json!({
+            "action": "create_shape",
+            "presentation_id": "pres-123",
+            "slide_object_id": "slide-1",
+            "x": 10.0,
+            "y": 20.0,
+            "width": 300.0,
+            "height": 100.0
+        }))
+        .unwrap();
+
+        match action {
+            GoogleSlidesAction::CreateShape {
+                presentation_id,
+                slide_object_id,
+                shape_type,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                assert_eq!(presentation_id, "pres-123");
+                assert_eq!(slide_object_id, "slide-1");
+                assert_eq!(shape_type, "TEXT_BOX");
+                assert_eq!(x, 10.0);
+                assert_eq!(y, 20.0);
+                assert_eq!(width, 300.0);
+                assert_eq!(height, 100.0);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+}

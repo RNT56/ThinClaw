@@ -988,6 +988,9 @@ impl SetupWizard {
         if self.settings.channels.apple_mail_enabled {
             channels.push("apple_mail".to_string());
         }
+        if self.settings.channels.bluebubbles_enabled {
+            channels.push("bluebubbles".to_string());
+        }
         channels.extend(self.settings.channels.wasm_channels.iter().cloned());
         channels
     }
@@ -1266,6 +1269,29 @@ impl SetupWizard {
                 issues += 1;
                 print_warning(
                     "Gmail verification failed. Project, subscription, and topic are required.",
+                );
+            }
+        }
+
+        if self.settings.channels.bluebubbles_enabled {
+            let bb_ready = if let Some(ref url) = self.settings.channels.bluebubbles_server_url {
+                if url.trim().is_empty() {
+                    false
+                } else {
+                    let ping_url = format!("{}/api/v1/ping", url.trim_end_matches('/'));
+                    Self::verify_http_reachable(&ping_url).await
+                }
+            } else {
+                false
+            };
+            self.verified_channels
+                .insert("bluebubbles".to_string(), bb_ready);
+            if bb_ready {
+                print_success("BlueBubbles verification passed (server reachable).");
+            } else {
+                issues += 1;
+                print_warning(
+                    "BlueBubbles verification failed. Ensure the server URL is correct and reachable.",
                 );
             }
         }

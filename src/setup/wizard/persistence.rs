@@ -208,6 +208,29 @@ impl SetupWizard {
             env_vars.push(("APPLE_MAIL_MARK_AS_READ", "false".to_string()));
         }
 
+        // BlueBubbles iMessage bridge env vars
+        if self.settings.channels.bluebubbles_enabled {
+            env_vars.push(("BLUEBUBBLES_ENABLED", "true".to_string()));
+        }
+        if let Some(ref url) = self.settings.channels.bluebubbles_server_url {
+            env_vars.push(("BLUEBUBBLES_SERVER_URL", url.clone()));
+        }
+        if let Some(ref password) = self.settings.channels.bluebubbles_password {
+            env_vars.push(("BLUEBUBBLES_PASSWORD", password.clone()));
+        }
+        if let Some(ref host) = self.settings.channels.bluebubbles_webhook_host {
+            env_vars.push(("BLUEBUBBLES_WEBHOOK_HOST", host.clone()));
+        }
+        if let Some(port) = self.settings.channels.bluebubbles_webhook_port {
+            env_vars.push(("BLUEBUBBLES_WEBHOOK_PORT", port.to_string()));
+        }
+        if let Some(ref allow_from) = self.settings.channels.bluebubbles_allow_from {
+            env_vars.push(("BLUEBUBBLES_ALLOW_FROM", allow_from.clone()));
+        }
+        if let Some(send_receipts) = self.settings.channels.bluebubbles_send_read_receipts {
+            env_vars.push(("BLUEBUBBLES_SEND_READ_RECEIPTS", send_receipts.to_string()));
+        }
+
         // Web Gateway env vars
         if let Some(ref port) = self.settings.channels.gateway_port {
             env_vars.push(("GATEWAY_PORT", port.to_string()));

@@ -37,9 +37,8 @@ for consent, then stores refresh + access tokens encrypted in the secret store.
 
 | Scope | Purpose |
 |-------|---------|
-| `gmail.readonly` | Read emails and labels |
-| `gmail.send` | Send emails |
-| `pubsub` | Real-time notifications (for Gmail channel, optional) |
+| `https://www.googleapis.com/auth/gmail.modify` | Read/write mailbox content and metadata (including modifying labels/messages) |
+| `https://www.googleapis.com/auth/gmail.compose` | Send emails and manage drafts |
 
 ### Secret Name
 

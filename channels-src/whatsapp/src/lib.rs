@@ -373,7 +373,11 @@ impl Guest for WhatsAppChannel {
         let _ = channel_host::workspace_write("channels/whatsapp/api_version", &config.api_version);
         let _ = channel_host::workspace_write(
             "channels/whatsapp/reply_to_message",
-            if config.reply_to_message { "true" } else { "false" },
+            if config.reply_to_message {
+                "true"
+            } else {
+                "false"
+            },
         );
 
         // Persist permission config for handle_message
@@ -738,35 +742,48 @@ fn handle_message(
     if let Some(ref img) = message.image {
         media_descriptors.push((
             img.id.clone(),
-            img.mime_type.clone().unwrap_or_else(|| "image/jpeg".to_string()),
+            img.mime_type
+                .clone()
+                .unwrap_or_else(|| "image/jpeg".to_string()),
             None,
         ));
     }
     if let Some(ref audio) = message.audio {
         media_descriptors.push((
             audio.id.clone(),
-            audio.mime_type.clone().unwrap_or_else(|| "audio/ogg".to_string()),
+            audio
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "audio/ogg".to_string()),
             None,
         ));
     }
     if let Some(ref video) = message.video {
         media_descriptors.push((
             video.id.clone(),
-            video.mime_type.clone().unwrap_or_else(|| "video/mp4".to_string()),
+            video
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "video/mp4".to_string()),
             None,
         ));
     }
     if let Some(ref doc) = message.document {
         media_descriptors.push((
             doc.id.clone(),
-            doc.mime_type.clone().unwrap_or_else(|| "application/octet-stream".to_string()),
+            doc.mime_type
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
             doc.filename.clone(),
         ));
     }
     if let Some(ref sticker) = message.sticker {
         media_descriptors.push((
             sticker.id.clone(),
-            sticker.mime_type.clone().unwrap_or_else(|| "image/webp".to_string()),
+            sticker
+                .mime_type
+                .clone()
+                .unwrap_or_else(|| "image/webp".to_string()),
             None,
         ));
     }
@@ -786,16 +803,13 @@ fn handle_message(
     let user_name = contact_names.get(&message.from).cloned();
 
     // Permission check (WhatsApp is always DM)
-    if !check_sender_permission(
-        &message.from,
-        user_name.as_deref(),
-        phone_number_id,
-    ) {
+    if !check_sender_permission(&message.from, user_name.as_deref(), phone_number_id) {
         return;
     }
 
     // Download media attachments
-    let headers_json = serde_json::json!({"Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"}).to_string();
+    let headers_json =
+        serde_json::json!({"Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"}).to_string();
     let mut attachments = Vec::new();
 
     for (media_id, mime_type, filename) in &media_descriptors {
@@ -904,14 +918,9 @@ fn download_whatsapp_media(media_id: &str, headers_json: &str) -> Result<Vec<u8>
         .ok_or_else(|| "No URL in media response".to_string())?;
 
     // Step 2: Download the actual file binary
-    let download_response = channel_host::http_request(
-        "GET",
-        &download_url,
-        headers_json,
-        None,
-        Some(30_000),
-    )
-    .map_err(|e| format!("Media download failed: {}", e))?;
+    let download_response =
+        channel_host::http_request("GET", &download_url, headers_json, None, Some(30_000))
+            .map_err(|e| format!("Media download failed: {}", e))?;
 
     if download_response.status != 200 {
         return Err(format!(
@@ -996,10 +1005,7 @@ fn check_sender_permission(
             Ok(result) => {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!(
-                        "Pairing request for {}: code {}",
-                        sender_phone, result.code
-                    ),
+                    &format!("Pairing request for {}: code {}", sender_phone, result.code),
                 );
                 if result.created {
                     let _ = send_pairing_reply(sender_phone, phone_number_id, &result.code);
@@ -1296,7 +1302,12 @@ fn parse_wa_link(chars: &[char], start: usize) -> Option<(String, String, usize)
 }
 
 /// Extract content between `count` instances of `delimiter` character.
-fn extract_wa_delimited(chars: &[char], start: usize, delimiter: char, count: usize) -> Option<(String, usize)> {
+fn extract_wa_delimited(
+    chars: &[char],
+    start: usize,
+    delimiter: char,
+    count: usize,
+) -> Option<(String, usize)> {
     let len = chars.len();
     for j in 0..count {
         if start + j >= len || chars[start + j] != delimiter {
@@ -1351,7 +1362,9 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
         let search_area = &remaining[..max_len];
 
-        let split_at = search_area.rfind("\n\n").map(|pos| pos + 1)
+        let split_at = search_area
+            .rfind("\n\n")
+            .map(|pos| pos + 1)
             .or_else(|| search_area.rfind('\n'))
             .or_else(|| search_area.rfind(' '))
             .unwrap_or_else(|| {
@@ -1477,9 +1490,7 @@ mod tests {
             timestamp: "1234567890".to_string(),
             conversation_kind: Some("direct".to_string()),
             conversation_scope_id: Some("whatsapp:direct:123456:15551234567".to_string()),
-            external_conversation_key: Some(
-                "whatsapp://direct/123456/15551234567".to_string(),
-            ),
+            external_conversation_key: Some("whatsapp://direct/123456/15551234567".to_string()),
             raw_sender_id: Some("15551234567".to_string()),
             stable_sender_id: Some("15551234567".to_string()),
         };
@@ -1490,5 +1501,23 @@ mod tests {
         assert_eq!(parsed.phone_number_id, "123456");
         assert_eq!(parsed.sender_phone, "15551234567");
         assert_eq!(parsed.conversation_kind.as_deref(), Some("direct"));
+    }
+
+    #[test]
+    fn test_split_message_short() {
+        let chunks = split_message("hello", WHATSAPP_MAX_MESSAGE_LENGTH);
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_split_message_prefers_newline_boundaries() {
+        let text = format!("{}\n{}", "a".repeat(2500), "b".repeat(2500));
+        let chunks = split_message(&text, WHATSAPP_MAX_MESSAGE_LENGTH);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].len() <= WHATSAPP_MAX_MESSAGE_LENGTH);
+        assert!(chunks[1].len() <= WHATSAPP_MAX_MESSAGE_LENGTH);
+        assert!(chunks[0].starts_with('a'));
+        assert!(chunks[1].starts_with('b'));
     }
 }
