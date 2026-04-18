@@ -22,13 +22,14 @@ use crate::tools::mcp::config::{
     McpCapabilityPolicy, McpConfigStore, McpLoggingLevel, McpServerConfig, McpTransport,
 };
 use crate::tools::mcp::protocol::{
-    CallToolResult, ClientCapabilities, ClientElicitationCapability, ClientRootsCapability,
-    ClientSamplingCapability, ClientSamplingToolsCapability, CompleteArgument, CompleteResult,
-    ContentBlock, ElicitationCreateRequest, GetPromptResult, InitializeResult, ListPromptsResult,
-    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, McpError, McpNotification,
-    McpPrompt, McpRequest, McpResource, McpResourceContents, McpResourceTemplate, McpResponse,
-    McpTool, McpTransportMessage, PROTOCOL_VERSION, ReadResourceResult,
-    SamplingCreateMessageRequest,
+    CallToolResult, CancelledNotification, ClientCapabilities, ClientElicitationCapability,
+    ClientRootsCapability, ClientSamplingCapability, ClientSamplingToolsCapability,
+    CompleteArgument, CompleteResult, ContentBlock, ElicitationCreateRequest, GetPromptResult,
+    InitializeResult, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
+    ListToolsResult, LoggingMessageNotification, McpError, McpNotification, McpPrompt, McpRequest,
+    McpResource, McpResourceContents, McpResourceTemplate, McpResponse, McpTool,
+    McpTransportMessage, PROTOCOL_VERSION, ProgressNotification, ReadResourceResult,
+    ResourceUpdatedNotification, SamplingCreateMessageRequest,
 };
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::mcp::stdio::{McpInboundHandler, StdioTransport};
@@ -47,6 +48,7 @@ struct McpRuntimeState {
     config_store: Option<McpConfigStore>,
     pending_interactions: RwLock<HashMap<String, McpPendingInteraction>>,
     interaction_waiters: Mutex<HashMap<String, oneshot::Sender<PendingInteractionResolution>>>,
+    interaction_request_ids: Mutex<HashMap<u64, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +105,7 @@ impl McpRuntimeState {
             config_store,
             pending_interactions: RwLock::new(HashMap::new()),
             interaction_waiters: Mutex::new(HashMap::new()),
+            interaction_request_ids: Mutex::new(HashMap::new()),
         }
     }
 
@@ -152,6 +155,17 @@ impl McpRuntimeState {
             "notifications/resources/list_changed" | "notifications/resources/updated" => {
                 *self.resources_cache.write().await = None;
                 *self.resource_templates_cache.write().await = None;
+                if notification.method == "notifications/resources/updated"
+                    && let Some(params) = notification.params.as_ref()
+                    && let Ok(updated) =
+                        serde_json::from_value::<ResourceUpdatedNotification>(params.clone())
+                {
+                    tracing::debug!(
+                        server = %self.server_name,
+                        uri = updated.uri.as_deref().unwrap_or(""),
+                        "MCP resource updated"
+                    );
+                }
                 tracing::debug!(server = %self.server_name, "MCP resources cache invalidated");
             }
             "notifications/prompts/list_changed" => {
@@ -159,23 +173,47 @@ impl McpRuntimeState {
                 tracing::debug!(server = %self.server_name, "MCP prompts cache invalidated");
             }
             "notifications/message" => {
+                let parsed = notification.params.as_ref().and_then(|params| {
+                    serde_json::from_value::<LoggingMessageNotification>(params.clone()).ok()
+                });
                 tracing::debug!(
                     server = %self.server_name,
-                    params = ?notification.params,
+                    level = ?parsed.as_ref().and_then(|message| message.level),
+                    logger = parsed.as_ref().and_then(|message| message.logger.as_deref()).unwrap_or(""),
+                    data = ?parsed.as_ref().and_then(|message| message.data.clone()).or_else(|| notification.params.clone()),
                     "MCP log notification"
                 );
             }
             "notifications/progress" => {
+                let parsed = notification.params.as_ref().and_then(|params| {
+                    serde_json::from_value::<ProgressNotification>(params.clone()).ok()
+                });
                 tracing::debug!(
                     server = %self.server_name,
-                    params = ?notification.params,
+                    progress = ?parsed.as_ref().and_then(|progress| progress.progress),
+                    total = ?parsed.as_ref().and_then(|progress| progress.total),
+                    progress_token = ?parsed.as_ref().and_then(|progress| progress.progress_token.clone()),
+                    message = parsed.as_ref().and_then(|progress| progress.message.as_deref()).unwrap_or(""),
                     "MCP progress notification"
                 );
             }
             "notifications/cancelled" => {
+                let parsed = notification.params.as_ref().and_then(|params| {
+                    serde_json::from_value::<CancelledNotification>(params.clone()).ok()
+                });
+                if let Some(cancelled) = parsed.as_ref() {
+                    self.cancel_pending_server_request(
+                        cancelled.request_id,
+                        cancelled.reason.clone().unwrap_or_else(|| {
+                            "MCP interaction was cancelled by the server".to_string()
+                        }),
+                    )
+                    .await;
+                }
                 tracing::debug!(
                     server = %self.server_name,
-                    params = ?notification.params,
+                    request_id = ?parsed.as_ref().and_then(|cancelled| cancelled.request_id),
+                    reason = parsed.as_ref().and_then(|cancelled| cancelled.reason.as_deref()).unwrap_or(""),
                     "MCP cancellation notification"
                 );
             }
@@ -201,8 +239,13 @@ impl McpRuntimeState {
         }
     }
 
-    async fn set_roots_grants(&self, roots_grants: Vec<String>) {
-        *self.roots_grants.write().await = roots_grants;
+    async fn update_roots_grants(&self, roots_grants: Vec<String>) -> bool {
+        let mut current = self.roots_grants.write().await;
+        if *current == roots_grants {
+            return false;
+        }
+        *current = roots_grants;
+        true
     }
 
     async fn roots_result(&self) -> serde_json::Value {
@@ -237,10 +280,14 @@ impl McpRuntimeState {
         interaction_id: &str,
         resolution: PendingInteractionResolution,
     ) -> Result<(), ToolError> {
-        self.pending_interactions
-            .write()
-            .await
-            .remove(interaction_id);
+        let Some(request_id) = self.pending_request_id(interaction_id).await else {
+            return Err(ToolError::InvalidParameters(format!(
+                "No pending MCP interaction with id '{}'",
+                interaction_id
+            )));
+        };
+        self.remove_pending_tracking(interaction_id, Some(request_id))
+            .await;
         let sender = self
             .interaction_waiters
             .lock()
@@ -258,6 +305,53 @@ impl McpRuntimeState {
                 interaction_id
             ))
         })
+    }
+
+    async fn pending_request_id(&self, interaction_id: &str) -> Option<u64> {
+        let request_ids = self.interaction_request_ids.lock().await;
+        request_ids.iter().find_map(|(request_id, pending_id)| {
+            (pending_id == interaction_id).then_some(*request_id)
+        })
+    }
+
+    async fn remove_pending_tracking(&self, interaction_id: &str, request_id: Option<u64>) {
+        self.pending_interactions
+            .write()
+            .await
+            .remove(interaction_id);
+        let mut request_ids = self.interaction_request_ids.lock().await;
+        if let Some(request_id) = request_id {
+            request_ids.remove(&request_id);
+        } else if let Some(request_id) = request_ids.iter().find_map(|(request_id, pending_id)| {
+            (pending_id == interaction_id).then_some(*request_id)
+        }) {
+            request_ids.remove(&request_id);
+        }
+    }
+
+    async fn cancel_pending_server_request(&self, request_id: Option<u64>, reason: String) {
+        let Some(request_id) = request_id else {
+            return;
+        };
+        let interaction_id = self
+            .interaction_request_ids
+            .lock()
+            .await
+            .get(&request_id)
+            .cloned();
+        let Some(interaction_id) = interaction_id else {
+            return;
+        };
+        self.remove_pending_tracking(&interaction_id, Some(request_id))
+            .await;
+        if let Some(sender) = self
+            .interaction_waiters
+            .lock()
+            .await
+            .remove(&interaction_id)
+        {
+            let _ = sender.send(PendingInteractionResolution::Denied(reason));
+        }
     }
 
     async fn build_pending_interaction(
@@ -291,6 +385,10 @@ impl McpRuntimeState {
             .lock()
             .await
             .insert(interaction_id, tx);
+        self.interaction_request_ids
+            .lock()
+            .await
+            .insert(request.id, pending.id.clone());
         (pending, rx)
     }
 
@@ -304,17 +402,20 @@ impl McpRuntimeState {
 
         match tokio::time::timeout(MCP_INTERACTION_TIMEOUT, receiver).await {
             Ok(Ok(PendingInteractionResolution::Approved(result))) => {
-                self.pending_interactions.write().await.remove(&pending.id);
+                self.remove_pending_tracking(&pending.id, Some(request_id))
+                    .await;
                 self.interaction_waiters.lock().await.remove(&pending.id);
                 McpResponse::success(request_id, result)
             }
             Ok(Ok(PendingInteractionResolution::Denied(message))) => {
-                self.pending_interactions.write().await.remove(&pending.id);
+                self.remove_pending_tracking(&pending.id, Some(request_id))
+                    .await;
                 self.interaction_waiters.lock().await.remove(&pending.id);
                 McpResponse::error(request_id, McpError::request_cancelled(message))
             }
             Ok(Err(_)) => {
-                self.pending_interactions.write().await.remove(&pending.id);
+                self.remove_pending_tracking(&pending.id, Some(request_id))
+                    .await;
                 self.interaction_waiters.lock().await.remove(&pending.id);
                 McpResponse::error(
                     request_id,
@@ -322,7 +423,8 @@ impl McpRuntimeState {
                 )
             }
             Err(_) => {
-                self.pending_interactions.write().await.remove(&pending.id);
+                self.remove_pending_tracking(&pending.id, Some(request_id))
+                    .await;
                 self.interaction_waiters.lock().await.remove(&pending.id);
                 McpResponse::error(
                     request_id,
@@ -1017,7 +1119,7 @@ impl McpClient {
                 })?)
                 .map_err(|e| ToolError::ExternalService(format!("Invalid tools list: {}", e)))?;
             tools.extend(page.tools);
-            cursor = page.next_cursor;
+            cursor = page.cursor.next_cursor;
             if cursor.is_none() {
                 break;
             }
@@ -1056,7 +1158,7 @@ impl McpClient {
                     ToolError::ExternalService(format!("Invalid resources list: {}", e))
                 })?;
             resources.extend(page.resources);
-            cursor = page.next_cursor;
+            cursor = page.cursor.next_cursor;
             if cursor.is_none() {
                 break;
             }
@@ -1113,7 +1215,7 @@ impl McpClient {
                     ToolError::ExternalService(format!("Invalid resource template list: {}", e))
                 })?;
             templates.extend(page.resource_templates);
-            cursor = page.next_cursor;
+            cursor = page.cursor.next_cursor;
             if cursor.is_none() {
                 break;
             }
@@ -1181,7 +1283,7 @@ impl McpClient {
                 })?)
                 .map_err(|e| ToolError::ExternalService(format!("Invalid prompts list: {}", e)))?;
             prompts.extend(page.prompts);
-            cursor = page.next_cursor;
+            cursor = page.cursor.next_cursor;
             if cursor.is_none() {
                 break;
             }
@@ -1297,8 +1399,17 @@ impl McpClient {
     }
 
     /// Update the in-memory roots grants for an active client.
-    pub async fn update_roots_grants(&self, roots_grants: Vec<String>) {
-        self.runtime.set_roots_grants(roots_grants).await;
+    pub async fn update_roots_grants(&self, roots_grants: Vec<String>) -> bool {
+        self.runtime.update_roots_grants(roots_grants).await
+    }
+
+    /// Notify the connected server that roots grants changed.
+    pub async fn notify_roots_list_changed(&self) -> Result<(), ToolError> {
+        if self.runtime.cached_initialize().await.is_none() {
+            return Ok(());
+        }
+        self.send_notification(McpNotification::roots_list_changed())
+            .await
     }
 
     /// Snapshot all pending server-initiated interactions for this client.

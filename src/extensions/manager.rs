@@ -10,8 +10,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
 
 use crate::channels::ChannelManager;
 use crate::channels::wasm::{
@@ -77,6 +80,8 @@ pub struct ExtensionManager {
     mcp_session_manager: Arc<McpSessionManager>,
     /// Active MCP clients keyed by server name.
     mcp_clients: RwLock<HashMap<String, Arc<McpClient>>>,
+    /// Background config sync tasks keyed by server name.
+    mcp_watchers: RwLock<HashMap<String, JoinHandle<()>>>,
 
     // WASM tool infrastructure
     wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
@@ -131,6 +136,7 @@ impl ExtensionManager {
             discovery: OnlineDiscovery::new(),
             mcp_session_manager,
             mcp_clients: RwLock::new(HashMap::new()),
+            mcp_watchers: RwLock::new(HashMap::new()),
             wasm_tool_runtime,
             wasm_tools_dir,
             wasm_channels_dir,
@@ -635,6 +641,7 @@ impl ExtensionManager {
 
                 // Remove MCP client
                 self.mcp_clients.write().await.remove(name);
+                self.stop_mcp_watcher(name).await;
 
                 // Remove from config
                 self.remove_mcp_server(name)
@@ -791,6 +798,47 @@ impl ExtensionManager {
         McpConfigStore::new(self.store.clone(), self.user_id.clone())
     }
 
+    async fn ensure_mcp_watcher(&self, name: &str, client: &Arc<McpClient>) {
+        let mut watchers = self.mcp_watchers.write().await;
+        if watchers.contains_key(name) {
+            return;
+        }
+
+        let server_name = name.to_string();
+        let config_store = self.mcp_config_store();
+        let weak_client = Arc::downgrade(client);
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let Some(client) = weak_client.upgrade() else {
+                    break;
+                };
+                let Ok(Some(config)) = config_store.get_server(&server_name).await else {
+                    continue;
+                };
+                if client.update_roots_grants(config.roots_grants).await
+                    && let Err(error) = client.notify_roots_list_changed().await
+                {
+                    tracing::debug!(
+                        server = %server_name,
+                        error = %error,
+                        "Failed to notify MCP server about updated roots grants"
+                    );
+                }
+            }
+        });
+        watchers.insert(name.to_string(), handle);
+    }
+
+    async fn stop_mcp_watcher(&self, name: &str) {
+        if let Some(handle) = self.mcp_watchers.write().await.remove(name) {
+            handle.abort();
+        }
+    }
+
     async fn build_mcp_client(
         &self,
         server: &McpServerConfig,
@@ -831,6 +879,7 @@ impl ExtensionManager {
             .write()
             .await
             .insert(name.to_string(), Arc::clone(&client));
+        self.ensure_mcp_watcher(name, &client).await;
         Ok(client)
     }
 
@@ -1962,6 +2011,7 @@ impl ExtensionManager {
                 .write()
                 .await
                 .insert(name.to_string(), Arc::clone(&client));
+            self.ensure_mcp_watcher(name, &client).await;
             client
         };
 

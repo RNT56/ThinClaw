@@ -462,8 +462,8 @@ pub struct CursorPage {
 pub struct ListToolsResult {
     #[serde(default)]
     pub tools: Vec<McpTool>,
-    #[serde(rename = "nextCursor", default)]
-    pub next_cursor: Option<String>,
+    #[serde(flatten)]
+    pub cursor: CursorPage,
 }
 
 /// Result of listing resources.
@@ -471,8 +471,8 @@ pub struct ListToolsResult {
 pub struct ListResourcesResult {
     #[serde(default)]
     pub resources: Vec<McpResource>,
-    #[serde(rename = "nextCursor", default)]
-    pub next_cursor: Option<String>,
+    #[serde(flatten)]
+    pub cursor: CursorPage,
 }
 
 /// Result of listing resource templates.
@@ -480,8 +480,8 @@ pub struct ListResourcesResult {
 pub struct ListResourceTemplatesResult {
     #[serde(default, rename = "resourceTemplates")]
     pub resource_templates: Vec<McpResourceTemplate>,
-    #[serde(rename = "nextCursor", default)]
-    pub next_cursor: Option<String>,
+    #[serde(flatten)]
+    pub cursor: CursorPage,
 }
 
 /// Result of reading a resource.
@@ -496,8 +496,8 @@ pub struct ReadResourceResult {
 pub struct ListPromptsResult {
     #[serde(default)]
     pub prompts: Vec<McpPrompt>,
-    #[serde(rename = "nextCursor", default)]
-    pub next_cursor: Option<String>,
+    #[serde(flatten)]
+    pub cursor: CursorPage,
 }
 
 /// Result of fetching a prompt.
@@ -972,7 +972,7 @@ mod tests {
         let result: ListToolsResult =
             serde_json::from_value(server_response).expect("deserialize ListToolsResult");
         assert_eq!(result.tools.len(), 1);
-        assert_eq!(result.next_cursor.as_deref(), Some("cursor-2"));
+        assert_eq!(result.cursor.next_cursor.as_deref(), Some("cursor-2"));
     }
 
     #[test]
