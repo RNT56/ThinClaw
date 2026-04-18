@@ -10,6 +10,8 @@
 pub mod browser_args;
 pub mod builder;
 pub mod builtin;
+pub mod execution;
+pub mod execution_backend;
 pub mod intent_display;
 pub mod mcp;
 pub mod policy;
@@ -28,4 +30,8 @@ pub use builder::{
 };
 pub use rate_limiter::RateLimiter;
 pub use registry::ToolRegistry;
-pub use tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig};
+pub use tool::{
+    ApprovalRequirement, Tool, ToolApprovalClass, ToolArtifact, ToolDescriptor, ToolDomain,
+    ToolError, ToolExecutionLane, ToolMetadata, ToolOutput, ToolProfile, ToolRateLimitConfig,
+    ToolRouteIntent, ToolSideEffectLevel,
+};

@@ -423,17 +423,17 @@ impl ChannelManager {
 
             let (last_message_at, last_error, last_error_at) =
                 if let Some(c) = counters_guard.get(name.as_str()) {
-                (
-                    c.last_message_at
-                        .read()
-                        .ok()
-                        .and_then(|guard| guard.clone()),
-                    c.last_error.read().ok().and_then(|guard| guard.clone()),
-                    c.last_error_at.read().ok().and_then(|guard| guard.clone()),
-                )
-            } else {
-                (None, None, None)
-            };
+                    (
+                        c.last_message_at
+                            .read()
+                            .ok()
+                            .and_then(|guard| guard.clone()),
+                        c.last_error.read().ok().and_then(|guard| guard.clone()),
+                        c.last_error_at.read().ok().and_then(|guard| guard.clone()),
+                    )
+                } else {
+                    (None, None, None)
+                };
             let state = if let (Some(error), Some(failed_at)) =
                 (last_error.clone(), last_error_at.clone())
             {

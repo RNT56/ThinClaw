@@ -69,6 +69,14 @@ expression: settings
     "gmail_subscription_id": null,
     "gmail_topic_id": null,
     "gmail_allowed_senders": null,
+    "bluebubbles_enabled": false,
+    "bluebubbles_server_url": null,
+    "bluebubbles_password": null,
+    "bluebubbles_webhook_host": null,
+    "bluebubbles_webhook_port": null,
+    "bluebubbles_webhook_path": null,
+    "bluebubbles_allow_from": null,
+    "bluebubbles_send_read_receipts": null,
     "imessage_enabled": false,
     "imessage_allow_from": null,
     "imessage_poll_interval": null,
@@ -86,6 +94,18 @@ expression: settings
   "notifications": {
     "preferred_channel": null,
     "recipient": null
+  },
+  "desktop_autonomy": {
+    "enabled": false,
+    "profile": "off",
+    "deployment_mode": "whole_machine_admin",
+    "target_username": null,
+    "desktop_max_concurrent_jobs": 1,
+    "desktop_action_timeout_secs": 60,
+    "capture_evidence": true,
+    "emergency_stop_path": "~/.thinclaw/AUTONOMY_DISABLED",
+    "pause_on_bootstrap_failure": true,
+    "kill_switch_hotkey": "ctrl+option+command+period"
   },
   "heartbeat": {
     "enabled": false,
@@ -129,6 +149,9 @@ expression: settings
     "thinking_enabled": false,
     "thinking_budget_tokens": 10000,
     "auto_approve_tools": false,
+    "main_tool_profile": "standard",
+    "worker_tool_profile": "restricted",
+    "subagent_tool_profile": "explicit_only",
     "allow_local_tools": false,
     "subagent_transparency_level": "balanced",
     "workspace_mode": null,
@@ -205,7 +228,7 @@ expression: settings
     "advisor_escalation_prompt": null
   },
   "learning": {
-    "enabled": false,
+    "enabled": true,
     "auto_apply_classes": [
       "memory",
       "skill",
@@ -227,6 +250,7 @@ expression: settings
       "enabled": false
     },
     "providers": {
+      "active": "none",
       "honcho": {
         "enabled": false,
         "config": {}
@@ -238,13 +262,14 @@ expression: settings
     },
     "code_proposals": {
       "enabled": true,
-      "publish_mode": "branch_pr_draft"
+      "publish_mode": "branch_pr_draft",
+      "auto_apply_without_review": false
     },
     "exports": {
       "enabled": false
     },
     "outcomes": {
-      "enabled": false,
+      "enabled": true,
       "evaluation_interval_secs": 600,
       "max_due_per_tick": 50,
       "default_ttl_hours": 72,

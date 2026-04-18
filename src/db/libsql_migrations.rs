@@ -316,6 +316,8 @@ CREATE TABLE IF NOT EXISTS experiment_runner_profiles (
     secret_references TEXT NOT NULL DEFAULT '[]',
     cache_policy TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'draft',
+    readiness_class TEXT NOT NULL DEFAULT 'manual_only',
+    launch_eligible INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -355,6 +357,7 @@ CREATE TABLE IF NOT EXISTS experiment_campaigns (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES experiment_projects(id) ON DELETE CASCADE,
     runner_profile_id TEXT NOT NULL REFERENCES experiment_runner_profiles(id) ON DELETE RESTRICT,
+    owner_user_id TEXT NOT NULL DEFAULT 'default',
     status TEXT NOT NULL DEFAULT 'pending_baseline',
     baseline_commit TEXT,
     best_commit TEXT,
@@ -1061,6 +1064,7 @@ CREATE TABLE IF NOT EXISTS agent_workspaces (
     trigger_keywords TEXT NOT NULL DEFAULT '[]',
     allowed_tools TEXT,
     allowed_skills TEXT,
+    tool_profile TEXT,
     is_default INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1205,6 +1209,11 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         description: "Add allowed skills/workspace restrictions",
         sql: "ALTER TABLE agent_workspaces ADD COLUMN allowed_skills TEXT",
     },
+    LibsqlColumnUpgrade {
+        version: 14,
+        description: "Add tool profile/workspace restrictions",
+        sql: "ALTER TABLE agent_workspaces ADD COLUMN tool_profile TEXT",
+    },
     // ── V11: memory_chunks embedding parity ─────────────────────────────
     LibsqlColumnUpgrade {
         version: 11,
@@ -1226,6 +1235,16 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         version: 16,
         description: "Add autonomy mode to experiment projects",
         sql: "ALTER TABLE experiment_projects ADD COLUMN autonomy_mode TEXT NOT NULL DEFAULT 'autonomous'",
+    },
+    LibsqlColumnUpgrade {
+        version: 17,
+        description: "Add readiness class to experiment runners",
+        sql: "ALTER TABLE experiment_runner_profiles ADD COLUMN readiness_class TEXT NOT NULL DEFAULT 'manual_only'",
+    },
+    LibsqlColumnUpgrade {
+        version: 17,
+        description: "Add launch eligibility to experiment runners",
+        sql: "ALTER TABLE experiment_runner_profiles ADD COLUMN launch_eligible INTEGER NOT NULL DEFAULT 0",
     },
     LibsqlColumnUpgrade {
         version: 16,
@@ -1367,6 +1386,11 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         version: 17,
         description: "Add model usage campaign lookup index",
         sql: "CREATE INDEX IF NOT EXISTS idx_experiment_model_usage_campaign ON experiment_model_usage_records(json_extract(metadata, '$.experiment_campaign_id'), created_at DESC)",
+    },
+    LibsqlColumnUpgrade {
+        version: 18,
+        description: "Add campaign owner user id",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT 'default'",
     },
 ];
 

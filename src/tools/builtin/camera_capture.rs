@@ -253,10 +253,9 @@ impl Tool for CameraCaptureTool {
     }
 
     fn description(&self) -> &str {
-        "Capture a photo from the system camera and save to a JPEG file. \
-         On macOS: uses imagesnap or ffmpeg. \
-         On Linux: uses fswebcam or ffmpeg. \
-         Returns the file path and size."
+        "Capture a fresh photo from the system camera and save it as a JPEG file. \
+         Use this when you need live visual input from a webcam rather than an existing \
+         image file. Returns the saved file path and image metadata."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

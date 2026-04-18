@@ -8,6 +8,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 
 - New to ThinClaw: go to [../README.md](../README.md)
 - Running ThinClaw yourself: go to [DEPLOYMENT.md](DEPLOYMENT.md)
+- Running reckless desktop autonomy: go to [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md)
 - Understanding identity, packs, and `/personality`: go to [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
 - Understanding memory, continuity, and `/compress`: go to [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
 - Understanding outcome-backed learning, Learning Ledger outcomes, and deferred review: go to [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md)
@@ -23,6 +24,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 ### Operators
 
 - [DEPLOYMENT.md](DEPLOYMENT.md)
+- [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md)
 - [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
 - [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
 - [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md)
@@ -56,6 +58,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 | Identity packs and session personality | [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md) |
 | Memory, continuity, and growth surfaces | [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md) |
 | Outcome-backed learning and Learning Ledger outcomes | [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md) |
+| Desktop autonomy profile, bootstrap, and rollback | [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md) |
 | Research, experiments, and remote runners | [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md) |
 | Shared cross-surface command vocabulary | [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md) |
 | Onboarding and setup behavior | [../src/setup/README.md](../src/setup/README.md) |

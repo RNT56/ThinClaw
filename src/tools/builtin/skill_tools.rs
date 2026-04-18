@@ -232,6 +232,33 @@ impl Tool for SkillListTool {
                         "max_context_tokens".to_string(),
                         serde_json::json!(s.manifest.activation.max_context_tokens),
                     );
+                    if let Some(openclaw) = s
+                        .manifest
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.openclaw.as_ref())
+                    {
+                        obj.insert(
+                            "provenance".to_string(),
+                            serde_json::json!(openclaw.provenance.clone()),
+                        );
+                        obj.insert(
+                            "lifecycle_status".to_string(),
+                            serde_json::json!(openclaw.lifecycle_status.clone()),
+                        );
+                        obj.insert(
+                            "outcome_score".to_string(),
+                            serde_json::json!(openclaw.outcome_score),
+                        );
+                        obj.insert(
+                            "reuse_count".to_string(),
+                            serde_json::json!(openclaw.reuse_count),
+                        );
+                        obj.insert(
+                            "activation_reason".to_string(),
+                            serde_json::json!(openclaw.activation_reason.clone()),
+                        );
+                    }
                 }
 
                 entry

@@ -719,7 +719,9 @@ pub async fn maybe_create_artifact_contract(
     store: &Arc<dyn Database>,
     version: &LearningArtifactVersion,
 ) -> Result<Option<Uuid>, String> {
-    if !version.status.eq_ignore_ascii_case("applied") {
+    if !version.status.eq_ignore_ascii_case("applied")
+        && !version.status.eq_ignore_ascii_case("promoted")
+    {
         return Ok(None);
     }
     let settings = load_learning_settings(&**store, &version.user_id).await;

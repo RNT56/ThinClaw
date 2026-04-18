@@ -22,7 +22,7 @@ use crate::context::JobContext;
 use crate::db::Database;
 use crate::identity::ConversationKind as IdentityConversationKind;
 use crate::llm::LlmProvider;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolMetadata, ToolOutput, ToolRouteIntent, require_str};
 use crate::workspace::{SearchConfig, Workspace, paths};
 
 /// Files the LLM may only APPEND to — never fully overwrite.
@@ -109,7 +109,8 @@ fn resolve_memory_write_path(ctx: &JobContext, target: &str) -> (String, bool) {
         .metadata
         .get("actor_id")
         .or_else(|| ctx.metadata.get("actor"))
-        .and_then(|v| v.as_str());
+        .and_then(|v| v.as_str())
+        .or(ctx.actor_id.as_deref());
     let direct_actor = job_conversation_kind(&ctx.metadata) == IdentityConversationKind::Direct
         && actor_id.is_some();
 
@@ -123,6 +124,7 @@ fn resolve_memory_write_path(ctx: &JobContext, target: &str) -> (String, bool) {
             && (bare_target.eq_ignore_ascii_case("memory")
                 || bare_target.eq_ignore_ascii_case(paths::MEMORY)
                 || bare_target.eq_ignore_ascii_case(paths::USER)
+                || bare_target.eq_ignore_ascii_case("profile")
                 || bare_target.eq_ignore_ascii_case(paths::PROFILE)) =>
         {
             let actor_id = actor_id.expect("checked is_some above");
@@ -202,6 +204,10 @@ impl Tool for MemorySearchTool {
             },
             "required": ["query"]
         })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::authoritative(ToolRouteIntent::MemoryRecall)
     }
 
     async fn execute(
@@ -446,6 +452,10 @@ impl Tool for SessionSearchTool {
         })
     }
 
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::authoritative(ToolRouteIntent::TranscriptHistory)
+    }
+
     async fn execute(
         &self,
         params: serde_json::Value,
@@ -557,12 +567,19 @@ impl Tool for SessionSearchTool {
 /// across sessions: decisions, preferences, facts, lessons learned.
 pub struct MemoryWriteTool {
     workspace: Arc<Workspace>,
+    orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
 }
 
 impl MemoryWriteTool {
     /// Create a new memory write tool.
-    pub fn new(workspace: Arc<Workspace>) -> Self {
-        Self { workspace }
+    pub fn new(
+        workspace: Arc<Workspace>,
+        orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
+    ) -> Self {
+        Self {
+            workspace,
+            orchestrator,
+        }
     }
 }
 
@@ -783,6 +800,22 @@ impl Tool for MemoryWriteTool {
             "content_length": content.len(),
         });
 
+        if let Some(orchestrator) = self.orchestrator.as_ref() {
+            let orchestrator = Arc::clone(orchestrator);
+            let user_id = ctx.user_id.clone();
+            let payload = serde_json::json!({
+                "tool": "memory_write",
+                "path": path,
+                "append": append,
+                "content_preview": content.chars().take(240).collect::<String>(),
+            });
+            tokio::spawn(async move {
+                orchestrator
+                    .mirror_workspace_write(&user_id, &payload)
+                    .await;
+            });
+        }
+
         Ok(ToolOutput::success(output, start.elapsed()))
     }
 
@@ -847,6 +880,10 @@ impl Tool for MemoryReadTool {
             },
             "required": ["path"]
         })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::authoritative(ToolRouteIntent::MemoryRecall)
     }
 
     async fn execute(
@@ -1184,7 +1221,7 @@ mod tests {
     #[test]
     fn test_memory_write_schema() {
         let workspace = make_test_workspace();
-        let tool = MemoryWriteTool::new(workspace);
+        let tool = MemoryWriteTool::new(workspace, None);
 
         assert_eq!(tool.name(), "memory_write");
 
@@ -1248,6 +1285,18 @@ mod tests {
         let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "shared:memory");
         assert!(!is_actor_scoped);
         assert_eq!(path, "MEMORY.md");
+    }
+
+    #[test]
+    fn test_memory_write_uses_job_actor_without_metadata_actor_id() {
+        let mut ctx = JobContext::with_user_and_actor("default", "actor-456", "chat", "test");
+        ctx.metadata = serde_json::json!({
+            "conversation_kind": "direct"
+        });
+
+        let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "profile");
+        assert!(is_actor_scoped);
+        assert_eq!(path, "actors/actor-456/context/profile.json");
     }
 }
 
@@ -1355,6 +1404,7 @@ mod session_search_smoke_tests {
         db.update_conversation_identity(
             telegram_conversation,
             Some("user-1"),
+            Some("user-1"),
             Some(crate::identity::scope_id_from_key("principal:user-1")),
             crate::history::ConversationKind::Direct,
             Some("telegram://direct/user-1"),
@@ -1371,6 +1421,7 @@ mod session_search_smoke_tests {
             .expect("create gateway conversation");
         db.update_conversation_identity(
             gateway_conversation,
+            Some("user-1"),
             Some("user-1"),
             Some(crate::identity::scope_id_from_key("principal:user-1")),
             crate::history::ConversationKind::Direct,

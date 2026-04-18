@@ -29,17 +29,30 @@ pub struct StatusUpdate {
 }
 
 /// Job description fetched from orchestrator.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobDescription {
     pub title: String,
     pub description: String,
     pub project_dir: Option<String>,
+    #[serde(default)]
+    pub principal_id: Option<String>,
+    #[serde(default)]
+    pub actor_id: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub allowed_skills: Option<Vec<String>>,
+    #[serde(default)]
+    pub tool_profile: Option<String>,
 }
 
 /// Completion result from the orchestrator (proxied from the real LLM).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyCompletionRequest {
     pub messages: Vec<ChatMessage>,
+    pub context_documents: Vec<String>,
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -59,6 +72,7 @@ pub struct ProxyCompletionResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
+    pub context_documents: Vec<String>,
     pub tools: Vec<ToolDefinition>,
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
@@ -216,6 +230,7 @@ impl WorkerHttpClient {
     ) -> Result<CompletionResponse, WorkerError> {
         let proxy_req = ProxyCompletionRequest {
             messages: request.messages.clone(),
+            context_documents: request.context_documents.clone(),
             model: request.model.clone(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
@@ -244,6 +259,7 @@ impl WorkerHttpClient {
     ) -> Result<ToolCompletionResponse, WorkerError> {
         let proxy_req = ProxyToolCompletionRequest {
             messages: request.messages.clone(),
+            context_documents: request.context_documents.clone(),
             tools: request.tools.clone(),
             model: request.model.clone(),
             max_tokens: request.max_tokens,

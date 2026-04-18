@@ -50,8 +50,16 @@ fn default_runner_status() -> ExperimentRunnerStatus {
     ExperimentRunnerStatus::Draft
 }
 
+fn default_runner_readiness_class() -> ExperimentRunnerReadinessClass {
+    ExperimentRunnerReadinessClass::ManualOnly
+}
+
 fn default_campaign_status() -> ExperimentCampaignStatus {
     ExperimentCampaignStatus::PendingBaseline
+}
+
+fn default_experiment_owner_user_id() -> String {
+    "default".to_string()
 }
 
 fn default_trial_status() -> ExperimentTrialStatus {
@@ -280,6 +288,15 @@ pub enum ExperimentRunnerStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum ExperimentRunnerReadinessClass {
+    #[default]
+    ManualOnly,
+    BootstrapReady,
+    LaunchReady,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum ExperimentCampaignStatus {
     #[default]
     PendingBaseline,
@@ -404,6 +421,10 @@ pub struct ExperimentRunnerProfile {
     pub cache_policy: serde_json::Value,
     #[serde(default = "default_runner_status")]
     pub status: ExperimentRunnerStatus,
+    #[serde(default = "default_runner_readiness_class")]
+    pub readiness_class: ExperimentRunnerReadinessClass,
+    #[serde(default)]
+    pub launch_eligible: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -413,6 +434,8 @@ pub struct ExperimentCampaign {
     pub id: Uuid,
     pub project_id: Uuid,
     pub runner_profile_id: Uuid,
+    #[serde(default = "default_experiment_owner_user_id")]
+    pub owner_user_id: String,
     #[serde(default = "default_campaign_status")]
     pub status: ExperimentCampaignStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]

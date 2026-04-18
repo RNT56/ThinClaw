@@ -204,7 +204,10 @@ impl SetupWizard {
             ("Discord", self.settings.channels.discord_enabled),
             ("Slack", self.settings.channels.slack_enabled),
             ("Gmail", self.settings.channels.gmail_enabled),
-            ("BlueBubbles (iMessage bridge)", self.settings.channels.bluebubbles_enabled),
+            (
+                "BlueBubbles (iMessage bridge)",
+                self.settings.channels.bluebubbles_enabled,
+            ),
         ];
         #[allow(unused_mut)]
         let mut native_keys: Vec<&str> = vec!["signal", "discord", "slack", "gmail", "bluebubbles"];
@@ -696,44 +699,44 @@ impl SetupWizard {
             {
                 print_info("BlueBubbles bridges iMessage via a dedicated macOS server app.");
                 print_info("Unlike the native iMessage channel (which polls chat.db read-only),");
-                print_info("BlueBubbles adds: typing indicators, read receipts, tapback reactions,");
+                print_info(
+                    "BlueBubbles adds: typing indicators, read receipts, tapback reactions,",
+                );
                 print_info("group chat management, and cross-platform access from Linux/Windows.");
                 print_info("Both channels can coexist — native for lightweight local use,");
                 print_info("BlueBubbles for full-featured or remote deployments.");
             }
             #[cfg(not(target_os = "macos"))]
             {
-                print_info("BlueBubbles bridges iMessage from a Mac running the BlueBubbles server.");
-                print_info("It works from any platform (Linux, Windows, macOS) over REST API + webhooks.");
+                print_info(
+                    "BlueBubbles bridges iMessage from a Mac running the BlueBubbles server.",
+                );
+                print_info(
+                    "It works from any platform (Linux, Windows, macOS) over REST API + webhooks.",
+                );
             }
             print_info("Download the server: https://bluebubbles.app/");
             println!();
 
-            let server_url =
-                input("BlueBubbles server URL (e.g. http://192.168.1.50:1234)").map_err(SetupError::Io)?;
+            let server_url = input("BlueBubbles server URL (e.g. http://192.168.1.50:1234)")
+                .map_err(SetupError::Io)?;
             self.settings.channels.bluebubbles_server_url = Some(server_url);
 
-            let password = secret_input("BlueBubbles server password")
-                .map_err(SetupError::Io)?;
+            let password = secret_input("BlueBubbles server password").map_err(SetupError::Io)?;
             self.settings.channels.bluebubbles_password =
                 Some(password.expose_secret().to_string());
 
-            let webhook_host = optional_input(
-                "Webhook listen host (this machine)",
-                Some("127.0.0.1"),
-            )
-            .map_err(SetupError::Io)?;
+            let webhook_host =
+                optional_input("Webhook listen host (this machine)", Some("127.0.0.1"))
+                    .map_err(SetupError::Io)?;
             if let Some(ref host) = webhook_host
                 && !host.is_empty()
             {
                 self.settings.channels.bluebubbles_webhook_host = Some(host.clone());
             }
 
-            let webhook_port = optional_input(
-                "Webhook listen port",
-                Some("8645"),
-            )
-            .map_err(SetupError::Io)?;
+            let webhook_port =
+                optional_input("Webhook listen port", Some("8645")).map_err(SetupError::Io)?;
             if let Some(ref port) = webhook_port
                 && !port.is_empty()
             {

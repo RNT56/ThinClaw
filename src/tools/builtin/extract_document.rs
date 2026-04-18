@@ -24,9 +24,9 @@ impl Tool for ExtractDocumentTool {
     }
 
     fn description(&self) -> &str {
-        "Extract text content from a document file. Supports PDF, DOCX, PPTX, XLSX, \
-         and plain text formats (TXT, CSV, JSON, XML, Markdown, code). \
-         Provide either a URL to fetch or base64-encoded data with a MIME type."
+        "Extract text from document files such as PDF, DOCX, PPTX, XLSX, and plain-text \
+         formats. Use this when the user gives you a document and you need readable text \
+         before summarizing, searching, or analyzing its contents."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -129,10 +129,7 @@ async fn fetch_document(url: &str) -> Result<(Vec<u8>, String), ToolError> {
         upgrade_http_to_https: false,
         allowlist: Vec::new(),
     };
-    let guarded_url = validate_outbound_url(
-        url,
-        &guard_options,
-    )?;
+    let guarded_url = validate_outbound_url(url, &guard_options)?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {

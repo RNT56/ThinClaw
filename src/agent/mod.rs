@@ -32,10 +32,14 @@ pub mod management_api;
 pub mod outcomes;
 pub mod personality;
 pub mod presence;
+pub(crate) mod prompt_assembly;
 mod router;
 pub mod routine;
 pub mod routine_audit;
 pub mod routine_engine;
+pub mod run_artifact;
+pub mod run_driver;
+pub mod run_harness;
 pub mod runtime_behavior;
 mod scheduler;
 mod self_repair;
@@ -68,6 +72,9 @@ pub use learning::{
 pub use router::{MessageIntent, Router};
 pub use routine::{Routine, RoutineAction, RoutineRun, Trigger};
 pub use routine_engine::RoutineEngine;
+pub use run_artifact::{AgentRunArtifact, AgentRunArtifactLogger, AgentRunStatus};
+pub use run_driver::AgentRunDriver;
+pub use run_harness::AgentRunHarness;
 pub use scheduler::Scheduler;
 pub use self_repair::{BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob};
 pub use session::{

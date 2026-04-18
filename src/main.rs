@@ -282,6 +282,20 @@ async fn main() -> anyhow::Result<()> {
             )
             .await;
         }
+        Some(Command::AutonomyShadowCanary { manifest }) => {
+            init_cli_tracing(cli.debug);
+            let _ = dotenvy::dotenv();
+            thinclaw::bootstrap::load_thinclaw_env();
+            let report = thinclaw::desktop_autonomy::run_shadow_canary_entrypoint(manifest)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!(
+                "{}",
+                serde_json::to_string(&report)
+                    .map_err(|e| anyhow::anyhow!("failed to encode canary report: {}", e))?
+            );
+            return Ok(());
+        }
         Some(Command::Update(update_cmd)) => {
             init_cli_tracing(cli.debug);
             return thinclaw::cli::run_update_command(update_cmd.clone()).await;
@@ -411,7 +425,10 @@ async fn main() -> anyhow::Result<()> {
     } else {
         thinclaw::sandbox::DockerStatus::Disabled
     };
-    tracing::info!(elapsed_ms = phase_start.elapsed().as_millis(), "Startup phase: docker detection");
+    tracing::info!(
+        elapsed_ms = phase_start.elapsed().as_millis(),
+        "Startup phase: docker detection"
+    );
 
     let job_event_tx: Option<
         tokio::sync::broadcast::Sender<(uuid::Uuid, thinclaw::channels::web::types::SseEvent)>,
@@ -428,111 +445,110 @@ async fn main() -> anyhow::Result<()> {
     >::new()));
 
     #[cfg(feature = "docker-sandbox")]
-    let container_job_manager: Option<Arc<ContainerJobManager>> =
-        if config.sandbox.enabled {
-            let token_store = TokenStore::new();
+    let container_job_manager: Option<Arc<ContainerJobManager>> = if config.sandbox.enabled {
+        let token_store = TokenStore::new();
 
-            // Resolve Claude Code API key: env var > OS secure store > (OAuth fallback in config)
-            let claude_code_api_key = match std::env::var("ANTHROPIC_API_KEY").ok() {
-                Some(key) => Some(key),
-                None => {
-                    // Check the OS secure store for the API key stored by the wizard
-                    thinclaw::platform::secure_store::get_api_key(
-                        thinclaw::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
-                    )
-                    .await
-                }
-            };
-
-            let codex_code_api_key = match std::env::var("OPENAI_API_KEY").ok() {
-                Some(key) => Some(key),
-                None => {
-                    thinclaw::platform::secure_store::get_api_key(
-                        thinclaw::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
-                    )
-                    .await
-                }
-            };
-
-            let job_config = ContainerJobConfig {
-                image: config.sandbox.image.clone(),
-                memory_limit_mb: config.sandbox.memory_limit_mb,
-                cpu_shares: config.sandbox.cpu_shares,
-                orchestrator_port: 50051,
-                claude_code_api_key,
-                claude_code_oauth_token: thinclaw::config::ClaudeCodeConfig::extract_oauth_token(),
-                claude_code_enabled: config.claude_code.enabled,
-                claude_code_model: config.claude_code.model.clone(),
-                claude_code_max_turns: config.claude_code.max_turns,
-                claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
-                claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
-                codex_code_api_key,
-                codex_code_enabled: config.codex_code.enabled,
-                codex_code_model: config.codex_code.model.clone(),
-                codex_code_memory_limit_mb: config.codex_code.memory_limit_mb,
-                codex_code_home_dir: config.codex_code.home_dir.clone(),
-            };
-            let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
-
-            // Clean up orphan containers from a previous process crash
-            // (fire-and-forget — never blocks startup)
-            {
-                let jm_cleanup = Arc::clone(&jm);
-                tokio::spawn(async move {
-                    jm_cleanup.cleanup_orphan_containers().await;
-                });
+        // Resolve Claude Code API key: env var > OS secure store > (OAuth fallback in config)
+        let claude_code_api_key = match std::env::var("ANTHROPIC_API_KEY").ok() {
+            Some(key) => Some(key),
+            None => {
+                // Check the OS secure store for the API key stored by the wizard
+                thinclaw::platform::secure_store::get_api_key(
+                    thinclaw::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
+                )
+                .await
             }
-
-            // Start the orchestrator internal API in the background
-            let orchestrator_state = OrchestratorState {
-                llm: components.llm.clone(),
-                job_manager: Arc::clone(&jm),
-                token_store,
-                job_event_tx: job_event_tx.clone(),
-                prompt_queue: Arc::clone(&prompt_queue),
-                store: components.db.clone(),
-                secrets_store: components.secrets_store.clone(),
-                user_id: "default".to_string(),
-            };
-
-            tokio::spawn(async move {
-                if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
-                    tracing::error!("Orchestrator API failed: {}", e);
-                }
-            });
-
-            if config.claude_code.enabled {
-                if docker_status.is_ok() {
-                    tracing::info!(
-                        "Claude Code sandbox mode available (model: {}, max_turns: {})",
-                        config.claude_code.model,
-                        config.claude_code.max_turns
-                    );
-                } else {
-                    tracing::info!(
-                        "Claude Code sandbox mode configured (model: {}, max_turns: {}) — will activate when Docker starts",
-                        config.claude_code.model,
-                        config.claude_code.max_turns
-                    );
-                }
-            }
-            if config.codex_code.enabled {
-                if docker_status.is_ok() {
-                    tracing::info!(
-                        "Codex sandbox mode available (model: {})",
-                        config.codex_code.model
-                    );
-                } else {
-                    tracing::info!(
-                        "Codex sandbox mode configured (model: {}) — will activate when Docker starts",
-                        config.codex_code.model
-                    );
-                }
-            }
-            Some(jm)
-        } else {
-            None
         };
+
+        let codex_code_api_key = match std::env::var("OPENAI_API_KEY").ok() {
+            Some(key) => Some(key),
+            None => {
+                thinclaw::platform::secure_store::get_api_key(
+                    thinclaw::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
+                )
+                .await
+            }
+        };
+
+        let job_config = ContainerJobConfig {
+            image: config.sandbox.image.clone(),
+            memory_limit_mb: config.sandbox.memory_limit_mb,
+            cpu_shares: config.sandbox.cpu_shares,
+            orchestrator_port: 50051,
+            claude_code_api_key,
+            claude_code_oauth_token: thinclaw::config::ClaudeCodeConfig::extract_oauth_token(),
+            claude_code_enabled: config.claude_code.enabled,
+            claude_code_model: config.claude_code.model.clone(),
+            claude_code_max_turns: config.claude_code.max_turns,
+            claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
+            claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+            codex_code_api_key,
+            codex_code_enabled: config.codex_code.enabled,
+            codex_code_model: config.codex_code.model.clone(),
+            codex_code_memory_limit_mb: config.codex_code.memory_limit_mb,
+            codex_code_home_dir: config.codex_code.home_dir.clone(),
+        };
+        let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+
+        // Clean up orphan containers from a previous process crash
+        // (fire-and-forget — never blocks startup)
+        {
+            let jm_cleanup = Arc::clone(&jm);
+            tokio::spawn(async move {
+                jm_cleanup.cleanup_orphan_containers().await;
+            });
+        }
+
+        // Start the orchestrator internal API in the background
+        let orchestrator_state = OrchestratorState {
+            llm: components.llm.clone(),
+            job_manager: Arc::clone(&jm),
+            token_store,
+            job_event_tx: job_event_tx.clone(),
+            prompt_queue: Arc::clone(&prompt_queue),
+            store: components.db.clone(),
+            secrets_store: components.secrets_store.clone(),
+            user_id: "default".to_string(),
+        };
+
+        tokio::spawn(async move {
+            if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
+                tracing::error!("Orchestrator API failed: {}", e);
+            }
+        });
+
+        if config.claude_code.enabled {
+            if docker_status.is_ok() {
+                tracing::info!(
+                    "Claude Code sandbox mode available (model: {}, max_turns: {})",
+                    config.claude_code.model,
+                    config.claude_code.max_turns
+                );
+            } else {
+                tracing::info!(
+                    "Claude Code sandbox mode configured (model: {}, max_turns: {}) — will activate when Docker starts",
+                    config.claude_code.model,
+                    config.claude_code.max_turns
+                );
+            }
+        }
+        if config.codex_code.enabled {
+            if docker_status.is_ok() {
+                tracing::info!(
+                    "Codex sandbox mode available (model: {})",
+                    config.codex_code.model
+                );
+            } else {
+                tracing::info!(
+                    "Codex sandbox mode configured (model: {}) — will activate when Docker starts",
+                    config.codex_code.model
+                );
+            }
+        }
+        Some(jm)
+    } else {
+        None
+    };
 
     #[cfg(not(feature = "docker-sandbox"))]
     let _container_job_manager: Option<std::sync::Arc<std::convert::Infallible>> = None;
@@ -907,7 +923,6 @@ async fn main() -> anyhow::Result<()> {
     // NOTE: bootstrap_hooks() is already called inside AppBuilder::build_all()
     // (app.rs). Do NOT call it again here — that would double-register bundled
     // hooks and emit a spurious "Replacing existing hook" WARN.
-
 
     // Create session manager (shared between agent and web gateway)
     let session_manager =
@@ -1340,7 +1355,10 @@ async fn main() -> anyhow::Result<()> {
             components.safety.clone(),
             components.tools.clone(),
             channels.clone(),
-            thinclaw::agent::SubagentConfig::default(),
+            thinclaw::agent::SubagentConfig {
+                default_tool_profile: config.agent.subagent_tool_profile,
+                ..thinclaw::agent::SubagentConfig::default()
+            },
         );
 
         // Wire store + SSE + cost tracker for routine run finalization by subagents

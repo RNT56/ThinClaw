@@ -13,6 +13,8 @@ let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
+let mcpInteractionPollInterval = null;
+let lastMcpInteractionCount = 0;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 const SUBAGENT_EVENTS_CAP = 120;
@@ -20,6 +22,14 @@ const SUBAGENT_SESSION_STORAGE_KEY = 'thinclaw_subagent_sessions_v1';
 const SUBAGENT_SESSION_STORAGE_LIMIT = 96;
 let experimentsFeatureEnabled = false;
 let experimentsRefreshTimer = null;
+let autonomyFeatureAvailable = false;
+const autonomyState = {
+  status: null,
+  rollouts: null,
+  checks: null,
+  evidence: null,
+  permissions: null,
+};
 const experimentsState = {
   projects: [],
   runners: [],
@@ -38,6 +48,14 @@ const experimentsState = {
   lastLeaseCampaignId: null,
 };
 let currentResearchSubtab = 'overview';
+const mcpBrowserState = {
+  servers: [],
+  selectedServer: '',
+  interactions: [],
+  resources: [],
+  resourceTemplates: [],
+  prompts: [],
+};
 
 const RESEARCH_SUBTABS = ['overview', 'opportunities', 'projects', 'runners', 'campaigns', 'gpu-clouds'];
 const PRESENTATION_SETTING_KEYS = new Set([
@@ -292,6 +310,12 @@ function normalizeStoredSubagentSession(entry) {
     summary: firstDefined(entry.summary, null),
     iterations: firstDefined(entry.iterations, null),
     durationMs: firstDefined(entry.durationMs, entry.duration_ms, null),
+    taskPacket: normalizeTaskPacket(firstDefined(entry.taskPacket, entry.task_packet), firstDefined(entry.task, null)),
+    allowedTools: Array.isArray(entry.allowedTools) ? entry.allowedTools.slice() : (Array.isArray(entry.allowed_tools) ? entry.allowed_tools.slice() : []),
+    allowedSkills: Array.isArray(entry.allowedSkills) ? entry.allowedSkills.slice() : (Array.isArray(entry.allowed_skills) ? entry.allowed_skills.slice() : []),
+    memoryMode: firstDefined(entry.memoryMode, entry.memory_mode, 'provided_context_only'),
+    toolMode: firstDefined(entry.toolMode, entry.tool_mode, 'explicit_only'),
+    skillMode: firstDefined(entry.skillMode, entry.skill_mode, 'explicit_only'),
     startedAt: toIsoTimestamp(firstDefined(entry.startedAt, entry.started_at, entry.updatedAt, entry.updated_at, Date.now())),
     updatedAt: toIsoTimestamp(firstDefined(entry.updatedAt, entry.updated_at, Date.now())),
     completedAt: firstDefined(entry.completedAt, entry.completed_at) ? toIsoTimestamp(firstDefined(entry.completedAt, entry.completed_at)) : null,
@@ -337,6 +361,12 @@ function persistSubagentSessionsToStorage() {
       summary: session.summary,
       iterations: session.iterations,
       durationMs: session.durationMs,
+      taskPacket: session.taskPacket,
+      allowedTools: session.allowedTools,
+      allowedSkills: session.allowedSkills,
+      memoryMode: session.memoryMode,
+      toolMode: session.toolMode,
+      skillMode: session.skillMode,
       startedAt: session.startedAt,
       updatedAt: session.updatedAt,
       completedAt: session.completedAt,
@@ -382,9 +412,11 @@ function authenticate() {
       startGatewayStatusPolling();
       checkTeeStatus();
       loadOptionalFeatureFlags();
+      loadAutonomyAvailability();
       loadThreads();
       loadMemoryTree();
       loadJobs();
+      startMcpInteractionPolling();
       // Apply URL log_level param if present, otherwise just sync the dropdown
       if (urlLogLevel) {
         setServerLogLevel(urlLogLevel);
@@ -396,6 +428,7 @@ function authenticate() {
       btn.disabled = false;
       btn.textContent = origText;
       sessionStorage.removeItem('thinclaw_token');
+      if (mcpInteractionPollInterval) clearInterval(mcpInteractionPollInterval);
       document.getElementById('auth-screen').style.display = '';
       document.getElementById('app').style.display = 'none';
       document.getElementById('auth-error').textContent = 'Invalid token';
@@ -449,6 +482,27 @@ function apiFetch(path, options) {
   });
 }
 
+function startMcpInteractionPolling() {
+  if (mcpInteractionPollInterval) clearInterval(mcpInteractionPollInterval);
+  var poll = function() {
+    apiFetch('/api/mcp/interactions')
+      .then(function(data) {
+        var interactions = (data && data.interactions) || [];
+        mcpBrowserState.interactions = interactions;
+        if (interactions.length > lastMcpInteractionCount && interactions.length > 0) {
+          showToast('New MCP request waiting for review.', 'info');
+        }
+        lastMcpInteractionCount = interactions.length;
+        if (currentTab === 'extensions') {
+          renderMcpInteractions();
+        }
+      })
+      .catch(function() {});
+  };
+  poll();
+  mcpInteractionPollInterval = setInterval(poll, 8000);
+}
+
 function boolSettingValue(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
   if (typeof value === 'boolean') return value;
@@ -467,6 +521,31 @@ function applyResearchVisibility(enabled) {
   if (!experimentsFeatureEnabled && currentTab === 'research') {
     switchTab('chat');
   }
+}
+
+function setAutonomyVisibility(enabled) {
+  autonomyFeatureAvailable = !!enabled;
+  const button = document.getElementById('autonomy-tab-button');
+  const panel = document.getElementById('tab-autonomy');
+  if (button) button.style.display = autonomyFeatureAvailable ? '' : 'none';
+  if (panel) panel.dataset.enabled = autonomyFeatureAvailable ? 'true' : 'false';
+  if (!autonomyFeatureAvailable && currentTab === 'autonomy') {
+    switchTab('chat');
+  }
+}
+
+function loadAutonomyAvailability() {
+  return apiFetch('/api/autonomy/status')
+    .then((status) => {
+      autonomyState.status = status;
+      setAutonomyVisibility(true);
+      return status;
+    })
+    .catch(() => {
+      autonomyState.status = null;
+      setAutonomyVisibility(false);
+      return null;
+    });
 }
 
 function applyOptionalFeatureFlagsFromRows(rows) {
@@ -761,6 +840,32 @@ function getSubsessionStatusLabel(status) {
   return 'Running';
 }
 
+function normalizeTaskPacket(packet, fallbackTask) {
+  const value = packet && typeof packet === 'object' ? packet : {};
+  return {
+    objective: firstDefined(value.objective, fallbackTask, '') || '',
+    todos: Array.isArray(value.todos) ? value.todos.filter(Boolean) : [],
+    acceptance_criteria: Array.isArray(value.acceptance_criteria) ? value.acceptance_criteria.filter(Boolean) : [],
+    constraints: Array.isArray(value.constraints) ? value.constraints.filter(Boolean) : [],
+    provided_context: Array.isArray(value.provided_context) ? value.provided_context.filter(Boolean) : [],
+    parent_summary: typeof value.parent_summary === 'string' ? value.parent_summary : '',
+  };
+}
+
+function renderSubsessionList(items) {
+  if (!Array.isArray(items) || items.length === 0) return '<span class="subsession-inline-muted">none</span>';
+  return '<ul class="subsession-inline-list">' + items.map((item) => '<li>' + escapeHtml(String(item)) + '</li>').join('') + '</ul>';
+}
+
+function renderProvidedContext(items) {
+  if (!Array.isArray(items) || items.length === 0) return '<span class="subsession-inline-muted">none</span>';
+  return items.map((item) => {
+    const title = escapeHtml(String(firstDefined(item.title, 'Context')));
+    const content = escapeHtml(String(firstDefined(item.content, ''))).replace(/\n/g, '<br>');
+    return '<div class="subsession-context-card"><div class="subsession-context-title">' + title + '</div><div class="subsession-context-body">' + content + '</div></div>';
+  }).join('');
+}
+
 function buildSubagentEventRecord(eventType, payload) {
   const status = normalizeSubagentStatus(payload, eventType);
   const timestamp = toIsoTimestamp(
@@ -812,6 +917,12 @@ function ensureSubsession(threadId, agentId, seed) {
       summary: null,
       iterations: null,
       durationMs: null,
+      taskPacket: normalizeTaskPacket(null, null),
+      allowedTools: [],
+      allowedSkills: [],
+      memoryMode: 'provided_context_only',
+      toolMode: 'explicit_only',
+      skillMode: 'explicit_only',
       startedAt: null,
       updatedAt: null,
       completedAt: null,
@@ -837,6 +948,12 @@ function ensureSubsession(threadId, agentId, seed) {
   session.summary = firstDefined(seed?.summary, seed?.message, session.summary);
   session.iterations = firstDefined(seed?.iterations, session.iterations);
   session.durationMs = firstDefined(seed?.duration_ms, seed?.durationMs, session.durationMs);
+  session.taskPacket = normalizeTaskPacket(firstDefined(seed?.task_packet, seed?.taskPacket), firstDefined(seed?.task, session.task));
+  session.allowedTools = Array.isArray(seed?.allowed_tools) ? seed.allowed_tools.slice() : (Array.isArray(seed?.allowedTools) ? seed.allowedTools.slice() : session.allowedTools);
+  session.allowedSkills = Array.isArray(seed?.allowed_skills) ? seed.allowed_skills.slice() : (Array.isArray(seed?.allowedSkills) ? seed.allowedSkills.slice() : session.allowedSkills);
+  session.memoryMode = firstDefined(seed?.memory_mode, seed?.memoryMode, session.memoryMode);
+  session.toolMode = firstDefined(seed?.tool_mode, seed?.toolMode, session.toolMode);
+  session.skillMode = firstDefined(seed?.skill_mode, seed?.skillMode, session.skillMode);
   session.status = normalizeSubagentStatus(seed || {}, seed?.type);
   session.updatedAt = timestamp;
   session.startedAt = session.startedAt || toIsoTimestamp(seed?.started_at, timestamp);
@@ -933,13 +1050,32 @@ function renderSubsessionInlineDetail(session) {
     );
   }).join('');
   const iterationsValue = firstDefined(session.iterations, '-');
+  const packet = normalizeTaskPacket(session.taskPacket, session.task);
   return (
     '<div class="subsession-row-detail">' +
       '<div class="subsession-inline-grid">' +
-        '<div class="subsession-inline-item"><span class="subsession-inline-label">Task</span><span class="subsession-inline-value">' + escapeHtml(session.task || 'Delegated task') + '</span></div>' +
+        '<div class="subsession-inline-item"><span class="subsession-inline-label">Objective</span><span class="subsession-inline-value">' + escapeHtml(packet.objective || session.task || 'Delegated task') + '</span></div>' +
         '<div class="subsession-inline-item"><span class="subsession-inline-label">Status</span><span class="subsession-inline-value">' + escapeHtml(getSubsessionStatusLabel(session.status)) + '</span></div>' +
         '<div class="subsession-inline-item"><span class="subsession-inline-label">Iterations</span><span class="subsession-inline-value">' + escapeHtml(String(iterationsValue === null ? '-' : iterationsValue)) + '</span></div>' +
         '<div class="subsession-inline-item"><span class="subsession-inline-label">Duration</span><span class="subsession-inline-value">' + escapeHtml(formatDurationMs(session.durationMs)) + '</span></div>' +
+      '</div>' +
+      '<div class="subsession-inline-section"><div class="subsession-inline-kicker">Task Packet</div>' +
+        '<div class="subsession-inline-stack">' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Todos</span><div class="subsession-inline-value">' + renderSubsessionList(packet.todos) + '</div></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Acceptance</span><div class="subsession-inline-value">' + renderSubsessionList(packet.acceptance_criteria) + '</div></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Constraints</span><div class="subsession-inline-value">' + renderSubsessionList(packet.constraints) + '</div></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Parent Summary</span><div class="subsession-inline-value">' + (packet.parent_summary ? escapeHtml(packet.parent_summary) : '<span class="subsession-inline-muted">none</span>') + '</div></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Provided Context</span><div class="subsession-inline-value">' + renderProvidedContext(packet.provided_context) + '</div></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="subsession-inline-section"><div class="subsession-inline-kicker">Capability Policy</div>' +
+        '<div class="subsession-inline-grid">' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Memory Mode</span><span class="subsession-inline-value">' + escapeHtml(session.memoryMode || 'provided_context_only') + '</span></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Tool Mode</span><span class="subsession-inline-value">' + escapeHtml(session.toolMode || 'explicit_only') + '</span></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Skill Mode</span><span class="subsession-inline-value">' + escapeHtml(session.skillMode || 'explicit_only') + '</span></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Granted Tools</span><div class="subsession-inline-value">' + renderSubsessionList(session.allowedTools) + '</div></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Granted Skills</span><div class="subsession-inline-value">' + renderSubsessionList(session.allowedSkills) + '</div></div>' +
+        '</div>' +
       '</div>' +
       (session.response
         ? '<div class="subsession-response"><span class="subsession-response-label">Final handoff</span>' + renderMarkdown(session.response) + '</div>'
@@ -1101,6 +1237,12 @@ function handleSubagentLifecycleEvent(eventType, payload) {
   session.category = firstDefined(payload.category, session.category);
   session.iterations = firstDefined(payload.iterations, session.iterations);
   session.durationMs = firstDefined(payload.duration_ms, session.durationMs);
+  session.taskPacket = normalizeTaskPacket(firstDefined(payload.task_packet, payload.taskPacket), session.task);
+  session.allowedTools = Array.isArray(payload.allowed_tools) ? payload.allowed_tools.slice() : session.allowedTools;
+  session.allowedSkills = Array.isArray(payload.allowed_skills) ? payload.allowed_skills.slice() : session.allowedSkills;
+  session.memoryMode = firstDefined(payload.memory_mode, session.memoryMode);
+  session.toolMode = firstDefined(payload.tool_mode, session.toolMode);
+  session.skillMode = firstDefined(payload.skill_mode, session.skillMode);
   if (eventType === 'subagent_spawned' && threadId === currentThreadId) {
     selectedSubsessionKey = session.key;
   } else if (eventType === 'subagent_completed' && threadId === currentThreadId && !selectedSubsessionKey) {
@@ -1145,6 +1287,77 @@ function chatMessagesContainer() {
   return document.getElementById('chat-messages');
 }
 
+function chatJumpLatestButton() {
+  return document.getElementById('chat-jump-latest');
+}
+
+function syncChatComposerMetrics() {
+  const stage = document.getElementById('chat-stage');
+  const composer = document.querySelector('.chat-input');
+  if (!stage || !composer) return;
+  if (composer.offsetHeight > 0) {
+    stage.style.setProperty('--chat-composer-height', composer.offsetHeight + 'px');
+  }
+}
+
+function chatDistanceFromLatest() {
+  const container = chatMessagesContainer();
+  if (!container) return 0;
+  return Math.max(0, container.scrollHeight - container.clientHeight - container.scrollTop);
+}
+
+function isChatNearLatest() {
+  return chatDistanceFromLatest() <= 80;
+}
+
+function updateChatJumpLatestButton() {
+  const button = chatJumpLatestButton();
+  const container = chatMessagesContainer();
+  if (!button || !container) return;
+  const shouldShow = currentTab === 'chat'
+    && container.childElementCount > 0
+    && !isChatNearLatest();
+  button.classList.toggle('visible', shouldShow);
+  button.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+}
+
+function scrollChatToLatest(options) {
+  const container = chatMessagesContainer();
+  if (!container) return;
+
+  const behavior = options && options.behavior ? options.behavior : 'auto';
+  const performScroll = () => {
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({ top: container.scrollHeight, behavior: behavior });
+    } else {
+      container.scrollTop = container.scrollHeight;
+    }
+    updateChatJumpLatestButton();
+  };
+
+  if (options && options.defer) {
+    requestAnimationFrame(performScroll);
+  } else {
+    performScroll();
+  }
+}
+
+function shouldPinChatToLatest(force) {
+  return !!force || isChatNearLatest();
+}
+
+function finishChatMutation(stickToLatest, options) {
+  syncChatComposerMetrics();
+  if (stickToLatest) {
+    scrollChatToLatest({
+      behavior: options && options.behavior ? options.behavior : 'auto',
+      defer: true,
+    });
+  } else {
+    updateChatJumpLatestButton();
+  }
+}
+
 function clearChatEmptyState() {
   chatMessagesContainer().querySelectorAll('.chat-empty-state').forEach((node) => node.remove());
 }
@@ -1187,9 +1400,11 @@ function appendTurnCard(card, options) {
   const container = chatMessagesContainer();
   if (options && options.prepend) {
     container.insertBefore(card, container.firstChild);
+    updateChatJumpLatestButton();
   } else {
+    const stickToLatest = shouldPinChatToLatest(options && options.forceScroll);
     container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
+    finishChatMutation(stickToLatest, options);
   }
   return card;
 }
@@ -1214,7 +1429,7 @@ function startLiveTurn(userContent, timestamp) {
   settleLiveTurnCard();
   const card = createTurnCard({ live: true });
   appendMessageToTurn(card, 'user', userContent, { timestamp: timestamp });
-  appendTurnCard(card);
+  appendTurnCard(card, { forceScroll: true });
   _liveTurnCard = card;
   return card;
 }
@@ -1320,15 +1535,17 @@ function appendMessageToTurn(card, role, content, options) {
 function addStandaloneMessage(role, content, options) {
   clearChatEmptyState();
   const container = chatMessagesContainer();
+  const stickToLatest = shouldPinChatToLatest(options && options.forceScroll);
   const message = createMessageElement(role, content, options || {});
   container.appendChild(message);
-  container.scrollTop = container.scrollHeight;
+  finishChatMutation(stickToLatest, options);
   return message;
 }
 
 function upsertAssistantMessage(content, options) {
   const card = ensureLiveTurnCard();
   const stack = turnCardStack(card);
+  const stickToLatest = shouldPinChatToLatest(options && options.forceScroll);
   let message = stack.querySelector('.message.assistant');
   if (!message) {
     message = createMessageElement('assistant', content, options || {});
@@ -1336,13 +1553,14 @@ function upsertAssistantMessage(content, options) {
   } else {
     updateMessageElement(message, content, options || {});
   }
-  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
+  finishChatMutation(stickToLatest, options);
   return message;
 }
 
 function appendToLastAssistant(chunk, timestamp) {
   const card = ensureLiveTurnCard();
   const stack = turnCardStack(card);
+  const stickToLatest = shouldPinChatToLatest();
   let message = stack.querySelector('.message.assistant');
   if (!message) {
     message = createMessageElement('assistant', chunk, { timestamp: timestamp });
@@ -1351,7 +1569,7 @@ function appendToLastAssistant(chunk, timestamp) {
     const raw = (message.getAttribute('data-raw') || '') + chunk;
     updateMessageElement(message, raw, { timestamp: message.getAttribute('data-timestamp') || timestamp });
   }
-  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
+  finishChatMutation(stickToLatest);
 }
 
 function createTurnCardFromHistory(turn) {
@@ -1497,7 +1715,7 @@ function getOrCreateActivityGroup() {
   const group = document.createElement('div');
   group.className = 'activity-group';
   stack.appendChild(group);
-  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
+  finishChatMutation(shouldPinChatToLatest());
   _activeGroup = group;
   _activeToolCards = {};
   return group;
@@ -1505,6 +1723,7 @@ function getOrCreateActivityGroup() {
 
 function showActivityThinking(message) {
   const group = getOrCreateActivityGroup();
+  const stickToLatest = shouldPinChatToLatest();
   if (_activityThinking) {
     // Already exists — just update text and un-hide
     _activityThinking.style.display = '';
@@ -1522,7 +1741,7 @@ function showActivityThinking(message) {
     group.appendChild(_activityThinking);
     _activityThinking.querySelector('.activity-thinking-text').textContent = message || personalityCopy('thinkingFallback');
   }
-  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
+  finishChatMutation(stickToLatest);
 }
 
 function removeActivityThinking() {
@@ -1595,8 +1814,7 @@ function addToolCard(name) {
   if (!_activeToolCards[name]) _activeToolCards[name] = [];
   _activeToolCards[name].push({ card, startTime, timer: timerInterval, duration, icon, finalDuration: null });
 
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
+  finishChatMutation(shouldPinChatToLatest());
 }
 
 function completeToolCard(name, success) {
@@ -1775,7 +1993,7 @@ function showApproval(data) {
   card.appendChild(actions);
 
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  finishChatMutation(shouldPinChatToLatest());
 }
 
 function showJobCard(data) {
@@ -1822,7 +2040,7 @@ function showJobCard(data) {
   }
 
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  finishChatMutation(shouldPinChatToLatest());
 }
 
 // --- Auth card ---
@@ -1911,7 +2129,7 @@ function showAuthCard(data) {
   card.appendChild(actions);
 
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  finishChatMutation(shouldPinChatToLatest(), { forceScroll: true });
   tokenInput.focus();
 }
 
@@ -2000,6 +2218,8 @@ function loadHistory(before) {
           container.appendChild(createTurnCardFromHistory(turn));
         }
       }
+      syncChatComposerMetrics();
+      scrollChatToLatest({ force: true, defer: true });
     } else {
       // Pagination: prepend older messages
       const savedHeight = container.scrollHeight;
@@ -2010,6 +2230,7 @@ function loadHistory(before) {
       container.insertBefore(fragment, container.firstChild);
       // Restore scroll position so the user doesn't jump
       container.scrollTop = container.scrollHeight - savedHeight;
+      updateChatJumpLatestButton();
     }
 
     hasMore = data.has_more || false;
@@ -2019,6 +2240,7 @@ function loadHistory(before) {
   }).finally(() => {
     loadingOlder = false;
     removeScrollSpinner();
+    updateChatJumpLatestButton();
   });
 }
 
@@ -2035,6 +2257,8 @@ function showChatEmptyState(message) {
   empty.innerHTML = '<div class="chat-empty-state-glyph">' + escapeHtml(resolvedSkinMeta().promptSymbol || '›') + '</div>'
     + '<div class="chat-empty-state-copy">' + escapeHtml(message) + '</div>';
   container.appendChild(empty);
+  syncChatComposerMetrics();
+  updateChatJumpLatestButton();
 }
 
 // --- Threads ---
@@ -2124,6 +2348,8 @@ function createNewThread() {
     syncSelectedSubsessionForCurrentThread();
     renderThreadSidebar();
     renderSubsessionPanel();
+    syncChatComposerMetrics();
+    updateChatJumpLatestButton();
     loadThreads();
   }).catch((err) => {
     showToast('Failed to create thread: ' + err.message, 'error');
@@ -2170,13 +2396,20 @@ chatInput.addEventListener('keydown', (e) => {
   }
 });
 chatInput.addEventListener('input', () => autoResizeTextarea(chatInput));
+window.addEventListener('resize', syncChatComposerMetrics);
 
 // Disable send until a thread is selected (loadThreads will enable it)
 chatInput.disabled = true;
 document.getElementById('send-btn').disabled = true;
+document.getElementById('chat-jump-latest').addEventListener('click', () => {
+  scrollChatToLatest({ force: true, behavior: 'smooth' });
+});
+syncChatComposerMetrics();
+updateChatJumpLatestButton();
 
 // Infinite scroll: load older messages when scrolled near the top
 document.getElementById('chat-messages').addEventListener('scroll', function () {
+  updateChatJumpLatestButton();
   if (this.scrollTop < 100 && hasMore && !loadingOlder) {
     loadingOlder = true;
     // Show spinner at top
@@ -2192,6 +2425,7 @@ document.getElementById('chat-messages').addEventListener('scroll', function () 
 function autoResizeTextarea(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  syncChatComposerMetrics();
 }
 
 // --- Tabs ---
@@ -2219,6 +2453,7 @@ function switchTab(tab) {
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
+  if (tab === 'autonomy') loadAutonomyDashboard();
   if (tab === 'research') {
     loadExperiments();
     switchResearchSubtab(currentResearchSubtab || 'overview', { render: false });
@@ -2235,6 +2470,13 @@ function switchTab(tab) {
   if (tab === 'providers') loadProviders();
   if (tab === 'costs') { loadCostDashboard(); startCostAutoRefresh(); } else { stopCostAutoRefresh(); }
   if (tab === 'settings') loadSettings();
+  if (tab === 'chat') {
+    requestAnimationFrame(() => {
+      syncChatComposerMetrics();
+      scrollChatToLatest({ force: true });
+    });
+  }
+  updateChatJumpLatestButton();
 }
 
 // --- Memory (filesystem tree) ---
@@ -2619,12 +2861,18 @@ function loadExtensions() {
   const toolsTbody = document.getElementById('tools-tbody');
   const toolsEmpty = document.getElementById('tools-empty');
 
-  // Fetch all three in parallel
+  // Fetch all MCP and extension surfaces in parallel
   Promise.all([
     apiFetch('/api/extensions').catch(() => ({ extensions: [] })),
     apiFetch('/api/extensions/tools').catch(() => ({ tools: [] })),
     apiFetch('/api/extensions/registry').catch(function(err) { console.warn('registry fetch failed:', err); return { entries: [] }; }),
-  ]).then(([extData, toolData, registryData]) => {
+    apiFetch('/api/mcp/servers').catch(() => ({ servers: [] })),
+    apiFetch('/api/mcp/interactions').catch(() => ({ interactions: [] })),
+  ]).then(([extData, toolData, registryData, mcpServerData, interactionData]) => {
+    var serverMap = new Map((mcpServerData.servers || []).map(function(server) {
+      return [server.name, server];
+    }));
+
     // Render installed extensions
     if (extData.extensions.length === 0) {
       extList.innerHTML = '<div class="empty-state">No extensions installed</div>';
@@ -2649,15 +2897,26 @@ function loadExtensions() {
       }
     }
 
-    // MCP servers (show both installed and uninstalled)
-    if (mcpEntries.length === 0) {
+    // MCP servers (show configured + registry entries)
+    var mcpCardNames = new Set();
+    var mcpCards = [];
+    mcpEntries.forEach(function(entry) {
+      var installedExt = extData.extensions.find(function(e) { return e.name === entry.name; });
+      mcpCards.push(renderMcpServerCard(entry, installedExt, serverMap.get(entry.name) || null));
+      mcpCardNames.add(entry.name);
+    });
+    (mcpServerData.servers || []).forEach(function(server) {
+      if (mcpCardNames.has(server.name)) return;
+      var installedExt = extData.extensions.find(function(e) { return e.name === server.name; });
+      mcpCards.push(renderMcpServerCard(null, installedExt, server));
+      mcpCardNames.add(server.name);
+    });
+
+    if (mcpCards.length === 0) {
       mcpList.innerHTML = '<div class="empty-state">No MCP servers available</div>';
     } else {
       mcpList.innerHTML = '';
-      for (const entry of mcpEntries) {
-        var installedExt = extData.extensions.find(function(e) { return e.name === entry.name; });
-        mcpList.appendChild(renderMcpServerCard(entry, installedExt));
-      }
+      mcpCards.forEach(function(card) { mcpList.appendChild(card); });
     }
 
     // Render tools
@@ -2669,6 +2928,20 @@ function loadExtensions() {
       toolsTbody.innerHTML = toolData.tools.map((t) =>
         '<tr><td>' + escapeHtml(t.name) + '</td><td>' + escapeHtml(t.description) + '</td></tr>'
       ).join('');
+    }
+
+    mcpBrowserState.servers = mcpServerData.servers || [];
+    mcpBrowserState.interactions = interactionData.interactions || [];
+    syncMcpBrowserServerSelection();
+    renderMcpInteractions();
+    renderMcpBrowserServerPicker();
+    if (mcpBrowserState.selectedServer) {
+      loadMcpBrowserServer(mcpBrowserState.selectedServer);
+    } else {
+      renderMcpBrowserSummary(null);
+      renderMcpResourceCards([]);
+      renderMcpTemplateCards([]);
+      renderMcpPromptCards([]);
     }
   });
 }
@@ -2739,7 +3012,58 @@ function renderAvailableExtensionCard(entry) {
   return card;
 }
 
-function renderMcpServerCard(entry, installedExt) {
+function syncMcpBrowserServerSelection() {
+  if (!Array.isArray(mcpBrowserState.servers) || mcpBrowserState.servers.length === 0) {
+    mcpBrowserState.selectedServer = '';
+    return;
+  }
+  if (mcpBrowserState.selectedServer
+      && mcpBrowserState.servers.some(function(server) { return server.name === mcpBrowserState.selectedServer; })) {
+    return;
+  }
+  var preferred = mcpBrowserState.servers.find(function(server) { return server.active; })
+    || mcpBrowserState.servers[0];
+  mcpBrowserState.selectedServer = preferred ? preferred.name : '';
+}
+
+function renderMcpBrowserServerPicker() {
+  var select = document.getElementById('mcp-browser-server');
+  if (!select) return;
+  var selected = mcpBrowserState.selectedServer || '';
+  var options = ['<option value="">Select an MCP server</option>'];
+  (mcpBrowserState.servers || []).forEach(function(server) {
+    var label = escapeHtml(server.display_name || server.name);
+    if (server.active) label += ' · active';
+    options.push('<option value="' + escapeHtml(server.name) + '"' + (server.name === selected ? ' selected' : '') + '>' + label + '</option>');
+  });
+  select.innerHTML = options.join('');
+}
+
+function onMcpBrowserServerChange() {
+  var select = document.getElementById('mcp-browser-server');
+  mcpBrowserState.selectedServer = select ? select.value : '';
+  if (mcpBrowserState.selectedServer) {
+    loadMcpBrowserServer(mcpBrowserState.selectedServer);
+  } else {
+    renderMcpBrowserSummary(null);
+    renderMcpResourceCards([]);
+    renderMcpTemplateCards([]);
+    renderMcpPromptCards([]);
+    renderMcpDetailEmpty();
+  }
+}
+
+function refreshMcpBrowser() {
+  loadExtensions();
+}
+
+function selectMcpBrowserServer(name) {
+  mcpBrowserState.selectedServer = name;
+  renderMcpBrowserServerPicker();
+  if (name) loadMcpBrowserServer(name);
+}
+
+function renderMcpServerCard(entry, installedExt, serverInfo) {
   var card = document.createElement('div');
   card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card'
     + (installedExt ? '' : ' ui-panel--feature ext-available');
@@ -2749,7 +3073,11 @@ function renderMcpServerCard(entry, installedExt) {
 
   var name = document.createElement('span');
   name.className = 'ext-name ui-resource-name';
-  name.textContent = entry.display_name;
+  name.textContent = (serverInfo && serverInfo.display_name)
+    || (entry && entry.display_name)
+    || (serverInfo && serverInfo.name)
+    || (installedExt && installedExt.name)
+    || 'mcp_server';
   header.appendChild(name);
 
   var kind = document.createElement('span');
@@ -2768,8 +3096,23 @@ function renderMcpServerCard(entry, installedExt) {
 
   var desc = document.createElement('div');
   desc.className = 'ext-desc ui-resource-meta';
-  desc.textContent = entry.description;
+  desc.textContent = (entry && entry.description)
+    || (serverInfo && serverInfo.description)
+    || 'Model Context Protocol server';
   card.appendChild(desc);
+
+  if (serverInfo) {
+    var meta = document.createElement('div');
+    meta.className = 'ext-note ui-resource-note';
+    var metaParts = [];
+    if (serverInfo.transport) metaParts.push(serverInfo.transport);
+    if (serverInfo.url) metaParts.push(serverInfo.url);
+    if (serverInfo.command) metaParts.push(serverInfo.command);
+    if (serverInfo.protocol_version) metaParts.push('protocol ' + serverInfo.protocol_version);
+    if (serverInfo.server_version) metaParts.push('server ' + serverInfo.server_version);
+    meta.textContent = metaParts.join(' · ');
+    card.appendChild(meta);
+  }
 
   var actions = document.createElement('div');
   actions.className = 'ext-actions ui-resource-actions';
@@ -2801,10 +3144,10 @@ function renderMcpServerCard(entry, installedExt) {
       installBtn.textContent = 'Installing...';
       apiFetch('/api/extensions/install', {
         method: 'POST',
-        body: { name: entry.name, kind: entry.kind },
+        body: { name: (entry && entry.name) || serverInfo.name, kind: 'mcp_server' },
       }).then(function(res) {
         if (res.success) {
-          showToast('Installed ' + entry.display_name, 'success');
+          showToast('Installed ' + ((entry && entry.display_name) || serverInfo.display_name || serverInfo.name), 'success');
         } else {
           showToast('Install: ' + (res.message || 'unknown error'), 'error');
         }
@@ -2817,8 +3160,508 @@ function renderMcpServerCard(entry, installedExt) {
     actions.appendChild(installBtn);
   }
 
+  if (serverInfo) {
+    var browseBtn = document.createElement('button');
+    browseBtn.className = 'btn-ext configure';
+    browseBtn.textContent = 'Browse';
+    browseBtn.addEventListener('click', function() {
+      selectMcpBrowserServer(serverInfo.name);
+    });
+    actions.appendChild(browseBtn);
+  }
+
   card.appendChild(actions);
   return card;
+}
+
+function renderMcpInteractions() {
+  var container = document.getElementById('mcp-interactions-list');
+  if (!container) return;
+  var interactions = mcpBrowserState.interactions || [];
+  if (interactions.length === 0) {
+    container.innerHTML = '<div class="empty-state">No pending MCP requests</div>';
+    return;
+  }
+  container.innerHTML = '';
+  interactions.forEach(function(interaction) {
+    var card = document.createElement('div');
+    card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card';
+    card.innerHTML =
+      '<div class="ext-header ui-resource-header">'
+        + '<span class="ext-name ui-resource-name">' + escapeHtml(interaction.title || interaction.method) + '</span>'
+        + '<span class="ext-kind kind-mcp_server">' + escapeHtml(interaction.kind || 'interaction') + '</span>'
+      + '</div>'
+      + '<div class="ext-desc ui-resource-meta">' + escapeHtml(interaction.description || 'Pending MCP interaction') + '</div>'
+      + '<div class="ext-note ui-resource-note">Server: ' + escapeHtml(interaction.server_name || '') + ' · Method: ' + escapeHtml(interaction.method || '') + '</div>';
+
+    var body = document.createElement('div');
+    body.className = 'ext-actions ui-resource-actions';
+
+    if (interaction.kind === 'sampling') {
+      var textarea = document.createElement('textarea');
+      textarea.className = 'mcp-inline-textarea';
+      textarea.placeholder = 'Write the assistant response to return to the MCP server';
+      body.appendChild(textarea);
+
+      var submitBtn = document.createElement('button');
+      submitBtn.className = 'btn-ext activate';
+      submitBtn.textContent = 'Submit';
+      submitBtn.addEventListener('click', function() {
+        var text = textarea.value.trim();
+        if (!text) {
+          showToast('Sampling responses need text before submitting.', 'warning');
+          return;
+        }
+        respondToMcpInteraction(interaction.id, {
+          action: 'approve',
+          response: {
+            role: 'assistant',
+            content: [{ type: 'text', text: text }],
+            stopReason: 'end_turn',
+          },
+        });
+      });
+      body.appendChild(submitBtn);
+    } else {
+      var form = renderMcpElicitationForm(interaction);
+      body.appendChild(form);
+    }
+
+    var denyBtn = document.createElement('button');
+    denyBtn.className = 'btn-ext remove';
+    denyBtn.textContent = 'Deny';
+    denyBtn.addEventListener('click', function() {
+      respondToMcpInteraction(interaction.id, {
+        action: 'deny',
+        message: 'User denied the MCP interaction from the web UI.',
+      });
+    });
+    body.appendChild(denyBtn);
+
+    card.appendChild(body);
+    container.appendChild(card);
+  });
+}
+
+function mcpSchemaFieldType(field) {
+  if (!field || !field.type) return null;
+  if (Array.isArray(field.type)) {
+    for (var i = 0; i < field.type.length; i += 1) {
+      if (field.type[i] && field.type[i] !== 'null') return field.type[i];
+    }
+    return field.type[0] || null;
+  }
+  return field.type;
+}
+
+function buildMcpElicitationInput(field, propName) {
+  var fieldType = mcpSchemaFieldType(field);
+
+  if (Array.isArray(field && field.enum) && field.enum.length > 0) {
+    var select = document.createElement('select');
+    select.setAttribute('data-field-name', propName);
+    select.setAttribute('data-field-kind', 'enum');
+    select.setAttribute('data-field-enum', JSON.stringify(field.enum));
+    var emptyOption = document.createElement('option');
+    emptyOption.value = '';
+    emptyOption.textContent = 'Select a value';
+    select.appendChild(emptyOption);
+    field.enum.forEach(function(optionValue, index) {
+      var option = document.createElement('option');
+      option.value = String(index);
+      option.textContent = typeof optionValue === 'string' ? optionValue : JSON.stringify(optionValue);
+      select.appendChild(option);
+    });
+    return select;
+  }
+
+  if (fieldType === 'boolean') {
+    var boolSelect = document.createElement('select');
+    boolSelect.setAttribute('data-field-name', propName);
+    boolSelect.setAttribute('data-field-kind', 'boolean');
+    [
+      { value: '', label: 'Select true or false' },
+      { value: 'true', label: 'true' },
+      { value: 'false', label: 'false' },
+    ].forEach(function(optionDef) {
+      var option = document.createElement('option');
+      option.value = optionDef.value;
+      option.textContent = optionDef.label;
+      boolSelect.appendChild(option);
+    });
+    return boolSelect;
+  }
+
+  if (fieldType === 'array' || fieldType === 'object') {
+    var jsonInput = document.createElement('textarea');
+    jsonInput.setAttribute('data-field-name', propName);
+    jsonInput.setAttribute('data-field-kind', fieldType);
+    jsonInput.placeholder = fieldType === 'array' ? '[...]' : '{...}';
+    return jsonInput;
+  }
+
+  var input = document.createElement(fieldType === 'string' && (field.format === 'multiline' || field.maxLength > 120) ? 'textarea' : 'input');
+  input.setAttribute('data-field-name', propName);
+  input.setAttribute('data-field-kind', fieldType || 'string');
+  if (input.tagName === 'INPUT') {
+    input.type = fieldType === 'number' || fieldType === 'integer' ? 'number' : 'text';
+    if (fieldType === 'integer') input.step = '1';
+    if (fieldType === 'number') input.step = 'any';
+  }
+  return input;
+}
+
+function hasMcpElicitationValue(input) {
+  var kind = input.getAttribute('data-field-kind');
+  if (kind === 'boolean' || kind === 'enum') return input.value !== '';
+  return String(input.value || '').trim() !== '';
+}
+
+function parseMcpElicitationValue(input) {
+  var kind = input.getAttribute('data-field-kind') || 'string';
+  var rawValue = String(input.value || '').trim();
+  if (kind === 'boolean') {
+    if (input.value === 'true') return true;
+    if (input.value === 'false') return false;
+    throw new Error('Choose true or false');
+  }
+  if (kind === 'integer') {
+    if (!rawValue) throw new Error('Enter an integer');
+    var intValue = Number(rawValue);
+    if (!Number.isInteger(intValue)) throw new Error('Enter a valid integer');
+    return intValue;
+  }
+  if (kind === 'number') {
+    if (!rawValue) throw new Error('Enter a number');
+    var numberValue = Number(rawValue);
+    if (!Number.isFinite(numberValue)) throw new Error('Enter a valid number');
+    return numberValue;
+  }
+  if (kind === 'array' || kind === 'object') {
+    if (!rawValue) throw new Error('Enter valid JSON');
+    var parsed = JSON.parse(rawValue);
+    if (kind === 'array' && !Array.isArray(parsed)) throw new Error('Enter a JSON array');
+    if (kind === 'object' && (!parsed || Array.isArray(parsed) || typeof parsed !== 'object')) {
+      throw new Error('Enter a JSON object');
+    }
+    return parsed;
+  }
+  if (kind === 'enum') {
+    var options = JSON.parse(input.getAttribute('data-field-enum') || '[]');
+    var optionIndex = Number(input.value);
+    if (!Number.isInteger(optionIndex) || optionIndex < 0 || optionIndex >= options.length) {
+      throw new Error('Select a valid option');
+    }
+    return options[optionIndex];
+  }
+  return rawValue;
+}
+
+function renderMcpElicitationForm(interaction) {
+  var shell = document.createElement('div');
+  shell.className = 'mcp-elicitation-form';
+  var schema = interaction && interaction.schema && typeof interaction.schema === 'object'
+    ? interaction.schema
+    : null;
+  var props = schema && schema.properties && typeof schema.properties === 'object'
+    ? schema.properties
+    : {};
+  var required = Array.isArray(schema && schema.required) ? schema.required : [];
+  var propNames = Object.keys(props);
+
+  if (propNames.length === 0) {
+    var textarea = document.createElement('textarea');
+    textarea.className = 'mcp-inline-textarea';
+    textarea.placeholder = 'Enter JSON to return to the MCP server';
+    shell.appendChild(textarea);
+
+    var submitBtn = document.createElement('button');
+    submitBtn.className = 'btn-ext activate';
+    submitBtn.textContent = 'Submit';
+    submitBtn.addEventListener('click', function() {
+      var raw = textarea.value.trim();
+      if (!raw) {
+        showToast('Enter a JSON response before submitting.', 'warning');
+        return;
+      }
+      try {
+        respondToMcpInteraction(interaction.id, {
+          action: 'approve',
+          response: JSON.parse(raw),
+        });
+      } catch (err) {
+        showToast('Invalid JSON: ' + err.message, 'error');
+      }
+    });
+    shell.appendChild(submitBtn);
+    return shell;
+  }
+
+  propNames.forEach(function(propName) {
+    var field = props[propName] || {};
+    var label = document.createElement('label');
+    label.className = 'mcp-inline-field';
+    label.textContent = propName + (required.indexOf(propName) !== -1 ? ' *' : '');
+    var input = buildMcpElicitationInput(field, propName);
+    input.placeholder = field.description || propName;
+    label.appendChild(input);
+    shell.appendChild(label);
+  });
+
+  var submitBtn = document.createElement('button');
+  submitBtn.className = 'btn-ext activate';
+  submitBtn.textContent = 'Submit';
+  submitBtn.addEventListener('click', function() {
+    var values = {};
+    var invalid = null;
+    shell.querySelectorAll('[data-field-name]').forEach(function(input) {
+      var name = input.getAttribute('data-field-name');
+      if (invalid || !hasMcpElicitationValue(input)) return;
+      try {
+        values[name] = parseMcpElicitationValue(input);
+      } catch (err) {
+        invalid = name + ': ' + err.message;
+      }
+    });
+    required.forEach(function(name) {
+      if (!invalid && !Object.prototype.hasOwnProperty.call(values, name)) invalid = 'Missing required field: ' + name;
+    });
+    if (invalid) {
+      showToast(invalid, 'warning');
+      return;
+    }
+    respondToMcpInteraction(interaction.id, {
+      action: 'approve',
+      response: { values: values },
+    });
+  });
+  shell.appendChild(submitBtn);
+
+  return shell;
+}
+
+function respondToMcpInteraction(interactionId, body) {
+  apiFetch('/api/mcp/interactions/' + encodeURIComponent(interactionId) + '/respond', {
+    method: 'POST',
+    body: body,
+  }).then(function() {
+    showToast('Submitted MCP interaction response.', 'success');
+    loadExtensions();
+  }).catch(function(err) {
+    showToast('Failed to submit MCP interaction: ' + err.message, 'error');
+  });
+}
+
+function loadMcpBrowserServer(name) {
+  if (!name) return;
+  Promise.all([
+    apiFetch('/api/mcp/servers/' + encodeURIComponent(name)).catch(function() { return null; }),
+    apiFetch('/api/mcp/servers/' + encodeURIComponent(name) + '/resources').catch(function() { return { resources: [] }; }),
+    apiFetch('/api/mcp/servers/' + encodeURIComponent(name) + '/resource-templates').catch(function() { return { resource_templates: [] }; }),
+    apiFetch('/api/mcp/servers/' + encodeURIComponent(name) + '/prompts').catch(function() { return { prompts: [] }; }),
+  ]).then(function(results) {
+    var server = results[0];
+    mcpBrowserState.selectedServer = name;
+    mcpBrowserState.resources = (results[1] && results[1].resources) || [];
+    mcpBrowserState.resourceTemplates = (results[2] && results[2].resource_templates) || [];
+    mcpBrowserState.prompts = (results[3] && results[3].prompts) || [];
+    renderMcpBrowserSummary(server);
+    renderMcpResourceCards(mcpBrowserState.resources);
+    renderMcpTemplateCards(mcpBrowserState.resourceTemplates);
+    renderMcpPromptCards(mcpBrowserState.prompts);
+  }).catch(function(err) {
+    showToast('Failed to load MCP browser data: ' + err.message, 'error');
+  });
+}
+
+function renderMcpBrowserSummary(server) {
+  var container = document.getElementById('mcp-browser-summary');
+  if (!container) return;
+  if (!server) {
+    container.innerHTML = '<div class="empty-state">Select an MCP server to inspect its live surface.</div>';
+    return;
+  }
+  container.innerHTML =
+    '<div class="ui-panel ui-panel--compact ui-resource-card ext-card">'
+      + '<div class="ext-header ui-resource-header">'
+        + '<span class="ext-name ui-resource-name">' + escapeHtml(server.display_name || server.name) + '</span>'
+        + '<span class="ext-kind kind-mcp_server">' + escapeHtml(server.transport || 'mcp') + '</span>'
+      + '</div>'
+      + '<div class="ext-note ui-resource-note">Namespace: ' + escapeHtml(server.tool_namespace || '') + '</div>'
+      + '<div class="ext-note ui-resource-note">Auth: ' + escapeHtml(server.authenticated ? 'authenticated' : 'not authenticated') + ' · Active: ' + escapeHtml(server.active ? 'yes' : 'no') + '</div>'
+      + (server.protocol_version ? '<div class="ext-note ui-resource-note">Protocol: ' + escapeHtml(server.protocol_version) + '</div>' : '')
+      + (server.server_version ? '<div class="ext-note ui-resource-note">Version: ' + escapeHtml(server.server_version) + '</div>' : '')
+    + '</div>';
+}
+
+function renderMcpResourceCards(resources) {
+  var container = document.getElementById('mcp-resources-list');
+  if (!container) return;
+  if (!Array.isArray(resources) || resources.length === 0) {
+    container.innerHTML = '<div class="empty-state">No MCP resources published by this server</div>';
+    return;
+  }
+  container.innerHTML = '';
+  resources.forEach(function(resource) {
+    var card = document.createElement('div');
+    card.className = 'ui-panel ui-panel--compact ui-resource-card ext-card';
+    card.innerHTML =
+      '<div class="ext-header ui-resource-header">'
+        + '<span class="ext-name ui-resource-name">' + escapeHtml(resource.title || resource.name || resource.uri) + '</span>'
+      + '</div>'
+      + '<div class="ext-desc ui-resource-meta">' + escapeHtml(resource.description || resource.uri) + '</div>'
+      + '<div class="ext-note ui-resource-note">' + escapeHtml(resource.mime_type || resource.mimeType || 'unknown') + '</div>';
+    var actions = document.createElement('div');
+    actions.className = 'ext-actions ui-resource-actions';
+    var button = document.createElement('button');
+    button.className = 'btn-ext configure';
+    button.textContent = 'Read';
+    button.addEventListener('click', function() {
+      showMcpResourceDetail(resource);
+    });
+    actions.appendChild(button);
+    card.appendChild(actions);
+    container.appendChild(card);
+  });
+}
+
+function renderMcpTemplateCards(templates) {
+  var container = document.getElementById('mcp-resource-templates-list');
+  if (!container) return;
+  if (!Array.isArray(templates) || templates.length === 0) {
+    container.innerHTML = '<div class="empty-state">No MCP resource templates published by this server</div>';
+    return;
+  }
+  container.innerHTML = '';
+  templates.forEach(function(template) {
+    var card = document.createElement('div');
+    card.className = 'ui-panel ui-panel--compact ui-resource-card ext-card';
+    card.innerHTML =
+      '<div class="ext-header ui-resource-header">'
+        + '<span class="ext-name ui-resource-name">' + escapeHtml(template.title || template.name || template.uri_template) + '</span>'
+      + '</div>'
+      + '<div class="ext-desc ui-resource-meta">' + escapeHtml(template.description || template.uri_template) + '</div>'
+      + '<div class="ext-note ui-resource-note">' + escapeHtml(template.uri_template || '') + '</div>';
+    container.appendChild(card);
+  });
+}
+
+function renderMcpPromptCards(prompts) {
+  var container = document.getElementById('mcp-prompts-list');
+  if (!container) return;
+  if (!Array.isArray(prompts) || prompts.length === 0) {
+    container.innerHTML = '<div class="empty-state">No MCP prompts published by this server</div>';
+    return;
+  }
+  container.innerHTML = '';
+  prompts.forEach(function(promptDef) {
+    var card = document.createElement('div');
+    card.className = 'ui-panel ui-panel--compact ui-resource-card ext-card';
+    card.innerHTML =
+      '<div class="ext-header ui-resource-header">'
+        + '<span class="ext-name ui-resource-name">' + escapeHtml(promptDef.title || promptDef.name) + '</span>'
+      + '</div>'
+      + '<div class="ext-desc ui-resource-meta">' + escapeHtml(promptDef.description || promptDef.name) + '</div>'
+      + '<div class="ext-note ui-resource-note">' + escapeHtml((promptDef.arguments || []).map(function(arg) { return arg.name + (arg.required ? '*' : ''); }).join(', ') || 'No arguments') + '</div>';
+    var actions = document.createElement('div');
+    actions.className = 'ext-actions ui-resource-actions';
+    var button = document.createElement('button');
+    button.className = 'btn-ext configure';
+    button.textContent = 'Open';
+    button.addEventListener('click', function() {
+      showMcpPromptDetail(promptDef);
+    });
+    actions.appendChild(button);
+    card.appendChild(actions);
+    container.appendChild(card);
+  });
+}
+
+function renderMcpDetailEmpty() {
+  var panel = document.getElementById('mcp-detail-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div class="empty-state">Select an MCP resource or prompt to inspect its contents.</div>';
+}
+
+function showMcpResourceDetail(resource) {
+  apiFetch('/api/mcp/servers/' + encodeURIComponent(mcpBrowserState.selectedServer) + '/resources/read?uri=' + encodeURIComponent(resource.uri))
+    .then(function(data) {
+      var panel = document.getElementById('mcp-detail-panel');
+      if (!panel) return;
+      var contentHtml = (data.contents || []).map(function(item) {
+        if (item.type === 'text') {
+          return '<pre class="mcp-detail-pre">' + escapeHtml(item.text || '') + '</pre>';
+        }
+        return '<pre class="mcp-detail-pre">' + escapeHtml(JSON.stringify(item, null, 2)) + '</pre>';
+      }).join('');
+      panel.innerHTML =
+        '<div class="ui-panel-copy">'
+          + '<h4 class="ui-panel-title ui-panel-title--section">' + escapeHtml(resource.title || resource.name || resource.uri) + '</h4>'
+          + '<p class="ui-panel-desc">' + escapeHtml(resource.description || resource.uri) + '</p>'
+        + '</div>'
+        + contentHtml;
+    })
+    .catch(function(err) {
+      showToast('Failed to read MCP resource: ' + err.message, 'error');
+    });
+}
+
+function showMcpPromptDetail(promptDef) {
+  var panel = document.getElementById('mcp-detail-panel');
+  if (!panel) return;
+  var args = Array.isArray(promptDef.arguments) ? promptDef.arguments : [];
+  var fields = args.map(function(arg) {
+    return '<label class="mcp-inline-field">' + escapeHtml(arg.name + (arg.required ? ' *' : ''))
+      + '<input type="text" data-prompt-arg="' + escapeHtml(arg.name) + '" placeholder="' + escapeHtml(arg.description || arg.name) + '"></label>';
+  }).join('');
+  panel.innerHTML =
+    '<div class="ui-panel-copy">'
+      + '<h4 class="ui-panel-title ui-panel-title--section">' + escapeHtml(promptDef.title || promptDef.name) + '</h4>'
+      + '<p class="ui-panel-desc">' + escapeHtml(promptDef.description || 'Request this MCP prompt with optional arguments.') + '</p>'
+    + '</div>'
+    + '<div class="mcp-prompt-form">' + fields + '<button class="btn-ext configure" id="mcp-prompt-submit">Fetch Prompt</button></div>';
+  var submit = document.getElementById('mcp-prompt-submit');
+  if (submit) {
+    submit.addEventListener('click', function() {
+      submitMcpPrompt(promptDef.name);
+    });
+  }
+}
+
+function submitMcpPrompt(promptName) {
+  var panel = document.getElementById('mcp-detail-panel');
+  if (!panel) return;
+  var argumentsPayload = {};
+  panel.querySelectorAll('[data-prompt-arg]').forEach(function(input) {
+    var value = String(input.value || '').trim();
+    if (!value) return;
+    argumentsPayload[input.getAttribute('data-prompt-arg')] = value;
+  });
+  apiFetch('/api/mcp/servers/' + encodeURIComponent(mcpBrowserState.selectedServer) + '/prompts/' + encodeURIComponent(promptName), {
+    method: 'POST',
+    body: { arguments: Object.keys(argumentsPayload).length ? argumentsPayload : null },
+  }).then(function(data) {
+    var messages = (data.messages || []).map(function(message) {
+      var content = message.content;
+      if (typeof content === 'string') return renderMarkdown(content);
+      if (Array.isArray(content)) {
+        return content.map(function(block) {
+          if (block.type === 'text') return renderMarkdown(block.text || '');
+          return '<pre class="mcp-detail-pre">' + escapeHtml(JSON.stringify(block, null, 2)) + '</pre>';
+        }).join('');
+      }
+      if (content && content.type === 'text') return renderMarkdown(content.text || '');
+      return '<pre class="mcp-detail-pre">' + escapeHtml(JSON.stringify(content, null, 2)) + '</pre>';
+    }).join('');
+    panel.innerHTML =
+      '<div class="ui-panel-copy">'
+        + '<h4 class="ui-panel-title ui-panel-title--section">' + escapeHtml(promptName) + '</h4>'
+        + (data.description ? '<p class="ui-panel-desc">' + escapeHtml(data.description) + '</p>' : '')
+      + '</div>'
+      + messages;
+  }).catch(function(err) {
+    showToast('Failed to fetch MCP prompt: ' + err.message, 'error');
+  });
 }
 
 function createReconfigureButton(extName) {
@@ -3531,7 +4374,9 @@ function renderJobsList(jobs) {
 
     return '<tr class="job-row" onclick="openJobDetail(\'' + job.id + '\')">'
       + '<td title="' + escapeHtml(job.id) + '">' + shortId + '</td>'
-      + '<td>' + escapeHtml(job.title) + '</td>'
+      + '<td>' + escapeHtml(job.title)
+      + (job.runtime_mode ? '<div class="meta-inline">' + escapeHtml(job.runtime_mode) + '</div>' : '')
+      + '</td>'
       + '<td><span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span></td>'
       + '<td>' + formatDate(job.created_at) + '</td>'
       + '<td>' + actionBtns + '</td>'
@@ -3658,12 +4503,24 @@ function renderJobOverview(container, job) {
   grid.className = 'job-meta-grid';
   grid.innerHTML = metaItem('Job ID', job.id)
     + metaItem('State', job.state)
+    + metaItem('Backend', job.execution_backend || '-')
+    + metaItem('Runtime family', job.runtime_family || '-')
+    + metaItem('Runtime mode', job.runtime_mode || job.job_mode || '-')
+    + metaItem('Network isolation', job.network_isolation || '-')
     + metaItem('Created', formatDate(job.created_at))
     + metaItem('Started', formatDate(job.started_at))
     + metaItem('Completed', formatDate(job.completed_at))
-    + metaItem('Duration', formatDuration(job.elapsed_secs))
-    + (job.job_mode ? metaItem('Mode', job.job_mode) : '');
+    + metaItem('Duration', formatDuration(job.elapsed_secs));
   container.appendChild(grid);
+
+  if (job.runtime_capabilities && job.runtime_capabilities.length) {
+    const caps = document.createElement('div');
+    caps.className = 'ui-panel ui-panel--subtle';
+    caps.innerHTML = '<h3>Runtime capabilities</h3><div class="meta-inline">'
+      + escapeHtml(job.runtime_capabilities.join(', '))
+      + '</div>';
+    container.appendChild(caps);
+  }
 
   // Description
   if (job.description) {
@@ -4196,6 +5053,203 @@ function deleteRoutine(id, name) {
       else loadRoutines();
     })
     .catch((err) => showToast('Delete failed: ' + err.message, 'error'));
+}
+
+function autonomyBadgeClass(value) {
+  return value ? 'completed' : 'failed';
+}
+
+function autonomyStatusValue(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value);
+}
+
+function renderAutonomySummaryCard(label, value, statusClass, detail) {
+  return '<section class="ui-panel">'
+    + '<div class="autonomy-summary-label">' + escapeHtml(label) + '</div>'
+    + '<div class="autonomy-summary-value">' + escapeHtml(autonomyStatusValue(value)) + '</div>'
+    + (detail ? '<div class="autonomy-summary-detail">' + escapeHtml(detail) + '</div>' : '')
+    + (statusClass ? '<span class="badge ' + escapeHtml(statusClass) + '">' + escapeHtml(statusClass.replace('_', ' ')) + '</span>' : '')
+    + '</section>';
+}
+
+function renderAutonomyCheckList(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return '<div class="ui-panel-empty">No checks recorded yet.</div>';
+  }
+  return '<div class="autonomy-check-list">' + items.map((item) => {
+    const passed = !!item.passed;
+    return '<div class="autonomy-check-item">'
+      + '<div class="autonomy-check-head">'
+      + '<span class="autonomy-check-title">' + escapeHtml(item.name || 'check') + '</span>'
+      + '<span class="badge ' + autonomyBadgeClass(passed) + '">' + (passed ? 'passed' : 'failed') + '</span>'
+      + '</div>'
+      + (item.detail ? '<div class="autonomy-check-detail">' + escapeHtml(item.detail) + '</div>' : '')
+      + '</div>';
+  }).join('') + '</div>';
+}
+
+function renderAutonomyKv(rows) {
+  return '<div class="autonomy-kv">' + rows.map((row) => {
+    return '<div class="autonomy-kv-row"><span class="autonomy-kv-key">' + escapeHtml(row.label)
+      + '</span><span class="autonomy-kv-value">' + escapeHtml(autonomyStatusValue(row.value)) + '</span></div>';
+  }).join('') + '</div>';
+}
+
+function loadAutonomyDashboard() {
+  if (!autonomyFeatureAvailable) {
+    setAutonomyVisibility(false);
+    return;
+  }
+  Promise.all([
+    apiFetch('/api/autonomy/status'),
+    apiFetch('/api/autonomy/rollouts'),
+    apiFetch('/api/autonomy/checks'),
+    apiFetch('/api/autonomy/evidence'),
+  ]).then(([status, rollouts, checks, evidence]) => {
+    autonomyState.status = status;
+    autonomyState.rollouts = rollouts;
+    autonomyState.checks = checks;
+    autonomyState.evidence = evidence;
+    renderAutonomyDashboard();
+  }).catch((err) => {
+    setAutonomyVisibility(false);
+    showToast('Failed to load autonomy console: ' + err.message, 'error');
+  });
+}
+
+function renderAutonomyDashboard() {
+  const status = autonomyState.status || {};
+  const rollouts = autonomyState.rollouts || {};
+  const checks = autonomyState.checks || {};
+  const evidence = autonomyState.evidence || {};
+
+  document.getElementById('autonomy-summary').innerHTML = ''
+    + renderAutonomySummaryCard('Actions Ready', status.action_ready, status.action_ready ? 'completed' : 'failed', status.blocking_reason || 'Ready to run desktop actions')
+    + renderAutonomySummaryCard('Bootstrap', status.bootstrap_passed, status.bootstrap_passed ? 'completed' : 'failed', status.last_bootstrap_at ? formatDate(status.last_bootstrap_at) : 'Not bootstrapped')
+    + renderAutonomySummaryCard('Session Ready', status.session_ready, status.session_ready ? 'completed' : 'failed', status.target_username || status.deployment_mode || '-')
+    + renderAutonomySummaryCard('Current Build', status.current_build_id || '-', status.current_build_id ? 'completed' : 'pending', status.profile || '-');
+
+  const pauseDisabled = !!status.emergency_stop_active;
+  document.getElementById('autonomy-action-bar').innerHTML =
+    '<button onclick="bootstrapAutonomy()">Bootstrap</button>' +
+    '<button onclick="pauseAutonomy()" ' + (status.paused ? 'disabled' : '') + '>Pause</button>' +
+    '<button onclick="resumeAutonomy()" ' + ((status.paused && !pauseDisabled) ? '' : 'disabled') + '>Resume</button>' +
+    '<button onclick="checkAutonomyPermissions()">Check Permissions</button>' +
+    '<button onclick="rollbackAutonomy()" ' + (rollouts.rollback_target_build_id ? '' : 'disabled') + '>Rollback</button>' +
+    '<button onclick="loadAutonomyDashboard()">Refresh</button>';
+
+  document.getElementById('autonomy-readiness-panel').innerHTML =
+    '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">Readiness</h3><p class="ui-panel-desc">Exact operator-facing reasons for why desktop work is or is not runnable.</p></div></div>'
+    + '<div class="autonomy-readiness-banner ' + (status.action_ready ? 'ready' : 'blocked') + '">' + escapeHtml(status.blocking_reason || 'Desktop action path is ready.') + '</div>'
+    + renderAutonomyKv([
+      { label: 'Enabled', value: status.enabled },
+      { label: 'Profile', value: status.profile },
+      { label: 'Deployment', value: status.deployment_mode },
+      { label: 'Target User', value: status.target_username || '-' },
+      { label: 'Paused', value: status.paused },
+      { label: 'Pause Reason', value: status.pause_reason || '-' },
+      { label: 'Emergency Stop', value: status.emergency_stop_active },
+      { label: 'Code Auto Apply Paused', value: status.code_auto_apply_paused },
+    ])
+    + '<div class="autonomy-json-block"><div class="autonomy-json-title">Permissions</div><pre>' + escapeHtml(JSON.stringify(status.permission_summary || {}, null, 2)) + '</pre></div>'
+    + '<div class="autonomy-json-block"><div class="autonomy-json-title">Prerequisites</div><pre>' + escapeHtml(JSON.stringify(status.prerequisite_summary || {}, null, 2)) + '</pre></div>';
+
+  document.getElementById('autonomy-rollouts-panel').innerHTML =
+    '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">Rollouts</h3><p class="ui-panel-desc">Promotion health, rollback target, and recent promoted or candidate builds.</p></div></div>'
+    + renderAutonomyKv([
+      { label: 'Current Build', value: rollouts.current_build_id || '-' },
+      { label: 'Last Successful', value: rollouts.last_successful_build_id || '-' },
+      { label: 'Rollback Target', value: rollouts.rollback_target_build_id || '-' },
+      { label: 'Failed Promotions', value: rollouts.consecutive_failed_promotions || 0 },
+      { label: 'Failed Canaries (24h)', value: rollouts.failed_canary_count || 0 },
+      { label: 'Rollout Pause', value: rollouts.pause_reason || '-' },
+    ])
+    + '<div class="autonomy-build-list">' + ((rollouts.recent_builds || []).map((build) => {
+      return '<div class="autonomy-build-item">'
+        + '<div class="autonomy-build-head"><span class="autonomy-build-title">' + escapeHtml(build.title || build.build_id) + '</span><span class="badge ' + (build.promoted ? 'completed' : 'pending') + '">' + (build.promoted ? 'promoted' : 'candidate') + '</span></div>'
+        + '<div class="autonomy-build-meta">' + escapeHtml(build.build_id) + ' · ' + escapeHtml(formatDate(build.created_at)) + '</div>'
+        + '</div>';
+    }).join('') || '<div class="ui-panel-empty">No rollout history yet.</div>') + '</div>';
+
+  document.getElementById('autonomy-checks-panel').innerHTML =
+    '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">Checks</h3><p class="ui-panel-desc">Latest bootstrap and canary checks, rendered without raw log hunting.</p></div></div>'
+    + '<div class="autonomy-section-label">Bootstrap Checks</div>'
+    + renderAutonomyCheckList(checks.bootstrap_checks || [])
+    + '<div class="autonomy-section-label">Latest Canary Checks</div>'
+    + renderAutonomyCheckList(checks.latest_canary_checks || []);
+
+  document.getElementById('autonomy-evidence-panel').innerHTML =
+    '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">Evidence</h3><p class="ui-panel-desc">Bootstrap notes, recent autonomy events, and latest canary evidence.</p></div></div>'
+    + '<div class="autonomy-event-list">' + ((evidence.recent_events || []).map((event) => {
+      return '<div class="autonomy-event-item"><div class="autonomy-event-kind">' + escapeHtml(event.kind || 'event') + '</div><div class="autonomy-event-message">' + escapeHtml(event.message || '') + '</div><div class="autonomy-event-time">' + escapeHtml(formatDate(event.timestamp)) + '</div></div>';
+    }).join('') || '<div class="ui-panel-empty">No autonomy evidence recorded yet.</div>') + '</div>'
+    + (evidence.latest_bootstrap_report
+      ? '<div class="autonomy-json-block"><div class="autonomy-json-title">Latest Bootstrap Report</div><pre>' + escapeHtml(JSON.stringify(evidence.latest_bootstrap_report, null, 2)) + '</pre></div>'
+      : '')
+    + (evidence.latest_canary_report
+      ? '<div class="autonomy-json-block"><div class="autonomy-json-title">Latest Canary Report</div><pre>' + escapeHtml(JSON.stringify(evidence.latest_canary_report, null, 2)) + '</pre></div>'
+      : '');
+
+  document.getElementById('autonomy-seeded-panel').innerHTML =
+    '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">Seeded Routines & Skills</h3><p class="ui-panel-desc">Visibility into the routines and skill templates that bootstrap created.</p></div></div>'
+    + '<div class="autonomy-seeded-grid">'
+    + '<div><div class="autonomy-section-label">Routines</div><div class="autonomy-routine-list">'
+    + ((evidence.seeded_routines || []).map((name) => '<button class="autonomy-routine-link" onclick="switchTab(\'routines\')">' + escapeHtml(name) + '</button>').join('') || '<div class="ui-panel-empty">No seeded routines recorded.</div>')
+    + '</div></div>'
+    + '<div><div class="autonomy-section-label">Skill Templates</div><div class="autonomy-routine-list">'
+    + ((evidence.seeded_skills || []).map((path) => '<div class="autonomy-skill-path">' + escapeHtml(String(path)) + '</div>').join('') || '<div class="ui-panel-empty">No seeded skill templates recorded.</div>')
+    + '</div></div>'
+    + '</div>';
+}
+
+function bootstrapAutonomy() {
+  apiFetch('/api/autonomy/bootstrap', { method: 'POST' })
+    .then(() => {
+      showToast('Desktop autonomy bootstrapped', 'success');
+      return loadAutonomyDashboard();
+    })
+    .catch((err) => showToast('Bootstrap failed: ' + err.message, 'error'));
+}
+
+function pauseAutonomy() {
+  const reason = window.prompt('Pause reason (optional):', '') || '';
+  apiFetch('/api/autonomy/pause', { method: 'POST', body: { reason: reason || null } })
+    .then(() => {
+      showToast('Desktop autonomy paused', 'success');
+      return loadAutonomyDashboard();
+    })
+    .catch((err) => showToast('Pause failed: ' + err.message, 'error'));
+}
+
+function resumeAutonomy() {
+  apiFetch('/api/autonomy/resume', { method: 'POST' })
+    .then(() => {
+      showToast('Desktop autonomy resumed', 'success');
+      return loadAutonomyDashboard();
+    })
+    .catch((err) => showToast('Resume failed: ' + err.message, 'error'));
+}
+
+function checkAutonomyPermissions() {
+  apiFetch('/api/autonomy/permissions')
+    .then((permissions) => {
+      autonomyState.permissions = permissions;
+      showToast('Permission check complete', 'success');
+      return loadAutonomyDashboard();
+    })
+    .catch((err) => showToast('Permission check failed: ' + err.message, 'error'));
+}
+
+function rollbackAutonomy() {
+  if (!confirm('Roll back to the previous promoted desktop build?')) return;
+  apiFetch('/api/autonomy/rollback', { method: 'POST' })
+    .then(() => {
+      showToast('Desktop autonomy rolled back', 'success');
+      return loadAutonomyDashboard();
+    })
+    .catch((err) => showToast('Rollback failed: ' + err.message, 'error'));
 }
 
 // --- Research / Experiments ---
@@ -7837,7 +8891,7 @@ function showCanvasPanel(panelId, content) {
     '</div>';
 
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  finishChatMutation(shouldPinChatToLatest());
   _canvasPanels.set(panelId, card);
 }
 
@@ -7955,6 +9009,9 @@ const SETTINGS_SCHEMA = {
       { key: 'agent.thinking_enabled', label: 'Extended thinking', type: 'bool', desc: 'Enable chain-of-thought reasoning' },
       { key: 'agent.thinking_budget_tokens', label: 'Thinking budget', type: 'number', desc: 'Token budget for reasoning', min: 1000, max: 100000 },
       { key: 'agent.auto_approve_tools', label: 'Auto-approve tools', type: 'bool', desc: 'Skip approval checks (use with caution)' },
+      { key: 'agent.main_tool_profile', label: 'Main tool profile', type: 'select', options: [{value: 'standard', label: 'Standard'}, {value: 'restricted', label: 'Restricted'}, {value: 'explicit_only', label: 'Explicit only'}], desc: 'Default implicit tool access for the main agent lane' },
+      { key: 'agent.worker_tool_profile', label: 'Worker tool profile', type: 'select', options: [{value: 'restricted', label: 'Restricted'}, {value: 'standard', label: 'Standard'}, {value: 'explicit_only', label: 'Explicit only'}], desc: 'Default implicit tool access for worker and scheduled job lanes' },
+      { key: 'agent.subagent_tool_profile', label: 'Subagent tool profile', type: 'select', options: [{value: 'explicit_only', label: 'Explicit only'}, {value: 'restricted', label: 'Restricted'}, {value: 'standard', label: 'Standard'}], desc: 'Default implicit tool access for delegated subagents unless a request overrides it' },
       { key: 'agent.subagent_transparency_level', label: 'Subagent transparency', type: 'select', options: [{value: 'balanced', label: 'Balanced'}, {value: 'detailed', label: 'Detailed'}], desc: 'How much subagent progress detail to surface in temporal transcript views' },
     ]
   },

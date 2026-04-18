@@ -5,11 +5,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
 use hmac::{Hmac, Mac};
+use reqwest::StatusCode;
 use rust_decimal::Decimal;
 use serde_json::json;
 use sha2::Sha256;
 use thinclaw::agent::routine::{RoutineAction, RunStatus, Trigger};
 use thinclaw::agent::routine_engine::RoutineEngine;
+use thinclaw::channels::web::server::{GatewayState, start_server};
+use thinclaw::channels::web::sse::SseManager;
+use thinclaw::channels::web::ws::WsConnectionTracker;
 use thinclaw::channels::{IncomingMessage, OutgoingResponse};
 use thinclaw::config::RoutineConfig;
 use thinclaw::context::JobContext;
@@ -19,10 +23,6 @@ use thinclaw::llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
     ToolCompletionResponse,
 };
-use thinclaw::channels::web::server::{GatewayState, start_server};
-use thinclaw::channels::web::sse::SseManager;
-use thinclaw::channels::web::ws::WsConnectionTracker;
-use reqwest::StatusCode;
 use thinclaw::tools::ToolRegistry;
 use thinclaw::workspace::Workspace;
 use tokio::sync::mpsc;
@@ -222,8 +222,8 @@ async fn wait_for_notification(rx: &mut mpsc::Receiver<OutgoingResponse>) -> Out
 }
 
 fn webhook_signature(secret: &str, body: &[u8]) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("hmac secret should be accepted");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("hmac secret should be accepted");
     mac.update(body);
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
@@ -782,7 +782,11 @@ async fn event_routine_fires_for_bluebubbles_channel_payloads() {
     let routine_id = parse_uuid(&created, "id");
 
     let fired = engine
-        .check_event_triggers(&IncomingMessage::new("bluebubbles", &user, "bluebubbles ping now"))
+        .check_event_triggers(&IncomingMessage::new(
+            "bluebubbles",
+            &user,
+            "bluebubbles ping now",
+        ))
         .await;
     assert_eq!(fired, 1);
 
@@ -792,7 +796,10 @@ async fn event_routine_fires_for_bluebubbles_channel_payloads() {
     assert_eq!(run.trigger_detail.as_deref(), Some("bluebubbles ping now"));
 
     let notification = wait_for_notification(&mut notify_rx).await;
-    assert_eq!(notification.metadata["routine_name"], created["name"].clone());
+    assert_eq!(
+        notification.metadata["routine_name"],
+        created["name"].clone()
+    );
     assert_eq!(notification.metadata["status"], json!("attention"));
 }
 
@@ -868,7 +875,8 @@ async fn event_routine_filters_by_channel_and_supports_wildcard() {
         .await;
     assert_eq!(fired_telegram, 1);
 
-    let wildcard_second_run = wait_for_new_terminal_run(&ctx.db, wildcard_id, Some(wildcard_first_run.id)).await;
+    let wildcard_second_run =
+        wait_for_new_terminal_run(&ctx.db, wildcard_id, Some(wildcard_first_run.id)).await;
     assert_ne!(wildcard_first_run.id, wildcard_second_run.id);
 }
 
@@ -945,11 +953,17 @@ async fn event_routine_matching_covers_multiple_channel_names() {
                 "matrix check is active",
             ))
             .await;
-        assert_eq!(fired, 2, "both wildcard and {channel} routine should fire on hit {index}");
+        assert_eq!(
+            fired, 2,
+            "both wildcard and {channel} routine should fire on hit {index}"
+        );
 
         let specific_run = wait_for_terminal_run(&ctx.db, *routine_id).await;
         assert_eq!(specific_run.status, RunStatus::Attention);
-        assert_eq!(specific_run.trigger_detail.as_deref(), Some("matrix check is active"));
+        assert_eq!(
+            specific_run.trigger_detail.as_deref(),
+            Some("matrix check is active")
+        );
 
         let next_wildcard_run = if let Some(previous_id) = wildcard_last {
             wait_for_new_terminal_run(&ctx.db, wildcard_id, Some(previous_id)).await
@@ -965,7 +979,11 @@ async fn event_routine_matching_covers_multiple_channel_names() {
     }
 
     let unrelated_fired = engine
-        .check_event_triggers(&IncomingMessage::new("webhook", &user, "matrix check is active"))
+        .check_event_triggers(&IncomingMessage::new(
+            "webhook",
+            &user,
+            "matrix check is active",
+        ))
         .await;
     assert_eq!(unrelated_fired, 1);
 
@@ -996,13 +1014,8 @@ async fn webhook_routine_endpoint_runs_routine_and_enforces_signature() {
         &user,
         Arc::new(TestLlm::reply("Webhook routine should run.")),
     );
-    let addr = start_routine_gateway_server(
-        Arc::clone(&ctx.db),
-        &user,
-        &actor,
-        Arc::clone(&engine),
-    )
-    .await;
+    let addr =
+        start_routine_gateway_server(Arc::clone(&ctx.db), &user, &actor, Arc::clone(&engine)).await;
 
     let client = reqwest::Client::new();
     let secret = "routine-webhook-secret";
@@ -1048,7 +1061,10 @@ async fn webhook_routine_endpoint_runs_routine_and_enforces_signature() {
     assert_eq!(run.id, run_id);
     assert_eq!(run.trigger_type, "manual");
     assert_eq!(run.status, RunStatus::Attention);
-    assert_eq!(run.result_summary.as_deref(), Some("Webhook routine should run."));
+    assert_eq!(
+        run.result_summary.as_deref(),
+        Some("Webhook routine should run.")
+    );
 
     let stored_routine = ctx
         .db
@@ -1098,13 +1114,8 @@ async fn webhook_routine_rejects_oversized_payload_without_dispatch() {
         &user,
         Arc::new(TestLlm::reply("Should not run.")),
     );
-    let addr = start_routine_gateway_server(
-        Arc::clone(&ctx.db),
-        &user,
-        &actor,
-        Arc::clone(&engine),
-    )
-    .await;
+    let addr =
+        start_routine_gateway_server(Arc::clone(&ctx.db), &user, &actor, Arc::clone(&engine)).await;
 
     let client = reqwest::Client::new();
     let mut oversized = fixtures::routine(&user, &actor);

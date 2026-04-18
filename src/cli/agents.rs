@@ -94,6 +94,7 @@ pub async fn run_agents_command(cmd: AgentCommand, router: &AgentRouter) {
                 trigger_keywords: keywords,
                 allowed_tools: None,
                 allowed_skills: None,
+                tool_profile: None,
                 is_default: default,
                 model,
             };
@@ -293,6 +294,7 @@ mod tests {
             trigger_keywords: vec![],
             allowed_tools: None,
             allowed_skills: None,
+            tool_profile: None,
             is_default: false,
             model: None,
         };

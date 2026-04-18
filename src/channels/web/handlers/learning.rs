@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::agent::outcomes::OutcomeService;
 use crate::api::learning as learning_api;
 use crate::channels::web::identity_helpers::{
-    request_actor_id, request_user_id, requested_identity_override,
+    GatewayRequestIdentity, request_identity_with_overrides, requested_identity_override,
 };
 use crate::channels::web::server::GatewayState;
 
@@ -46,6 +46,7 @@ fn learning_orchestrator(
 
 pub(crate) async fn learning_status_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<learning_api::LearningListQuery>,
 ) -> Result<Json<learning_api::LearningStatusResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -53,10 +54,16 @@ pub(crate) async fn learning_status_handler(
         "Database not available".to_string(),
     ))?;
     let orchestrator = learning_orchestrator(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
     let limit = learning_limit(query.limit);
 
-    learning_api::status(store, &orchestrator, &user_id, limit)
+    learning_api::status(store, &orchestrator, &request_identity.principal_id, limit)
         .await
         .map(Json)
         .map_err(learning_api_error)
@@ -64,20 +71,27 @@ pub(crate) async fn learning_status_handler(
 
 pub(crate) async fn learning_history_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<learning_api::LearningListQuery>,
 ) -> Result<Json<learning_api::LearningHistoryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    let actor_id = request_actor_id(&state, query.actor_id.as_deref(), &user_id);
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
     let limit = learning_limit(query.limit);
-    let actor_filter = requested_identity_override(query.actor_id.as_deref()).unwrap_or(actor_id);
+    let actor_filter = requested_identity_override(query.actor_id.as_deref())
+        .unwrap_or_else(|| request_identity.actor_id.clone());
 
     learning_api::history(
         store,
-        &user_id,
+        &request_identity.principal_id,
         Some(actor_filter.as_str()),
         query.channel.as_deref(),
         query.thread_id.as_deref(),
@@ -90,18 +104,25 @@ pub(crate) async fn learning_history_handler(
 
 pub(crate) async fn learning_candidates_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<learning_api::LearningListQuery>,
 ) -> Result<Json<learning_api::LearningCandidateResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
     let limit = learning_limit(query.limit);
 
     learning_api::candidates(
         store,
-        &user_id,
+        &request_identity.principal_id,
         query.candidate_type.as_deref(),
         query.risk_tier.as_deref(),
         limit,
@@ -113,18 +134,25 @@ pub(crate) async fn learning_candidates_handler(
 
 pub(crate) async fn learning_artifact_versions_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<learning_api::LearningListQuery>,
 ) -> Result<Json<learning_api::LearningArtifactVersionResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
     let limit = learning_limit(query.limit);
 
     learning_api::artifact_versions(
         store,
-        &user_id,
+        &request_identity.principal_id,
         query.artifact_type.as_deref(),
         query.artifact_name.as_deref(),
         limit,
@@ -136,18 +164,25 @@ pub(crate) async fn learning_artifact_versions_handler(
 
 pub(crate) async fn learning_feedback_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<learning_api::LearningListQuery>,
 ) -> Result<Json<learning_api::LearningFeedbackResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
     let limit = learning_limit(query.limit);
 
     learning_api::feedback(
         store,
-        &user_id,
+        &request_identity.principal_id,
         query.target_type.as_deref(),
         query.target_id.as_deref(),
         limit,
@@ -159,6 +194,7 @@ pub(crate) async fn learning_feedback_handler(
 
 pub(crate) async fn learning_feedback_submit_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Json(req): Json<learning_api::LearningFeedbackRequest>,
 ) -> Result<
     (
@@ -168,11 +204,10 @@ pub(crate) async fn learning_feedback_submit_handler(
     (StatusCode, String),
 > {
     let orchestrator = learning_orchestrator(&state)?;
-    let user_id = request_user_id(&state, None).await;
 
     let response = learning_api::submit_feedback(
         &orchestrator,
-        &user_id,
+        &request_identity.principal_id,
         &req.target_type,
         &req.target_id,
         &req.verdict,
@@ -187,12 +222,19 @@ pub(crate) async fn learning_feedback_submit_handler(
 
 pub(crate) async fn learning_provider_health_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<learning_api::LearningListQuery>,
 ) -> Result<Json<learning_api::LearningProviderHealthResponse>, (StatusCode, String)> {
     let orchestrator = learning_orchestrator(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
 
-    learning_api::provider_health(&orchestrator, &user_id)
+    learning_api::provider_health(&orchestrator, &request_identity.principal_id)
         .await
         .map(Json)
         .map_err(learning_api_error)
@@ -200,23 +242,36 @@ pub(crate) async fn learning_provider_health_handler(
 
 pub(crate) async fn learning_code_proposals_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<learning_api::LearningListQuery>,
 ) -> Result<Json<learning_api::LearningCodeProposalResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
     let limit = learning_limit(query.limit);
 
-    learning_api::code_proposals(store, &user_id, query.status.as_deref(), limit)
-        .await
-        .map(Json)
-        .map_err(learning_api_error)
+    learning_api::code_proposals(
+        store,
+        &request_identity.principal_id,
+        query.status.as_deref(),
+        limit,
+    )
+    .await
+    .map(Json)
+    .map_err(learning_api_error)
 }
 
 pub(crate) async fn learning_code_proposal_review_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Json(req): Json<learning_api::LearningCodeProposalReviewRequest>,
 ) -> Result<
@@ -227,7 +282,6 @@ pub(crate) async fn learning_code_proposal_review_handler(
     (StatusCode, String),
 > {
     let orchestrator = learning_orchestrator(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let proposal_id = Uuid::parse_str(&id).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -237,7 +291,7 @@ pub(crate) async fn learning_code_proposal_review_handler(
 
     let response = learning_api::review_code_proposal(
         &orchestrator,
-        &user_id,
+        &request_identity.principal_id,
         proposal_id,
         &req.decision,
         req.note.as_deref(),
@@ -250,18 +304,25 @@ pub(crate) async fn learning_code_proposal_review_handler(
 
 pub(crate) async fn learning_rollbacks_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<learning_api::LearningListQuery>,
 ) -> Result<Json<learning_api::LearningRollbackResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
     let limit = learning_limit(query.limit);
 
     learning_api::rollbacks(
         store,
-        &user_id,
+        &request_identity.principal_id,
         query.artifact_type.as_deref(),
         query.artifact_name.as_deref(),
         limit,
@@ -273,20 +334,27 @@ pub(crate) async fn learning_rollbacks_handler(
 
 pub(crate) async fn learning_outcomes_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<learning_api::LearningListQuery>,
 ) -> Result<Json<learning_api::LearningOutcomeResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    let actor_id = request_actor_id(&state, query.actor_id.as_deref(), &user_id);
-    let actor_filter = requested_identity_override(query.actor_id.as_deref()).unwrap_or(actor_id);
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
+    let actor_filter = requested_identity_override(query.actor_id.as_deref())
+        .unwrap_or_else(|| request_identity.actor_id.clone());
     let limit = learning_limit(query.limit);
 
     learning_api::outcomes(
         store,
-        &user_id,
+        &request_identity.principal_id,
         Some(actor_filter.as_str()),
         query.status.as_deref(),
         query.contract_type.as_deref(),
@@ -301,13 +369,13 @@ pub(crate) async fn learning_outcomes_handler(
 
 pub(crate) async fn learning_outcome_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<learning_api::LearningOutcomeDetailResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let user_id = request_user_id(&state, None).await;
     let contract_id = Uuid::parse_str(&id).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -315,7 +383,7 @@ pub(crate) async fn learning_outcome_detail_handler(
         )
     })?;
 
-    learning_api::outcome_detail(store, &user_id, contract_id)
+    learning_api::outcome_detail(store, &request_identity.principal_id, contract_id)
         .await
         .map(Json)
         .map_err(learning_api_error)
@@ -323,6 +391,7 @@ pub(crate) async fn learning_outcome_detail_handler(
 
 pub(crate) async fn learning_outcome_review_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Json(req): Json<learning_api::LearningOutcomeReviewRequest>,
 ) -> Result<Json<learning_api::LearningOutcomeReviewResponse>, (StatusCode, String)> {
@@ -330,7 +399,6 @@ pub(crate) async fn learning_outcome_review_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let user_id = request_user_id(&state, None).await;
     let contract_id = Uuid::parse_str(&id).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
@@ -340,7 +408,7 @@ pub(crate) async fn learning_outcome_review_handler(
 
     learning_api::review_outcome(
         store,
-        &user_id,
+        &request_identity.principal_id,
         contract_id,
         &req.decision,
         req.verdict.as_deref(),
@@ -352,12 +420,12 @@ pub(crate) async fn learning_outcome_review_handler(
 
 pub(crate) async fn learning_outcomes_evaluate_now_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<Json<learning_api::LearningOutcomeEvaluateNowResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let user_id = request_user_id(&state, None).await;
     let safety = Arc::new(crate::safety::SafetyLayer::new(
         &crate::config::SafetyConfig::default(),
     ));
@@ -368,7 +436,7 @@ pub(crate) async fn learning_outcomes_evaluate_now_handler(
             state.routine_engine.clone(),
         );
     let processed = service
-        .run_once_for_user(&user_id)
+        .run_once_for_user(&request_identity.principal_id)
         .await
         .map_err(|error| learning_api_error(crate::api::ApiError::Internal(error)))?;
 
@@ -380,6 +448,7 @@ pub(crate) async fn learning_outcomes_evaluate_now_handler(
 
 pub(crate) async fn learning_rollback_submit_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Json(req): Json<learning_api::LearningRollbackRequest>,
 ) -> Result<
     (
@@ -392,11 +461,10 @@ pub(crate) async fn learning_rollback_submit_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Database not available".to_string(),
     ))?;
-    let user_id = request_user_id(&state, None).await;
 
     let response = learning_api::record_rollback(
         store,
-        &user_id,
+        &request_identity.principal_id,
         &req.artifact_type,
         &req.artifact_name,
         req.artifact_version_id,
@@ -414,6 +482,15 @@ mod tests {
     use super::*;
     use crate::history::{OutcomeContract, OutcomeObservation};
     use chrono::{Duration, Utc};
+
+    fn test_request_identity(user_id: &str) -> GatewayRequestIdentity {
+        GatewayRequestIdentity::new(
+            user_id,
+            user_id,
+            crate::channels::web::identity_helpers::GatewayAuthSource::BearerHeader,
+            false,
+        )
+    }
 
     fn test_gateway_state(
         user_id: &str,
@@ -556,8 +633,12 @@ mod tests {
         let (db, _guard) = crate::testing::test_db().await;
         let state = Arc::new(test_gateway_state("gateway-user", Some(db)));
 
-        let response =
-            learning_outcome_detail_handler(State(state), Path("not-a-uuid".to_string())).await;
+        let response = learning_outcome_detail_handler(
+            State(state),
+            test_request_identity("gateway-user"),
+            Path("not-a-uuid".to_string()),
+        )
+        .await;
 
         let error = response.expect_err("invalid UUID should fail");
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
@@ -569,8 +650,12 @@ mod tests {
         let (db, _guard) = crate::testing::test_db().await;
         let state = Arc::new(test_gateway_state("gateway-user", Some(db)));
 
-        let response =
-            learning_outcome_detail_handler(State(state), Path(Uuid::new_v4().to_string())).await;
+        let response = learning_outcome_detail_handler(
+            State(state),
+            test_request_identity("gateway-user"),
+            Path(Uuid::new_v4().to_string()),
+        )
+        .await;
 
         let error = response.expect_err("missing contract should fail");
         assert_eq!(error.0, StatusCode::NOT_FOUND);
@@ -588,6 +673,7 @@ mod tests {
 
         let response = learning_outcome_review_handler(
             State(state),
+            test_request_identity("gateway-user"),
             Path(contract.id.to_string()),
             Json(learning_api::LearningOutcomeReviewRequest {
                 decision: "confirm".to_string(),
@@ -625,9 +711,10 @@ mod tests {
             .expect("insert observation b");
 
         let state = Arc::new(test_gateway_state(user_a, Some(db.clone())));
-        let Json(response) = learning_outcomes_evaluate_now_handler(State(state))
-            .await
-            .expect("evaluate now should succeed");
+        let Json(response) =
+            learning_outcomes_evaluate_now_handler(State(state), test_request_identity(user_a))
+                .await
+                .expect("evaluate now should succeed");
 
         assert_eq!(response.status, "processed");
         assert_eq!(response.processed, 1);

@@ -1,6 +1,6 @@
 # ThinClaw Parity And ThinClaw-First Feature Matrix
 
-> **Last reconciled:** 2026-04-14 (post parity audit)
+> **Last reconciled:** 2026-04-18 (docs + desktop autonomy reconciliation)
 
 This document tracks both feature parity against OpenClaw (TypeScript reference implementation) and ThinClaw-first capabilities that now extend well beyond parity. Use it both as a compatibility map and as a ledger of the newer Rust-native features we are actively adding.
 
@@ -32,6 +32,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | Accessibility-tree browser automation | ✅ | Managed `agent-browser` integration and cloud browser routing move ThinClaw from screenshot-only inspection toward interaction-oriented browsing. |
 | Session-level `/personality` overlays (`/vibe` alias) | ✅ | Session-scoped personality overlays add temporary tone shifts without mutating durable identity files. |
 | CLI skin system | ✅ | Shared TOML-backed local skins now cover boot, REPL, full-screen TUI, onboarding TUI, setup prompts, and human-readable CLI subcommands with prompt symbols, ASCII art, taglines, and tool emoji labels. |
+| Reckless desktop autonomy | ✅ | Privileged host-level desktop autonomy adds native app adapters, generic UI automation, evidence capture, seeded desktop routines, managed shadow-canary code autorollout, and rollback for promoted builds. |
 | Trajectory archive + training export | ✅ | Structured turn archives and `trajectory export` provide SFT/DPO-friendly offline training datasets. |
 | Anthropic prompt caching | ✅ | Provider-scoped message metadata now carries Anthropic-compatible cache hints where supported. |
 
@@ -60,7 +61,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | HTTP endpoints for Control UI | ✅ | ✅ | Web dashboard with chat, memory, jobs, logs, extensions |
 | Channel connection lifecycle | ✅ | ✅ | ChannelManager + WebSocket tracker |
 | Session management/routing | ✅ | ✅ | SessionManager with principal-scoped direct session cutover + cross-channel thread alias reuse |
-| Household multi-actor identity | ❌ | 🚧 | Actor registry + `ResolvedIdentity` + conversation-scope session keys are landed, with `thinclaw identity ...` management and pairing-based actor linking; WebSocket/Tauri send, approval, cancel, and thread binding now preserve actor/thread scope consistently, while gateway actor auth still defaults to the principal actor in v1 |
+| Household multi-actor identity | ❌ | ✅ | Actor registry + `ResolvedIdentity` + conversation-scope session keys are landed, with `thinclaw identity ...` management, request-scoped gateway identity resolution, actor-aware protected routes, actor-partitioned SSE/WS fanout, and cross-channel direct-thread continuity that stays bound to the owning actor |
 | Configuration hot-reload | ✅ | ✅ | `ConfigWatcher` with mtime polling, debounce, broadcast subscribers |
 | Network modes (loopback/LAN/remote) | ✅ | ✅ | Full loopback/LAN/remote with security validation ([`src/config/network_modes.rs`](src/config/network_modes.rs)) |
 | OpenAI-compatible HTTP API | ✅ | ✅ | /v1/chat/completions, per-request `model` override |
@@ -487,7 +488,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | Channel status view | ✅ | ✅ | P2 | `ChannelStatusView` with per-channel state machine, table/JSON format ([`src/channels/status_view.rs`](src/channels/status_view.rs)) |
 | Agent management | ✅ | ✅ | P3 | CLI: `agents list/add/remove/show/set-default`; `AgentRouter` dispatch pipeline |
 | Model selection | ✅ | ✅ | - | TUI only |
-| Config editing | ✅ | ✅ | P3 | `Settings.set()/.get()/.list()/.reset()` with typed path-based access ([`src/settings.rs`](src/settings.rs)). Web gateway Settings tab with grouped sections (Notifications, Heartbeat, Agent, Channels [Telegram/Signal/Discord/Slack/Nostr/iMessage/Gmail/Gateway], Safety, Features), toggle switches, import/export. Includes `agent.subagent_transparency_level` and `channels.telegram_subagent_session_mode` plumbing |
+| Config editing | ✅ | ✅ | P3 | `Settings.set()/.get()/.list()/.reset()` with typed path-based access ([`src/settings.rs`](src/settings.rs)). Web gateway Settings tab with grouped sections (Notifications, Heartbeat, Agent, Channels [Telegram/Signal/Discord/Slack/Nostr/iMessage/Gmail/Gateway], Safety, Features), toggle switches, import/export. Includes `agent.main_tool_profile`, `agent.worker_tool_profile`, `agent.subagent_tool_profile`, `agent.subagent_transparency_level`, and `channels.telegram_subagent_session_mode` plumbing |
 | Debug/logs viewer | ✅ | ✅ | - | Real-time log streaming with level/target filters |
 | WebChat interface | ✅ | ✅ | - | Web gateway chat with SSE/WebSocket |
 | Temporal subagent subsessions | ❌ | ✅ | WebUI now renders live child subsessions under active threads, with temporal transcript inspection and collapse/reopen after completion; state remains ephemeral in browser session memory (not DB-persisted) |
@@ -509,7 +510,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | Cron finished-run webhook | ✅ | ✅ | P3 | `FinishedRunPayload` + `notify_finished_run()` ([`src/agent/cron_stagger.rs`](src/agent/cron_stagger.rs)) |
 | Timezone support | ✅ | ✅ | - | Via cron expressions |
 | One-shot/recurring jobs | ✅ | ✅ | - | Manual + cron triggers |
-| Actor-private routines/jobs | ❌ | 🚧 | `actor_id` persistence, actor-scoped cron/tool lookups, in-channel job listing, pairing-linked delivery, and default gateway actor filtering are landed; explicit multi-actor WebUI auth is still pending |
+| Actor-private routines/jobs | ❌ | ✅ | `actor_id` persistence, actor-scoped cron/tool lookups, actor-bound routine/job ownership checks, request-scoped gateway enforcement, in-channel job listing, pairing-linked delivery, and actor-private profile/routine writes are all wired end to end |
 | Channel health monitor | ✅ | ✅ | `ChannelHealthMonitor` wired into background tasks |
 | `beforeInbound` hook | ✅ | ✅ | P2 | |
 | `beforeOutbound` hook | ✅ | ✅ | P2 | |

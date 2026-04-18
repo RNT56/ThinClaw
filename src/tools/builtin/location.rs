@@ -206,9 +206,8 @@ impl Tool for LocationTool {
     }
 
     fn description(&self) -> &str {
-        "Get the device's current geographic location (latitude, longitude, accuracy). \
-         On macOS: uses CoreLocation (GPS/Wi-Fi/cellular). \
-         On other platforms: falls back to IP-based geolocation."
+        "Get the device's current geographic location. Use this when the task depends \
+         on where the device is physically located, not just the user's configured timezone or locale."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

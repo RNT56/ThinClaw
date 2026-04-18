@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, anyhow};
@@ -10,6 +11,9 @@ use crate::api::experiments::{
 use crate::experiments::{
     ExperimentRunnerArtifactUpload, ExperimentRunnerCompletion, ExperimentRunnerJob,
     extract_metrics,
+};
+use crate::tools::execution_backend::{
+    CommandExecutionRequest, ExecutionBackend, LocalHostExecutionBackend, ScriptExecutionRequest,
 };
 
 pub async fn run_remote_runner(
@@ -52,6 +56,7 @@ pub async fn run_remote_runner(
     let mut terminal_completion_attempted = false;
     let mut completion_stage = "runner_setup".to_string();
     let mut persisted_log_path: Option<PathBuf> = None;
+    let backend = local_runner_execution_backend();
 
     let result: anyhow::Result<()> = async {
         post_status(
@@ -67,7 +72,7 @@ pub async fn run_remote_runner(
 
         completion_stage = "checkout".to_string();
         let checkout_dir = prepare_checkout_dir(workspace_root, lease_id)?;
-        clone_checkout(&job, &checkout_dir).await?;
+        clone_checkout(&job, &checkout_dir, Arc::clone(&backend)).await?;
 
         let run_root = checkout_dir.join(&job.workdir);
         if !run_root.exists() {
@@ -91,9 +96,10 @@ pub async fn run_remote_runner(
             )
             .await
             .ok();
-            let output = run_shell_command(&run_root, prepare_command, &env).await?;
+            let output =
+                run_shell_command(Arc::clone(&backend), &run_root, prepare_command, &env).await?;
             log.push_str("== prepare ==\n");
-            log.push_str(&output);
+            log.push_str(&output.combined);
             log.push('\n');
             ensure_shell_step_succeeded("prepare", &output)?;
         }
@@ -110,9 +116,10 @@ pub async fn run_remote_runner(
         .ok();
 
         completion_stage = "run".to_string();
-        let run_output = run_shell_command(&run_root, &job.run_command, &env).await?;
+        let run_output =
+            run_shell_command(Arc::clone(&backend), &run_root, &job.run_command, &env).await?;
         log.push_str("== run ==\n");
-        log.push_str(&run_output);
+        log.push_str(&run_output.combined);
 
         let log_path = checkout_dir.join("run.log");
         tokio::fs::write(&log_path, &log)
@@ -136,7 +143,7 @@ pub async fn run_remote_runner(
             &log,
             &summary_json,
         );
-        let exit_code = parse_exit_code(&run_output).unwrap_or(1);
+        let exit_code = run_output.exit_code;
         let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
 
         let artifact_log = ExperimentRunnerArtifactUpload {
@@ -339,11 +346,20 @@ fn prepare_checkout_dir(
     Ok(checkout_dir)
 }
 
-async fn clone_checkout(job: &ExperimentRunnerJob, checkout_dir: &Path) -> anyhow::Result<()> {
+fn local_runner_execution_backend() -> Arc<dyn ExecutionBackend> {
+    LocalHostExecutionBackend::shared()
+}
+
+async fn clone_checkout(
+    job: &ExperimentRunnerJob,
+    checkout_dir: &Path,
+    backend: Arc<dyn ExecutionBackend>,
+) -> anyhow::Result<()> {
     let parent = checkout_dir
         .parent()
         .ok_or_else(|| anyhow!("checkout dir has no parent"))?;
     run_command_capture(
+        Arc::clone(&backend),
         Some(parent),
         "git",
         &[
@@ -355,13 +371,21 @@ async fn clone_checkout(job: &ExperimentRunnerJob, checkout_dir: &Path) -> anyho
     )
     .await?;
     run_command_capture(
+        Arc::clone(&backend),
         Some(checkout_dir),
         "git",
         &["fetch", "origin", &job.git_ref],
         &[],
     )
     .await?;
-    run_command_capture(Some(checkout_dir), "git", &["checkout", "FETCH_HEAD"], &[]).await?;
+    run_command_capture(
+        backend,
+        Some(checkout_dir),
+        "git",
+        &["checkout", "FETCH_HEAD"],
+        &[],
+    )
+    .await?;
     Ok(())
 }
 
@@ -386,81 +410,98 @@ fn merge_env(job: &ExperimentRunnerJob, credentials: &serde_json::Value) -> Vec<
     pairs
 }
 
+#[allow(dead_code)]
+struct RunnerCommandOutput {
+    stdout: String,
+    stderr: String,
+    combined: String,
+    exit_code: i32,
+}
+
 async fn run_shell_command(
+    backend: Arc<dyn ExecutionBackend>,
     cwd: &Path,
     command: &str,
     env: &[(String, String)],
-) -> anyhow::Result<String> {
-    #[cfg(target_os = "windows")]
-    let (shell, base_args) = ("cmd", vec!["/C"]);
-    #[cfg(not(target_os = "windows"))]
-    let (shell, base_args) = ("sh", vec!["-lc"]);
-
-    let wrapped = format!("{command}; printf '\\n__THINCLAW_EXIT_CODE__:%s\\n' \"$?\"");
-    let mut args = base_args;
-    args.push(&wrapped);
-    run_command_capture(Some(cwd), shell, &args, env).await
+) -> anyhow::Result<RunnerCommandOutput> {
+    let env_map = env.iter().cloned().collect();
+    let output = backend
+        .run_shell(CommandExecutionRequest {
+            command: command.to_string(),
+            workdir: cwd.to_path_buf(),
+            timeout: std::time::Duration::from_secs(600),
+            extra_env: env_map,
+            allow_network: false,
+        })
+        .await
+        .map_err(|err| anyhow!(err.to_string()))?;
+    if output.exit_code != 0 {
+        return Err(anyhow!(
+            "shell exited with status {}{}",
+            output.exit_code,
+            if output.output.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", output.output.trim())
+            }
+        ));
+    }
+    Ok(RunnerCommandOutput {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        combined: output.output,
+        exit_code: output.exit_code as i32,
+    })
 }
 
 async fn run_command_capture(
+    backend: Arc<dyn ExecutionBackend>,
     cwd: Option<&Path>,
     binary: &str,
     args: &[&str],
     env: &[(String, String)],
-) -> anyhow::Result<String> {
-    let mut command = tokio::process::Command::new(binary);
-    command.args(args);
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
-    }
-    for (key, value) in env {
-        command.env(key, value);
-    }
-    let output = command
-        .output()
+) -> anyhow::Result<RunnerCommandOutput> {
+    let env_map = env.iter().cloned().collect();
+    let output = backend
+        .run_script(ScriptExecutionRequest {
+            program: binary.to_string(),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            workdir: cwd
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+            timeout: std::time::Duration::from_secs(600),
+            extra_env: env_map,
+            allow_network: true,
+        })
         .await
         .with_context(|| format!("failed to run {binary}"))?;
-    let mut text = String::new();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
-    if !output.stderr.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-    }
-    if !output.status.success() {
+    if output.exit_code != 0 {
         return Err(anyhow!(
             "{binary} exited with status {}{}",
-            output
-                .status
-                .code()
-                .map(|code| code.to_string())
-                .unwrap_or_else(|| "unknown".to_string()),
-            if text.trim().is_empty() {
+            output.exit_code,
+            if output.output.trim().is_empty() {
                 String::new()
             } else {
-                format!(": {}", text.trim())
+                format!(": {}", output.output.trim())
             }
         ));
     }
-    Ok(text)
+    Ok(RunnerCommandOutput {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        combined: output.output,
+        exit_code: output.exit_code as i32,
+    })
 }
 
-fn parse_exit_code(output: &str) -> Option<i32> {
-    output
-        .lines()
-        .find_map(|line| line.split("__THINCLAW_EXIT_CODE__:").nth(1))
-        .and_then(|value| value.trim().parse::<i32>().ok())
-}
-
-fn ensure_shell_step_succeeded(stage: &str, output: &str) -> anyhow::Result<()> {
-    let exit_code = parse_exit_code(output).unwrap_or(1);
+fn ensure_shell_step_succeeded(stage: &str, output: &RunnerCommandOutput) -> anyhow::Result<()> {
+    let exit_code = output.exit_code;
     if exit_code == 0 {
         return Ok(());
     }
 
     Err(anyhow!(
         "{stage} command exited with code {exit_code}: {}",
-        output.trim()
+        output.combined.trim()
     ))
 }

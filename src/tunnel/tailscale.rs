@@ -69,10 +69,7 @@ impl Tunnel for TailscaleTunnel {
                     );
                 }
 
-                bail!(
-                    "tailscale status failed: {}",
-                    stderr
-                );
+                bail!("tailscale status failed: {}", stderr);
             }
 
             let status: serde_json::Value = serde_json::from_slice(&output.stdout)

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolMetadata, ToolOutput, require_str};
 
 /// Simple echo tool for testing.
 pub struct EchoTool;
@@ -15,7 +15,8 @@ impl Tool for EchoTool {
     }
 
     fn description(&self) -> &str {
-        "Echoes back the input message. Useful for testing tool execution."
+        "Echo the provided text back unchanged. Use only for tool-plumbing tests or \
+         minimal debugging, not for normal task work."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -29,6 +30,10 @@ impl Tool for EchoTool {
             },
             "required": ["message"]
         })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::read_only()
     }
 
     async fn execute(

@@ -417,8 +417,7 @@ impl ChannelWorkspaceStore {
                     ) {
                         Ok(map) => {
                             // Pre-compute initial snapshot for change detection
-                            let snapshot = Self::serialize_deterministic(&map)
-                                .unwrap_or_default();
+                            let snapshot = Self::serialize_deterministic(&map).unwrap_or_default();
                             (map, snapshot)
                         }
                         Err(err) => {
@@ -558,8 +557,8 @@ impl ChannelWorkspaceStore {
         }
 
         let tmp_path = path.with_extension("tmp");
-        if let Err(err) = std::fs::write(&tmp_path, serialized)
-            .and_then(|()| std::fs::rename(&tmp_path, path))
+        if let Err(err) =
+            std::fs::write(&tmp_path, serialized).and_then(|()| std::fs::rename(&tmp_path, path))
         {
             tracing::warn!(
                 path = %path.display(),
@@ -837,7 +836,11 @@ mod tests {
         // Write data with a disk-backed store
         {
             let store = ChannelWorkspaceStore::with_persistence(path.clone());
-            assert!(store.read("channels/telegram/state/managed_private_topics").is_none());
+            assert!(
+                store
+                    .read("channels/telegram/state/managed_private_topics")
+                    .is_none()
+            );
 
             let writes = vec![PendingWorkspaceWrite {
                 path: "channels/telegram/state/managed_private_topics".to_string(),
@@ -882,10 +885,7 @@ mod tests {
         store.commit_writes(&writes);
         assert!(path.exists());
 
-        let mtime_after_first = std::fs::metadata(&path)
-            .unwrap()
-            .modified()
-            .unwrap();
+        let mtime_after_first = std::fs::metadata(&path).unwrap().modified().unwrap();
 
         // Small sleep to ensure filesystem timestamp granularity
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -893,10 +893,7 @@ mod tests {
         // Second write with identical content — should NOT touch the file
         store.commit_writes(&writes);
 
-        let mtime_after_second = std::fs::metadata(&path)
-            .unwrap()
-            .modified()
-            .unwrap();
+        let mtime_after_second = std::fs::metadata(&path).unwrap().modified().unwrap();
 
         assert_eq!(
             mtime_after_first, mtime_after_second,
@@ -911,10 +908,7 @@ mod tests {
         }];
         store.commit_writes(&writes_changed);
 
-        let mtime_after_third = std::fs::metadata(&path)
-            .unwrap()
-            .modified()
-            .unwrap();
+        let mtime_after_third = std::fs::metadata(&path).unwrap().modified().unwrap();
 
         assert_ne!(
             mtime_after_first, mtime_after_third,

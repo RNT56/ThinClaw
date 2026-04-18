@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_param, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolMetadata, ToolOutput, require_param, require_str};
 
 /// Tool for JSON manipulation (parse, query, transform).
 pub struct JsonTool;
@@ -15,7 +15,8 @@ impl Tool for JsonTool {
     }
 
     fn description(&self) -> &str {
-        "Parse, query, and transform JSON data. Supports JSONPath-like queries."
+        "Parse, query, and transform JSON values. Use this when a tool or API returns \
+         structured JSON and you need to inspect fields, reshape data, or extract nested values."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -37,6 +38,10 @@ impl Tool for JsonTool {
             },
             "required": ["operation", "data"]
         })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::read_only()
     }
 
     async fn execute(

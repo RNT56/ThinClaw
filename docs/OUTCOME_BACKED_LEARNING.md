@@ -7,7 +7,7 @@ It is the canonical reference for:
 - what outcome-backed learning currently does
 - which user-facing surfaces expose it
 - how manual outcome review behaves
-- which follow-ups are still optional rather than required for v1
+- how normal review-oriented behavior differs from `reckless_desktop`
 
 ## Status
 
@@ -23,10 +23,11 @@ It extends the existing learning stack instead of replacing it:
 - `/api/learning/status` now reports real evaluator health instead of a placeholder
 - outcome detail payloads now include normalized provenance fields for UI navigation and review
 - assistant-turn outcome evaluations now carry explicit trajectory identifiers so turn-linked exports can match them deterministically
-- the only supported outcome-driven routine auto-apply in this tranche is `notification_noise_reduction`, which disables `routine.notify.on_success`
-- routine auto-applies now create `learning_artifact_versions` too, so they appear in the Learning Ledger as auditable applied artifacts instead of silent store-only mutations
+- routine auto-applies create `learning_artifact_versions`, so applied routine mutations stay auditable in the Learning Ledger
 - Research opportunities now consume recent negative evaluated outcome patterns, expose them as `source = "outcome_learning"`, and carry project-prefill hints so the Research project form can be seeded directly from deferred-reality evidence
 - the gateway now ships a browser automation harness that verifies auth, Learning outcome rendering, outcome detail provenance, and outcome-backed Research project prefilling end to end
+
+Default behavior remains review-oriented. The explicit exception is `desktop_autonomy.profile = "reckless_desktop"`, which expands auto-apply classes to `memory`, `skill`, `prompt`, `routine`, and `code`, enables automatic code proposal approval, and publishes code through `local_autorollout` with checks, shadow canaries, promotion, pause thresholds, and rollback.
 
 There is no historical backfill in v1. Contracts are only created for new activity after rollout.
 
@@ -34,7 +35,7 @@ There is no historical backfill in v1. Contracts are only created for new activi
 
 ### Contract Types
 
-V1 supports exactly three contract types:
+Current outcome contracts support exactly three contract types:
 
 - `turn_usefulness`
 - `tool_durability`
@@ -61,7 +62,7 @@ Important v1 rules:
 
 ### Matching Scope
 
-V1 only matches within the same:
+Outcome matching still only occurs within the same:
 
 - `user_id`
 - `actor_id`
@@ -171,24 +172,41 @@ Assistant-side learning events now persist turn identity fields when available:
 
 `turn_usefulness` contracts copy those identifiers into contract metadata, and synthetic/manual outcome ledger events only propagate them for turn-linked contracts. Tool and routine synthetic events remain visible in the Learning Ledger but intentionally do not relabel unrelated trajectory turns.
 
-### Routine Auto-Apply Guardrail
+### Auto-Apply Modes
 
-Outcome-driven routine auto-apply remains opt-in and narrow.
+Outcome-backed learning has two distinct operating modes.
 
-Current behavior:
+#### Normal Mode
 
-- routine candidates stay review-only unless `routine` is explicitly present in `learning.auto_apply_classes`
-- the only supported patch type is `notification_noise_reduction`
-- that patch is only emitted when the negative routine pattern looks like notification noise from an `Ok` routine run with `notify.on_success = true`
-- auto-apply updates the routine through the existing store/update path and refreshes the routine event cache afterward
-- auto-applied routine patches are also recorded as `artifact_type = "routine"` artifact versions with before/after serialized routine content and provenance including `routine_id` plus `patch_type`
+Normal mode stays conservative.
 
-Still intentionally unsupported in this tranche:
+- candidates remain review-oriented unless their class is explicitly present in `learning.auto_apply_classes`
+- routine auto-apply is still narrow and primarily aimed at `notification_noise_reduction`
+- prompt mutation still requires `learning.prompt_mutation.enabled`
+- code changes still go through the proposal path unless a stronger profile explicitly changes that behavior
 
-- schedule changes
-- disable/delete actions
-- prompt rewrites
-- any routine patch type besides `notification_noise_reduction`
+#### `reckless_desktop`
+
+`reckless_desktop` is the explicit exception.
+
+When that profile is enabled, ThinClaw expands `learning.auto_apply_classes` to include:
+
+- `memory`
+- `skill`
+- `prompt`
+- `routine`
+- `code`
+
+It also changes code handling:
+
+- code proposals can be auto-approved without manual review
+- publish mode becomes `local_autorollout`
+- code changes build in the managed autonomy source/build tree instead of mutating the running checkout in place
+- successful promotions are recorded as `artifact_type = "code"` artifact versions with rollout metadata
+- promoted code artifacts can immediately open outcome durability contracts
+- rollback records a negative observation against the affected promoted code build when the matching contract is available
+
+Routine changes in reckless desktop mode still go through the existing routine store/update path and remain auditable through artifact versions.
 
 ## Boundaries In V1
 
@@ -199,8 +217,13 @@ These constraints are intentional in the current release:
 - no dedicated CLI surface for outcome review
 - no outcome-driven mutation of `IDENTITY.md`, `SOUL.md`, `AGENTS.md`, or `context/profile.json`
 - prompt mutation remains gated by `learning.prompt_mutation.enabled`
-- routine candidates remain review-only unless `routine` is explicitly included in `learning.auto_apply_classes`
 - Research campaign execution still does not depend on outcomes in v1, but the opportunities surface now consumes outcome-backed signals for benchmark discovery and project prefilling
+
+Additional reckless-desktop-specific boundaries:
+
+- desktop code autorollout applies only to the managed autonomy source/build tree
+- promotion requires local checks plus shadow canaries
+- repeated failed promotions or canaries pause code auto-rollout instead of silently continuing
 
 ## Verification Status
 
@@ -214,16 +237,18 @@ The v1 tranche now includes regression coverage for:
 - repeated manual review reusing `ledger_learning_event_id`
 - per-user pending-work discovery and evaluator health
 - trajectory metadata propagation for turn-linked outcome events
-- routine auto-apply patch emission staying limited to `notification_noise_reduction`
 - routine auto-apply artifact recording for applied routine mutations
 - outcome-backed Research opportunity generation and project-hint payloads
 - browser-driven gateway verification for Learning outcome detail rendering and outcome-backed Research prefilling
+- reckless desktop auto-approval defaults for `memory`, `skill`, `prompt`, `routine`, and `code`
+- `local_autorollout` publishing with managed build metadata, promoted/failed code artifact versions, and promoted-artifact contract hooks
+- rollback observation recording against promoted code-build durability contracts
 
-The gateway now ships a browser automation harness in `tests/web_gateway_ui_browser_integration.rs`. The manual checklist below remains useful as a fast operator-facing smoke pass after UI changes.
+The gateway ships a browser automation harness in `tests/web_gateway_ui_browser_integration.rs`. Desktop rollout and operator certification also rely on the ignored live desktop smoke suite in `tests/desktop_autonomy_live_smoke.rs`.
 
 ## Optional Follow-Ups
 
-These are no longer blockers for the shipped v1 pipeline:
+These are no longer blockers for the shipped outcome-backed pipeline:
 
 - add a formal browser test harness for Learning Ledger interactions
 - revisit whether per-class safe-mode thresholds are needed after real-world outcome data accumulates

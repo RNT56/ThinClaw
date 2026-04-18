@@ -30,13 +30,13 @@ use crate::hooks::HookRegistry;
 use crate::pairing::PairingStore;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::ToolRegistry;
-use crate::tools::mcp::McpClient;
 use crate::tools::mcp::auth::{
-    PkceChallenge, authorize_mcp_server, build_authorization_url, discover_full_oauth_metadata,
+    PkceChallenge, authorize_mcp_server, build_authorization_url, discover_oauth_bundle,
     find_available_port, is_authenticated, register_client,
 };
-use crate::tools::mcp::config::McpServerConfig;
+use crate::tools::mcp::config::{McpConfigStore, McpServerConfig};
 use crate::tools::mcp::session::McpSessionManager;
+use crate::tools::mcp::{McpClient, McpPendingInteraction};
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
 /// Pending OAuth authorization state.
@@ -478,11 +478,12 @@ impl ExtensionManager {
 
                         // Get tool names if active
                         let tools = if active {
+                            let prefix = McpClient::registered_tool_prefix(&server.name);
                             self.tool_registry
                                 .list()
                                 .await
                                 .into_iter()
-                                .filter(|t| t.starts_with(&format!("{}_", server.name)))
+                                .filter(|t| t.starts_with(&prefix))
                                 .collect()
                         } else {
                             Vec::new()
@@ -619,12 +620,13 @@ impl ExtensionManager {
         let result: Result<String, ExtensionError> = match kind {
             ExtensionKind::McpServer => {
                 // Unregister tools with this server's prefix
+                let prefix = McpClient::registered_tool_prefix(name);
                 let tool_names: Vec<String> = self
                     .tool_registry
                     .list()
                     .await
                     .into_iter()
-                    .filter(|t| t.starts_with(&format!("{}_", name)))
+                    .filter(|t| t.starts_with(&prefix))
                     .collect();
 
                 for tool_name in &tool_names {
@@ -764,6 +766,123 @@ impl ExtensionManager {
         } else {
             crate::tools::mcp::config::add_mcp_server(config).await
         }
+    }
+
+    pub async fn list_mcp_server_configs(
+        &self,
+    ) -> Result<Vec<McpServerConfig>, crate::tools::mcp::config::ConfigError> {
+        let mut servers = self.load_mcp_servers().await?.servers;
+        servers.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(servers)
+    }
+
+    pub async fn get_mcp_server_config(
+        &self,
+        name: &str,
+    ) -> Result<McpServerConfig, crate::tools::mcp::config::ConfigError> {
+        self.get_mcp_server(name).await
+    }
+
+    pub async fn get_active_mcp_client(&self, name: &str) -> Option<Arc<McpClient>> {
+        self.mcp_clients.read().await.get(name).cloned()
+    }
+
+    fn mcp_config_store(&self) -> McpConfigStore {
+        McpConfigStore::new(self.store.clone(), self.user_id.clone())
+    }
+
+    async fn build_mcp_client(
+        &self,
+        server: &McpServerConfig,
+    ) -> Result<Arc<McpClient>, ExtensionError> {
+        let config_store = Some(self.mcp_config_store());
+        let client = if server.is_stdio() {
+            McpClient::new_stdio_with_store(server, config_store)
+                .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?
+        } else {
+            let has_tokens = is_authenticated(server, &self.secrets, &self.user_id).await;
+            if has_tokens {
+                McpClient::new_authenticated_with_store(
+                    server.clone(),
+                    Arc::clone(&self.mcp_session_manager),
+                    Arc::clone(&self.secrets),
+                    &self.user_id,
+                    config_store,
+                )
+            } else {
+                McpClient::new_configured_with_store(server.clone(), config_store)
+            }
+        };
+
+        Ok(Arc::new(client))
+    }
+
+    pub async fn connect_mcp_client(&self, name: &str) -> Result<Arc<McpClient>, ExtensionError> {
+        if let Some(client) = self.get_active_mcp_client(name).await {
+            return Ok(client);
+        }
+
+        let server = self
+            .get_mcp_server(name)
+            .await
+            .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
+        let client = self.build_mcp_client(&server).await?;
+        self.mcp_clients
+            .write()
+            .await
+            .insert(name.to_string(), Arc::clone(&client));
+        Ok(client)
+    }
+
+    pub async fn list_pending_mcp_interactions(&self) -> Vec<McpPendingInteraction> {
+        let clients = self
+            .mcp_clients
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut interactions = Vec::new();
+        for client in clients {
+            interactions.extend(client.pending_interactions().await);
+        }
+        interactions.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        interactions
+    }
+
+    pub async fn resolve_pending_mcp_interaction(
+        &self,
+        interaction_id: &str,
+        approved: bool,
+        result: Option<serde_json::Value>,
+        message: Option<String>,
+    ) -> Result<(), ExtensionError> {
+        let clients = self
+            .mcp_clients
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for client in clients {
+            if client
+                .pending_interactions()
+                .await
+                .iter()
+                .any(|pending| pending.id == interaction_id)
+            {
+                return client
+                    .resolve_pending_interaction(interaction_id, approved, result, message)
+                    .await
+                    .map_err(|e| ExtensionError::ActivationFailed(e.to_string()));
+            }
+        }
+
+        Err(ExtensionError::Other(format!(
+            "No active MCP interaction with id '{}'",
+            interaction_id
+        )))
     }
 
     async fn remove_mcp_server(
@@ -1466,9 +1585,10 @@ impl ExtensionManager {
         server: &McpServerConfig,
     ) -> Result<AuthResult, ExtensionError> {
         // Try to discover OAuth metadata and build a URL the user can open manually
-        let metadata = discover_full_oauth_metadata(&server.url)
+        let bundle = discover_oauth_bundle(&server.url)
             .await
             .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+        let metadata = bundle.authorization_server;
 
         // Try DCR if no client_id configured
         let (client_id, redirect_uri) = if let Some(ref oauth) = server.oauth {
@@ -1494,6 +1614,8 @@ impl ExtensionManager {
             ));
         };
 
+        // Generate a state nonce for CSRF protection
+        let state_nonce = uuid::Uuid::new_v4().to_string();
         let pkce = PkceChallenge::generate();
         let auth_url = build_authorization_url(
             &metadata.authorization_endpoint,
@@ -1501,11 +1623,16 @@ impl ExtensionManager {
             &redirect_uri,
             &metadata.scopes_supported,
             Some(&pkce),
+            Some(&state_nonce),
+            Some(
+                server
+                    .oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.resource.as_deref())
+                    .unwrap_or(&bundle.protected_resource.resource),
+            ),
             &std::collections::HashMap::new(),
         );
-
-        // Generate a state nonce for CSRF protection
-        let state_nonce = uuid::Uuid::new_v4().to_string();
 
         // Store pending auth for later callback handling
         self.pending_auth.write().await.insert(
@@ -1823,49 +1950,19 @@ impl ExtensionManager {
     }
 
     async fn activate_mcp(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
-        // Check if already activated
-        {
-            let clients = self.mcp_clients.read().await;
-            if clients.contains_key(name) {
-                // Already connected, just return the tool names
-                let tools: Vec<String> = self
-                    .tool_registry
-                    .list()
-                    .await
-                    .into_iter()
-                    .filter(|t| t.starts_with(&format!("{}_", name)))
-                    .collect();
-
-                return Ok(ActivateResult {
-                    name: name.to_string(),
-                    kind: ExtensionKind::McpServer,
-                    tools_loaded: tools,
-                    message: format!("MCP server '{}' already active", name),
-                });
-            }
-        }
-
-        let server = self
-            .get_mcp_server(name)
-            .await
-            .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
-
-        let client = if server.is_stdio() {
-            McpClient::new_stdio(&server)
-                .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?
+        let client = if let Some(existing) = self.get_active_mcp_client(name).await {
+            existing
         } else {
-            let has_tokens = is_authenticated(&server, &self.secrets, &self.user_id).await;
-
-            if has_tokens || server.requires_auth() {
-                McpClient::new_authenticated(
-                    server.clone(),
-                    Arc::clone(&self.mcp_session_manager),
-                    Arc::clone(&self.secrets),
-                    &self.user_id,
-                )
-            } else {
-                McpClient::new_with_name(&server.name, &server.url)
-            }
+            let server = self
+                .get_mcp_server(name)
+                .await
+                .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
+            let client = self.build_mcp_client(&server).await?;
+            self.mcp_clients
+                .write()
+                .await
+                .insert(name.to_string(), Arc::clone(&client));
+            client
         };
 
         // Try to list and create tools
@@ -1881,18 +1978,12 @@ impl ExtensionManager {
 
         let tool_names: Vec<String> = mcp_tools
             .iter()
-            .map(|t| format!("{}_{}", name, t.name))
+            .map(|t| McpClient::registered_tool_name(name, &t.name))
             .collect();
 
         for tool in tool_impls {
             self.tool_registry.register(tool).await;
         }
-
-        // Store the client
-        self.mcp_clients
-            .write()
-            .await
-            .insert(name.to_string(), Arc::new(client));
 
         tracing::info!(
             "Activated MCP server '{}' with {} tools",

@@ -21,9 +21,12 @@ use uuid::Uuid;
 
 use crate::agent::submission::Submission;
 use crate::channels::IncomingMessage;
-use crate::channels::web::identity_helpers::gateway_identity;
+use crate::channels::web::handlers::chat::clear_auth_mode_for_identity;
+use crate::channels::web::identity_helpers::{
+    GatewayRequestIdentity, sse_event_visible_to_identity,
+};
 use crate::channels::web::server::GatewayState;
-use crate::channels::web::types::{WsClientMessage, WsServerMessage};
+use crate::channels::web::types::{SseEvent, WsClientMessage, WsServerMessage};
 
 /// Tracks active WebSocket connections.
 pub struct WsConnectionTracker {
@@ -64,7 +67,11 @@ impl Default for WsConnectionTracker {
 ///
 /// When either task ends (client disconnect or broadcast closed), both are
 /// cleaned up.
-pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
+pub async fn handle_ws_connection(
+    socket: WebSocket,
+    state: Arc<GatewayState>,
+    request_identity: GatewayRequestIdentity,
+) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
     // Track connection
@@ -83,7 +90,26 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
         }
         return;
     };
-    let mut event_stream = Box::pin(raw_stream);
+    let state_for_stream = Arc::clone(&state);
+    let identity_for_stream = request_identity.clone();
+    let mut event_stream = Box::pin(raw_stream.filter_map(move |event| {
+        let state = Arc::clone(&state_for_stream);
+        let identity = identity_for_stream.clone();
+        async move {
+            if sse_event_visible_to_identity(
+                state.store.as_ref(),
+                state.as_ref(),
+                &identity,
+                &event,
+            )
+            .await
+            {
+                Some(event)
+            } else {
+                None
+            }
+        }
+    }));
 
     // Channel for the sender task to receive messages from both
     // the broadcast stream and any direct sends (like Pong)
@@ -119,14 +145,14 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
     });
 
     // Receiver task: read client frames and route to agent
-    let user_id = state.user_id.clone();
     while let Some(Ok(frame)) = ws_stream.next().await {
         match frame {
             Message::Text(text) => {
                 let parsed: Result<WsClientMessage, _> = serde_json::from_str(&text);
                 match parsed {
                     Ok(client_msg) => {
-                        handle_client_message(client_msg, &state, &user_id, &direct_tx).await;
+                        handle_client_message(client_msg, &state, &request_identity, &direct_tx)
+                            .await;
                     }
                     Err(e) => {
                         let _ = direct_tx
@@ -154,22 +180,21 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
 async fn handle_client_message(
     msg: WsClientMessage,
     state: &GatewayState,
-    user_id: &str,
+    request_identity: &GatewayRequestIdentity,
     direct_tx: &mpsc::Sender<WsServerMessage>,
 ) {
     match msg {
         WsClientMessage::Message { content, thread_id } => {
-            let mut incoming = IncomingMessage::new("gateway", user_id, &content);
-            incoming = incoming.with_identity(gateway_identity(
-                user_id,
-                &state.actor_id,
-                thread_id.as_deref(),
-            ));
+            let user_id = request_identity.principal_id.clone();
+            let actor_id = request_identity.actor_id.clone();
+            let mut incoming = IncomingMessage::new("gateway", &user_id, &content);
+            incoming =
+                incoming.with_identity(request_identity.resolved_identity(thread_id.as_deref()));
             if let Some(ref tid) = thread_id {
                 incoming = incoming.with_thread(tid);
                 incoming = incoming.with_metadata(serde_json::json!({
                     "thread_id": tid,
-                    "actor_id": state.actor_id,
+                    "actor_id": actor_id,
                 }));
             }
 
@@ -238,17 +263,15 @@ async fn handle_client_message(
                 }
             };
 
-            let mut msg = IncomingMessage::new("gateway", user_id, content);
-            msg = msg.with_identity(gateway_identity(
-                user_id,
-                &state.actor_id,
-                thread_id.as_deref(),
-            ));
+            let user_id = request_identity.principal_id.clone();
+            let actor_id = request_identity.actor_id.clone();
+            let mut msg = IncomingMessage::new("gateway", &user_id, content);
+            msg = msg.with_identity(request_identity.resolved_identity(thread_id.as_deref()));
             if let Some(ref tid) = thread_id {
                 msg = msg.with_thread(tid);
                 msg = msg.with_metadata(serde_json::json!({
                     "thread_id": tid,
-                    "actor_id": state.actor_id,
+                    "actor_id": actor_id,
                 }));
             }
             let tx_guard = state.msg_tx.read().await;
@@ -274,24 +297,24 @@ async fn handle_client_message(
                                 extension_name, e
                             ),
                         };
-                        crate::channels::web::server::clear_auth_mode(state).await;
-                        state
-                            .sse
-                            .broadcast(crate::channels::web::types::SseEvent::AuthCompleted {
+                        clear_auth_mode_for_identity(state, request_identity).await;
+                        let _ = direct_tx
+                            .send(WsServerMessage::from_sse_event(&SseEvent::AuthCompleted {
                                 extension_name,
                                 success: true,
                                 message: msg,
-                            });
+                            }))
+                            .await;
                     }
                     Ok(result) => {
-                        state
-                            .sse
-                            .broadcast(crate::channels::web::types::SseEvent::AuthRequired {
+                        let _ = direct_tx
+                            .send(WsServerMessage::from_sse_event(&SseEvent::AuthRequired {
                                 extension_name,
                                 instructions: result.instructions,
                                 auth_url: result.auth_url,
                                 setup_url: result.setup_url,
-                            });
+                            }))
+                            .await;
                     }
                     Err(e) => {
                         let _ = direct_tx
@@ -310,7 +333,7 @@ async fn handle_client_message(
             }
         }
         WsClientMessage::AuthCancel { .. } => {
-            crate::channels::web::server::clear_auth_mode(state).await;
+            clear_auth_mode_for_identity(state, request_identity).await;
         }
         WsClientMessage::Ping => {
             let _ = direct_tx.send(WsServerMessage::Pong).await;
@@ -347,7 +370,14 @@ async fn handle_client_message(
         WsClientMessage::ConfigSet { key, value } => {
             // Write the setting to the DB-backed settings store
             if let Some(ref store) = state.store {
-                match crate::api::config::set_setting(store, &state.user_id, &key, &value).await {
+                match crate::api::config::set_setting(
+                    store,
+                    &request_identity.principal_id,
+                    &key,
+                    &value,
+                )
+                .await
+                {
                     Ok(()) => {
                         tracing::info!("WS config.set: key={} updated", key);
                         let _ = direct_tx
@@ -387,7 +417,7 @@ async fn handle_client_message(
                 let setting_value = serde_json::Value::String(value);
                 match crate::api::config::set_setting(
                     store,
-                    &state.user_id,
+                    &request_identity.principal_id,
                     &setting_key,
                     &setting_value,
                 )
@@ -454,6 +484,15 @@ async fn handle_client_message(
 mod tests {
     use super::*;
 
+    fn test_request_identity(user_id: &str) -> GatewayRequestIdentity {
+        GatewayRequestIdentity::new(
+            user_id,
+            user_id,
+            crate::channels::web::identity_helpers::GatewayAuthSource::BearerHeader,
+            false,
+        )
+    }
+
     #[test]
     fn test_ws_connection_tracker() {
         let tracker = WsConnectionTracker::new();
@@ -484,7 +523,8 @@ mod tests {
         let (direct_tx, mut direct_rx) = mpsc::channel(16);
         let state = make_test_state(None).await;
 
-        handle_client_message(WsClientMessage::Ping, &state, "user1", &direct_tx).await;
+        let identity = test_request_identity("user1");
+        handle_client_message(WsClientMessage::Ping, &state, &identity, &direct_tx).await;
 
         let response = direct_rx.recv().await.unwrap();
         assert!(matches!(response, WsServerMessage::Pong));
@@ -496,6 +536,7 @@ mod tests {
         let (agent_tx, mut agent_rx) = mpsc::channel(16);
         let state = make_test_state(Some(agent_tx)).await;
         let (direct_tx, _direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
 
         handle_client_message(
             WsClientMessage::Message {
@@ -503,7 +544,7 @@ mod tests {
                 thread_id: Some("t1".to_string()),
             },
             &state,
-            "user1",
+            &identity,
             &direct_tx,
         )
         .await;
@@ -520,6 +561,7 @@ mod tests {
         // When msg_tx is None, should send an error back
         let state = make_test_state(None).await;
         let (direct_tx, mut direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
 
         handle_client_message(
             WsClientMessage::Message {
@@ -527,7 +569,7 @@ mod tests {
                 thread_id: None,
             },
             &state,
-            "user1",
+            &identity,
             &direct_tx,
         )
         .await;
@@ -546,6 +588,7 @@ mod tests {
         let (agent_tx, mut agent_rx) = mpsc::channel(16);
         let state = make_test_state(Some(agent_tx)).await;
         let (direct_tx, _direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
 
         let request_id = Uuid::new_v4();
         handle_client_message(
@@ -555,7 +598,7 @@ mod tests {
                 thread_id: Some("thread-42".to_string()),
             },
             &state,
-            "user1",
+            &identity,
             &direct_tx,
         )
         .await;
@@ -571,6 +614,7 @@ mod tests {
     async fn test_handle_client_approval_invalid_action() {
         let state = make_test_state(None).await;
         let (direct_tx, mut direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
 
         handle_client_message(
             WsClientMessage::Approval {
@@ -579,7 +623,7 @@ mod tests {
                 thread_id: None,
             },
             &state,
-            "user1",
+            &identity,
             &direct_tx,
         )
         .await;
@@ -597,6 +641,7 @@ mod tests {
     async fn test_handle_client_approval_invalid_uuid() {
         let state = make_test_state(None).await;
         let (direct_tx, mut direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
 
         handle_client_message(
             WsClientMessage::Approval {
@@ -605,7 +650,7 @@ mod tests {
                 thread_id: None,
             },
             &state,
-            "user1",
+            &identity,
             &direct_tx,
         )
         .await;

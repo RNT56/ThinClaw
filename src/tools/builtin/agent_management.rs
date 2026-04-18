@@ -11,7 +11,19 @@ use serde_json::json;
 
 use crate::agent::agent_registry::AgentRegistry;
 use crate::context::JobContext;
+use crate::tools::ToolProfile;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
+
+fn parse_tool_profile_param(value: &str) -> Result<ToolProfile, ToolError> {
+    match value {
+        "standard" => Ok(ToolProfile::Standard),
+        "restricted" => Ok(ToolProfile::Restricted),
+        "explicit_only" => Ok(ToolProfile::ExplicitOnly),
+        other => Err(ToolError::InvalidParameters(format!(
+            "Invalid tool_profile '{other}'"
+        ))),
+    }
+}
 
 // ── CreateAgentTool ──────────────────────────────────────────────────
 
@@ -78,6 +90,11 @@ impl Tool for CreateAgentTool {
                     "items": { "type": "string" },
                     "description": "Optional: skill allowlist for this agent. When set, only these skills are visible/readable."
                 },
+                "tool_profile": {
+                    "type": "string",
+                    "enum": ["standard", "restricted", "explicit_only"],
+                    "description": "Optional: execution profile override for this agent. Omit to inherit the main-agent profile."
+                },
                 "is_default": {
                     "type": "boolean",
                     "description": "Whether this is the default agent that receives unrouted messages. Default: false."
@@ -124,6 +141,11 @@ impl Tool for CreateAgentTool {
         let allowed_skills: Option<Vec<String>> = params
             .get("allowed_skills")
             .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let tool_profile = params
+            .get("tool_profile")
+            .and_then(|v| v.as_str())
+            .map(parse_tool_profile_param)
+            .transpose()?;
         let is_default = params
             .get("is_default")
             .and_then(|v| v.as_bool())
@@ -141,6 +163,7 @@ impl Tool for CreateAgentTool {
                 is_default,
                 allowed_tools,
                 allowed_skills,
+                tool_profile,
             )
             .await
         {
@@ -153,6 +176,7 @@ impl Tool for CreateAgentTool {
                     "is_default": record.is_default,
                     "allowed_tools": record.allowed_tools,
                     "allowed_skills": record.allowed_skills,
+                    "tool_profile": record.tool_profile.map(|profile| profile.as_str().to_string()),
                     "workspace_seeded": true,
                     "duration_ms": start.elapsed().as_millis(),
                 }))
@@ -218,6 +242,7 @@ impl Tool for ListAgentsTool {
                     "trigger_keywords": ws.trigger_keywords,
                     "allowed_tools": ws.allowed_tools,
                     "allowed_skills": ws.allowed_skills,
+                    "tool_profile": ws.tool_profile.map(|profile| profile.as_str().to_string()),
                     "has_system_prompt": ws.system_prompt.is_some(),
                 })
             })
@@ -304,6 +329,11 @@ impl Tool for UpdateAgentTool {
                     "items": { "type": "string" },
                     "description": "New skill allowlist (set to null to clear)"
                 },
+                "tool_profile": {
+                    "type": "string",
+                    "enum": ["standard", "restricted", "explicit_only"],
+                    "description": "New execution profile override (set to null to clear)"
+                },
                 "is_default": {
                     "type": "boolean",
                     "description": "Set as default agent"
@@ -363,6 +393,17 @@ impl Tool for UpdateAgentTool {
         } else {
             None
         };
+        let tool_profile: Option<Option<ToolProfile>> = if params.get("tool_profile").is_some() {
+            Some(
+                params
+                    .get("tool_profile")
+                    .and_then(|v| v.as_str())
+                    .map(parse_tool_profile_param)
+                    .transpose()?,
+            )
+        } else {
+            None
+        };
         let is_default = params.get("is_default").and_then(|v| v.as_bool());
 
         match self
@@ -377,6 +418,7 @@ impl Tool for UpdateAgentTool {
                 is_default,
                 allowed_tools,
                 allowed_skills,
+                tool_profile,
             )
             .await
         {
@@ -387,6 +429,7 @@ impl Tool for UpdateAgentTool {
                     "display_name": record.display_name,
                     "allowed_tools": record.allowed_tools,
                     "allowed_skills": record.allowed_skills,
+                    "tool_profile": record.tool_profile.map(|profile| profile.as_str().to_string()),
                 }))
                 .unwrap(),
                 start.elapsed(),
@@ -621,6 +664,7 @@ impl Tool for MessageAgentTool {
                 "target_model": record.model,
                 "target_allowed_tools": record.allowed_tools,
                 "target_allowed_skills": record.allowed_skills,
+                "target_tool_profile": record.tool_profile.map(|profile| profile.as_str().to_string()),
                 "target_system_prompt": full_context,
                 "message": message,
                 "timeout_secs": timeout_secs,

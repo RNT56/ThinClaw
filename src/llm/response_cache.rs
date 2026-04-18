@@ -115,6 +115,12 @@ fn cache_key(model: &str, request: &CompletionRequest) -> String {
     if let Ok(json) = serde_json::to_string(&request.messages) {
         hasher.update(json.as_bytes());
     }
+    if !request.context_documents.is_empty() {
+        hasher.update(b"|docs:");
+        if let Ok(json) = serde_json::to_string(&request.context_documents) {
+            hasher.update(json.as_bytes());
+        }
+    }
 
     // Include response-affecting parameters so different temperatures,
     // max_tokens, or stop sequences produce distinct cache keys.
@@ -291,6 +297,7 @@ mod tests {
     fn simple_request() -> CompletionRequest {
         CompletionRequest {
             messages: vec![ChatMessage::user("hello")],
+            context_documents: Vec::new(),
             model: None,
             max_tokens: None,
             temperature: None,
@@ -303,6 +310,7 @@ mod tests {
     fn different_request() -> CompletionRequest {
         CompletionRequest {
             messages: vec![ChatMessage::user("goodbye")],
+            context_documents: Vec::new(),
             model: None,
             max_tokens: None,
             temperature: None,
@@ -351,6 +359,15 @@ mod tests {
         req_a.max_tokens = Some(100);
         let mut req_b = simple_request();
         req_b.max_tokens = Some(500);
+        assert_ne!(cache_key("m", &req_a), cache_key("m", &req_b));
+    }
+
+    #[test]
+    fn cache_key_varies_by_context_documents() {
+        let mut req_a = simple_request();
+        req_a.context_documents = vec!["ephemeral context A".to_string()];
+        let mut req_b = simple_request();
+        req_b.context_documents = vec!["ephemeral context B".to_string()];
         assert_ne!(cache_key("m", &req_a), cache_key("m", &req_b));
     }
 
@@ -431,6 +448,7 @@ mod tests {
         // Add a third: should evict the oldest
         let third = CompletionRequest {
             messages: vec![ChatMessage::user("third")],
+            context_documents: Vec::new(),
             model: None,
             max_tokens: None,
             temperature: None,
@@ -450,6 +468,7 @@ mod tests {
 
         let req = ToolCompletionRequest {
             messages: vec![ChatMessage::user("use tool")],
+            context_documents: Vec::new(),
             tools: vec![],
             model: None,
             max_tokens: None,

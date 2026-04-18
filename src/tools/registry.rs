@@ -13,6 +13,7 @@ use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::safety::SafetyLayer;
+use crate::sandbox::{SandboxManager, SandboxPolicy};
 use crate::sandbox_types::ContainerJobManager;
 use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
@@ -20,13 +21,14 @@ use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
     AgentBrowserTool, AgentThinkTool, AppleMailTool, ApplyPatchTool, BrowserTool, CancelJobTool,
-    CanvasTool, ClarifyTool, CreateAgentTool, CreateJobTool, DeviceInfoTool, EchoTool,
-    EmitUserMessageTool, ExecuteCodeTool, GrepTool, HomeAssistantTool, HttpTool, JobEventsTool,
-    JobPromptTool, JobStatusTool, JsonTool, LearningFeedbackTool, LearningHistoryTool,
-    LearningOutcomesTool, LearningProposalReviewTool, LearningStatusTool, ListAgentsTool,
-    ListDirTool, ListJobsTool, LlmListModelsTool, LlmSelectTool, MemoryDeleteTool, MemoryReadTool,
-    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, MoaTool, ProcessTool,
-    PromptManageTool, PromptQueue, ReadFileTool, RemoveAgentTool, SearchFilesTool, SendMessageTool,
+    CanvasTool, ClarifyTool, CreateAgentTool, CreateJobTool, DesktopAutonomyTool, DeviceInfoTool,
+    EchoTool, EmitUserMessageTool, ExecuteCodeTool, ExternalMemoryRecallTool,
+    ExternalMemoryStatusTool, GrepTool, HomeAssistantTool, HttpTool, JobEventsTool, JobPromptTool,
+    JobStatusTool, JsonTool, LearningFeedbackTool, LearningHistoryTool, LearningOutcomesTool,
+    LearningProposalReviewTool, LearningStatusTool, ListAgentsTool, ListDirTool, ListJobsTool,
+    LlmListModelsTool, LlmSelectTool, MemoryDeleteTool, MemoryReadTool, MemorySearchTool,
+    MemoryTreeTool, MemoryWriteTool, MessageAgentTool, MoaTool, ProcessTool, PromptManageTool,
+    PromptQueue, ReadFileTool, RemoveAgentTool, SearchFilesTool, SendMessageTool,
     SessionSearchTool, SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool,
     SkillInstallTool, SkillListTool, SkillManageTool, SkillReadTool, SkillReloadTool,
     SkillRemoveTool, SkillSearchTool, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool,
@@ -34,7 +36,7 @@ use crate::tools::builtin::{
     VisionAnalyzeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
-use crate::tools::tool::{Tool, ToolDomain};
+use crate::tools::tool::{Tool, ToolDescriptor, ToolDomain, ToolExecutionLane, ToolProfile};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
@@ -106,6 +108,8 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "learning_history",
     "learning_feedback",
     "learning_proposal_review",
+    "external_memory_recall",
+    "external_memory_status",
     // Hermes-parity tools
     "process",
     "todo",
@@ -116,9 +120,17 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "mixture_of_agents",
     "execute_code",
     "search_files",
+    "desktop_apps",
+    "desktop_ui",
+    "desktop_screen",
+    "desktop_calendar_native",
+    "desktop_numbers_native",
+    "desktop_pages_native",
+    "autonomy_control",
 ];
 
 const IMPLICIT_CAPABILITY_TOOLS: &[&str] = &["agent_think", "emit_user_message"];
+const HIDDEN_BY_DEFAULT_TOOL_NAMES: &[&str] = &["external_memory_recall", "external_memory_status"];
 const SKILL_ADMIN_TOOLS: &[&str] = &[
     "skill_search",
     "skill_install",
@@ -232,17 +244,42 @@ impl ToolRegistry {
         self.tools.read().await.values().cloned().collect()
     }
 
-    /// Get tool definitions for LLM function calling.
-    pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools
+    /// Get tool descriptors for internal routing and policy decisions.
+    pub async fn tool_descriptors(&self) -> Vec<ToolDescriptor> {
+        let mut descriptors = self
+            .tools
             .read()
             .await
             .values()
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
+            .map(|tool| tool.descriptor())
+            .collect::<Vec<_>>();
+        descriptors.sort_by(|left, right| left.name.cmp(&right.name));
+        descriptors
+    }
+
+    /// Get a single tool descriptor by name.
+    pub async fn tool_descriptor(&self, name: &str) -> Option<ToolDescriptor> {
+        self.tools
+            .read()
+            .await
+            .get(name)
+            .map(|tool| tool.descriptor())
+    }
+
+    fn descriptor_to_definition(descriptor: ToolDescriptor) -> ToolDefinition {
+        ToolDefinition {
+            name: descriptor.name,
+            description: descriptor.description,
+            parameters: descriptor.parameters,
+        }
+    }
+
+    /// Get tool definitions for LLM function calling.
+    pub async fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tool_descriptors()
+            .await
+            .into_iter()
+            .map(Self::descriptor_to_definition)
             .collect()
     }
 
@@ -303,12 +340,56 @@ impl ToolRegistry {
         defs: Vec<ToolDefinition>,
         allowed_tools: Option<&[String]>,
         allowed_skills: Option<&[String]>,
+        visible_hidden_tools: Option<&[String]>,
     ) -> Vec<ToolDefinition> {
         defs.into_iter()
             .filter(|def| {
                 Self::tool_name_allowed_for_capabilities(&def.name, allowed_tools, allowed_skills)
+                    && Self::tool_name_visible_for_turn(&def.name, visible_hidden_tools)
             })
             .collect()
+    }
+
+    /// Filter tool definitions by execution lane/profile metadata in addition to capability grants.
+    pub async fn filter_tool_definitions_for_execution_profile(
+        &self,
+        defs: Vec<ToolDefinition>,
+        lane: ToolExecutionLane,
+        profile: ToolProfile,
+        metadata: &serde_json::Value,
+    ) -> Vec<ToolDefinition> {
+        let tools = self.tools.read().await;
+        let allowed_names: HashSet<String> = tools
+            .values()
+            .filter_map(|tool| {
+                let descriptor = tool.descriptor();
+                (crate::tools::execution::tool_allowed_for_lane(tool.as_ref(), &descriptor, lane)
+                    && crate::tools::execution::descriptor_allowed_for_profile(
+                        &descriptor,
+                        lane,
+                        profile,
+                        metadata,
+                    ))
+                .then_some(descriptor.name)
+            })
+            .collect();
+
+        defs.into_iter()
+            .filter(|def| allowed_names.contains(&def.name))
+            .collect()
+    }
+
+    fn tool_name_visible_for_turn(
+        tool_name: &str,
+        visible_hidden_tools: Option<&[String]>,
+    ) -> bool {
+        if !HIDDEN_BY_DEFAULT_TOOL_NAMES.contains(&tool_name) {
+            return true;
+        }
+
+        visible_hidden_tools
+            .map(|visible| visible.iter().any(|name| name == tool_name))
+            .unwrap_or(false)
     }
 
     /// Get tool definitions filtered for a routed agent/subagent capability bundle.
@@ -316,9 +397,15 @@ impl ToolRegistry {
         &self,
         allowed_tools: Option<&[String]>,
         allowed_skills: Option<&[String]>,
+        visible_hidden_tools: Option<&[String]>,
     ) -> Vec<ToolDefinition> {
         let defs = self.tool_definitions().await;
-        Self::filter_tool_definitions_for_capabilities(defs, allowed_tools, allowed_skills)
+        Self::filter_tool_definitions_for_capabilities(
+            defs,
+            allowed_tools,
+            allowed_skills,
+            visible_hidden_tools,
+        )
     }
 
     /// Get tool definitions filtered for autonomous execution (routines, workers).
@@ -335,7 +422,8 @@ impl ToolRegistry {
         const DISPATCHER_ONLY_TOOLS: &[&str] =
             &["spawn_subagent", "list_subagents", "cancel_subagent"];
 
-        self.tools
+        let defs = self
+            .tools
             .read()
             .await
             .values()
@@ -350,12 +438,15 @@ impl ToolRegistry {
                 }
                 true
             })
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
-            .collect()
+            .map(|tool| tool.descriptor())
+            .collect::<Vec<_>>();
+        let mut defs = defs;
+        defs.sort_by(|left, right| left.name.cmp(&right.name));
+        let defs = defs
+            .into_iter()
+            .map(Self::descriptor_to_definition)
+            .collect();
+        Self::filter_tool_definitions_for_capabilities(defs, None, None, None)
     }
 
     /// Get autonomous tool definitions filtered by a capability bundle.
@@ -363,9 +454,15 @@ impl ToolRegistry {
         &self,
         allowed_tools: Option<&[String]>,
         allowed_skills: Option<&[String]>,
+        visible_hidden_tools: Option<&[String]>,
     ) -> Vec<ToolDefinition> {
         let defs = self.tool_definitions_for_autonomous().await;
-        Self::filter_tool_definitions_for_capabilities(defs, allowed_tools, allowed_skills)
+        Self::filter_tool_definitions_for_capabilities(
+            defs,
+            allowed_tools,
+            allowed_skills,
+            visible_hidden_tools,
+        )
     }
 
     /// Get tool definitions for specific tools.
@@ -374,11 +471,7 @@ impl ToolRegistry {
         names
             .iter()
             .filter_map(|name| tools.get(*name))
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
+            .map(|tool| Self::descriptor_to_definition(tool.descriptor()))
             .collect()
     }
 
@@ -477,17 +570,16 @@ impl ToolRegistry {
 
     /// Get tool definitions filtered by domain.
     pub async fn tool_definitions_for_domain(&self, domain: ToolDomain) -> Vec<ToolDefinition> {
-        self.tools
+        let mut defs = self
+            .tools
             .read()
             .await
             .values()
             .filter(|tool| tool.domain() == domain)
-            .map(|tool| ToolDefinition {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                parameters: tool.parameters_schema(),
-            })
-            .collect()
+            .map(|tool| Self::descriptor_to_definition(tool.descriptor()))
+            .collect::<Vec<_>>();
+        defs.sort_by(|left, right| left.name.cmp(&right.name));
+        defs
     }
 
     /// Register development tools for building software.
@@ -519,6 +611,17 @@ impl ToolRegistry {
         working_dir: Option<PathBuf>,
         safety: Option<&SafetyConfig>,
     ) {
+        self.register_dev_tools_with_runtime(base_dir, working_dir, safety, None, None);
+    }
+
+    pub fn register_dev_tools_with_runtime(
+        &self,
+        base_dir: Option<PathBuf>,
+        working_dir: Option<PathBuf>,
+        safety: Option<&SafetyConfig>,
+        sandbox: Option<Arc<SandboxManager>>,
+        sandbox_policy: Option<SandboxPolicy>,
+    ) {
         // Shell tool — when base_dir is set, the shell gets sandbox restrictions too
         let mut shell = ShellTool::new();
         if let Some(ref wd) = working_dir {
@@ -529,6 +632,12 @@ impl ToolRegistry {
         }
         if let Some(safety) = safety {
             shell = shell.with_safety_config(safety);
+        }
+        if let Some(sandbox) = sandbox {
+            shell = shell.with_sandbox(sandbox);
+        }
+        if let Some(policy) = sandbox_policy {
+            shell = shell.with_sandbox_policy(policy);
         }
         self.register_sync(Arc::new(shell));
 
@@ -572,6 +681,13 @@ impl ToolRegistry {
         sse_sender: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
     ) {
         let mut memory_tool_count = 5;
+        let orchestrator = db.as_ref().map(|db| {
+            Arc::new(LearningOrchestrator::new(
+                Arc::clone(db),
+                Some(Arc::clone(&workspace)),
+                None,
+            ))
+        });
         self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&workspace))));
         if let Some(db) = db {
             let mut session_search = SessionSearchTool::new(db);
@@ -581,7 +697,10 @@ impl ToolRegistry {
             self.register_sync(Arc::new(session_search));
             memory_tool_count += 1;
         }
-        self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&workspace))));
+        self.register_sync(Arc::new(MemoryWriteTool::new(
+            Arc::clone(&workspace),
+            orchestrator,
+        )));
         self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&workspace))));
         self.register_sync(Arc::new(MemoryTreeTool::new(Arc::clone(&workspace))));
         let mut delete_tool = MemoryDeleteTool::new(workspace);
@@ -731,10 +850,37 @@ impl ToolRegistry {
         self.register_sync(Arc::new(LearningFeedbackTool::new(Arc::clone(
             &orchestrator,
         ))));
+        self.register_sync(Arc::new(ExternalMemoryRecallTool::new(Arc::clone(
+            &orchestrator,
+        ))));
+        self.register_sync(Arc::new(ExternalMemoryStatusTool::new(Arc::clone(
+            &orchestrator,
+        ))));
         self.register_sync(Arc::new(LearningProposalReviewTool::new(orchestrator)));
-        count += 5;
+        count += 7;
 
         tracing::info!("Registered {} learning tools", count);
+    }
+
+    /// Register reckless desktop autonomy tools.
+    pub fn register_desktop_autonomy_tools(
+        &self,
+        manager: Arc<crate::desktop_autonomy::DesktopAutonomyManager>,
+    ) {
+        self.register_sync(Arc::new(DesktopAutonomyTool::apps(Arc::clone(&manager))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::ui(Arc::clone(&manager))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::screen(Arc::clone(&manager))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::calendar_native(Arc::clone(
+            &manager,
+        ))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::numbers_native(Arc::clone(
+            &manager,
+        ))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::pages_native(Arc::clone(
+            &manager,
+        ))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::control(manager)));
+        tracing::info!("Registered 7 reckless desktop autonomy tools");
     }
 
     /// Register routine management tools.
@@ -844,8 +990,22 @@ impl ToolRegistry {
     ///
     /// Provides start/list/poll/wait/kill/write actions for long-running background
     /// processes. The registry is shared so the auto-reaper can update statuses.
+    /// In restricted workspace modes this tool may be intentionally omitted rather
+    /// than pretending cwd scoping is process isolation.
     pub fn register_process_tool(&self, registry: SharedProcessRegistry) {
-        self.register_sync(Arc::new(ProcessTool::new(registry)));
+        self.register_process_tool_with_backend(registry, None);
+    }
+
+    pub fn register_process_tool_with_backend(
+        &self,
+        registry: SharedProcessRegistry,
+        backend: Option<Arc<dyn crate::tools::execution_backend::ExecutionBackend>>,
+    ) {
+        let mut tool = ProcessTool::new(registry);
+        if let Some(backend) = backend {
+            tool = tool.with_backend(backend);
+        }
+        self.register_sync(Arc::new(tool));
         tracing::info!("Registered background process tool");
     }
 
@@ -914,18 +1074,32 @@ impl ToolRegistry {
     /// Register the sandboxed code execution tool.
     ///
     /// Supports Python, JavaScript/TypeScript, and Bash execution in a
-    /// subprocess with scrubbed environment and captured output.
+    /// subprocess with scrubbed environment and captured output. Callers can also
+    /// inject a different execution backend so restricted modes do not fall back
+    /// to host execution when that would overstate isolation.
     pub fn register_execute_code_tool(
-        &self,
+        self: &Arc<Self>,
         working_dir: Option<std::path::PathBuf>,
         allow_network: bool,
     ) {
-        let mut tool = ExecuteCodeTool::new();
+        self.register_execute_code_tool_with_backend(working_dir, allow_network, None);
+    }
+
+    pub fn register_execute_code_tool_with_backend(
+        self: &Arc<Self>,
+        working_dir: Option<std::path::PathBuf>,
+        allow_network: bool,
+        backend: Option<Arc<dyn crate::tools::execution_backend::ExecutionBackend>>,
+    ) {
+        let mut tool = ExecuteCodeTool::new().with_tool_registry(Arc::downgrade(self));
         if let Some(dir) = working_dir {
             tool = tool.with_working_dir(dir);
         }
         if allow_network {
             tool = tool.with_network(true);
+        }
+        if let Some(backend) = backend {
+            tool = tool.with_backend(backend);
         }
         self.register_sync(Arc::new(tool));
         tracing::info!("Registered execute_code tool");
@@ -957,12 +1131,20 @@ impl ToolRegistry {
         config: Option<BuilderConfig>,
         base_dir: Option<std::path::PathBuf>,
         working_dir: Option<std::path::PathBuf>,
+        shell_sandbox: Option<Arc<SandboxManager>>,
+        shell_sandbox_policy: Option<SandboxPolicy>,
         cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
     ) {
         // Register dev tools respecting workspace sandbox config.
         // Previously this always called register_dev_tools() (= None, None),
         // bypassing sandboxing entirely. Now callers pass the resolved dirs.
-        self.register_dev_tools_with_config(base_dir, working_dir);
+        self.register_dev_tools_with_runtime(
+            base_dir,
+            working_dir,
+            None,
+            shell_sandbox,
+            shell_sandbox_policy,
+        );
 
         // Create the builder (arg order: config, llm, safety, tools)
         let mut builder =
@@ -1235,6 +1417,28 @@ mod tests {
         assert!(!ToolRegistry::skill_name_allowed_by_metadata(
             &metadata,
             "openai-docs"
+        ));
+    }
+
+    #[test]
+    fn hidden_tools_are_invisible_without_turn_visibility() {
+        assert!(!ToolRegistry::tool_name_visible_for_turn(
+            "external_memory_recall",
+            None,
+        ));
+        assert!(ToolRegistry::tool_name_visible_for_turn("echo", None));
+    }
+
+    #[test]
+    fn hidden_tools_are_visible_when_turn_explicitly_enables_them() {
+        let visible = vec!["external_memory_recall".to_string()];
+        assert!(ToolRegistry::tool_name_visible_for_turn(
+            "external_memory_recall",
+            Some(&visible),
+        ));
+        assert!(!ToolRegistry::tool_name_visible_for_turn(
+            "external_memory_status",
+            Some(&visible),
         ));
     }
 

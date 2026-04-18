@@ -194,6 +194,7 @@ impl ConversationStore for PgBackend {
     async fn update_conversation_identity(
         &self,
         id: Uuid,
+        principal_id: Option<&str>,
         actor_id: Option<&str>,
         conversation_scope_id: Option<Uuid>,
         conversation_kind: crate::history::ConversationKind,
@@ -202,6 +203,7 @@ impl ConversationStore for PgBackend {
         self.store
             .update_conversation_identity(
                 id,
+                principal_id,
                 actor_id,
                 conversation_scope_id,
                 conversation_kind,
@@ -351,6 +353,16 @@ impl ConversationStore for PgBackend {
     ) -> Result<Vec<LearningCandidate>, DatabaseError> {
         self.store
             .list_learning_candidates(user_id, candidate_type, risk_tier, limit)
+            .await
+    }
+
+    async fn update_learning_candidate_proposal(
+        &self,
+        candidate_id: Uuid,
+        proposal: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .update_learning_candidate_proposal(candidate_id, proposal)
             .await
     }
 
@@ -1792,6 +1804,7 @@ impl AgentRegistryStore for PgBackend {
                         trigger_keywords JSONB NOT NULL DEFAULT '[]',
                         allowed_tools JSONB,
                         allowed_skills JSONB,
+                        tool_profile TEXT,
                         is_default BOOLEAN NOT NULL DEFAULT FALSE,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1801,6 +1814,17 @@ impl AgentRegistryStore for PgBackend {
                 .await
                 .map_err(|e| {
                     DatabaseError::Query(format!("Failed to ensure agent_workspaces table: {e}"))
+                })?;
+            client
+                .execute(
+                    "ALTER TABLE agent_workspaces ADD COLUMN IF NOT EXISTS tool_profile TEXT",
+                    &[],
+                )
+                .await
+                .map_err(|e| {
+                    DatabaseError::Query(format!(
+                        "Failed to ensure agent_workspaces.tool_profile column: {e}"
+                    ))
                 })?;
             TABLE_CREATED.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -1817,14 +1841,15 @@ impl AgentRegistryStore for PgBackend {
             .allowed_skills
             .as_ref()
             .map(|skills| serde_json::to_value(skills).unwrap_or(serde_json::Value::Null));
+        let tool_profile = ws.tool_profile.map(|profile| profile.as_str().to_string());
 
         client
             .execute(
                 "INSERT INTO agent_workspaces \
                  (id, agent_id, display_name, system_prompt, model, \
-                  bound_channels, trigger_keywords, allowed_tools, allowed_skills, \
+                  bound_channels, trigger_keywords, allowed_tools, allowed_skills, tool_profile, \
                   is_default, created_at, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                 &[
                     &ws.id,
                     &ws.agent_id,
@@ -1835,6 +1860,7 @@ impl AgentRegistryStore for PgBackend {
                     &trigger_keywords,
                     &allowed_tools,
                     &allowed_skills,
+                    &tool_profile,
                     &ws.is_default,
                     &ws.created_at,
                     &ws.updated_at,
@@ -1860,7 +1886,7 @@ impl AgentRegistryStore for PgBackend {
         let row = client
             .query_opt(
                 "SELECT id, agent_id, display_name, system_prompt, model, \
-                 bound_channels, trigger_keywords, allowed_tools, allowed_skills, \
+                 bound_channels, trigger_keywords, allowed_tools, allowed_skills, tool_profile, \
                  is_default, created_at, updated_at \
                  FROM agent_workspaces WHERE agent_id = $1",
                 &[&agent_id],
@@ -1882,7 +1908,7 @@ impl AgentRegistryStore for PgBackend {
         let rows = client
             .query(
                 "SELECT id, agent_id, display_name, system_prompt, model, \
-                 bound_channels, trigger_keywords, allowed_tools, allowed_skills, \
+                 bound_channels, trigger_keywords, allowed_tools, allowed_skills, tool_profile, \
                  is_default, created_at, updated_at \
                  FROM agent_workspaces ORDER BY created_at ASC",
                 &[],
@@ -1932,14 +1958,15 @@ impl AgentRegistryStore for PgBackend {
             .allowed_skills
             .as_ref()
             .map(|skills| serde_json::to_value(skills).unwrap_or(serde_json::Value::Null));
+        let tool_profile = ws.tool_profile.map(|profile| profile.as_str().to_string());
 
         let affected = client
             .execute(
                 "UPDATE agent_workspaces SET \
                  display_name = $1, system_prompt = $2, model = $3, \
                  bound_channels = $4, trigger_keywords = $5, allowed_tools = $6, \
-                 allowed_skills = $7, is_default = $8, updated_at = NOW() \
-                 WHERE agent_id = $9",
+                 allowed_skills = $7, tool_profile = $8, is_default = $9, updated_at = NOW() \
+                 WHERE agent_id = $10",
                 &[
                     &ws.display_name,
                     &ws.system_prompt,
@@ -1948,6 +1975,7 @@ impl AgentRegistryStore for PgBackend {
                     &trigger_keywords,
                     &allowed_tools,
                     &allowed_skills,
+                    &tool_profile,
                     &ws.is_default,
                     &ws.agent_id,
                 ],
@@ -1972,6 +2000,7 @@ fn pg_row_to_agent_workspace(row: &tokio_postgres::Row) -> AgentWorkspaceRecord 
     let trigger_keywords: serde_json::Value = row.get("trigger_keywords");
     let allowed_tools: Option<serde_json::Value> = row.get("allowed_tools");
     let allowed_skills: Option<serde_json::Value> = row.get("allowed_skills");
+    let tool_profile: Option<String> = row.get("tool_profile");
 
     AgentWorkspaceRecord {
         id: row.get("id"),
@@ -1983,6 +2012,12 @@ fn pg_row_to_agent_workspace(row: &tokio_postgres::Row) -> AgentWorkspaceRecord 
         trigger_keywords: serde_json::from_value(trigger_keywords).unwrap_or_default(),
         allowed_tools: allowed_tools.and_then(|value| serde_json::from_value(value).ok()),
         allowed_skills: allowed_skills.and_then(|value| serde_json::from_value(value).ok()),
+        tool_profile: tool_profile.and_then(|value| match value.as_str() {
+            "standard" => Some(crate::tools::ToolProfile::Standard),
+            "restricted" => Some(crate::tools::ToolProfile::Restricted),
+            "explicit_only" => Some(crate::tools::ToolProfile::ExplicitOnly),
+            _ => None,
+        }),
         is_default: row.get("is_default"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),

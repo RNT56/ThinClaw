@@ -120,6 +120,12 @@ impl SkillRegistry {
         dirs
     }
 
+    /// Return the writable directory used for installs prepared through the
+    /// staged install pipeline.
+    pub fn install_root(&self) -> &Path {
+        self.installed_dir.as_deref().unwrap_or(&self.user_dir)
+    }
+
     /// Discover and load skills from all configured directories.
     ///
     /// Discovery order (earlier wins on name collision):

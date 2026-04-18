@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
 };
 
+use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 
 /// Response for GET /api/providers — lists all catalog providers with key status.
@@ -247,6 +248,7 @@ fn provider_oauth_ui_state(slug: &str) -> ProviderOauthUiState {
 
 pub(crate) async fn providers_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<Json<ProvidersListResponse>, StatusCode> {
     let catalog = crate::config::provider_catalog::catalog();
     let secrets = state.secrets_store.as_ref();
@@ -261,7 +263,7 @@ pub(crate) async fn providers_list_handler(
             .flatten()
             .is_some();
         let has_secret = if let Some(ss) = secrets {
-            ss.exists(&state.user_id, endpoint.secret_name)
+            ss.exists(&request_identity.principal_id, endpoint.secret_name)
                 .await
                 .unwrap_or(false)
         } else {
@@ -302,7 +304,12 @@ pub(crate) async fn providers_list_handler(
         .ok()
         .flatten()
         .is_some()
-        || secret_exists(secrets, &state.user_id, "llm_compatible_api_key").await;
+        || secret_exists(
+            secrets,
+            &request_identity.principal_id,
+            "llm_compatible_api_key",
+        )
+        .await;
     providers.push(ProviderInfo {
         slug: "openai_compatible".to_string(),
         display_name: "OpenAI-compatible".to_string(),
@@ -328,12 +335,22 @@ pub(crate) async fn providers_list_handler(
             .ok()
             .flatten()
             .is_some()
-        || secret_exists(secrets, &state.user_id, "llm_bedrock_api_key").await
+        || secret_exists(
+            secrets,
+            &request_identity.principal_id,
+            "llm_bedrock_api_key",
+        )
+        .await
         || crate::config::helpers::optional_env("BEDROCK_PROXY_API_KEY")
             .ok()
             .flatten()
             .is_some()
-        || secret_exists(secrets, &state.user_id, "llm_bedrock_proxy_api_key").await;
+        || secret_exists(
+            secrets,
+            &request_identity.principal_id,
+            "llm_bedrock_proxy_api_key",
+        )
+        .await;
     providers.push(ProviderInfo {
         slug: "bedrock".to_string(),
         display_name: "AWS Bedrock".to_string(),
@@ -358,15 +375,19 @@ pub(crate) async fn providers_list_handler(
 
 pub(crate) async fn providers_config_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<Json<ProvidersConfigResponse>, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let map = store.get_all_settings(&state.user_id).await.map_err(|e| {
-        tracing::error!("Failed to load provider settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let map = store
+        .get_all_settings(&request_identity.principal_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load provider settings: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let settings = crate::settings::Settings::from_db_map(&map);
     let providers_settings = crate::llm::normalize_providers_settings(&settings);
     let diagnostics = crate::llm::validate_providers_settings(&settings.providers);
@@ -374,8 +395,13 @@ pub(crate) async fn providers_config_handler(
     let persisted = settings.providers.clone();
     let runtime_status = state.llm_runtime.as_ref().map(|runtime| runtime.status());
     let secrets = state.secrets_store.as_ref();
-    let providers =
-        build_routing_provider_entries(&state.user_id, &settings, &persisted, secrets).await;
+    let providers = build_routing_provider_entries(
+        &request_identity.principal_id,
+        &settings,
+        &persisted,
+        secrets,
+    )
+    .await;
 
     Ok(Json(ProvidersConfigResponse {
         routing_enabled: providers_settings.smart_routing_enabled,
@@ -1447,19 +1473,23 @@ pub(crate) async fn secret_exists(
 
 pub(crate) async fn providers_config_set_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Json(body): Json<ProvidersConfigWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let map = store.get_all_settings(&state.user_id).await.map_err(|e| {
-        tracing::error!(
-            "Failed to load settings before provider config write: {}",
-            e
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let map = store
+        .get_all_settings(&request_identity.principal_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to load settings before provider config write: {}",
+                e
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let mut settings = crate::settings::Settings::from_db_map(&map);
 
     settings.providers.smart_routing_enabled = body.routing_enabled;
@@ -1669,7 +1699,7 @@ pub(crate) async fn providers_config_set_handler(
 
     for key in stale_provider_keys {
         store
-            .delete_setting(&state.user_id, &key)
+            .delete_setting(&request_identity.principal_id, &key)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to delete stale provider setting '{}': {}", key, e);
@@ -1678,7 +1708,7 @@ pub(crate) async fn providers_config_set_handler(
     }
 
     store
-        .set_all_settings(&state.user_id, &next_settings_map)
+        .set_all_settings(&request_identity.principal_id, &next_settings_map)
         .await
         .map_err(|e| {
             tracing::error!("Failed to save provider config: {}", e);
@@ -1795,16 +1825,20 @@ pub(crate) fn route_target_is_available_for_enabled_providers(
 
 pub(crate) async fn provider_models_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(slug): Path<String>,
 ) -> Result<Json<ProviderModelsResponse>, StatusCode> {
     let settings = if let Some(ref store) = state.store {
-        let map = store.get_all_settings(&state.user_id).await.map_err(|e| {
-            tracing::error!(
-                "Failed to load provider settings for model discovery: {}",
-                e
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        let map = store
+            .get_all_settings(&request_identity.principal_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to load provider settings for model discovery: {}",
+                    e
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
         crate::settings::Settings::from_db_map(&map)
     } else {
         crate::settings::Settings::load()
@@ -1812,7 +1846,7 @@ pub(crate) async fn provider_models_handler(
 
     let providers_settings = crate::llm::normalize_providers_settings(&settings);
     let response = build_provider_models_response(
-        &state.user_id,
+        &request_identity.principal_id,
         &slug,
         &settings,
         &providers_settings,
@@ -1871,6 +1905,7 @@ pub(crate) struct ProviderKeyRequest {
 
 pub(crate) async fn providers_save_key_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(slug): Path<String>,
     Json(body): Json<ProviderKeyRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
@@ -1886,17 +1921,23 @@ pub(crate) async fn providers_save_key_handler(
             if api_key.is_empty() {
                 return Err(StatusCode::BAD_REQUEST);
             }
-            let _ = secrets.delete(&state.user_id, secret_name).await;
+            let _ = secrets
+                .delete(&request_identity.principal_id, secret_name)
+                .await;
             let params = crate::secrets::CreateSecretParams::new(*secret_name, api_key)
                 .with_provider(slug.clone());
-            secrets.create(&state.user_id, params).await.map_err(|e| {
-                tracing::error!("Failed to save API key for '{}': {}", slug, e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+            secrets
+                .create(&request_identity.principal_id, params)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to save API key for '{}': {}", slug, e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
         }
     }
 
-    let count = crate::config::refresh_secrets(secrets.as_ref(), &state.user_id).await;
+    let count =
+        crate::config::refresh_secrets(secrets.as_ref(), &request_identity.principal_id).await;
     tracing::info!(
         provider = %slug,
         refreshed = count,
@@ -1904,7 +1945,13 @@ pub(crate) async fn providers_save_key_handler(
     );
 
     if let Some(ref db) = state.store {
-        auto_enable_provider(db.as_ref(), &state.user_id, &slug, spec.default_model()).await;
+        auto_enable_provider(
+            db.as_ref(),
+            &request_identity.principal_id,
+            &slug,
+            spec.default_model(),
+        )
+        .await;
     }
     if let Err(e) = reload_llm_runtime(state.as_ref()).await {
         tracing::warn!("Provider Vault runtime reload failed after save: {}", e);
@@ -1931,6 +1978,7 @@ pub(crate) async fn providers_save_key_handler(
 
 pub(crate) async fn providers_delete_key_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(slug): Path<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
     let secrets = state
@@ -1942,7 +1990,7 @@ pub(crate) async fn providers_delete_key_handler(
     match &spec {
         ProviderCredentialSpec::ApiKey { secret_name, .. } => {
             secrets
-                .delete(&state.user_id, secret_name)
+                .delete(&request_identity.principal_id, secret_name)
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to delete API key for '{}': {}", slug, e);
@@ -1951,7 +1999,8 @@ pub(crate) async fn providers_delete_key_handler(
         }
     }
 
-    let count = crate::config::refresh_secrets(secrets.as_ref(), &state.user_id).await;
+    let count =
+        crate::config::refresh_secrets(secrets.as_ref(), &request_identity.principal_id).await;
     tracing::info!(
         provider = %slug,
         refreshed = count,
@@ -1959,7 +2008,7 @@ pub(crate) async fn providers_delete_key_handler(
     );
 
     if let Some(ref db) = state.store {
-        auto_disable_provider(db.as_ref(), &state.user_id, &slug).await;
+        auto_disable_provider(db.as_ref(), &request_identity.principal_id, &slug).await;
     }
     if let Err(e) = reload_llm_runtime(state.as_ref()).await {
         tracing::warn!("Provider Vault runtime reload failed after delete: {}", e);

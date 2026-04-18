@@ -176,9 +176,19 @@ The design goal is simple: values needed before the database exists must be avai
 The setup/runtime defaults relevant to the new transparency surfaces are:
 
 - `agent.subagent_transparency_level = "balanced"`
+- `agent.main_tool_profile = "standard"`
+- `agent.worker_tool_profile = "restricted"`
+- `agent.subagent_tool_profile = "explicit_only"`
 - `channels.telegram_subagent_session_mode = "temp_topic"`
 
 These are runtime settings, not separate onboarding state. Setup may explain or expose them later, but they persist through the same database-backed settings path as the rest of operator preferences.
+
+Profile behavior is intentionally asymmetric:
+
+- `standard` keeps the main agent's full lane-eligible tool surface after policy and approval checks.
+- `restricted` only grants safe read-only orchestrator tools implicitly; anything broader must be granted explicitly.
+- `explicit_only` keeps delegated agents on coordination tools unless the caller grants additional tools.
+- delegated workers and subagents inherit parent `allowed_tools` and `allowed_skills` ceilings unless a narrower request is supplied.
 
 ## Setup Invariants
 

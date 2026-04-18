@@ -32,6 +32,31 @@ use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingProvider, Workspace};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeExecRegistrationMode {
+    Disabled,
+    LocalHost,
+    DockerSandbox,
+}
+
+fn process_registration_mode(workspace_mode: &str) -> RuntimeExecRegistrationMode {
+    match workspace_mode {
+        "sandboxed" | "project" => RuntimeExecRegistrationMode::Disabled,
+        _ => RuntimeExecRegistrationMode::LocalHost,
+    }
+}
+
+fn execute_code_registration_mode(
+    workspace_mode: &str,
+    sandbox_enabled: bool,
+) -> RuntimeExecRegistrationMode {
+    match workspace_mode {
+        "sandboxed" if sandbox_enabled => RuntimeExecRegistrationMode::DockerSandbox,
+        "sandboxed" | "project" => RuntimeExecRegistrationMode::Disabled,
+        _ => RuntimeExecRegistrationMode::LocalHost,
+    }
+}
+
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
 pub struct AppComponents {
@@ -555,6 +580,14 @@ impl AppBuilder {
                     Some(self.config.builder.to_builder_config()),
                     builder_base_dir,
                     builder_working_dir,
+                    (self.config.agent.workspace_mode == "sandboxed"
+                        && self.config.sandbox.enabled)
+                        .then(|| {
+                            Arc::new(crate::sandbox::SandboxManager::new(
+                                self.config.sandbox.to_sandbox_config(),
+                            ))
+                        }),
+                    Some(crate::sandbox::SandboxPolicy::WorkspaceWrite),
                     cost_tracker.clone(),
                 )
                 .await;
@@ -661,113 +694,136 @@ impl AppBuilder {
             let tools = Arc::clone(tools);
             let mcp_sm = Arc::clone(&mcp_session_manager);
             async move {
-                if let Some(ref secrets) = secrets_store {
-                    let servers_result = if let Some(ref d) = db {
-                        load_mcp_servers_from_db(d.as_ref(), "default").await
+                let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+                    if let Some(ref secrets) = secrets_store {
+                        Arc::clone(secrets)
                     } else {
-                        crate::tools::mcp::config::load_mcp_servers().await
+                        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+                        let ephemeral_key = secrecy::SecretString::from(
+                            crate::platform::secure_store::generate_master_key_hex(),
+                        );
+                        let crypto =
+                            Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+                        tracing::debug!(
+                            "Using ephemeral in-memory secrets store for startup MCP loading"
+                        );
+                        Arc::new(InMemorySecretsStore::new(crypto))
                     };
-                    match servers_result {
-                        Ok(servers) => {
-                            let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
-                            if !enabled.is_empty() {
-                                tracing::info!(
-                                    "Loading {} configured MCP server(s)...",
-                                    enabled.len()
-                                );
-                            }
 
-                            let mut join_set = tokio::task::JoinSet::new();
-                            for server in enabled {
-                                let mcp_sm = Arc::clone(&mcp_sm);
-                                let secrets = Arc::clone(secrets);
-                                let tools = Arc::clone(&tools);
+                let servers_result = if let Some(ref d) = db {
+                    load_mcp_servers_from_db(d.as_ref(), "default").await
+                } else {
+                    crate::tools::mcp::config::load_mcp_servers().await
+                };
+                match servers_result {
+                    Ok(servers) => {
+                        let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
+                        if !enabled.is_empty() {
+                            tracing::info!("Loading {} configured MCP server(s)...", enabled.len());
+                        }
 
-                                join_set.spawn(async move {
-                                    let server_name = server.name.clone();
+                        let mut join_set = tokio::task::JoinSet::new();
+                        for server in enabled {
+                            let mcp_sm = Arc::clone(&mcp_sm);
+                            let secrets = Arc::clone(&secrets);
+                            let tools = Arc::clone(&tools);
+                            let config_store = crate::tools::mcp::config::McpConfigStore::new(
+                                db.clone(),
+                                "default",
+                            );
 
-                                    // Use from_config for automatic transport dispatch
-                                    // (handles both stdio and HTTP)
-                                    let client = if server.is_stdio() {
-                                        match McpClient::new_stdio(&server) {
-                                            Ok(c) => c,
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Failed to spawn stdio MCP server '{}': {}",
-                                                    server_name,
-                                                    e
-                                                );
-                                                return;
-                                            }
-                                        }
-                                    } else {
-                                        let has_tokens =
-                                            is_authenticated(&server, &secrets, "default").await;
+                            join_set.spawn(async move {
+                                let server_name = server.name.clone();
 
-                                        if has_tokens || server.requires_auth() {
-                                            McpClient::new_authenticated(
-                                                server, mcp_sm, secrets, "default",
-                                            )
-                                        } else {
-                                            McpClient::new_with_name(&server_name, &server.url)
-                                        }
-                                    };
-
-                                    match client.list_tools().await {
-                                        Ok(mcp_tools) => {
-                                            let tool_count = mcp_tools.len();
-                                            match client.create_tools().await {
-                                                Ok(tool_impls) => {
-                                                    for tool in tool_impls {
-                                                        tools.register(tool).await;
-                                                    }
-                                                    tracing::info!(
-                                                        "Loaded {} tools from MCP server '{}'",
-                                                        tool_count,
-                                                        server_name
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        "Failed to create tools from MCP server '{}': {}",
-                                                        server_name,
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        }
+                                let client = if server.is_stdio() {
+                                    match McpClient::new_stdio_with_store(
+                                        &server,
+                                        Some(config_store.clone()),
+                                    ) {
+                                        Ok(c) => c,
                                         Err(e) => {
-                                            let err_str = e.to_string();
-                                            if err_str.contains("401")
-                                                || err_str.contains("authentication")
-                                            {
-                                                tracing::warn!(
-                                                    "MCP server '{}' requires authentication. \
-                                                     Run: thinclaw mcp auth {}",
-                                                    server_name,
+                                            tracing::warn!(
+                                                "Failed to spawn stdio MCP server '{}': {}",
+                                                server_name,
+                                                e
+                                            );
+                                            return;
+                                        }
+                                    }
+                                } else {
+                                    let has_tokens =
+                                        is_authenticated(&server, &secrets, "default").await;
+
+                                    if has_tokens || server.requires_auth() {
+                                        McpClient::new_authenticated_with_store(
+                                            server,
+                                            mcp_sm,
+                                            secrets,
+                                            "default",
+                                            Some(config_store.clone()),
+                                        )
+                                    } else {
+                                        McpClient::new_configured_with_store(
+                                            server.clone(),
+                                            Some(config_store.clone()),
+                                        )
+                                    }
+                                };
+
+                                match client.list_tools().await {
+                                    Ok(mcp_tools) => {
+                                        let tool_count = mcp_tools.len();
+                                        match client.create_tools().await {
+                                            Ok(tool_impls) => {
+                                                for tool in tool_impls {
+                                                    tools.register(tool).await;
+                                                }
+                                                tracing::info!(
+                                                    "Loaded {} tools from MCP server '{}'",
+                                                    tool_count,
                                                     server_name
                                                 );
-                                            } else {
+                                            }
+                                            Err(e) => {
                                                 tracing::warn!(
-                                                    "Failed to connect to MCP server '{}': {}",
+                                                    "Failed to create tools from MCP server '{}': {}",
                                                     server_name,
                                                     e
                                                 );
                                             }
                                         }
                                     }
-                                });
-                            }
-
-                            while let Some(result) = join_set.join_next().await {
-                                if let Err(e) = result {
-                                    tracing::warn!("MCP server loading task panicked: {}", e);
+                                    Err(e) => {
+                                        let err_str = e.to_string();
+                                        if err_str.contains("401")
+                                            || err_str.contains("authentication")
+                                        {
+                                            tracing::warn!(
+                                                "MCP server '{}' requires authentication. \
+                                                 Run: thinclaw mcp auth {}",
+                                                server_name,
+                                                server_name
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                "Failed to connect to MCP server '{}': {}",
+                                                server_name,
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
+                            });
+                        }
+
+                        while let Some(result) = join_set.join_next().await {
+                            if let Err(e) = result {
+                                tracing::warn!("MCP server loading task panicked: {}", e);
                             }
                         }
-                        Err(e) => {
-                            tracing::debug!("No MCP servers configured ({})", e);
-                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("No MCP servers configured ({})", e);
                     }
                 }
             }
@@ -851,10 +907,14 @@ impl AppBuilder {
                     // Ensure directory exists
                     let _ = std::fs::create_dir_all(&dir);
                     tracing::info!("[app] Workspace mode: sandboxed → {}", dir.display());
-                    tools.register_dev_tools_with_safety(
+                    tools.register_dev_tools_with_runtime(
                         Some(dir.clone()),
                         Some(dir),
                         Some(&self.config.safety),
+                        Some(Arc::new(crate::sandbox::SandboxManager::new(
+                            self.config.sandbox.to_sandbox_config(),
+                        ))),
+                        Some(crate::sandbox::SandboxPolicy::WorkspaceWrite),
                     );
                 }
                 "project" => {
@@ -864,10 +924,12 @@ impl AppBuilder {
                     });
                     let _ = std::fs::create_dir_all(&dir);
                     tracing::info!("[app] Workspace mode: project → {}", dir.display());
-                    tools.register_dev_tools_with_safety(
+                    tools.register_dev_tools_with_runtime(
                         None,
                         Some(dir),
                         Some(&self.config.safety),
+                        None,
+                        None,
                     );
                 }
                 _ => {
@@ -875,7 +937,13 @@ impl AppBuilder {
                     // The agent can write to any absolute path the user/LLM specifies.
                     // (This mode is intended for remote/server deployments or power users.)
                     tracing::info!("[app] Workspace mode: unrestricted (full filesystem access)");
-                    tools.register_dev_tools_with_safety(None, None, Some(&self.config.safety));
+                    tools.register_dev_tools_with_runtime(
+                        None,
+                        None,
+                        Some(&self.config.safety),
+                        None,
+                        None,
+                    );
                 }
             }
         }
@@ -884,11 +952,33 @@ impl AppBuilder {
         let screen_capture_enabled = std::env::var("SCREEN_CAPTURE_ENABLED")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
-        if self.config.agent.allow_local_tools && screen_capture_enabled {
+        let reckless_desktop_capture = self.config.desktop_autonomy.is_reckless_enabled()
+            && self.config.desktop_autonomy.capture_evidence;
+        if self.config.agent.allow_local_tools
+            && (screen_capture_enabled || reckless_desktop_capture)
+        {
             use crate::tools::builtin::ScreenCaptureTool;
             tools.register_sync(Arc::new(ScreenCaptureTool::new()));
             tracing::info!("Registered screen capture tool (enabled via user toggle)");
         }
+
+        let _desktop_autonomy_manager = if self.config.desktop_autonomy.is_reckless_enabled() {
+            let manager = Arc::new(crate::desktop_autonomy::DesktopAutonomyManager::new(
+                self.config.desktop_autonomy.clone(),
+                Some(self.config.database.clone()),
+                self.db.clone(),
+            ));
+            crate::desktop_autonomy::install_global_manager(Some(Arc::clone(&manager)));
+            tools.register_desktop_autonomy_tools(Arc::clone(&manager));
+            tracing::info!(
+                deployment_mode = manager.config().deployment_mode.as_str(),
+                "Reckless desktop autonomy manager initialized"
+            );
+            Some(manager)
+        } else {
+            crate::desktop_autonomy::install_global_manager(None);
+            None
+        };
 
         // Hermes-parity runtime tools.
         tools.register_todo_tool(crate::tools::builtin::new_shared_todo_store());
@@ -896,11 +986,25 @@ impl AppBuilder {
         if self.config.agent.allow_local_tools {
             let process_registry: crate::tools::builtin::SharedProcessRegistry =
                 Arc::new(tokio::sync::RwLock::new(Default::default()));
-            crate::tools::builtin::start_reaper(Arc::clone(&process_registry));
-            tools.register_process_tool(process_registry);
-
             let mode = self.config.agent.workspace_mode.as_str();
             let root = self.config.agent.workspace_root.clone();
+            let sandbox_backend = Arc::new(crate::sandbox::SandboxManager::new(
+                self.config.sandbox.to_sandbox_config(),
+            ));
+
+            match process_registration_mode(mode) {
+                RuntimeExecRegistrationMode::LocalHost => {
+                    crate::tools::builtin::start_reaper(Arc::clone(&process_registry));
+                    tools.register_process_tool(process_registry);
+                }
+                RuntimeExecRegistrationMode::Disabled => {
+                    tracing::info!(
+                        workspace_mode = mode,
+                        "Background process tool disabled in restricted workspace mode"
+                    );
+                }
+                RuntimeExecRegistrationMode::DockerSandbox => unreachable!(),
+            }
 
             match mode {
                 "sandboxed" => {
@@ -913,7 +1017,30 @@ impl AppBuilder {
                             .join("agent_workspace")
                     });
                     let _ = std::fs::create_dir_all(&dir);
-                    tools.register_execute_code_tool(Some(dir.clone()), false);
+                    match execute_code_registration_mode(mode, self.config.sandbox.enabled) {
+                        RuntimeExecRegistrationMode::DockerSandbox => {
+                            let backend =
+                                crate::tools::execution_backend::DockerSandboxExecutionBackend::new(
+                                    Arc::clone(&sandbox_backend),
+                                    crate::sandbox::SandboxPolicy::WorkspaceWrite,
+                                );
+                            tools.register_execute_code_tool_with_backend(
+                                Some(dir.clone()),
+                                false,
+                                Some(backend),
+                            );
+                        }
+                        RuntimeExecRegistrationMode::Disabled => {
+                            tracing::warn!(
+                                workspace_mode = mode,
+                                sandbox_enabled = self.config.sandbox.enabled,
+                                "execute_code disabled because no isolated execution backend is available"
+                            );
+                        }
+                        RuntimeExecRegistrationMode::LocalHost => {
+                            tools.register_execute_code_tool(Some(dir.clone()), false);
+                        }
+                    }
                     tools.register_search_files_tool(Some(dir));
                 }
                 "project" => {
@@ -921,7 +1048,29 @@ impl AppBuilder {
                         dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
                     });
                     let _ = std::fs::create_dir_all(&dir);
-                    tools.register_execute_code_tool(Some(dir.clone()), false);
+                    match execute_code_registration_mode(mode, self.config.sandbox.enabled) {
+                        RuntimeExecRegistrationMode::Disabled => {
+                            tracing::info!(
+                                workspace_mode = mode,
+                                "execute_code disabled in project mode because it has no hard execution isolation there"
+                            );
+                        }
+                        RuntimeExecRegistrationMode::DockerSandbox => {
+                            let backend =
+                                crate::tools::execution_backend::DockerSandboxExecutionBackend::new(
+                                    Arc::clone(&sandbox_backend),
+                                    crate::sandbox::SandboxPolicy::WorkspaceWrite,
+                                );
+                            tools.register_execute_code_tool_with_backend(
+                                Some(dir.clone()),
+                                false,
+                                Some(backend),
+                            );
+                        }
+                        RuntimeExecRegistrationMode::LocalHost => {
+                            tools.register_execute_code_tool(Some(dir.clone()), false);
+                        }
+                    }
                     tools.register_search_files_tool(Some(dir));
                 }
                 _ => {
@@ -960,11 +1109,17 @@ impl AppBuilder {
 
         let phase_start = std::time::Instant::now();
         self.init_database().await?;
-        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis(), "Startup phase: database");
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Startup phase: database"
+        );
 
         let phase_start = std::time::Instant::now();
         self.init_secrets().await?;
-        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis(), "Startup phase: secrets");
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Startup phase: secrets"
+        );
 
         let providers_settings = self.providers_settings.clone().unwrap_or_default();
         let primed_oauth_credentials =
@@ -1100,7 +1255,10 @@ impl AppBuilder {
         let (safety, tools, embeddings, workspace) = self
             .init_tools(&llm, cheap_llm.as_ref(), Some(Arc::clone(&cost_tracker)))
             .await?;
-        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis(), "Startup phase: tools");
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Startup phase: tools"
+        );
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -1117,7 +1275,10 @@ impl AppBuilder {
             catalog_entries,
             dev_loaded_tool_names,
         ) = self.init_extensions(&tools, &hooks).await?;
-        tracing::info!(elapsed_ms = phase_start.elapsed().as_millis(), "Startup phase: extensions");
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Startup phase: extensions"
+        );
 
         // Wire the lifecycle audit hook into the extension manager so
         // install/activate/remove events are recorded for the UI.
@@ -1404,5 +1565,46 @@ impl AppBuilder {
             ))),
             routing_policy: Arc::clone(&llm_runtime.routing_policy),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restricted_modes_disable_background_processes() {
+        assert_eq!(
+            process_registration_mode("sandboxed"),
+            RuntimeExecRegistrationMode::Disabled
+        );
+        assert_eq!(
+            process_registration_mode("project"),
+            RuntimeExecRegistrationMode::Disabled
+        );
+        assert_eq!(
+            process_registration_mode("unrestricted"),
+            RuntimeExecRegistrationMode::LocalHost
+        );
+    }
+
+    #[test]
+    fn execute_code_requires_real_isolation_in_restricted_modes() {
+        assert_eq!(
+            execute_code_registration_mode("sandboxed", true),
+            RuntimeExecRegistrationMode::DockerSandbox
+        );
+        assert_eq!(
+            execute_code_registration_mode("sandboxed", false),
+            RuntimeExecRegistrationMode::Disabled
+        );
+        assert_eq!(
+            execute_code_registration_mode("project", true),
+            RuntimeExecRegistrationMode::Disabled
+        );
+        assert_eq!(
+            execute_code_registration_mode("unrestricted", false),
+            RuntimeExecRegistrationMode::LocalHost
+        );
     }
 }

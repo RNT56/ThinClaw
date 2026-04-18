@@ -71,6 +71,7 @@ pub enum ValidationErrorCode {
     TooLong,
     TooShort,
     InvalidFormat,
+    SchemaViolation,
     ForbiddenContent,
     InvalidEncoding,
     SuspiciousPattern,
@@ -225,6 +226,43 @@ impl Validator {
         }
 
         check_strings(params, self, &mut result);
+        result
+    }
+
+    /// Validate tool parameters against a JSON Schema.
+    pub fn validate_tool_params_against_schema(
+        &self,
+        schema: &serde_json::Value,
+        params: &serde_json::Value,
+    ) -> ValidationResult {
+        let compiled = match jsonschema::JSONSchema::compile(schema) {
+            Ok(compiled) => compiled,
+            Err(err) => {
+                return ValidationResult::error(ValidationError {
+                    field: "schema".to_string(),
+                    message: format!("Tool schema is invalid: {err}"),
+                    code: ValidationErrorCode::SchemaViolation,
+                });
+            }
+        };
+
+        let mut result = ValidationResult::ok();
+        if let Err(errors) = compiled.validate(params) {
+            for err in errors {
+                let path = err.instance_path.to_string();
+                let field = if path.is_empty() {
+                    "parameters".to_string()
+                } else {
+                    path
+                };
+                result = result.merge(ValidationResult::error(ValidationError {
+                    field,
+                    message: err.to_string(),
+                    code: ValidationErrorCode::SchemaViolation,
+                }));
+            }
+        }
+
         result
     }
 }

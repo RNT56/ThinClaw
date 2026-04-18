@@ -183,7 +183,8 @@ impl Tool for HttpTool {
     }
 
     fn description(&self) -> &str {
-        "Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods."
+        "Make raw HTTP requests to external URLs and APIs. Use this when you need a \
+         network call and there is no more specific built-in or extension tool for the service."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

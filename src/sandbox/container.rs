@@ -66,6 +66,17 @@ pub struct ContainerRunner {
 }
 
 impl ContainerRunner {
+    fn push_log_chunk(target: &mut String, text: &str, half_max: usize, truncated: &mut bool) {
+        if target.len() + text.len() > half_max {
+            *truncated = true;
+            let remaining = half_max.saturating_sub(target.len());
+            let safe = crate::util::floor_char_boundary(text, remaining.min(text.len()));
+            target.push_str(&text[..safe]);
+        } else {
+            target.push_str(text);
+        }
+    }
+
     /// Create a new container runner.
     pub fn new(docker: Docker, image: String, proxy_port: u16) -> Self {
         Self {
@@ -125,12 +136,13 @@ impl ContainerRunner {
         policy: SandboxPolicy,
         limits: &ResourceLimits,
         env: HashMap<String, String>,
+        allow_network: bool,
     ) -> Result<ContainerOutput> {
         let start_time = std::time::Instant::now();
 
         // Create the container
         let container_id = self
-            .create_container(command, working_dir, policy, limits, env)
+            .create_container(command, working_dir, policy, limits, env, allow_network)
             .await?;
 
         // Start the container
@@ -221,6 +233,7 @@ impl ContainerRunner {
         policy: SandboxPolicy,
         limits: &ResourceLimits,
         env: HashMap<String, String>,
+        allow_network: bool,
     ) -> Result<String> {
         let working_dir_str = working_dir.display().to_string();
 
@@ -237,7 +250,7 @@ impl ContainerRunner {
             "host.docker.internal"
         };
 
-        if self.proxy_port > 0 && policy.is_sandboxed() {
+        if allow_network && self.proxy_port > 0 && policy.is_sandboxed() {
             env_vec.push(format!(
                 "http_proxy=http://{}:{}",
                 proxy_host, self.proxy_port
@@ -277,8 +290,15 @@ impl ContainerRunner {
             binds: Some(binds),
             memory: Some((limits.memory_bytes) as i64),
             cpu_shares: Some(limits.cpu_shares as i64),
-            auto_remove: Some(true),
-            network_mode: Some("bridge".to_string()),
+            // Keep the container around until after log collection completes.
+            // Fast-running commands can otherwise disappear before `docker logs`
+            // has a chance to read their stdout/stderr.
+            auto_remove: Some(false),
+            network_mode: Some(if allow_network {
+                "bridge".to_string()
+            } else {
+                "none".to_string()
+            }),
             // Security: drop all capabilities and add back only what's needed
             cap_drop: Some(vec!["ALL".to_string()]),
             cap_add: Some(vec!["CHOWN".to_string()]),
@@ -395,27 +415,15 @@ impl ContainerRunner {
             match result {
                 Ok(LogOutput::StdOut { message }) => {
                     let text = String::from_utf8_lossy(&message);
-                    if stdout.len() + text.len() > half_max {
-                        truncated = true;
-                        let remaining = half_max.saturating_sub(stdout.len());
-                        let safe =
-                            crate::util::floor_char_boundary(&text, remaining.min(text.len()));
-                        stdout.push_str(&text[..safe]);
-                    } else {
-                        stdout.push_str(&text);
-                    }
+                    Self::push_log_chunk(&mut stdout, &text, half_max, &mut truncated);
                 }
                 Ok(LogOutput::StdErr { message }) => {
                     let text = String::from_utf8_lossy(&message);
-                    if stderr.len() + text.len() > half_max {
-                        truncated = true;
-                        let remaining = half_max.saturating_sub(stderr.len());
-                        let safe =
-                            crate::util::floor_char_boundary(&text, remaining.min(text.len()));
-                        stderr.push_str(&text[..safe]);
-                    } else {
-                        stderr.push_str(&text);
-                    }
+                    Self::push_log_chunk(&mut stderr, &text, half_max, &mut truncated);
+                }
+                Ok(LogOutput::Console { message }) => {
+                    let text = String::from_utf8_lossy(&message);
+                    Self::push_log_chunk(&mut stdout, &text, half_max, &mut truncated);
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -445,27 +453,15 @@ impl ContainerRunner {
                 match result {
                     Ok(LogOutput::StdOut { message }) => {
                         let text = String::from_utf8_lossy(&message);
-                        if stdout.len() < half_max {
-                            let remaining = half_max.saturating_sub(stdout.len());
-                            let safe =
-                                crate::util::floor_char_boundary(&text, remaining.min(text.len()));
-                            stdout.push_str(&text[..safe]);
-                            if text.len() > remaining {
-                                truncated = true;
-                            }
-                        }
+                        Self::push_log_chunk(&mut stdout, &text, half_max, &mut truncated);
                     }
                     Ok(LogOutput::StdErr { message }) => {
                         let text = String::from_utf8_lossy(&message);
-                        if stderr.len() < half_max {
-                            let remaining = half_max.saturating_sub(stderr.len());
-                            let safe =
-                                crate::util::floor_char_boundary(&text, remaining.min(text.len()));
-                            stderr.push_str(&text[..safe]);
-                            if text.len() > remaining {
-                                truncated = true;
-                            }
-                        }
+                        Self::push_log_chunk(&mut stderr, &text, half_max, &mut truncated);
+                    }
+                    Ok(LogOutput::Console { message }) => {
+                        let text = String::from_utf8_lossy(&message);
+                        Self::push_log_chunk(&mut stdout, &text, half_max, &mut truncated);
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -537,9 +533,11 @@ pub async fn connect_docker() -> Result<Docker> {
         for sock in unix_socket_candidates() {
             if sock.exists() {
                 let sock_str = sock.to_string_lossy();
-                if let Ok(docker) =
-                    Docker::connect_with_socket(&sock_str, PROBE_TIMEOUT, bollard::API_DEFAULT_VERSION)
-                    && docker.ping().await.is_ok()
+                if let Ok(docker) = Docker::connect_with_socket(
+                    &sock_str,
+                    PROBE_TIMEOUT,
+                    bollard::API_DEFAULT_VERSION,
+                ) && docker.ping().await.is_ok()
                 {
                     return Ok(docker.with_timeout(Duration::from_secs(RUNTIME_TIMEOUT)));
                 }

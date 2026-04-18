@@ -94,7 +94,7 @@ fn normalize_lexical(path: &Path) -> PathBuf {
 /// and then verify it lives under the canonical base. This prevents escapes through
 /// non-existent parent directories where `canonicalize()` would fall back to the
 /// raw (un-normalized) path.
-fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
+pub(crate) fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
     let path = PathBuf::from(path_str);
 
     // Resolve to absolute path
@@ -178,6 +178,17 @@ async fn checkpoint_before_mutation(
     }
 }
 
+fn metadata_base_dir(ctx: &JobContext) -> Option<PathBuf> {
+    ctx.metadata
+        .get("tool_base_dir")
+        .and_then(|value| value.as_str())
+        .map(PathBuf::from)
+}
+
+pub(crate) fn effective_base_dir(ctx: &JobContext, configured: Option<&Path>) -> Option<PathBuf> {
+    metadata_base_dir(ctx).or_else(|| configured.map(Path::to_path_buf))
+}
+
 /// Read file contents tool.
 #[derive(Debug, Default)]
 pub struct ReadFileTool {
@@ -231,7 +242,7 @@ impl Tool for ReadFileTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
@@ -240,7 +251,8 @@ impl Tool for ReadFileTool {
 
         let start = std::time::Instant::now();
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
         // Check file size
         let metadata = fs::metadata(&path)
@@ -379,9 +391,10 @@ impl Tool for WriteFileTool {
             )));
         }
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
-        checkpoint_before_mutation(ctx, &path, self.base_dir.as_deref(), "pre: write_file").await?;
+        checkpoint_before_mutation(ctx, &path, base_dir.as_deref(), "pre: write_file").await?;
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -473,7 +486,7 @@ impl Tool for ListDirTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
@@ -489,7 +502,8 @@ impl Tool for ListDirTool {
 
         let start = std::time::Instant::now();
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
         let mut entries = Vec::new();
         list_dir_inner(&path, &path, recursive, max_depth, 0, &mut entries).await?;
@@ -690,10 +704,10 @@ impl Tool for ApplyPatchTool {
 
         let start = std::time::Instant::now();
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
-        checkpoint_before_mutation(ctx, &path, self.base_dir.as_deref(), "pre: apply_patch")
-            .await?;
+        checkpoint_before_mutation(ctx, &path, base_dir.as_deref(), "pre: apply_patch").await?;
 
         // Read current content
         let content = fs::read_to_string(&path)
@@ -844,7 +858,7 @@ impl Tool for GrepTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let pattern_str = require_str(&params, "pattern")?;
 
@@ -869,7 +883,8 @@ impl Tool for GrepTool {
 
         let start = std::time::Instant::now();
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
         // Build the matcher
         let pattern = if is_regex {

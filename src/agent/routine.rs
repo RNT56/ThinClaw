@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::RoutineError;
+use crate::tools::ToolProfile;
 
 /// A routine is a named, persistent, user-owned task with a trigger and an action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +226,9 @@ pub enum RoutineAction {
         /// Optional skill allowlist for this routine's worker/subagent.
         #[serde(default)]
         allowed_skills: Option<Vec<String>>,
+        /// Optional execution profile override for this routine's worker/subagent.
+        #[serde(default)]
+        tool_profile: Option<ToolProfile>,
     },
     /// Periodic heartbeat: reads HEARTBEAT.md and runs a full agent turn.
     ///
@@ -362,12 +366,22 @@ impl RoutineAction {
                 let allowed_skills = config
                     .get("allowed_skills")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
+                let tool_profile = config
+                    .get("tool_profile")
+                    .and_then(|v| v.as_str())
+                    .and_then(|value| match value {
+                        "standard" => Some(ToolProfile::Standard),
+                        "restricted" => Some(ToolProfile::Restricted),
+                        "explicit_only" => Some(ToolProfile::ExplicitOnly),
+                        _ => None,
+                    });
                 Ok(RoutineAction::FullJob {
                     title,
                     description,
                     max_iterations,
                     allowed_tools,
                     allowed_skills,
+                    tool_profile,
                 })
             }
             "heartbeat" => {
@@ -462,12 +476,14 @@ impl RoutineAction {
                 max_iterations,
                 allowed_tools,
                 allowed_skills,
+                tool_profile,
             } => serde_json::json!({
                 "title": title,
                 "description": description,
                 "max_iterations": max_iterations,
                 "allowed_tools": allowed_tools,
                 "allowed_skills": allowed_skills,
+                "tool_profile": tool_profile.map(|profile| profile.as_str().to_string()),
             }),
             RoutineAction::Heartbeat {
                 light_context,
@@ -1055,6 +1071,7 @@ mod tests {
         next_fire_for_routine, next_schedule_fire_after_in_tz, normalize_cron_expr,
         routine_schedule_uses_timezone,
     };
+    use crate::tools::ToolProfile;
 
     #[test]
     fn test_trigger_roundtrip() {
@@ -1101,15 +1118,17 @@ mod tests {
             max_iterations: 5,
             allowed_tools: Some(vec!["shell".to_string()]),
             allowed_skills: Some(vec!["github".to_string()]),
+            tool_profile: Some(ToolProfile::Restricted),
         };
         let json = action.to_config_json();
         let parsed = RoutineAction::from_db("full_job", json).expect("parse full_job");
         assert!(
-            matches!(parsed, RoutineAction::FullJob { title, max_iterations, allowed_tools, allowed_skills, .. }
+            matches!(parsed, RoutineAction::FullJob { title, max_iterations, allowed_tools, allowed_skills, tool_profile, .. }
             if title == "Deploy review"
                 && max_iterations == 5
                 && allowed_tools == Some(vec!["shell".to_string()])
-                && allowed_skills == Some(vec!["github".to_string()]))
+                && allowed_skills == Some(vec!["github".to_string()])
+                && tool_profile == Some(ToolProfile::Restricted))
         );
     }
 

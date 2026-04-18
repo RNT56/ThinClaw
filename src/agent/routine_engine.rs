@@ -24,6 +24,7 @@ use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_fire_for_routine,
 };
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
+use crate::agent::{AgentRunArtifact, AgentRunStatus};
 use crate::api::experiments as experiments_api;
 use crate::channels::web::types::SseEvent;
 use crate::channels::{IncomingMessage, OutgoingResponse};
@@ -31,6 +32,8 @@ use crate::config::RoutineConfig;
 use crate::db::Database;
 use crate::error::RoutineError;
 use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
+use crate::tools::ToolProfile;
+use crate::tools::execution_backend::routine_engine_runtime_descriptor;
 use crate::workspace::Workspace;
 
 /// The routine execution engine.
@@ -145,6 +148,13 @@ impl RoutineEngine {
     /// Called synchronously from the main loop after handle_message(). The actual
     /// execution is spawned async so this returns quickly.
     pub async fn check_event_triggers(&self, message: &IncomingMessage) -> usize {
+        if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager()
+            && manager.emergency_stop_active()
+        {
+            tracing::warn!("Desktop autonomy emergency stop is active; skipping event routines");
+            return 0;
+        }
+
         let cache = self.event_cache.read().await;
         let mut fired = 0;
 
@@ -199,6 +209,13 @@ impl RoutineEngine {
 
     /// Check all due cron routines and fire them. Called by the cron ticker.
     pub async fn check_cron_triggers(&self) {
+        if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager()
+            && manager.emergency_stop_active()
+        {
+            tracing::warn!("Desktop autonomy emergency stop is active; skipping cron routines");
+            return;
+        }
+
         let routines = match self.store.list_due_cron_routines().await {
             Ok(r) => r,
             Err(e) => {
@@ -531,6 +548,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             max_iterations,
             allowed_tools,
             allowed_skills,
+            tool_profile,
         } => {
             if ctx.subagent_executor.is_some() {
                 execute_as_subagent(
@@ -541,6 +559,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
                     description,
                     allowed_tools.as_deref(),
                     allowed_skills.as_deref(),
+                    *tool_profile,
                 )
                 .await
             } else {
@@ -553,6 +572,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
                     *max_iterations,
                     allowed_tools.as_deref(),
                     allowed_skills.as_deref(),
+                    *tool_profile,
                 )
                 .await
             }
@@ -661,6 +681,46 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     {
         tracing::debug!(routine = %routine.name, error = %err, "Outcome routine contract hook skipped");
     }
+    let run_artifact = AgentRunArtifact::new(
+        "routine_run",
+        match status {
+            RunStatus::Failed => AgentRunStatus::Failed,
+            RunStatus::Ok | RunStatus::Attention | RunStatus::Running => AgentRunStatus::Completed,
+        },
+        run.started_at,
+        completed_run.completed_at,
+    )
+    .with_failure_reason(
+        summary
+            .as_ref()
+            .filter(|_| status == RunStatus::Failed)
+            .cloned(),
+    )
+    .with_runtime_descriptor(Some(&routine_engine_runtime_descriptor()))
+    .with_metadata(serde_json::json!({
+        "event": "routine_run_completed",
+        "routine_id": routine.id,
+        "routine_name": routine.name.clone(),
+        "run_id": completed_run.id,
+        "status": status.to_string(),
+        "result_summary": completed_run.result_summary.clone(),
+        "tokens_used": completed_run.tokens_used,
+    }));
+    let routine_user_id = routine.user_id.clone();
+    let provider_store = Arc::clone(&ctx.store);
+    let mut run_artifact = run_artifact;
+    run_artifact.user_id = Some(routine.user_id.clone());
+    run_artifact.actor_id = Some(routine.owner_actor_id().to_string());
+    tokio::spawn(async move {
+        let harness = crate::agent::AgentRunHarness::new(None);
+        if let Err(err) = harness.append_artifact(&run_artifact).await {
+            tracing::debug!(error = %err, "Failed to append routine run artifact");
+        }
+        let manager = crate::agent::learning::MemoryProviderManager::new(provider_store);
+        manager
+            .session_end_extract(&routine_user_id, &run_artifact)
+            .await;
+    });
 
     // Update routine runtime state
     let now = Utc::now();
@@ -741,6 +801,7 @@ async fn execute_as_subagent(
     description: &str,
     allowed_tools: Option<&[String]>,
     allowed_skills: Option<&[String]>,
+    tool_profile: Option<ToolProfile>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let executor = ctx
         .subagent_executor
@@ -760,6 +821,11 @@ async fn execute_as_subagent(
             routine.name, title, description
         )),
         model: None,
+        task_packet: None,
+        memory_mode: None,
+        tool_mode: None,
+        skill_mode: None,
+        tool_profile,
         allowed_tools: allowed_tools.map(|tools| tools.to_vec()),
         allowed_skills: allowed_skills.map(|skills| skills.to_vec()),
         principal_id: Some(routine.user_id.clone()),
@@ -796,8 +862,13 @@ async fn execute_as_subagent(
                 event: "dispatched".to_string(),
                 run_id: Some(run.id.to_string()),
                 result_summary: Some(format!(
-                    "Subagent spawned (id: {}) — running with full tool access",
-                    result.agent_id
+                    "Subagent spawned (id: {}) — {}",
+                    result.agent_id,
+                    summarize_runtime_capabilities(
+                        tool_profile.unwrap_or(ToolProfile::ExplicitOnly),
+                        allowed_tools,
+                        allowed_skills,
+                    )
                 )),
             });
 
@@ -828,6 +899,7 @@ async fn execute_full_job(
     max_iterations: u32,
     allowed_tools: Option<&[String]>,
     allowed_skills: Option<&[String]>,
+    tool_profile: Option<ToolProfile>,
 ) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     let scheduler = ctx
         .scheduler
@@ -836,8 +908,26 @@ async fn execute_full_job(
             reason: "scheduler not available".to_string(),
         })?;
 
+    if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() {
+        if routine_requests_desktop_capabilities(allowed_tools) {
+            manager
+                .ensure_can_run()
+                .await
+                .map_err(|reason| RoutineError::ExecutionFailed { reason })?;
+        } else if manager.emergency_stop_active() {
+            return Err(RoutineError::ExecutionFailed {
+                reason: "desktop autonomy emergency stop is active".to_string(),
+            });
+        }
+    }
+
     let mut metadata = serde_json::json!({ "max_iterations": max_iterations });
     if let Some(obj) = metadata.as_object_mut() {
+        obj.insert(
+            "actor_id".to_string(),
+            serde_json::json!(routine.owner_actor_id()),
+        );
+        obj.insert("conversation_kind".to_string(), serde_json::json!("direct"));
         if let Some(allowed_tools) = allowed_tools {
             obj.insert(
                 "allowed_tools".to_string(),
@@ -850,11 +940,45 @@ async fn execute_full_job(
                 serde_json::json!(allowed_skills),
             );
         }
+        if let Some(tool_profile) = tool_profile {
+            obj.insert(
+                "tool_profile".to_string(),
+                serde_json::json!(tool_profile.as_str()),
+            );
+        }
+        if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() {
+            obj.insert(
+                "desktop_session".to_string(),
+                serde_json::json!(manager.default_session_id()),
+            );
+            obj.insert(
+                "deployment_mode".to_string(),
+                serde_json::json!(manager.config().deployment_mode.as_str()),
+            );
+            obj.insert(
+                "desktop_run_id".to_string(),
+                serde_json::json!(run.id.to_string()),
+            );
+            obj.insert("recovery_count".to_string(), serde_json::json!(0));
+            obj.insert(
+                "last_verified_snapshot".to_string(),
+                serde_json::Value::Null,
+            );
+            obj.insert(
+                "managed_build_id".to_string(),
+                serde_json::json!(manager.current_build_id()),
+            );
+            obj.insert(
+                "autonomy_profile".to_string(),
+                serde_json::json!(manager.config().profile.as_str()),
+            );
+        }
     }
 
     let job_id = scheduler
         .dispatch_job_for_routine(
             &routine.user_id,
+            routine.owner_actor_id(),
             title,
             description,
             Some(metadata),
@@ -880,7 +1004,12 @@ async fn execute_full_job(
         event: "dispatched".to_string(),
         run_id: Some(run.id.to_string()),
         result_summary: Some(format!(
-            "Job {job_id} queued — worker running with full tool access"
+            "Job {job_id} queued — {}",
+            summarize_runtime_capabilities(
+                tool_profile.unwrap_or(ToolProfile::Restricted),
+                allowed_tools,
+                allowed_skills,
+            )
         )),
     });
 
@@ -899,11 +1028,71 @@ async fn execute_full_job(
     );
 
     let summary = format!(
-        "Dispatched job {job_id} for full execution with tool access (max_iterations: {max_iterations})"
+        "Dispatched job {job_id} for full execution ({}, max_iterations: {max_iterations})",
+        summarize_runtime_capabilities(
+            tool_profile.unwrap_or(ToolProfile::Restricted),
+            allowed_tools,
+            allowed_skills,
+        )
     );
     // Return RunStatus::Running — execute_routine will skip emitting "completed"
     // for this case; the worker emits the real event via WorkerDeps::sse_tx.
     Ok((RunStatus::Running, Some(summary), None))
+}
+
+fn routine_requests_desktop_capabilities(allowed_tools: Option<&[String]>) -> bool {
+    const DESKTOP_TOOLS: &[&str] = &[
+        "desktop_apps",
+        "desktop_ui",
+        "desktop_screen",
+        "desktop_calendar_native",
+        "desktop_numbers_native",
+        "desktop_pages_native",
+    ];
+    allowed_tools.is_some_and(|tools| {
+        tools.iter().any(|tool| {
+            DESKTOP_TOOLS
+                .iter()
+                .any(|desktop| desktop == &tool.as_str())
+        })
+    })
+}
+
+fn summarize_runtime_capabilities(
+    tool_profile: ToolProfile,
+    allowed_tools: Option<&[String]>,
+    allowed_skills: Option<&[String]>,
+) -> String {
+    let tool_grants = allowed_tools
+        .map(|items| {
+            if items.is_empty() {
+                "none".to_string()
+            } else {
+                items.join(", ")
+            }
+        })
+        .unwrap_or_else(|| {
+            if matches!(tool_profile, ToolProfile::ExplicitOnly) {
+                "none".to_string()
+            } else {
+                "implicit".to_string()
+            }
+        });
+    let skill_grants = allowed_skills
+        .map(|items| {
+            if items.is_empty() {
+                "none".to_string()
+            } else {
+                items.join(", ")
+            }
+        })
+        .unwrap_or_else(|| "implicit".to_string());
+    format!(
+        "profile `{}` | tool grants: {} | skill grants: {}",
+        tool_profile.as_str(),
+        tool_grants,
+        skill_grants
+    )
 }
 
 /// Default heartbeat prompt body.
@@ -1090,11 +1279,17 @@ async fn execute_heartbeat(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let metadata = serde_json::json!({ "max_iterations": max_iterations, "heartbeat": true });
+    let metadata = serde_json::json!({
+        "max_iterations": max_iterations,
+        "heartbeat": true,
+        "actor_id": routine.owner_actor_id(),
+        "conversation_kind": "direct",
+    });
 
     let job_id = scheduler
         .dispatch_job_reserved_for_routine(
             &routine.user_id,
+            routine.owner_actor_id(),
             &title,
             &full_prompt,
             Some(metadata),

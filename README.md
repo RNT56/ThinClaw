@@ -39,6 +39,7 @@ It is built around a few core ideas:
 - layered safety around secrets, tools, network access, and external content
 - hybrid extensibility through native Rust, WASM, and MCP
 - a proactive runtime built around channels, routines, memory, and background work
+- an optional privileged desktop-autonomy profile for host-level app control and managed self-rollout
 
 ThinClaw is not just a chat wrapper. It is an agent product built on a runtime that handles identity, sessions, tools, channels, persistence, and policy.
 
@@ -105,6 +106,11 @@ ThinClaw’s safety story is not one toggle. It is split across host-boundary se
 - WASM tools and WASM channels are sandboxed and capability-scoped.
 - Native channels and built-in tools run in the trusted host runtime.
 - MCP servers are operator-trusted external processes or services, not sandboxed plugins.
+- In restricted workspace modes, ThinClaw now avoids overstating execution isolation: background `process` is disabled outside unrestricted mode, `execute_code` only runs in `sandboxed` mode when the Docker sandbox is available, and research `local_docker` trials execute through the same Docker-backed runtime.
+- On macOS, host-local no-network execution uses `sandbox-exec`; on Linux it now uses `bwrap` when available. Docker remains the portable hard-isolation path, and unsupported host-local platforms are reported honestly through runtime metadata instead of being implied as equivalent.
+- Tool outputs and job surfaces now expose runtime backend, runtime family, runtime mode, capabilities, and network-isolation metadata end to end so operators do not have to infer trust and execution behavior from implementation details.
+- `create_job`, including `worker`, `claude_code`, and `codex_code` modes, now executes through the same shared local-host / Docker execution backend family used by the rest of the runtime instead of a separate opaque path.
+- Local research trials persist benchmark summaries into the experiment artifact store and restore the dedicated campaign worktree after each run, so benchmark byproducts do not contaminate later candidate diffs.
 
 That distinction matters, and ThinClaw documents it explicitly instead of pretending every integration has the same trust model.
 
@@ -165,6 +171,7 @@ You can run ThinClaw:
 - Multi-provider LLM routing, failover, and cost controls
 - Operator-facing gateway UI for chat, memory, routines, logs, extensions, providers, and settings
 - Operator-facing transparency controls for subagent detail levels and Telegram subagent session routing
+- Optional reckless desktop autonomy with native app adapters, UI automation, evidence capture, and managed code autorollout/rollback
 
 ## Deployment Modes
 
@@ -173,6 +180,7 @@ You can run ThinClaw:
 | Local standalone | personal machine, laptop, workstation | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | Long-running service | Mac Mini, Linux host, VPS | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | Remote gateway access | LAN, Tailscale, controlled remote use | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| Reckless desktop autonomy | operator-approved host-level desktop automation | [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md) |
 | Scrappy embedding | desktop app workflow | [docs/README.md](docs/README.md) |
 
 Code-backed local default: the gateway listens on port `3000` unless you configure otherwise.
@@ -207,10 +215,12 @@ ThinClaw aims for operator control, but it does not claim that every configured 
 - local data paths, secrets, and policy enforcement are handled in the trusted host runtime
 - WASM components are sandboxed
 - MCP servers, tunnels, LLM providers, and external services are real trust boundaries
+- `desktop_autonomy.profile = "reckless_desktop"` is a privileged mode that adds host-level app/UI/screen control plus managed code promotion and rollback; treat it as a stronger trust grant than a normal local run
 
 Use the deep docs before relying on a surface for sensitive workflows:
 
 - [docs/SECURITY.md](docs/SECURITY.md)
+- [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md)
 - [src/NETWORK_SECURITY.md](src/NETWORK_SECURITY.md)
 - [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md)
 - [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md)
@@ -221,6 +231,7 @@ Start here, then go deeper by topic:
 
 - [docs/README.md](docs/README.md): audience-first docs index
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): standalone, service, remote, and gateway deployment
+- [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md): reckless desktop autonomy profile, bootstrap, launcher, canaries, and rollback
 - [docs/IDENTITY_AND_PERSONALITY.md](docs/IDENTITY_AND_PERSONALITY.md): personality packs, identity stack, and `/personality`
 - [docs/MEMORY_AND_GROWTH.md](docs/MEMORY_AND_GROWTH.md): continuity, memory, compaction, and growth surfaces
 - [docs/RESEARCH_AND_EXPERIMENTS.md](docs/RESEARCH_AND_EXPERIMENTS.md): research tab, experiments, runners, campaigns, and GPU clouds

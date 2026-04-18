@@ -86,7 +86,12 @@ pub(crate) async fn extensions_tools_handler(
         "Tool registry not available".to_string(),
     ))?;
 
-    let definitions = registry.tool_definitions().await;
+    let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
+    let metadata = serde_json::json!({
+        "channel": "web",
+    });
+    let definitions = tool_policies
+        .filter_tool_definitions_for_metadata(registry.tool_definitions().await, &metadata);
     let tools = definitions
         .into_iter()
         .map(|td| ToolInfo {

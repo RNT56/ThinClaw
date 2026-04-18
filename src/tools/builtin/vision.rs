@@ -59,9 +59,9 @@ impl Tool for VisionAnalyzeTool {
     }
 
     fn description(&self) -> &str {
-        "Analyze an image using the multimodal LLM. Provide either a local file path \
-         (image_path) or a URL (image_url). Optionally provide a custom analysis prompt. \
-         Returns the LLM's textual analysis of the image."
+        "Analyze an existing image with the multimodal model. Use this when the task \
+         depends on visual inspection of a screenshot, photo, diagram, or scanned document \
+         and you need a textual understanding of what is visible."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

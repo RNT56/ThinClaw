@@ -17,6 +17,7 @@
 //! - **DenyList**: All tools except explicitly listed ones are available
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -173,15 +174,65 @@ impl ToolPolicyManager {
         &self.default_policy
     }
 
-    /// Load the persisted policy manager from settings, falling back to
-    /// allow-all when settings are unavailable.
-    pub fn load_from_settings() -> Self {
-        let mut settings = crate::settings::Settings::load();
-        let toml_path = crate::settings::Settings::default_toml_path();
-        if let Ok(Some(toml_settings)) = crate::settings::Settings::load_toml(&toml_path) {
-            settings.merge_from(&toml_settings);
+    fn from_env_override(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
         }
-        settings.tool_policies
+        serde_json::from_str(trimmed)
+            .or_else(|_| toml::from_str(trimmed))
+            .ok()
+    }
+
+    fn load_toml_override(path: &Path) -> Option<Self> {
+        let raw = std::fs::read_to_string(path).ok()?;
+        let value = toml::from_str::<toml::Value>(&raw).ok()?;
+        if value.get("tool_policies").is_none() {
+            return None;
+        }
+        crate::settings::Settings::load_toml(path)
+            .ok()
+            .flatten()
+            .map(|settings| settings.tool_policies)
+    }
+
+    fn resolve_from_layers(
+        persisted: Option<&Self>,
+        toml: Option<&Self>,
+        env_override: Option<&str>,
+    ) -> Self {
+        let mut resolved = persisted.cloned().unwrap_or_default();
+        if let Some(toml) = toml {
+            resolved = toml.clone();
+        }
+        if let Some(raw) = env_override
+            && let Some(env) = Self::from_env_override(raw)
+        {
+            resolved = env;
+        }
+        resolved
+    }
+
+    /// Load the effective policy manager using runtime precedence:
+    /// env var > TOML config > persisted settings > defaults.
+    pub fn load_from_settings() -> Self {
+        let persisted = crate::settings::Settings::load();
+        let toml_path = crate::settings::Settings::default_toml_path();
+        let toml = Self::load_toml_override(&toml_path);
+        let env_override = crate::config::helpers::optional_env("THINCLAW_TOOL_POLICIES")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                crate::config::helpers::optional_env("TOOL_POLICIES_JSON")
+                    .ok()
+                    .flatten()
+            });
+
+        Self::resolve_from_layers(
+            Some(&persisted.tool_policies),
+            toml.as_ref(),
+            env_override.as_deref(),
+        )
     }
 
     /// Resolve the effective `(channel, group_id)` scope from job metadata.
@@ -256,6 +307,7 @@ fn metadata_value_as_string(metadata: &serde_json::Value, key: &str) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn test_allow_all_default() {
@@ -383,5 +435,77 @@ mod tests {
         assert!(!deserialized.is_allowed("shell", Some("signal"), None));
         assert!(deserialized.is_allowed("calculator", Some("signal"), Some("group1")));
         assert!(!deserialized.is_allowed("shell", Some("signal"), Some("group1")));
+    }
+
+    #[test]
+    fn layered_resolution_prefers_persisted_over_default() {
+        let mut persisted = ToolPolicyManager::new();
+        persisted.set_default(ToolAccessPolicy::deny(["shell"]));
+
+        let resolved = ToolPolicyManager::resolve_from_layers(Some(&persisted), None, None);
+        assert!(!resolved.is_allowed("shell", None, None));
+        assert!(resolved.is_allowed("calculator", None, None));
+    }
+
+    #[test]
+    fn layered_resolution_prefers_toml_over_persisted() {
+        let mut persisted = ToolPolicyManager::new();
+        persisted.set_default(ToolAccessPolicy::deny(["shell"]));
+
+        let mut toml = ToolPolicyManager::new();
+        toml.set_default(ToolAccessPolicy::allow_only(["calculator"]));
+
+        let resolved = ToolPolicyManager::resolve_from_layers(Some(&persisted), Some(&toml), None);
+        assert!(!resolved.is_allowed("shell", None, None));
+        assert!(resolved.is_allowed("calculator", None, None));
+        assert!(!resolved.is_allowed("search", None, None));
+    }
+
+    #[test]
+    fn layered_resolution_prefers_env_over_toml_and_persisted() {
+        let mut persisted = ToolPolicyManager::new();
+        persisted.set_default(ToolAccessPolicy::deny(["shell"]));
+
+        let mut toml = ToolPolicyManager::new();
+        toml.set_default(ToolAccessPolicy::allow_only(["calculator"]));
+
+        let env = serde_json::json!({
+            "default_policy": {
+                "mode": "deny_list",
+                "tools": ["calculator"]
+            },
+            "channel_policies": {
+                "web": {
+                    "mode": "allow_list",
+                    "tools": ["search"]
+                }
+            },
+            "group_policies": {}
+        })
+        .to_string();
+
+        let resolved =
+            ToolPolicyManager::resolve_from_layers(Some(&persisted), Some(&toml), Some(&env));
+        assert!(resolved.is_allowed("shell", None, None));
+        assert!(!resolved.is_allowed("calculator", None, None));
+        assert!(resolved.is_allowed("search", Some("web"), None));
+        assert!(!resolved.is_allowed("shell", Some("web"), None));
+    }
+
+    #[test]
+    fn toml_override_parses_tool_policy_section() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("config.toml");
+        let mut settings = crate::settings::Settings::default();
+        settings.tool_policies.default_policy = ToolAccessPolicy::allow_only(["search"]);
+        settings
+            .tool_policies
+            .set_channel_policy("web", ToolAccessPolicy::deny(["search"]));
+        let raw = toml::to_string(&settings).expect("serialize settings to toml");
+        std::fs::write(&path, raw).expect("write toml");
+
+        let resolved = ToolPolicyManager::load_toml_override(&path).expect("parse toml override");
+        assert!(resolved.is_allowed("search", None, None));
+        assert!(!resolved.is_allowed("search", Some("web"), None));
     }
 }

@@ -56,6 +56,7 @@ pub mod cli;
 pub mod config;
 pub mod context;
 pub mod db;
+pub mod desktop_autonomy;
 #[cfg(feature = "document-extraction")]
 pub mod document_extraction;
 pub mod error;

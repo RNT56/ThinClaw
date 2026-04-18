@@ -658,6 +658,7 @@ impl Store {
     pub async fn update_conversation_identity(
         &self,
         id: Uuid,
+        principal_id: Option<&str>,
         actor_id: Option<&str>,
         conversation_scope_id: Option<Uuid>,
         conversation_kind: ConversationKind,
@@ -667,14 +668,16 @@ impl Store {
         conn.execute(
             r#"
             UPDATE conversations
-            SET actor_id = $2,
-                conversation_scope_id = COALESCE($3, conversation_scope_id),
-                conversation_kind = $4,
-                stable_external_conversation_key = COALESCE($5, stable_external_conversation_key)
+            SET user_id = COALESCE($2, user_id),
+                actor_id = $3,
+                conversation_scope_id = COALESCE($4, conversation_scope_id),
+                conversation_kind = $5,
+                stable_external_conversation_key = COALESCE($6, stable_external_conversation_key)
             WHERE id = $1
             "#,
             &[
                 &id,
+                &principal_id,
                 &actor_id,
                 &conversation_scope_id,
                 &conversation_kind.as_str(),
@@ -743,7 +746,10 @@ impl Store {
                         ) AS title
                     FROM conversations c
                     WHERE c.user_id = $1
-                      AND c.actor_id = $2
+                      AND (
+                        c.actor_id = $2
+                        OR ((c.actor_id IS NULL OR btrim(c.actor_id) = '') AND $2 = $1)
+                      )
                       AND c.conversation_kind IN {}
                     ORDER BY c.last_activity DESC
                     LIMIT $3
@@ -2869,6 +2875,25 @@ impl Store {
             )
             .await?;
         Ok(rows.iter().map(learning_candidate_from_row).collect())
+    }
+
+    /// Update the canonical proposal payload for an existing learning candidate.
+    pub async fn update_learning_candidate_proposal(
+        &self,
+        candidate_id: Uuid,
+        proposal: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE learning_candidates
+            SET proposal = $2::jsonb
+            WHERE id = $1
+            "#,
+            &[&candidate_id, proposal],
+        )
+        .await?;
+        Ok(())
     }
 
     /// Persist a versioned artifact mutation.

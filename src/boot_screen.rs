@@ -209,9 +209,7 @@ pub fn print_boot_screen(info: &BootInfo) {
     if let Some(ref url) = info.gateway_url {
         // Show the full tokenized URL so the user can copy-paste it directly.
         // This is a local terminal on the operator's own machine — safe to display.
-        println!(
-            "    {muted}gateway{reset}   {warn}{url}{reset}",
-        );
+        println!("    {muted}gateway{reset}   {warn}{url}{reset}",);
         if url.contains("token=") {
             println!(
                 "    {muted}open{reset}      Copy the URL above and paste it into your browser."
@@ -262,7 +260,10 @@ fn redact_gateway_url(url: &str) -> String {
         return parsed.to_string();
     }
 
-    parsed.query_pairs_mut().clear().extend_pairs(pairs.drain(..));
+    parsed
+        .query_pairs_mut()
+        .clear()
+        .extend_pairs(pairs.drain(..));
     parsed.to_string()
 }
 

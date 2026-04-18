@@ -1939,8 +1939,7 @@ mod tests {
 
     #[test]
     fn redact_url_removes_auth() {
-        let redacted =
-            SignalChannel::redact_url("https://user:password@example.com/api/v1/rpc");
+        let redacted = SignalChannel::redact_url("https://user:password@example.com/api/v1/rpc");
         assert!(redacted.contains("**REDACTED**"));
         assert!(!redacted.contains("password"));
     }

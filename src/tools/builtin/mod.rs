@@ -12,11 +12,13 @@ mod browser_cloud;
 mod camera_capture;
 mod canvas;
 mod clarify;
+mod desktop_autonomy;
 mod device_info;
 mod discord_actions;
 mod echo;
 mod execute_code;
 pub mod extension_tools;
+mod external_memory;
 #[cfg(feature = "document-extraction")]
 mod extract_document;
 mod file;
@@ -54,6 +56,7 @@ pub use browser_a11y::AgentBrowserTool;
 pub use camera_capture::CameraCaptureTool;
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};
 pub use clarify::ClarifyTool;
+pub use desktop_autonomy::DesktopAutonomyTool;
 pub use device_info::DeviceInfoTool;
 pub use discord_actions::DiscordActionsTool;
 pub use echo::EchoTool;
@@ -61,6 +64,7 @@ pub use execute_code::ExecuteCodeTool;
 pub use extension_tools::{
     ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
 };
+pub use external_memory::{ExternalMemoryRecallTool, ExternalMemoryStatusTool};
 #[cfg(feature = "document-extraction")]
 pub use extract_document::ExtractDocumentTool;
 pub use file::{ApplyPatchTool, GrepTool, ListDirTool, ReadFileTool, WriteFileTool};

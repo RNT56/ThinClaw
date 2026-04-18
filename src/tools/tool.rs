@@ -20,6 +20,176 @@ pub enum ApprovalRequirement {
     Always,
 }
 
+/// Execution profile for a tool-capable agent lane.
+///
+/// Profiles determine which tools are implicitly available before explicit
+/// grants (for example `allowed_tools`) are considered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolProfile {
+    /// All lane-eligible tools are implicitly available.
+    #[default]
+    Standard,
+    /// Only safe read-only orchestrator tools are implicitly available.
+    Restricted,
+    /// Only coordination tools are implicitly available.
+    ExplicitOnly,
+}
+
+impl ToolProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Restricted => "restricted",
+            Self::ExplicitOnly => "explicit_only",
+        }
+    }
+}
+
+/// Which runtime lane is invoking a tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExecutionLane {
+    Chat,
+    DeferredChat,
+    Scheduler,
+    Worker,
+    WorkerRuntime,
+    Subagent,
+}
+
+impl ToolExecutionLane {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::DeferredChat => "deferred_chat",
+            Self::Scheduler => "scheduler",
+            Self::Worker => "worker",
+            Self::WorkerRuntime => "worker_runtime",
+            Self::Subagent => "subagent",
+        }
+    }
+}
+
+/// Coarse side-effect classification for a tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSideEffectLevel {
+    Read,
+    #[default]
+    Write,
+}
+
+/// Coarse approval classification for a tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolApprovalClass {
+    Never,
+    #[default]
+    Conditional,
+    Always,
+}
+
+/// Narrow routing intents where a tool is considered authoritative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolRouteIntent {
+    CurrentTime,
+    TranscriptHistory,
+    MemoryRecall,
+    LocalState,
+}
+
+/// Internal metadata used for tool routing and policy decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolMetadata {
+    pub authoritative_source: bool,
+    pub live_data: bool,
+    pub side_effect_level: ToolSideEffectLevel,
+    pub approval_class: ToolApprovalClass,
+    pub parallel_safe: bool,
+    #[serde(default)]
+    pub route_intents: Vec<ToolRouteIntent>,
+}
+
+impl ToolMetadata {
+    pub fn coordination() -> Self {
+        Self {
+            authoritative_source: true,
+            live_data: false,
+            side_effect_level: ToolSideEffectLevel::Read,
+            approval_class: ToolApprovalClass::Never,
+            parallel_safe: true,
+            route_intents: Vec::new(),
+        }
+    }
+
+    pub fn read_only() -> Self {
+        Self {
+            side_effect_level: ToolSideEffectLevel::Read,
+            approval_class: ToolApprovalClass::Never,
+            parallel_safe: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn authoritative(intent: ToolRouteIntent) -> Self {
+        Self {
+            authoritative_source: true,
+            route_intents: vec![intent],
+            ..Self::read_only()
+        }
+    }
+
+    pub fn live_authoritative(intent: ToolRouteIntent) -> Self {
+        Self {
+            authoritative_source: true,
+            live_data: true,
+            route_intents: vec![intent],
+            ..Self::read_only()
+        }
+    }
+}
+
+impl Default for ToolMetadata {
+    fn default() -> Self {
+        Self {
+            authoritative_source: false,
+            live_data: false,
+            side_effect_level: ToolSideEffectLevel::Write,
+            approval_class: ToolApprovalClass::Conditional,
+            parallel_safe: false,
+            route_intents: Vec::new(),
+        }
+    }
+}
+
+/// Rich internal descriptor for a tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDescriptor {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+    pub domain: ToolDomain,
+    pub metadata: ToolMetadata,
+}
+
+impl ToolDescriptor {
+    pub fn is_coordination_tool(&self) -> bool {
+        matches!(self.name.as_str(), "agent_think" | "emit_user_message")
+    }
+
+    pub fn is_safe_read_only_orchestrator(&self) -> bool {
+        self.domain == ToolDomain::Orchestrator
+            && self.metadata.side_effect_level == ToolSideEffectLevel::Read
+            && self.metadata.approval_class == ToolApprovalClass::Never
+    }
+
+    pub fn supports_route_intent(&self, intent: ToolRouteIntent) -> bool {
+        self.metadata.route_intents.contains(&intent)
+    }
+}
+
 impl ApprovalRequirement {
     /// Whether this invocation requires approval in contexts where
     /// auto-approve is irrelevant (e.g. autonomous worker/scheduler).
@@ -65,7 +235,8 @@ impl Default for ToolRateLimitConfig {
 ///
 /// Orchestrator tools run in the main agent process (memory access, job mgmt, etc).
 /// Container tools run inside Docker containers (shell, file ops, code mods).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolDomain {
     /// Safe to run in the orchestrator (pure functions, memory, job management).
     Orchestrator,
@@ -110,6 +281,9 @@ pub struct ToolOutput {
     /// Raw output before sanitization (for debugging).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw: Option<String>,
+    /// Optional rich artifacts that callers can render without flattening to text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ToolArtifact>,
 }
 
 impl ToolOutput {
@@ -120,6 +294,7 @@ impl ToolOutput {
             cost: None,
             duration,
             raw: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -130,6 +305,7 @@ impl ToolOutput {
             cost: None,
             duration,
             raw: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -144,6 +320,58 @@ impl ToolOutput {
         self.raw = Some(raw.into());
         self
     }
+
+    /// Attach rich artifacts to this result.
+    pub fn with_artifacts(mut self, artifacts: Vec<ToolArtifact>) -> Self {
+        self.artifacts = artifacts;
+        self
+    }
+
+    /// Append one rich artifact to this result.
+    pub fn push_artifact(mut self, artifact: ToolArtifact) -> Self {
+        self.artifacts.push(artifact);
+        self
+    }
+}
+
+/// Optional rich tool artifacts that can be rendered alongside the JSON result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolArtifact {
+    Text {
+        text: String,
+    },
+    Image {
+        data: String,
+        mime_type: String,
+    },
+    Audio {
+        data: String,
+        mime_type: String,
+    },
+    ResourceLink {
+        uri: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", rename = "mimeType")]
+        mime_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    },
+    EmbeddedResource {
+        uri: String,
+        #[serde(skip_serializing_if = "Option::is_none", rename = "mimeType")]
+        mime_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        blob: Option<String>,
+    },
+    Structured {
+        content: serde_json::Value,
+    },
 }
 
 /// Definition of a tool's parameters using JSON Schema.
@@ -186,6 +414,14 @@ pub trait Tool: Send + Sync {
 
     /// Get the JSON Schema for the tool's parameters.
     fn parameters_schema(&self) -> serde_json::Value;
+
+    /// Internal metadata used for routing and policy decisions.
+    ///
+    /// The default is intentionally conservative so unannotated or dynamic
+    /// tools in restricted lanes require explicit grants.
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::default()
+    }
 
     /// Execute the tool with the given parameters.
     async fn execute(
@@ -261,6 +497,17 @@ pub trait Tool: Send + Sync {
             name: self.name().to_string(),
             description: self.description().to_string(),
             parameters: self.parameters_schema(),
+        }
+    }
+
+    /// Build a rich descriptor for runtime policy decisions.
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: self.name().to_string(),
+            description: self.description().to_string(),
+            parameters: self.parameters_schema(),
+            domain: self.domain(),
+            metadata: self.metadata(),
         }
     }
 }
@@ -408,5 +655,21 @@ mod tests {
         assert!(!ApprovalRequirement::Never.is_required());
         assert!(ApprovalRequirement::UnlessAutoApproved.is_required());
         assert!(ApprovalRequirement::Always.is_required());
+    }
+
+    #[test]
+    fn read_only_metadata_is_safe_for_restricted_profiles() {
+        let metadata = ToolMetadata::read_only();
+        assert_eq!(metadata.approval_class, ToolApprovalClass::Never);
+        assert_eq!(metadata.side_effect_level, ToolSideEffectLevel::Read);
+        assert!(metadata.parallel_safe);
+
+        let live_authoritative = ToolMetadata::live_authoritative(ToolRouteIntent::CurrentTime);
+        assert_eq!(live_authoritative.approval_class, ToolApprovalClass::Never);
+        assert_eq!(
+            live_authoritative.side_effect_level,
+            ToolSideEffectLevel::Read
+        );
+        assert!(live_authoritative.parallel_safe);
     }
 }

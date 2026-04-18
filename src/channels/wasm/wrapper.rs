@@ -646,9 +646,9 @@ impl WasmChannel {
         let workspace_persist_path = crate::platform::state_paths()
             .channels_dir
             .join(format!("{}.workspace.json", &name));
-        let workspace_store = Arc::new(
-            ChannelWorkspaceStore::with_persistence(workspace_persist_path),
-        );
+        let workspace_store = Arc::new(ChannelWorkspaceStore::with_persistence(
+            workspace_persist_path,
+        ));
 
         Self {
             name,
@@ -759,7 +759,12 @@ impl WasmChannel {
                     total_calls += 1;
                     let icon = if *success { "✅" } else { "❌" };
                     let suffix = if *success { "" } else { " — failed" };
-                    lines.push(format!("{} <code>{}</code>{}", icon, html_escape(name), suffix));
+                    lines.push(format!(
+                        "{} <code>{}</code>{}",
+                        icon,
+                        html_escape(name),
+                        suffix
+                    ));
                     if *success {
                         succeeded += 1;
                     } else {
@@ -784,7 +789,11 @@ impl WasmChannel {
         // Footer
         if total_calls > 0 {
             lines.push("───────────────".to_string());
-            let mut footer_parts = vec![format!("{} call{}", total_calls, if total_calls == 1 { "" } else { "s" })];
+            let mut footer_parts = vec![format!(
+                "{} call{}",
+                total_calls,
+                if total_calls == 1 { "" } else { "s" }
+            )];
             if succeeded > 0 {
                 footer_parts.push(format!("{}✅", succeeded));
             }
@@ -1751,27 +1760,33 @@ impl WasmChannel {
                 // Accumulate in debug mode; suppress entirely in standard mode.
                 let is_debug = self.debug_mode.read().map(|g| *g).unwrap_or(false);
                 if is_debug {
-                    self.pending_tool_events.write().await.push(
-                        ToolEventEntry::Started { name: name.clone() },
-                    );
+                    self.pending_tool_events
+                        .write()
+                        .await
+                        .push(ToolEventEntry::Started { name: name.clone() });
                 }
             }
             StatusUpdate::ToolCompleted { name, success, .. } => {
                 let is_debug = self.debug_mode.read().map(|g| *g).unwrap_or(false);
                 if is_debug {
-                    self.pending_tool_events.write().await.push(
-                        ToolEventEntry::Completed { name: name.clone(), success: *success },
-                    );
+                    self.pending_tool_events
+                        .write()
+                        .await
+                        .push(ToolEventEntry::Completed {
+                            name: name.clone(),
+                            success: *success,
+                        });
                 }
             }
             StatusUpdate::ToolResult { preview, .. } => {
                 let is_debug = self.debug_mode.read().map(|g| *g).unwrap_or(false);
                 if is_debug {
-                    self.pending_tool_events.write().await.push(
-                        ToolEventEntry::Result {
+                    self.pending_tool_events
+                        .write()
+                        .await
+                        .push(ToolEventEntry::Result {
                             preview: preview.clone(),
-                        },
-                    );
+                        });
                 }
             }
             // Sub-agent lifecycle: debug-only (noisy orchestration detail).
@@ -2674,9 +2689,7 @@ impl WasmChannel {
         let token = match creds.get("TELEGRAM_BOT_TOKEN").cloned() {
             Some(t) => t,
             None => {
-                tracing::debug!(
-                    "send_telegram_attachments: no TELEGRAM_BOT_TOKEN, skipping"
-                );
+                tracing::debug!("send_telegram_attachments: no TELEGRAM_BOT_TOKEN, skipping");
                 return;
             }
         };
@@ -2696,10 +2709,7 @@ impl WasmChannel {
                 _ => ("sendDocument", "document"),
             };
 
-            let url = format!(
-                "https://api.telegram.org/bot{}/{}",
-                token, api_method
-            );
+            let url = format!("https://api.telegram.org/bot{}/{}", token, api_method);
 
             let filename = attachment
                 .filename
@@ -2898,7 +2908,10 @@ impl Channel for WasmChannel {
         // (before the text response, so files arrive first)
         if !response.attachments.is_empty() {
             let chat_id = msg.metadata.get("chat_id").and_then(|v| v.as_i64());
-            let message_thread_id = msg.metadata.get("message_thread_id").and_then(|v| v.as_i64());
+            let message_thread_id = msg
+                .metadata
+                .get("message_thread_id")
+                .and_then(|v| v.as_i64());
             if let Some(chat_id) = chat_id {
                 self.send_telegram_attachments(chat_id, message_thread_id, &response.attachments)
                     .await;
@@ -3725,6 +3738,7 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             agent_id,
             name,
             task,
+            ..
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::Status,
             message: format!(
@@ -4531,6 +4545,15 @@ mod tests {
                 agent_id: "agent-1".to_string(),
                 name: "Researcher".to_string(),
                 task: "Check brave search".to_string(),
+                task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                    objective: "Check brave search".to_string(),
+                    ..Default::default()
+                },
+                allowed_tools: vec![],
+                allowed_skills: vec![],
+                memory_mode: "provided_context_only".to_string(),
+                tool_mode: "explicit_only".to_string(),
+                skill_mode: "explicit_only".to_string(),
             },
             &metadata,
         );
@@ -4589,6 +4612,15 @@ mod tests {
                 response: "Done".to_string(),
                 duration_ms: 1850,
                 iterations: 3,
+                task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                    objective: "Check brave search".to_string(),
+                    ..Default::default()
+                },
+                allowed_tools: vec![],
+                allowed_skills: vec![],
+                memory_mode: "provided_context_only".to_string(),
+                tool_mode: "explicit_only".to_string(),
+                skill_mode: "explicit_only".to_string(),
             },
             &metadata,
         );

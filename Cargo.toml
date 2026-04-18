@@ -103,6 +103,7 @@ cron = "0.13"
 regex = "1"
 aho-corasick = "1"
 unicode-normalization = "0.1"
+jsonschema = "0.18"
 
 # YAML parsing for SKILL.md frontmatter
 serde_yaml_ng = "0.10"
@@ -171,6 +172,7 @@ ratatui = "0.30.0"
 unicode-width = "0.2.2"
 textwrap = "0.16.2"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+tempfile = "3"
 
 # Document extraction (feature gated)
 pdf-extract = { version = "0.7", optional = true }
@@ -212,7 +214,6 @@ windows-sys = { version = "0.52", features = [
 [dev-dependencies]
 tokio-test = "0.4"
 pretty_assertions = "1"
-tempfile = "3"
 criterion = "0.5"
 insta = { version = "1", features = ["json", "yaml"] }
 

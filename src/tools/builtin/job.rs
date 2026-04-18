@@ -11,20 +11,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
-use crate::history::SandboxJobRecord;
 #[cfg(test)]
 use crate::sandbox_types::{ContainerJobConfig, TokenStore};
-use crate::sandbox_types::{
-    ContainerJobManager, ContainerState, CredentialGrant, JobMode, PendingPrompt,
-};
+use crate::sandbox_types::{ContainerJobManager, CredentialGrant, JobMode, PendingPrompt};
 use crate::secrets::SecretsStore;
+use crate::tools::execution_backend::{
+    DockerSandboxExecutionBackend, ExecutionBackend, JobExecutionRequest, JobOrchestrationContext,
+    LocalHostExecutionBackend,
+};
+#[cfg(test)]
+use crate::tools::execution_backend::{resolve_project_dir, sandbox_job_runtime_descriptor};
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
 /// Resolve a job ID from a full UUID or a short prefix (like git short SHAs).
@@ -173,6 +175,21 @@ impl CreateJobTool {
         self.job_manager.is_some()
     }
 
+    fn job_backend(&self) -> Arc<dyn ExecutionBackend> {
+        let orchestration = Arc::new(JobOrchestrationContext::new(
+            Arc::clone(&self.context_manager),
+            self.job_manager.clone(),
+            self.store.clone(),
+            self.event_tx.clone(),
+            self.inject_tx.clone(),
+        ));
+        if self.sandbox_enabled() {
+            DockerSandboxExecutionBackend::with_job_orchestration(orchestration)
+        } else {
+            LocalHostExecutionBackend::with_job_orchestration(orchestration)
+        }
+    }
+
     fn claude_code_enabled(&self) -> bool {
         self.job_manager
             .as_ref()
@@ -303,47 +320,6 @@ impl CreateJobTool {
         Ok(grants)
     }
 
-    /// Persist a sandbox job record (fire-and-forget).
-    fn persist_job(&self, record: SandboxJobRecord) {
-        if let Some(store) = self.store.clone() {
-            tokio::spawn(async move {
-                if let Err(e) = store.save_sandbox_job(&record).await {
-                    tracing::warn!(job_id = %record.id, "Failed to persist sandbox job: {}", e);
-                }
-            });
-        }
-    }
-
-    /// Update sandbox job status in DB (fire-and-forget).
-    fn update_status(
-        &self,
-        job_id: Uuid,
-        status: &str,
-        success: Option<bool>,
-        message: Option<String>,
-        started_at: Option<chrono::DateTime<Utc>>,
-        completed_at: Option<chrono::DateTime<Utc>>,
-    ) {
-        if let Some(store) = self.store.clone() {
-            let status = status.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = store
-                    .update_sandbox_job_status(
-                        job_id,
-                        &status,
-                        success,
-                        message.as_deref(),
-                        started_at,
-                        completed_at,
-                    )
-                    .await
-                {
-                    tracing::warn!(job_id = %job_id, "Failed to update sandbox job status: {}", e);
-                }
-            });
-        }
-    }
-
     /// Execute via in-memory ContextManager (no sandbox).
     async fn execute_local(
         &self,
@@ -352,27 +328,33 @@ impl CreateJobTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        match self
-            .context_manager
-            .create_job_for_identity(&ctx.user_id, ctx.owner_actor_id(), title, description)
-            .await
-        {
-            Ok(job_id) => {
-                let result = serde_json::json!({
-                    "job_id": job_id.to_string(),
-                    "title": title,
-                    "status": "pending",
-                    "message": format!("Created job '{}'", title)
-                });
-                Ok(ToolOutput::success(result, start.elapsed()))
-            }
-            Err(e) => {
-                let result = serde_json::json!({
-                    "error": e.to_string()
-                });
-                Ok(ToolOutput::success(result, start.elapsed()))
-            }
-        }
+        let result = self
+            .job_backend()
+            .run_job(JobExecutionRequest {
+                title: title.to_string(),
+                description: description.to_string(),
+                principal_id: ctx.user_id.clone(),
+                actor_id: ctx.owner_actor_id().to_string(),
+                wait: false,
+                explicit_project_dir: None,
+                mode: None,
+                credential_grants: Vec::new(),
+            })
+            .await?;
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "job_id": result.job_id.to_string(),
+                "title": title,
+                "status": result.status,
+                "execution_backend": result.runtime.execution_backend,
+                "runtime_family": result.runtime.runtime_family,
+                "runtime_mode": result.runtime.runtime_mode,
+                "runtime_capabilities": result.runtime.runtime_capabilities,
+                "network_isolation": result.runtime.network_isolation,
+                "message": result.message,
+            }),
+            start.elapsed(),
+        ))
     }
 
     /// Execute via sandboxed Docker container.
@@ -386,212 +368,39 @@ impl CreateJobTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let jm = self.job_manager.as_ref().expect("sandbox deps required");
-
-        let job_id = Uuid::new_v4();
-        let (project_dir, browse_id) = resolve_project_dir(explicit_dir, job_id)?;
-        let project_dir_str = project_dir.display().to_string();
-
-        // Serialize credential grants so restarts can reload them.
-        let credential_grants_json = match serde_json::to_string(&credential_grants) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to serialize credential grants for job {}: {}. \
-                     Grants will not survive a restart.",
-                    job_id,
-                    e
-                );
-                String::from("[]")
-            }
-        };
-
-        // Persist the job to DB before creating the container.
-        self.persist_job(SandboxJobRecord {
-            id: job_id,
-            task: task.to_string(),
-            status: "creating".to_string(),
-            user_id: ctx.user_id.clone(),
-            actor_id: ctx.owner_actor_id().to_string(),
-            project_dir: project_dir_str.clone(),
-            success: None,
-            failure_reason: None,
-            created_at: Utc::now(),
-            started_at: None,
-            completed_at: None,
-            credential_grants_json,
-        });
-
-        // Persist the job mode to DB
-        if matches!(mode, JobMode::ClaudeCode | JobMode::CodexCode)
-            && let Some(store) = self.store.clone()
-        {
-            let mode_name = mode.as_str().to_string();
-            let job_id_copy = job_id;
-            tokio::spawn(async move {
-                if let Err(e) = store.update_sandbox_job_mode(job_id_copy, &mode_name).await {
-                    tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
-                }
-            });
-        }
-
-        // Create the container job with the pre-determined job_id.
-        jm.create_job(job_id, task, Some(project_dir), mode, credential_grants)
-            .await
-            .map_err(|e| {
-                self.update_status(
-                    job_id,
-                    "failed",
-                    Some(false),
-                    Some(e.to_string()),
-                    None,
-                    Some(Utc::now()),
-                );
-                ToolError::ExecutionFailed(format!("failed to create container: {}", e))
-            })?;
-
-        // Container started successfully.
-        let now = Utc::now();
-        self.update_status(job_id, "running", None, None, Some(now), None);
-
-        if !wait {
-            // Spawn a background monitor that forwards container agent output
-            // into the main agent loop.
-            //
-            // This monitor is intentionally fire-and-forget: its lifetime is
-            // bound to the broadcast channel (etx) and the inject sender (itx).
-            // When the broadcast sender is dropped during shutdown the
-            // subscription closes and the monitor exits. Likewise, if the agent
-            // loop stops consuming from inject_tx the send will fail and the
-            // monitor terminates. No JoinHandle is retained.
-            if let (Some(etx), Some(itx)) = (&self.event_tx, &self.inject_tx) {
-                crate::agent::job_monitor::spawn_job_monitor(job_id, etx.subscribe(), itx.clone());
-            }
-
-            let result = serde_json::json!({
-                "job_id": job_id.to_string(),
-                "status": "started",
-                "message": "Container started. Use job_events to check status or job_prompt to send follow-up instructions.",
-                "project_dir": project_dir_str,
-                "browse_url": format!("/projects/{}", browse_id),
-            });
-            return Ok(ToolOutput::success(result, start.elapsed()));
-        }
-
-        // Wait for completion by polling the container state.
-        let timeout = Duration::from_secs(600);
-        let poll_interval = Duration::from_secs(2);
-        let deadline = tokio::time::Instant::now() + timeout;
-
-        loop {
-            if tokio::time::Instant::now() > deadline {
-                let _ = jm.stop_job(job_id).await;
-                jm.cleanup_job(job_id).await;
-                self.update_status(
-                    job_id,
-                    "failed",
-                    Some(false),
-                    Some("Timed out (10 minutes)".to_string()),
-                    None,
-                    Some(Utc::now()),
-                );
-                return Err(ToolError::ExecutionFailed(
-                    "container execution timed out (10 minutes)".to_string(),
-                ));
-            }
-
-            match jm.get_handle(job_id).await {
-                Some(handle) => match handle.state {
-                    ContainerState::Running | ContainerState::Creating => {
-                        tokio::time::sleep(poll_interval).await;
-                    }
-                    ContainerState::Stopped => {
-                        let message = handle
-                            .completion_result
-                            .as_ref()
-                            .and_then(|r| r.message.clone())
-                            .unwrap_or_else(|| "Container job completed".to_string());
-                        let success = handle
-                            .completion_result
-                            .as_ref()
-                            .map(|r| r.success)
-                            .unwrap_or(true);
-                        jm.cleanup_job(job_id).await;
-
-                        let finished_at = Utc::now();
-                        if success {
-                            self.update_status(
-                                job_id,
-                                "completed",
-                                Some(true),
-                                None,
-                                None,
-                                Some(finished_at),
-                            );
-                            let result = serde_json::json!({
-                                "job_id": job_id.to_string(),
-                                "status": "completed",
-                                "output": message,
-                                "project_dir": project_dir_str,
-                                "browse_url": format!("/projects/{}", browse_id),
-                            });
-                            return Ok(ToolOutput::success(result, start.elapsed()));
-                        } else {
-                            self.update_status(
-                                job_id,
-                                "failed",
-                                Some(false),
-                                Some(message.clone()),
-                                None,
-                                Some(finished_at),
-                            );
-                            return Err(ToolError::ExecutionFailed(format!(
-                                "container job failed: {}",
-                                message
-                            )));
-                        }
-                    }
-                    ContainerState::Failed => {
-                        let message = handle
-                            .completion_result
-                            .as_ref()
-                            .and_then(|r| r.message.clone())
-                            .unwrap_or_else(|| "unknown failure".to_string());
-                        jm.cleanup_job(job_id).await;
-                        self.update_status(
-                            job_id,
-                            "failed",
-                            Some(false),
-                            Some(message.clone()),
-                            None,
-                            Some(Utc::now()),
-                        );
-                        return Err(ToolError::ExecutionFailed(format!(
-                            "container job failed: {}",
-                            message
-                        )));
-                    }
-                },
-                None => {
-                    self.update_status(
-                        job_id,
-                        "completed",
-                        Some(true),
-                        None,
-                        None,
-                        Some(Utc::now()),
-                    );
-                    let result = serde_json::json!({
-                        "job_id": job_id.to_string(),
-                        "status": "completed",
-                        "output": "Container job completed",
-                        "project_dir": project_dir_str,
-                        "browse_url": format!("/projects/{}", browse_id),
-                    });
-                    return Ok(ToolOutput::success(result, start.elapsed()));
-                }
-            }
-        }
+        let (title, description) = task
+            .split_once("\n\n")
+            .map(|(title, description)| (title.to_string(), description.to_string()))
+            .unwrap_or_else(|| (task.to_string(), task.to_string()));
+        let result = self
+            .job_backend()
+            .run_job(JobExecutionRequest {
+                title,
+                description,
+                principal_id: ctx.user_id.clone(),
+                actor_id: ctx.owner_actor_id().to_string(),
+                wait,
+                explicit_project_dir: explicit_dir,
+                mode: Some(mode),
+                credential_grants,
+            })
+            .await?;
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "job_id": result.job_id.to_string(),
+                "status": result.status,
+                "execution_backend": result.runtime.execution_backend,
+                "runtime_family": result.runtime.runtime_family,
+                "runtime_mode": result.runtime.runtime_mode,
+                "runtime_capabilities": result.runtime.runtime_capabilities,
+                "network_isolation": result.runtime.network_isolation,
+                "message": result.message,
+                "output": result.output,
+                "project_dir": result.project_dir,
+                "browse_url": result.browse_url,
+            }),
+            start.elapsed(),
+        ))
     }
 }
 
@@ -656,77 +465,9 @@ fn validate_env_var_name(name: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn projects_base() -> PathBuf {
     crate::platform::resolve_data_dir("projects")
-}
-
-/// Resolve the project directory, creating it if it doesn't exist.
-///
-/// Auto-creates `~/.thinclaw/projects/{project_id}/` so every sandbox job has a
-/// persistent bind mount that survives container teardown.
-///
-/// When an explicit path is provided (e.g. job restarts reusing the old dir),
-/// it is validated to fall within `~/.thinclaw/projects/` after canonicalization.
-fn resolve_project_dir(
-    explicit: Option<PathBuf>,
-    project_id: Uuid,
-) -> Result<(PathBuf, String), ToolError> {
-    let base = projects_base();
-    std::fs::create_dir_all(&base).map_err(|e| {
-        ToolError::ExecutionFailed(format!(
-            "failed to create projects base {}: {}",
-            base.display(),
-            e
-        ))
-    })?;
-    let canonical_base = base.canonicalize().map_err(|e| {
-        ToolError::ExecutionFailed(format!("failed to canonicalize projects base: {}", e))
-    })?;
-
-    let (canonical_dir, _was_explicit) = match explicit {
-        Some(d) => {
-            // Explicit paths: validate BEFORE creating anything.
-            // The path must already exist (it comes from a previous job run).
-            let canonical = d.canonicalize().map_err(|e| {
-                ToolError::InvalidParameters(format!(
-                    "explicit project dir {} does not exist or is inaccessible: {}",
-                    d.display(),
-                    e
-                ))
-            })?;
-            if !canonical.starts_with(&canonical_base) {
-                return Err(ToolError::InvalidParameters(format!(
-                    "project directory must be under {}",
-                    canonical_base.display()
-                )));
-            }
-            (canonical, true)
-        }
-        None => {
-            let dir = canonical_base.join(project_id.to_string());
-            std::fs::create_dir_all(&dir).map_err(|e| {
-                ToolError::ExecutionFailed(format!(
-                    "failed to create project dir {}: {}",
-                    dir.display(),
-                    e
-                ))
-            })?;
-            let canonical = dir.canonicalize().map_err(|e| {
-                ToolError::ExecutionFailed(format!(
-                    "failed to canonicalize project dir {}: {}",
-                    dir.display(),
-                    e
-                ))
-            })?;
-            (canonical, false)
-        }
-    };
-
-    let browse_id = canonical_dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| project_id.to_string());
-    Ok((canonical_dir, browse_id))
 }
 
 #[async_trait]
@@ -1439,6 +1180,41 @@ mod tests {
             result.result.get("status").unwrap().as_str().unwrap(),
             "pending"
         );
+        assert_eq!(
+            result
+                .result
+                .get("runtime_family")
+                .and_then(|value| value.as_str()),
+            Some("execution_backend")
+        );
+        assert_eq!(
+            result
+                .result
+                .get("runtime_mode")
+                .and_then(|value| value.as_str()),
+            Some("in_memory")
+        );
+    }
+
+    #[test]
+    fn sandbox_job_runtime_descriptor_tracks_mode_capabilities() {
+        let worker = sandbox_job_runtime_descriptor(JobMode::Worker);
+        assert_eq!(worker.runtime_family, "execution_backend");
+        assert_eq!(worker.runtime_mode, "worker");
+        assert!(
+            worker
+                .runtime_capabilities
+                .contains(&"llm_proxy".to_string())
+        );
+
+        let codex = sandbox_job_runtime_descriptor(JobMode::CodexCode);
+        assert_eq!(codex.runtime_mode, "codex_code");
+        assert!(
+            codex
+                .runtime_capabilities
+                .contains(&"codex_cli".to_string())
+        );
+        assert_eq!(codex.network_isolation.as_deref(), Some("hard"));
     }
 
     #[test]

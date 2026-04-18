@@ -254,9 +254,7 @@ impl IMessageChannel {
         // chat.db stores nanoseconds since Apple epoch
         let cutoff_ns = (now_unix - APPLE_EPOCH_OFFSET - max_age_secs as i64) * 1_000_000_000;
 
-        let query = format!(
-            "SELECT MIN(ROWID) FROM message WHERE date > {cutoff_ns};"
-        );
+        let query = format!("SELECT MIN(ROWID) FROM message WHERE date > {cutoff_ns};");
 
         match tokio::process::Command::new("sqlite3")
             .arg(db_path)
@@ -514,15 +512,9 @@ end tell"#
     /// Writes each [`MediaContent`] to a temporary file and attempts to send
     /// it via AppleScript. Failures are logged but do not abort the response
     /// (best-effort delivery since `send file` is unreliable on macOS 14+).
-    async fn send_attachments(
-        recipient: &str,
-        attachments: &[crate::media::MediaContent],
-    ) {
+    async fn send_attachments(recipient: &str, attachments: &[crate::media::MediaContent]) {
         for attachment in attachments {
-            let filename = attachment
-                .filename
-                .as_deref()
-                .unwrap_or("attachment");
+            let filename = attachment.filename.as_deref().unwrap_or("attachment");
 
             // Write to a temp file so osascript can reference a POSIX path
             let tmp_dir = std::env::temp_dir().join("thinclaw_imessage");
@@ -1150,9 +1142,6 @@ mod tests {
             redact("Reach me at +1234567890 or user@example.com"),
             "Reach me at [REDACTED] or [REDACTED]"
         );
-        assert_eq!(
-            redact("No sensitive data here"),
-            "No sensitive data here"
-        );
+        assert_eq!(redact("No sensitive data here"), "No sensitive data here");
     }
 }

@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -15,8 +16,14 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use super::shell_security::{
+    check_safe_bins, classify_hard_block, detect_command_injection, detect_library_injection,
+    requires_explicit_approval,
+};
 use crate::context::JobContext;
-use crate::platform::shell_launcher;
+use crate::tools::execution_backend::{
+    ExecutionBackend, LocalHostExecutionBackend, ProcessStartRequest,
+};
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
 };
@@ -84,15 +91,19 @@ impl OutputBuffer {
 
     /// Read all available content as a string.
     fn read_all(&self) -> String {
+        String::from_utf8_lossy(&self.read_all_bytes()).to_string()
+    }
+
+    fn read_all_bytes(&self) -> Vec<u8> {
         if self.total_written <= self.capacity {
-            String::from_utf8_lossy(&self.data).to_string()
+            self.data.clone()
         } else {
             // Ring buffer wrapped — reconstruct in order
             let start = self.total_written % self.capacity;
             let mut result = Vec::with_capacity(self.capacity);
             result.extend_from_slice(&self.data[start..]);
             result.extend_from_slice(&self.data[..start]);
-            String::from_utf8_lossy(&result).to_string()
+            result
         }
     }
 
@@ -105,15 +116,15 @@ impl OutputBuffer {
         let available_start = self.total_written.saturating_sub(self.capacity);
 
         let effective_offset = offset.max(available_start);
-        let content = self.read_all();
+        let content = self.read_all_bytes();
         let skip = effective_offset.saturating_sub(available_start);
-        let slice = if skip < content.len() {
-            &content[skip..]
+        let content = if skip < content.len() {
+            String::from_utf8_lossy(&content[skip..]).to_string()
         } else {
-            ""
+            String::new()
         };
 
-        (slice.to_string(), self.total_written)
+        (content, self.total_written)
     }
 
     fn total_bytes(&self) -> usize {
@@ -131,12 +142,25 @@ pub struct ProcessEntry {
     pub status: ProcessStatus,
     /// When the process was started.
     pub started_at: Instant,
+    /// Execution backend label.
+    pub backend: String,
+    /// Runtime family label.
+    pub runtime_family: String,
+    /// Runtime mode label.
+    pub runtime_mode: String,
+    /// Runtime capability hints.
+    pub runtime_capabilities: Vec<String>,
+    /// Effective network isolation mode.
+    pub network_isolation: Option<String>,
     /// Output buffer (stdout + stderr interleaved).
     pub output: OutputBuffer,
     /// Handle to the child process (for kill/wait).
     pub child: Option<tokio::process::Child>,
     /// Stdin writer (for write action).
     pub stdin: Option<tokio::process::ChildStdin>,
+    /// Reader completion flags so wait() can return only after streams drain.
+    pub stdout_done: Arc<AtomicBool>,
+    pub stderr_done: Arc<AtomicBool>,
 }
 
 /// Shared process registry.
@@ -169,6 +193,7 @@ impl ProcessRegistry {
                 serde_json::json!({
                     "id": p.id,
                     "command": truncate_str(&p.command, 80),
+                    "backend": p.backend,
                     "status": p.status.to_string(),
                     "runtime_secs": runtime.as_secs(),
                     "output_bytes": p.output.total_bytes(),
@@ -208,18 +233,28 @@ fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+        let boundary = crate::util::floor_char_boundary(s, max.saturating_sub(1));
+        format!("{}…", &s[..boundary])
     }
 }
 
 /// Background process management tool.
 pub struct ProcessTool {
     registry: SharedProcessRegistry,
+    backend: Arc<dyn ExecutionBackend>,
 }
 
 impl ProcessTool {
     pub fn new(registry: SharedProcessRegistry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            backend: LocalHostExecutionBackend::shared(),
+        }
+    }
+
+    pub fn with_backend(mut self, backend: Arc<dyn ExecutionBackend>) -> Self {
+        self.backend = backend;
+        self
     }
 }
 
@@ -230,13 +265,9 @@ impl Tool for ProcessTool {
     }
 
     fn description(&self) -> &str {
-        "Manage background processes. Actions: \
-         'start' (spawn a background command), \
-         'list' (show all tracked processes), \
-         'poll' (read new output from a process), \
-         'wait' (block until a process completes), \
-         'kill' (terminate a process), \
-         'write' (send input to a process's stdin)."
+        "Manage long-running background processes. Use this when a command needs to \
+         keep running across turns or when you need to poll output, wait, send stdin, \
+         or terminate an already-started process."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -276,7 +307,7 @@ impl Tool for ProcessTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = Instant::now();
         let action = require_str(&params, "action")?;
@@ -284,6 +315,27 @@ impl Tool for ProcessTool {
         match action {
             "start" => {
                 let command = require_str(&params, "command")?;
+                if let Some(reason) = classify_hard_block(command) {
+                    return Err(ToolError::NotAuthorized(format!("{}: {}", reason, command)));
+                }
+                if let Some(reason) = detect_command_injection(command) {
+                    return Err(ToolError::NotAuthorized(format!(
+                        "Command injection detected ({}): {}",
+                        reason, command
+                    )));
+                }
+                if let Some(reason) = detect_library_injection(command) {
+                    return Err(ToolError::NotAuthorized(format!(
+                        "Security violation ({}): {}",
+                        reason, command
+                    )));
+                }
+                if let Some(reason) = check_safe_bins(command) {
+                    return Err(ToolError::NotAuthorized(format!(
+                        "Blocked by safe bins policy ({}): {}",
+                        reason, command
+                    )));
+                }
 
                 // Check process limit
                 {
@@ -302,27 +354,54 @@ impl Tool for ProcessTool {
                 }
 
                 // Spawn the process
-                let mut child = shell_launcher()
-                    .tokio_command(command)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .stdin(std::process::Stdio::piped())
-                    .kill_on_drop(true)
-                    .spawn()
-                    .map_err(|e| {
-                        ToolError::ExecutionFailed(format!("Failed to spawn process: {}", e))
-                    })?;
+                let mut started = self
+                    .backend
+                    .start_process(ProcessStartRequest {
+                        command: command.to_string(),
+                        workdir: None,
+                        extra_env: (*ctx.extra_env).clone(),
+                        kill_on_drop: true,
+                    })
+                    .await?;
 
-                let stdin = child.stdin.take();
+                let stdin = started.stdin.take();
+                let stdout = started.stdout.take();
+                let stderr = started.stderr.take();
+                let runtime_family = started.runtime.runtime_family.clone();
+                let runtime_mode = started.runtime.runtime_mode.clone();
+                let runtime_capabilities = started.runtime.runtime_capabilities.clone();
+                let network_isolation = started.runtime.network_isolation.clone();
 
                 let id = {
                     let reg = self.registry.read().await;
                     reg.next_id()
                 };
+                let stdout_done = Arc::new(AtomicBool::new(stdout.is_none()));
+                let stderr_done = Arc::new(AtomicBool::new(stderr.is_none()));
+
+                let entry = ProcessEntry {
+                    id: id.clone(),
+                    command: command.to_string(),
+                    status: ProcessStatus::Running,
+                    started_at: Instant::now(),
+                    backend: started.backend.as_str().to_string(),
+                    runtime_family: runtime_family.clone(),
+                    runtime_mode: runtime_mode.clone(),
+                    runtime_capabilities: runtime_capabilities.clone(),
+                    network_isolation: network_isolation.clone(),
+                    output: OutputBuffer::new(MAX_BUFFER_SIZE),
+                    child: Some(started.child),
+                    stdin,
+                    stdout_done: Arc::clone(&stdout_done),
+                    stderr_done: Arc::clone(&stderr_done),
+                };
+
+                {
+                    let mut reg = self.registry.write().await;
+                    reg.processes.insert(id.clone(), entry);
+                }
 
                 // Set up output capture tasks
-                let stdout = child.stdout.take();
-                let stderr = child.stderr.take();
                 let registry_clone = Arc::clone(&self.registry);
                 let id_clone = id.clone();
 
@@ -330,6 +409,7 @@ impl Tool for ProcessTool {
                 if let Some(stdout) = stdout {
                     let reg = Arc::clone(&registry_clone);
                     let pid = id_clone.clone();
+                    let done = Arc::clone(&stdout_done);
                     tokio::spawn(async move {
                         use tokio::io::AsyncReadExt;
                         let mut reader = stdout;
@@ -346,6 +426,7 @@ impl Tool for ProcessTool {
                                 Err(_) => break,
                             }
                         }
+                        done.store(true, Ordering::SeqCst);
                     });
                 }
 
@@ -353,6 +434,7 @@ impl Tool for ProcessTool {
                 if let Some(stderr) = stderr {
                     let reg = Arc::clone(&registry_clone);
                     let pid = id_clone.clone();
+                    let done = Arc::clone(&stderr_done);
                     tokio::spawn(async move {
                         use tokio::io::AsyncReadExt;
                         let mut reader = stderr;
@@ -369,28 +451,19 @@ impl Tool for ProcessTool {
                                 Err(_) => break,
                             }
                         }
+                        done.store(true, Ordering::SeqCst);
                     });
-                }
-
-                let entry = ProcessEntry {
-                    id: id.clone(),
-                    command: command.to_string(),
-                    status: ProcessStatus::Running,
-                    started_at: Instant::now(),
-                    output: OutputBuffer::new(MAX_BUFFER_SIZE),
-                    child: Some(child),
-                    stdin,
-                };
-
-                {
-                    let mut reg = self.registry.write().await;
-                    reg.processes.insert(id.clone(), entry);
                 }
 
                 Ok(ToolOutput::success(
                     serde_json::json!({
                         "process_id": id,
                         "command": truncate_str(command, 80),
+                        "backend": self.backend.kind().as_str(),
+                        "runtime_family": runtime_family,
+                        "runtime_mode": runtime_mode,
+                        "runtime_capabilities": runtime_capabilities,
+                        "network_isolation": network_isolation,
                         "status": "running"
                     }),
                     start.elapsed(),
@@ -423,6 +496,11 @@ impl Tool for ProcessTool {
                 Ok(ToolOutput::success(
                     serde_json::json!({
                         "process_id": process_id,
+                        "backend": entry.backend.clone(),
+                        "runtime_family": entry.runtime_family.clone(),
+                        "runtime_mode": entry.runtime_mode.clone(),
+                        "runtime_capabilities": entry.runtime_capabilities.clone(),
+                        "network_isolation": entry.network_isolation.clone(),
                         "status": entry.status.to_string(),
                         "output": content,
                         "offset": new_offset,
@@ -457,11 +535,18 @@ impl Tool for ProcessTool {
                             entry.status = ProcessStatus::Completed(status.code().unwrap_or(-1));
                         }
 
-                        if entry.status != ProcessStatus::Running {
+                        let streams_drained = entry.stdout_done.load(Ordering::SeqCst)
+                            && entry.stderr_done.load(Ordering::SeqCst);
+                        if entry.status != ProcessStatus::Running && streams_drained {
                             let output = entry.output.read_all();
                             return Ok(ToolOutput::success(
                                 serde_json::json!({
                                     "process_id": process_id,
+                                    "backend": entry.backend.clone(),
+                                    "runtime_family": entry.runtime_family.clone(),
+                                    "runtime_mode": entry.runtime_mode.clone(),
+                                    "runtime_capabilities": entry.runtime_capabilities.clone(),
+                                    "network_isolation": entry.network_isolation.clone(),
                                     "status": entry.status.to_string(),
                                     "output": truncate_str(&output, 50_000),
                                 }),
@@ -495,6 +580,11 @@ impl Tool for ProcessTool {
                 Ok(ToolOutput::success(
                     serde_json::json!({
                         "process_id": process_id,
+                        "backend": entry.backend.clone(),
+                        "runtime_family": entry.runtime_family.clone(),
+                        "runtime_mode": entry.runtime_mode.clone(),
+                        "runtime_capabilities": entry.runtime_capabilities.clone(),
+                        "network_isolation": entry.network_isolation.clone(),
                         "status": "killed"
                     }),
                     start.elapsed(),
@@ -533,6 +623,11 @@ impl Tool for ProcessTool {
                 Ok(ToolOutput::success(
                     serde_json::json!({
                         "process_id": process_id,
+                        "backend": entry.backend.clone(),
+                        "runtime_family": entry.runtime_family.clone(),
+                        "runtime_mode": entry.runtime_mode.clone(),
+                        "runtime_capabilities": entry.runtime_capabilities.clone(),
+                        "network_isolation": entry.network_isolation.clone(),
                         "bytes_written": input.len(),
                         "success": true
                     }),
@@ -549,6 +644,14 @@ impl Tool for ProcessTool {
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
         match params.get("action").and_then(|v| v.as_str()) {
+            Some("start")
+                if params
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(requires_explicit_approval) =>
+            {
+                ApprovalRequirement::Always
+            }
             Some("list" | "poll" | "wait") => ApprovalRequirement::Never,
             _ => ApprovalRequirement::UnlessAutoApproved,
         }
@@ -610,6 +713,15 @@ mod tests {
         assert_eq!(offset, 5);
     }
 
+    #[test]
+    fn test_output_buffer_read_from_unicode_boundary_is_lossless() {
+        let mut buf = OutputBuffer::new(100);
+        buf.append("A🙂B".as_bytes());
+        let (content, offset) = buf.read_from(1);
+        assert_eq!(content, "🙂B");
+        assert_eq!(offset, "A🙂B".len());
+    }
+
     #[tokio::test]
     async fn test_process_list_empty() {
         let registry = make_registry();
@@ -654,6 +766,37 @@ mod tests {
 
         let status = result.result.get("status").unwrap().as_str().unwrap();
         assert!(status.contains("completed"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_process_wait_drains_tail_output_before_returning() {
+        let registry = make_registry();
+        let tool = ProcessTool::new(registry);
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "action": "start",
+                    "command": "printf first; sleep 0.1; printf second"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("process start should succeed");
+        let pid = result.result.get("process_id").unwrap().as_str().unwrap();
+
+        let result = tool
+            .execute(
+                serde_json::json!({"action": "wait", "process_id": pid, "timeout_secs": 5}),
+                &ctx,
+            )
+            .await
+            .expect("wait should succeed");
+
+        let output = result.result.get("output").unwrap().as_str().unwrap();
+        assert!(output.contains("firstsecond"));
     }
 
     #[tokio::test]
@@ -703,6 +846,39 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("Unknown process"));
+    }
+
+    #[test]
+    fn test_process_start_requires_explicit_approval_for_destructive_command() {
+        let registry = make_registry();
+        let tool = ProcessTool::new(registry);
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({
+                "action": "start",
+                "command": "rm -rf /tmp/test"
+            })),
+            ApprovalRequirement::Always
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_start_blocks_injection_pattern() {
+        let registry = make_registry();
+        let tool = ProcessTool::new(registry);
+        let ctx = JobContext::default();
+
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "action": "start",
+                    "command": "echo aGVsbG8= | base64 -d | sh"
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("injection command should be blocked");
+
+        assert!(err.to_string().contains("Command injection detected"));
     }
 
     #[test]

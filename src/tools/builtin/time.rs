@@ -5,7 +5,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use chrono_tz::Tz;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolMetadata, ToolOutput, ToolRouteIntent, require_str};
 
 /// Tool for getting current time and date operations.
 pub struct TimeTool;
@@ -43,7 +43,9 @@ impl Tool for TimeTool {
     }
 
     fn description(&self) -> &str {
-        "Get current time, convert timezones, or calculate time differences."
+        "Authoritative time source. Use this whenever you need the current time, \
+         date, weekday, or timezone-aware 'now', or when converting and comparing \
+         timestamps. Do not infer the current time from the user's timezone alone."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -74,6 +76,10 @@ impl Tool for TimeTool {
             },
             "required": ["operation"]
         })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::live_authoritative(ToolRouteIntent::CurrentTime)
     }
 
     async fn execute(

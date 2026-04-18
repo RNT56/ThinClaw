@@ -662,7 +662,9 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
                             }
                         }
                         Ok(_) => {
-                            print_error("Homebrew install failed. Try manually: brew install tailscale");
+                            print_error(
+                                "Homebrew install failed. Try manually: brew install tailscale",
+                            );
                             println!();
                             if !confirm("Continue configuring anyway?", false)? {
                                 return Ok(TunnelSettings::default());
@@ -727,7 +729,10 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
     print_info("                     Telegram will fall back to polling mode).");
     println!();
 
-    let funnel = confirm("Use Tailscale Funnel (public internet — needed for webhooks)?", true)?;
+    let funnel = confirm(
+        "Use Tailscale Funnel (public internet — needed for webhooks)?",
+        true,
+    )?;
     let hostname = optional_input("Hostname override", Some("leave empty for auto-detect"))?;
 
     let mode = if funnel {
@@ -742,7 +747,9 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
         print_info("  2. Ensure your ACL policy allows Funnel for this machine");
     } else {
         print_info("Note: Telegram and other webhook channels will use polling mode.");
-        print_info("You can switch to Funnel later by re-running setup or setting TUNNEL_TS_FUNNEL=true.");
+        print_info(
+            "You can switch to Funnel later by re-running setup or setting TUNNEL_TS_FUNNEL=true.",
+        );
     }
     if !is_binary_installed("tailscale") {
         print_info("⚠ Remember to install 'tailscale' before running 'thinclaw run'.");

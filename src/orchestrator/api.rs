@@ -131,11 +131,30 @@ async fn get_job(
         .get_handle(job_id)
         .await
         .ok_or(StatusCode::NOT_FOUND)?;
+    let stored_ctx = if let Some(store) = state.store.as_ref() {
+        store.get_job(job_id).await.ok().flatten()
+    } else {
+        None
+    };
 
     Ok(Json(JobDescription {
         title: format!("Job {}", job_id),
         description: handle.task_description,
         project_dir: handle.project_dir.map(|p| p.display().to_string()),
+        principal_id: stored_ctx.as_ref().map(|ctx| ctx.principal_id.clone()),
+        actor_id: stored_ctx.as_ref().and_then(|ctx| ctx.actor_id.clone()),
+        metadata: stored_ctx.as_ref().map(|ctx| ctx.metadata.clone()),
+        allowed_tools: stored_ctx.as_ref().and_then(|ctx| {
+            crate::tools::ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_tools")
+        }),
+        allowed_skills: stored_ctx.as_ref().and_then(|ctx| {
+            crate::tools::ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_skills")
+        }),
+        tool_profile: stored_ctx
+            .as_ref()
+            .and_then(|ctx| ctx.metadata.get("tool_profile"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
     }))
 }
 
@@ -146,6 +165,7 @@ async fn llm_complete(
 ) -> Result<Json<ProxyCompletionResponse>, StatusCode> {
     let completion_req = CompletionRequest {
         messages: req.messages,
+        context_documents: req.context_documents,
         model: req.model,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
@@ -176,6 +196,7 @@ async fn llm_complete_with_tools(
 ) -> Result<Json<ProxyToolCompletionResponse>, StatusCode> {
     let tool_req = ToolCompletionRequest {
         messages: req.messages,
+        context_documents: req.context_documents,
         tools: req.tools,
         model: req.model,
         max_tokens: req.max_tokens,

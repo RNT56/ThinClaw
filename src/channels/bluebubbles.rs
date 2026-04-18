@@ -57,8 +57,7 @@ const MESSAGE_EVENTS: &[&str] = &["new-message", "message", "updated-message"];
 /// reaction — not a user–typed message — and must be filtered out.
 const TAPBACK_CODES: &[i64] = &[
     // Added
-    2000, 2001, 2002, 2003, 2004, 2005,
-    // Removed
+    2000, 2001, 2002, 2003, 2004, 2005, // Removed
     3000, 3001, 3002, 3003, 3004, 3005,
 ];
 
@@ -260,15 +259,15 @@ impl BlueBubblesChannel {
     /// Connect to the BlueBubbles server and detect capabilities.
     async fn connect(&mut self) -> Result<(), ChannelError> {
         // Ping
-        self.api_get("/api/v1/ping").await.map_err(|e| {
-            ChannelError::StartupFailed {
+        self.api_get("/api/v1/ping")
+            .await
+            .map_err(|e| ChannelError::StartupFailed {
                 name: NAME.to_string(),
                 reason: format!(
                     "Cannot reach BlueBubbles server at {}: {e}",
                     self.config.server_url
                 ),
-            }
-        })?;
+            })?;
 
         // Get server info
         match self.api_get("/api/v1/server/info").await {
@@ -425,10 +424,7 @@ impl BlueBubblesChannel {
 
         match self.api_post("/api/v1/webhook", &payload).await {
             Ok(res) => {
-                let status = res
-                    .get("status")
-                    .and_then(|s| s.as_i64())
-                    .unwrap_or(0);
+                let status = res.get("status").and_then(|s| s.as_i64()).unwrap_or(0);
                 if (200..300).contains(&status) {
                     // Extract webhook ID for cleanup
                     let id = res
@@ -645,10 +641,7 @@ impl BlueBubblesChannel {
 
     /// Query chat metadata and participant list from BlueBubbles.
     #[allow(dead_code)] // Public integration point for diagnostics and tools
-    async fn get_chat_info(
-        &self,
-        chat_id: &str,
-    ) -> Result<serde_json::Value, ChannelError> {
+    async fn get_chat_info(&self, chat_id: &str) -> Result<serde_json::Value, ChannelError> {
         let guid = self.resolve_chat_guid(chat_id).await?;
         let guid = guid.as_deref().unwrap_or(chat_id);
         let encoded = urlencoding::encode(guid);
@@ -760,15 +753,15 @@ impl Channel for BlueBubblesChannel {
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         // Take the pre-created receiver out of the Mutex.
         // This can only be called once (subsequent calls return an error).
-        let rx = self
-            .incoming_rx
-            .lock()
-            .await
-            .take()
-            .ok_or_else(|| ChannelError::StartupFailed {
-                name: NAME.to_string(),
-                reason: "BlueBubbles channel already started (stream taken)".to_string(),
-            })?;
+        let rx =
+            self.incoming_rx
+                .lock()
+                .await
+                .take()
+                .ok_or_else(|| ChannelError::StartupFailed {
+                    name: NAME.to_string(),
+                    reason: "BlueBubbles channel already started (stream taken)".to_string(),
+                })?;
 
         // The webhook handler pushes messages into incoming_tx;
         // the returned stream is what ChannelManager merges into the agent loop.
@@ -825,10 +818,7 @@ impl Channel for BlueBubblesChannel {
             .unwrap_or(&msg.user_id);
 
         // Extract reply-to message GUID for threading
-        let reply_to = msg
-            .metadata
-            .get("message_id")
-            .and_then(|v| v.as_str());
+        let reply_to = msg.metadata.get("message_id").and_then(|v| v.as_str());
 
         // Resolve GUID if needed
         let resolved = self
@@ -1021,9 +1011,7 @@ async fn handle_webhook(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     // Skip tapback reactions delivered as messages
-    let assoc_type = record
-        .get("associatedMessageType")
-        .and_then(|v| v.as_i64());
+    let assoc_type = record.get("associatedMessageType").and_then(|v| v.as_i64());
     if let Some(code) = assoc_type {
         if TAPBACK_CODES.contains(&code) {
             return axum::http::StatusCode::OK;
@@ -1086,7 +1074,13 @@ async fn handle_webhook(
         .and_then(|h| h.get("address"))
         .and_then(|a| a.as_str())
         .map(|s| s.to_string())
-        .or_else(|| first_string(&[record.get("sender"), record.get("from"), record.get("address")]))
+        .or_else(|| {
+            first_string(&[
+                record.get("sender"),
+                record.get("from"),
+                record.get("address"),
+            ])
+        })
         .or_else(|| chat_identifier.clone())
         .or_else(|| chat_guid.clone());
 
@@ -1101,12 +1095,7 @@ async fn handle_webhook(
         .unwrap_or(&sender);
 
     // Check allow-list
-    if !state.allow_from.is_empty()
-        && !state
-            .allow_from
-            .iter()
-            .any(|a| a == "*" || a == &sender)
-    {
+    if !state.allow_from.is_empty() && !state.allow_from.iter().any(|a| a == "*" || a == &sender) {
         return axum::http::StatusCode::OK;
     }
 
@@ -1208,9 +1197,7 @@ async fn handle_webhook(
         let chat = session_chat_id.to_string();
         tokio::spawn(async move {
             let encoded = urlencoding::encode(&chat);
-            let url = format!(
-                "{server_url}/api/v1/chat/{encoded}/read?password={password}"
-            );
+            let url = format!("{server_url}/api/v1/chat/{encoded}/read?password={password}");
             let _ = client
                 .post(&url)
                 .timeout(std::time::Duration::from_secs(5))
@@ -1401,8 +1388,8 @@ mod tests {
     use futures::StreamExt;
     use secrecy::SecretString;
     use std::time::Duration;
-    use tower::ServiceExt;
     use tokio::time::timeout;
+    use tower::ServiceExt;
 
     #[test]
     fn test_normalize_server_url() {
@@ -1476,7 +1463,9 @@ mod tests {
             send_read_receipts: false,
         };
 
-        let channel = BlueBubblesChannel::new(config).await.expect("channel should initialize");
+        let channel = BlueBubblesChannel::new(config)
+            .await
+            .expect("channel should initialize");
         let mut stream = channel.start().await.expect("stream should start");
 
         let app = channel.webhook_routes();
@@ -1493,10 +1482,15 @@ mod tests {
             .method("POST")
             .uri("/bluebubbles-webhook?password=bluebubbles-pass")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&payload).expect("payload should serialize")))
+            .body(Body::from(
+                serde_json::to_vec(&payload).expect("payload should serialize"),
+            ))
             .expect("request should build");
 
-        let response = app.oneshot(request).await.expect("webhook request should be served");
+        let response = app
+            .oneshot(request)
+            .await
+            .expect("webhook request should be served");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
 
         let message = timeout(Duration::from_secs(1), stream.next())
@@ -1523,7 +1517,9 @@ mod tests {
             send_read_receipts: false,
         };
 
-        let channel = BlueBubblesChannel::new(config).await.expect("channel should initialize");
+        let channel = BlueBubblesChannel::new(config)
+            .await
+            .expect("channel should initialize");
         let mut stream = channel.start().await.expect("stream should start");
         let app = channel.webhook_routes();
 
@@ -1538,15 +1534,23 @@ mod tests {
             .method("POST")
             .uri("/bluebubbles-webhook?guid=bluebubbles-pass")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&payload).expect("payload should serialize")))
+            .body(Body::from(
+                serde_json::to_vec(&payload).expect("payload should serialize"),
+            ))
             .expect("request should build");
 
-        let response = app.oneshot(request).await.expect("webhook request should be served");
+        let response = app
+            .oneshot(request)
+            .await
+            .expect("webhook request should be served");
         assert_eq!(response.status(), axum::http::StatusCode::OK);
 
-        assert!(timeout(Duration::from_millis(200), stream.next())
-            .await
-            .is_err(), "unlisted sender should not emit a message");
+        assert!(
+            timeout(Duration::from_millis(200), stream.next())
+                .await
+                .is_err(),
+            "unlisted sender should not emit a message"
+        );
     }
 
     #[test]
@@ -1555,10 +1559,7 @@ mod tests {
             redact_url("http://192.168.1.50:1234/api/v1/ping"),
             "http://192.168.1.50:1234/***"
         );
-        assert_eq!(
-            redact_url("https://my.tunnel.dev"),
-            "https://my.tunnel.dev"
-        );
+        assert_eq!(redact_url("https://my.tunnel.dev"), "https://my.tunnel.dev");
     }
 
     #[test]
@@ -1579,11 +1580,17 @@ mod tests {
     fn test_tapback_codes_range() {
         // Added reactions: 2000-2005
         for code in 2000..=2005 {
-            assert!(TAPBACK_CODES.contains(&code), "tapback code {code} should be present");
+            assert!(
+                TAPBACK_CODES.contains(&code),
+                "tapback code {code} should be present"
+            );
         }
         // Removed reactions: 3000-3005
         for code in 3000..=3005 {
-            assert!(TAPBACK_CODES.contains(&code), "tapback code {code} should be present");
+            assert!(
+                TAPBACK_CODES.contains(&code),
+                "tapback code {code} should be present"
+            );
         }
         // Non-tapback codes should not match
         assert!(!TAPBACK_CODES.contains(&0));
@@ -1603,7 +1610,9 @@ mod tests {
             send_read_receipts: false,
         };
 
-        let channel = BlueBubblesChannel::new(config).await.expect("channel should initialize");
+        let channel = BlueBubblesChannel::new(config)
+            .await
+            .expect("channel should initialize");
         let mut stream = channel.start().await.expect("stream should start");
         let app = channel.webhook_routes();
 
@@ -1630,7 +1639,9 @@ mod tests {
 
         // No message should arrive — tapbacks are filtered
         assert!(
-            timeout(Duration::from_millis(200), stream.next()).await.is_err(),
+            timeout(Duration::from_millis(200), stream.next())
+                .await
+                .is_err(),
             "tapback reaction should not produce a message"
         );
     }
@@ -1647,7 +1658,9 @@ mod tests {
             send_read_receipts: false,
         };
 
-        let channel = BlueBubblesChannel::new(config).await.expect("channel should initialize");
+        let channel = BlueBubblesChannel::new(config)
+            .await
+            .expect("channel should initialize");
         let mut stream = channel.start().await.expect("stream should start");
         let app = channel.webhook_routes();
 
@@ -1660,7 +1673,8 @@ mod tests {
                 "isFromMe": false,
                 "handle": { "address": "bob@example.com" },
             }
-        }).to_string();
+        })
+        .to_string();
         let form_body = format!("payload={}", urlencoding::encode(&json_str));
 
         let request = Request::builder()
@@ -1705,7 +1719,9 @@ mod tests {
             send_read_receipts: false,
         };
 
-        let channel = BlueBubblesChannel::new(config).await.expect("channel should initialize");
+        let channel = BlueBubblesChannel::new(config)
+            .await
+            .expect("channel should initialize");
         let mut stream = channel.start().await.expect("stream should start");
         let app = channel.webhook_routes();
 

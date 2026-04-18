@@ -210,6 +210,21 @@ pub struct OpenClawMeta {
     /// Gating requirements that must be met for the skill to load.
     #[serde(default)]
     pub requires: GatingRequirements,
+    /// Skill provenance classification.
+    #[serde(default)]
+    pub provenance: Option<String>,
+    /// Lifecycle state for generated or learned skills.
+    #[serde(default)]
+    pub lifecycle_status: Option<String>,
+    /// Rolling outcome score for a learned skill.
+    #[serde(default)]
+    pub outcome_score: Option<f64>,
+    /// Number of successful reuse matches observed for this skill.
+    #[serde(default)]
+    pub reuse_count: Option<u32>,
+    /// Explanation for how/why the skill became active.
+    #[serde(default)]
+    pub activation_reason: Option<String>,
 }
 
 /// Requirements that must be satisfied for a skill to load.

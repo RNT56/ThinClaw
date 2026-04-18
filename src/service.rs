@@ -177,7 +177,12 @@ fn uninstall() -> Result<()> {
 
 fn force_service_install() -> bool {
     std::env::var("THINCLAW_FORCE_SERVICE_INSTALL")
-        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 

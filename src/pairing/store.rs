@@ -598,11 +598,7 @@ impl PairingStore {
         }
 
         let path = block_from_path(&self.base_dir, channel)?;
-        let file = match fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-        {
+        let file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
@@ -715,11 +711,7 @@ impl PairingStore {
         }
 
         let path = allow_from_path(&self.base_dir, channel)?;
-        let file = match fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-        {
+        let file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),

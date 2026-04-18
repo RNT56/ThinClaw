@@ -55,6 +55,20 @@ Use the CLI that matches the extension kind:
 
 Do not document these as interchangeable.
 
+## MCP Operator Surfaces
+
+The MCP surface is now split by task instead of a single flat command set:
+
+- `thinclaw mcp server ...` for add, list, show, auth, test, remove, and toggle
+- `thinclaw mcp resource ...` for listing and reading server resources
+- `thinclaw mcp prompt ...` for listing prompts and fetching prompt payloads
+- `thinclaw mcp root ...` for inspecting and changing roots grants
+- `thinclaw mcp log ...` for inspecting and updating server log levels
+
+The WebUI Extensions area also exposes a live MCP browser for server metadata, resources, prompts, OAuth discovery, and pending approval requests such as `sampling/createMessage` and `elicitation/create`.
+
+Roots grants are treated as persisted server policy rather than a one-time startup snapshot. Long-lived MCP clients reload the configured grants when serving `roots/list`, so updated grants are visible to connected servers without requiring a full ThinClaw restart.
+
 ## Recommended Reading Order
 
 - [Tool System](../src/tools/README.md)

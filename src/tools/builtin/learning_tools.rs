@@ -603,6 +603,21 @@ impl Tool for PromptManageTool {
         } else {
             None
         };
+        let orchestrator = Arc::clone(&self.orchestrator);
+        let user_id = ctx.user_id.clone();
+        let mirror_payload = serde_json::json!({
+            "tool": "prompt_manage",
+            "target": target,
+            "resolved_target": resolved_target,
+            "scope": scope,
+            "operation": operation,
+            "content_preview": after.chars().take(240).collect::<String>(),
+        });
+        tokio::spawn(async move {
+            orchestrator
+                .mirror_workspace_write(&user_id, &mirror_payload)
+                .await;
+        });
 
         let version_label = Some(Utc::now().to_rfc3339());
         let provenance = serde_json::json!({

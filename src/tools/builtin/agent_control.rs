@@ -12,7 +12,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolMetadata, ToolOutput, require_str};
 
 /// Internal reasoning / scratchpad tool.
 ///
@@ -53,6 +53,10 @@ impl Tool for AgentThinkTool {
             },
             "required": ["thought"]
         })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::coordination()
     }
 
     async fn execute(
@@ -136,6 +140,10 @@ impl Tool for EmitUserMessageTool {
             },
             "required": ["message"]
         })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::coordination()
     }
 
     async fn execute(

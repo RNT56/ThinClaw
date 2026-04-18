@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use tokio::fs;
 
 use crate::context::JobContext;
+use crate::tools::builtin::file::{effective_base_dir, validate_path};
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
@@ -234,9 +235,8 @@ impl Tool for SearchFilesTool {
     }
 
     fn description(&self) -> &str {
-        "Search for files by filename pattern. Searches a directory recursively for \
-         files and directories whose names contain the given pattern. Useful for finding \
-         files when you don't know their exact path. Use 'grep' to search file contents instead."
+        "Search for files or directories by name pattern. Use this when you know roughly \
+         what a file is called but not where it lives. This finds paths by filename, not content."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -263,7 +263,7 @@ impl Tool for SearchFilesTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -275,11 +275,8 @@ impl Tool for SearchFilesTool {
             .unwrap_or(true);
 
         // Resolve the search path
-        let search_path = if let Some(ref base) = self.base_dir {
-            base.join(path_str)
-        } else {
-            PathBuf::from(path_str)
-        };
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let search_path = validate_path(path_str, base_dir.as_deref())?;
 
         if !search_path.is_dir() {
             return Err(ToolError::ExecutionFailed(format!(

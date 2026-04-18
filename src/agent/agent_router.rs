@@ -21,6 +21,8 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::tools::ToolProfile;
+
 /// Configuration for a single agent workspace.
 #[derive(Debug, Clone)]
 pub struct AgentWorkspace {
@@ -40,6 +42,8 @@ pub struct AgentWorkspace {
     pub allowed_tools: Option<Vec<String>>,
     /// Optional per-agent skill allowlist.
     pub allowed_skills: Option<Vec<String>>,
+    /// Optional execution profile override for this agent workspace.
+    pub tool_profile: Option<ToolProfile>,
     /// Whether this is the default agent (receives unrouted messages).
     pub is_default: bool,
     /// Model override for this agent.
@@ -294,6 +298,7 @@ mod tests {
             trigger_keywords: vec![],
             allowed_tools: None,
             allowed_skills: None,
+            tool_profile: None,
             is_default,
             model: None,
         }

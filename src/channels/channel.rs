@@ -236,6 +236,18 @@ pub enum StatusUpdate {
         name: String,
         /// Task description.
         task: String,
+        /// Canonical bounded task packet.
+        task_packet: crate::agent::subagent_executor::SubagentTaskPacket,
+        /// Effective explicit tool grants after parent intersection.
+        allowed_tools: Vec<String>,
+        /// Effective explicit skill grants after parent intersection.
+        allowed_skills: Vec<String>,
+        /// Effective memory policy.
+        memory_mode: String,
+        /// Effective tool policy.
+        tool_mode: String,
+        /// Effective skill policy.
+        skill_mode: String,
     },
 
     /// A running sub-agent reports progress (tool use, thinking, etc.).
@@ -262,6 +274,18 @@ pub enum StatusUpdate {
         duration_ms: u64,
         /// Number of tool iterations used.
         iterations: usize,
+        /// Canonical bounded task packet.
+        task_packet: crate::agent::subagent_executor::SubagentTaskPacket,
+        /// Effective explicit tool grants after parent intersection.
+        allowed_tools: Vec<String>,
+        /// Effective explicit skill grants after parent intersection.
+        allowed_skills: Vec<String>,
+        /// Effective memory policy.
+        memory_mode: String,
+        /// Effective tool policy.
+        tool_mode: String,
+        /// Effective skill policy.
+        skill_mode: String,
     },
 }
 

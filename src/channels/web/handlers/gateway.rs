@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
 
+use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
@@ -38,6 +39,7 @@ pub(crate) async fn gateway_restart_handler(
 
 pub(crate) async fn gateway_status_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Json<GatewayStatusResponse> {
     let sse_connections = state.sse.connection_count();
     let ws_connections = state
@@ -48,7 +50,8 @@ pub(crate) async fn gateway_status_handler(
 
     let uptime_secs = state.startup_time.elapsed().as_secs();
     let runtime_status = state.llm_runtime.as_ref().map(|runtime| runtime.status());
-    let channel_setup = load_channel_setup_status(state.as_ref()).await;
+    let channel_setup =
+        load_channel_setup_status(state.as_ref(), &request_identity.principal_id).await;
 
     let (daily_cost, actions_this_hour, model_usage, budget_limit_usd, hourly_action_limit) =
         if let Some(ref cg) = state.cost_guard {
@@ -108,9 +111,9 @@ pub(crate) async fn gateway_status_handler(
     })
 }
 
-async fn load_channel_setup_status(state: &GatewayState) -> ChannelSetupStatus {
+async fn load_channel_setup_status(state: &GatewayState, user_id: &str) -> ChannelSetupStatus {
     let settings = if let Some(store) = state.store.as_ref()
-        && let Ok(map) = store.get_all_settings(&state.user_id).await
+        && let Ok(map) = store.get_all_settings(user_id).await
     {
         crate::settings::Settings::from_db_map(&map)
     } else {

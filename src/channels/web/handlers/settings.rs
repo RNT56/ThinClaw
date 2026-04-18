@@ -7,6 +7,7 @@ use axum::{
 };
 
 use crate::channels::web::handlers::providers::reload_llm_runtime;
+use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
@@ -122,15 +123,19 @@ fn telegram_transport_runtime_updates(
 
 pub(crate) async fn settings_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<Json<SettingsListResponse>, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let rows = store.list_settings(&state.user_id).await.map_err(|e| {
-        tracing::error!("Failed to list settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let rows = store
+        .list_settings(&request_identity.principal_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to list settings: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let settings = rows
         .into_iter()
@@ -146,6 +151,7 @@ pub(crate) async fn settings_list_handler(
 
 pub(crate) async fn settings_get_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(key): Path<String>,
 ) -> Result<Json<SettingResponse>, StatusCode> {
     let store = state
@@ -153,7 +159,7 @@ pub(crate) async fn settings_get_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let row = store
-        .get_setting_full(&state.user_id, &key)
+        .get_setting_full(&request_identity.principal_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get setting '{}': {}", key, e);
@@ -170,6 +176,7 @@ pub(crate) async fn settings_get_handler(
 
 pub(crate) async fn settings_set_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(key): Path<String>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
@@ -191,7 +198,7 @@ pub(crate) async fn settings_set_handler(
         crate::timezone::apply_user_timezone_change(
             store,
             state.workspace.as_deref(),
-            &state.user_id,
+            &request_identity.principal_id,
             timezone.as_deref(),
         )
         .await
@@ -253,7 +260,7 @@ pub(crate) async fn settings_set_handler(
     };
 
     store
-        .set_setting(&state.user_id, &key, &body.value)
+        .set_setting(&request_identity.principal_id, &key, &body.value)
         .await
         .map_err(|e| {
             tracing::error!("Failed to set setting '{}': {}", key, e);
@@ -351,6 +358,7 @@ pub(crate) async fn settings_set_handler(
 
 pub(crate) async fn settings_delete_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(key): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
     let store = state
@@ -362,7 +370,7 @@ pub(crate) async fn settings_delete_handler(
         crate::timezone::apply_user_timezone_change(
             store,
             state.workspace.as_deref(),
-            &state.user_id,
+            &request_identity.principal_id,
             None,
         )
         .await
@@ -374,7 +382,7 @@ pub(crate) async fn settings_delete_handler(
     }
 
     store
-        .delete_setting(&state.user_id, &key)
+        .delete_setting(&request_identity.principal_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete setting '{}': {}", key, e);
@@ -454,15 +462,19 @@ pub(crate) async fn settings_delete_handler(
 
 pub(crate) async fn settings_export_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<Json<SettingsExportResponse>, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let settings = store.get_all_settings(&state.user_id).await.map_err(|e| {
-        tracing::error!("Failed to export settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let settings = store
+        .get_all_settings(&request_identity.principal_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to export settings: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let settings = settings
         .into_iter()
@@ -477,6 +489,7 @@ pub(crate) async fn settings_export_handler(
 
 pub(crate) async fn settings_import_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Json(body): Json<SettingsImportRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let store = state
@@ -489,7 +502,7 @@ pub(crate) async fn settings_import_handler(
         None => None,
     };
     store
-        .set_all_settings(&state.user_id, &settings)
+        .set_all_settings(&request_identity.principal_id, &settings)
         .await
         .map_err(|e| {
             tracing::error!("Failed to import settings: {}", e);
@@ -500,7 +513,7 @@ pub(crate) async fn settings_import_handler(
         crate::timezone::apply_user_timezone_change(
             store,
             state.workspace.as_deref(),
-            &state.user_id,
+            &request_identity.principal_id,
             imported_timezone.as_deref(),
         )
         .await

@@ -5,12 +5,23 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
+use futures::future::join_all;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::sandbox_types::{CredentialGrant, JobMode, PendingPrompt};
+use crate::tools::execution_backend::{ExecutionBackendKind, sandbox_job_runtime_descriptor};
+
+fn parse_job_mode(mode: Option<&str>) -> JobMode {
+    match mode {
+        Some("claude_code") => JobMode::ClaudeCode,
+        Some("codex_code") => JobMode::CodexCode,
+        _ => JobMode::Worker,
+    }
+}
 
 #[derive(Deserialize)]
 pub(crate) struct FilePathQuery {
@@ -19,6 +30,7 @@ pub(crate) struct FilePathQuery {
 
 pub(crate) async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<Json<JobListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -26,28 +38,31 @@ pub(crate) async fn jobs_list_handler(
     ))?;
 
     let sandbox_jobs = store
-        .list_sandbox_jobs_for_actor(&state.user_id, &state.actor_id)
+        .list_sandbox_jobs_for_actor(&request_identity.principal_id, &request_identity.actor_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let mut jobs: Vec<JobInfo> = sandbox_jobs
-        .iter()
-        .map(|j| {
-            let ui_state = match j.status.as_str() {
-                "creating" => "pending",
-                "running" => "in_progress",
-                s => s,
-            };
-            JobInfo {
-                id: j.id,
-                title: j.task.clone(),
-                state: ui_state.to_string(),
-                user_id: j.user_id.clone(),
-                created_at: j.created_at.to_rfc3339(),
-                started_at: j.started_at.map(|dt| dt.to_rfc3339()),
-            }
-        })
-        .collect();
+    let jobs = sandbox_jobs.iter().map(|j| async {
+        let ui_state = match j.status.as_str() {
+            "creating" => "pending",
+            "running" => "in_progress",
+            s => s,
+        };
+        let runtime_mode = store.get_sandbox_job_mode(j.id).await.ok().flatten();
+        let runtime = sandbox_job_runtime_descriptor(parse_job_mode(runtime_mode.as_deref()));
+        JobInfo {
+            id: j.id,
+            title: j.task.clone(),
+            state: ui_state.to_string(),
+            user_id: j.user_id.clone(),
+            created_at: j.created_at.to_rfc3339(),
+            started_at: j.started_at.map(|dt| dt.to_rfc3339()),
+            execution_backend: Some(ExecutionBackendKind::DockerSandbox.as_str().to_string()),
+            runtime_family: Some(runtime.runtime_family),
+            runtime_mode: Some(runtime.runtime_mode),
+        }
+    });
+    let mut jobs = join_all(jobs).await;
 
     jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
@@ -56,6 +71,7 @@ pub(crate) async fn jobs_list_handler(
 
 pub(crate) async fn jobs_summary_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<Json<JobSummaryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -63,7 +79,7 @@ pub(crate) async fn jobs_summary_handler(
     ))?;
 
     let s = store
-        .sandbox_job_summary_for_actor(&state.user_id, &state.actor_id)
+        .sandbox_job_summary_for_actor(&request_identity.principal_id, &request_identity.actor_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -79,6 +95,7 @@ pub(crate) async fn jobs_summary_handler(
 
 pub(crate) async fn jobs_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<JobDetailResponse>, (StatusCode, String)> {
     let job_id = Uuid::parse_str(&id)
@@ -87,7 +104,8 @@ pub(crate) async fn jobs_detail_handler(
     if let Some(ref store) = state.store
         && let Ok(Some(job)) = store.get_sandbox_job(job_id).await
     {
-        if job.user_id != state.user_id || job.actor_id != state.actor_id {
+        if job.user_id != request_identity.principal_id || job.actor_id != request_identity.actor_id
+        {
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
         let browse_id = std::path::Path::new(&job.project_dir)
@@ -124,6 +142,9 @@ pub(crate) async fn jobs_detail_handler(
             });
         }
 
+        let runtime_mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
+        let runtime = sandbox_job_runtime_descriptor(parse_job_mode(runtime_mode.as_deref()));
+
         return Ok(Json(JobDetailResponse {
             id: job.id,
             title: job.task.clone(),
@@ -136,10 +157,12 @@ pub(crate) async fn jobs_detail_handler(
             elapsed_secs,
             project_dir: Some(job.project_dir.clone()),
             browse_url: Some(format!("/projects/{}/", browse_id)),
-            job_mode: {
-                let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
-                mode.filter(|m| m != "worker")
-            },
+            execution_backend: Some(ExecutionBackendKind::DockerSandbox.as_str().to_string()),
+            runtime_family: Some(runtime.runtime_family),
+            runtime_mode: Some(runtime.runtime_mode.clone()),
+            runtime_capabilities: runtime.runtime_capabilities,
+            network_isolation: runtime.network_isolation,
+            job_mode: runtime_mode.filter(|m| m != "worker"),
             transitions,
         }));
     }
@@ -149,6 +172,7 @@ pub(crate) async fn jobs_detail_handler(
 
 pub(crate) async fn jobs_cancel_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let job_id = Uuid::parse_str(&id)
@@ -157,7 +181,8 @@ pub(crate) async fn jobs_cancel_handler(
     if let Some(ref store) = state.store
         && let Ok(Some(job)) = store.get_sandbox_job(job_id).await
     {
-        if job.user_id != state.user_id || job.actor_id != state.actor_id {
+        if job.user_id != request_identity.principal_id || job.actor_id != request_identity.actor_id
+        {
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
         if job.status == "running" || job.status == "creating" {
@@ -189,6 +214,7 @@ pub(crate) async fn jobs_cancel_handler(
 
 pub(crate) async fn jobs_restart_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -209,7 +235,9 @@ pub(crate) async fn jobs_restart_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
-    if old_job.user_id != state.user_id || old_job.actor_id != state.actor_id {
+    if old_job.user_id != request_identity.principal_id
+        || old_job.actor_id != request_identity.actor_id
+    {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -288,6 +316,7 @@ pub(crate) async fn jobs_restart_handler(
 
 pub(crate) async fn jobs_prompt_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -302,7 +331,11 @@ pub(crate) async fn jobs_prompt_handler(
 
     if let Some(ref store) = state.store
         && !store
-            .sandbox_job_belongs_to_actor(job_id, &state.user_id, &state.actor_id)
+            .sandbox_job_belongs_to_actor(
+                job_id,
+                &request_identity.principal_id,
+                &request_identity.actor_id,
+            )
             .await
             .unwrap_or(false)
     {
@@ -334,6 +367,7 @@ pub(crate) async fn jobs_prompt_handler(
 
 pub(crate) async fn jobs_events_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -346,7 +380,11 @@ pub(crate) async fn jobs_events_handler(
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
     if !store
-        .sandbox_job_belongs_to_actor(job_id, &state.user_id, &state.actor_id)
+        .sandbox_job_belongs_to_actor(
+            job_id,
+            &request_identity.principal_id,
+            &request_identity.actor_id,
+        )
         .await
         .unwrap_or(false)
     {
@@ -378,6 +416,7 @@ pub(crate) async fn jobs_events_handler(
 
 pub(crate) async fn job_files_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFilesResponse>, (StatusCode, String)> {
@@ -395,7 +434,7 @@ pub(crate) async fn job_files_list_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
-    if job.user_id != state.user_id || job.actor_id != state.actor_id {
+    if job.user_id != request_identity.principal_id || job.actor_id != request_identity.actor_id {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -444,6 +483,7 @@ pub(crate) async fn job_files_list_handler(
 
 pub(crate) async fn job_files_read_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFileReadResponse>, (StatusCode, String)> {
@@ -461,7 +501,7 @@ pub(crate) async fn job_files_read_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
-    if job.user_id != state.user_id || job.actor_id != state.actor_id {
+    if job.user_id != request_identity.principal_id || job.actor_id != request_identity.actor_id {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 

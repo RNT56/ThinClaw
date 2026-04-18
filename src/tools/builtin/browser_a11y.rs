@@ -224,7 +224,9 @@ impl Tool for AgentBrowserTool {
     }
 
     fn description(&self) -> &str {
-        "Browse the web using the external agent-browser accessibility backend. Navigate pages, inspect aria snapshots, click or type using @ref selectors, scroll, execute console expressions, and take screenshots."
+        "Browse the web using the external accessibility backend. Use this when you \
+         need to inspect live websites, read page content, or interact with web UIs. \
+         Navigate first, then use snapshot to get @ref selectors before click or type actions."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

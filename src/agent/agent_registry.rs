@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::agent::agent_router::{AgentRouter, AgentWorkspace};
 use crate::db::{AgentWorkspaceRecord, Database};
 use crate::error::DatabaseError;
+use crate::tools::ToolProfile;
 use crate::workspace::Workspace;
 
 /// Maximum number of agent workspaces allowed (prevents resource exhaustion).
@@ -102,6 +103,7 @@ impl AgentRegistry {
         is_default: bool,
         allowed_tools: Option<Vec<String>>,
         allowed_skills: Option<Vec<String>>,
+        tool_profile: Option<ToolProfile>,
     ) -> Result<AgentWorkspaceRecord, AgentRegistryError> {
         // Validate
         self.validate_agent_id(agent_id)?;
@@ -132,6 +134,7 @@ impl AgentRegistry {
             trigger_keywords,
             allowed_tools,
             allowed_skills,
+            tool_profile,
             is_default,
             created_at: now,
             updated_at: now,
@@ -204,6 +207,7 @@ impl AgentRegistry {
         is_default: Option<bool>,
         allowed_tools: Option<Option<Vec<String>>>,
         allowed_skills: Option<Option<Vec<String>>>,
+        tool_profile: Option<Option<ToolProfile>>,
     ) -> Result<AgentWorkspaceRecord, AgentRegistryError> {
         // Get current record from DB (or construct from router)
         let mut record = if let Some(ref db) = self.db {
@@ -244,6 +248,9 @@ impl AgentRegistry {
         }
         if let Some(allowed_skills) = allowed_skills {
             record.allowed_skills = allowed_skills;
+        }
+        if let Some(tool_profile) = tool_profile {
+            record.tool_profile = tool_profile;
         }
         if let Some(default) = is_default {
             record.is_default = default;
@@ -368,6 +375,7 @@ fn record_to_workspace(record: &AgentWorkspaceRecord) -> AgentWorkspace {
         trigger_keywords: record.trigger_keywords.clone(),
         allowed_tools: record.allowed_tools.clone(),
         allowed_skills: record.allowed_skills.clone(),
+        tool_profile: record.tool_profile,
         is_default: record.is_default,
         model: record.model.clone(),
     }
@@ -387,6 +395,7 @@ fn workspace_to_record(ws: &AgentWorkspace) -> AgentWorkspaceRecord {
         trigger_keywords: ws.trigger_keywords.clone(),
         allowed_tools: ws.allowed_tools.clone(),
         allowed_skills: ws.allowed_skills.clone(),
+        tool_profile: ws.tool_profile,
         is_default: ws.is_default,
         created_at: now,
         updated_at: now,
@@ -419,6 +428,7 @@ mod tests {
                 false,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -441,15 +451,27 @@ mod tests {
                 vec![],
                 false,
                 None,
+                None,
                 None
             )
             .await
             .is_err()
         );
         assert!(
-            reg.create_agent("a", "Name", None, None, vec![], vec![], false, None, None)
-                .await
-                .is_err()
+            reg.create_agent(
+                "a",
+                "Name",
+                None,
+                None,
+                vec![],
+                vec![],
+                false,
+                None,
+                None,
+                None
+            )
+            .await
+            .is_err()
         );
         assert!(
             reg.create_agent(
@@ -460,6 +482,7 @@ mod tests {
                 vec![],
                 vec![],
                 false,
+                None,
                 None,
                 None,
             )
@@ -482,6 +505,7 @@ mod tests {
                 false,
                 None,
                 None,
+                None,
             )
             .await
             .is_err()
@@ -495,6 +519,7 @@ mod tests {
                 vec![],
                 vec![],
                 false,
+                None,
                 None,
                 None,
             )
@@ -516,6 +541,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -528,6 +554,7 @@ mod tests {
                 vec![],
                 vec![],
                 false,
+                None,
                 None,
                 None,
             )
@@ -547,6 +574,7 @@ mod tests {
             vec![],
             vec![],
             false,
+            None,
             None,
             None,
         )
@@ -569,6 +597,7 @@ mod tests {
             true,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -589,6 +618,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -599,6 +629,7 @@ mod tests {
                 Some("Updated Name"),
                 Some(Some("New prompt")),
                 Some(Some("openai/gpt-4o")),
+                None,
                 None,
                 None,
                 None,
@@ -628,6 +659,7 @@ mod tests {
             false,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -639,6 +671,7 @@ mod tests {
             vec![],
             vec![],
             false,
+            None,
             None,
             None,
         )
@@ -661,6 +694,7 @@ mod tests {
                 false,
                 Some(vec!["read_file".to_string(), "memory_read".to_string()]),
                 Some(vec!["github".to_string()]),
+                None,
             )
             .await
             .unwrap();
@@ -682,6 +716,7 @@ mod tests {
                 None,
                 Some(Some(vec!["shell".to_string()])),
                 Some(Some(vec!["openai-docs".to_string()])),
+                None,
             )
             .await
             .unwrap();

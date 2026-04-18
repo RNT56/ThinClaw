@@ -5,6 +5,7 @@ use crate::agent::personality::canonical_personality_pack_name;
 use crate::config::helpers::{optional_env, parse_bool_env, parse_option_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
+use crate::tools::ToolProfile;
 
 /// Per-model thinking override.
 #[derive(Debug, Clone)]
@@ -44,6 +45,12 @@ pub struct AgentConfig {
     pub auto_approve_tools: bool,
     /// Default user-facing transparency level for subagent activity.
     pub subagent_transparency_level: String,
+    /// Default tool profile for the main interactive agent.
+    pub main_tool_profile: ToolProfile,
+    /// Default tool profile for workers and scheduled jobs.
+    pub worker_tool_profile: ToolProfile,
+    /// Default tool profile for subagents and delegated execution.
+    pub subagent_tool_profile: ToolProfile,
     /// Per-model thinking overrides. Key is a model name (exact or prefix match).
     /// When a model matches, its override takes precedence over global thinking settings.
     /// Format of env var: `MODEL_THINKING_OVERRIDE=model1:true:16000,model2:false`
@@ -78,6 +85,20 @@ pub struct AgentConfig {
 
 impl AgentConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+        let mut allow_local_tools =
+            parse_bool_env("ALLOW_LOCAL_TOOLS", settings.agent.allow_local_tools)?;
+        let mut workspace_mode = optional_env("WORKSPACE_MODE")?
+            .or_else(|| settings.agent.workspace_mode.clone())
+            .unwrap_or_else(|| "sandboxed".to_string());
+
+        if settings.desktop_autonomy.is_reckless_enabled() {
+            allow_local_tools = true;
+            if workspace_mode.trim().is_empty() || workspace_mode.eq_ignore_ascii_case("sandboxed")
+            {
+                workspace_mode = "project".to_string();
+            }
+        }
+
         Ok(Self {
             name: parse_optional_env("AGENT_NAME", settings.agent.name.clone())?,
             max_parallel_jobs: parse_optional_env(
@@ -105,10 +126,7 @@ impl AgentConfig {
                 "SESSION_IDLE_TIMEOUT_SECS",
                 settings.agent.session_idle_timeout_secs,
             )?),
-            allow_local_tools: parse_bool_env(
-                "ALLOW_LOCAL_TOOLS",
-                settings.agent.allow_local_tools,
-            )?,
+            allow_local_tools,
             max_cost_per_day_cents: parse_option_env("MAX_COST_PER_DAY_CENTS")?,
             max_actions_per_hour: parse_option_env("MAX_ACTIONS_PER_HOUR")?,
             max_tool_iterations: parse_optional_env(
@@ -136,10 +154,21 @@ impl AgentConfig {
                     .or(optional_env("SUBAGENT_TRANSPARENCY_LEVEL")?)
                     .unwrap_or_else(|| settings.agent.subagent_transparency_level.clone()),
             ),
+            main_tool_profile: normalize_tool_profile(
+                optional_env("AGENT_MAIN_TOOL_PROFILE")?
+                    .unwrap_or_else(|| settings.agent.main_tool_profile.clone()),
+            ),
+            worker_tool_profile: normalize_tool_profile(
+                optional_env("AGENT_WORKER_TOOL_PROFILE")?
+                    .unwrap_or_else(|| settings.agent.worker_tool_profile.clone()),
+            ),
+            subagent_tool_profile: normalize_tool_profile(
+                optional_env("AGENT_SUBAGENT_TOOL_PROFILE")?
+                    .or(optional_env("SUBAGENT_TOOL_PROFILE")?)
+                    .unwrap_or_else(|| settings.agent.subagent_tool_profile.clone()),
+            ),
             model_thinking_overrides: parse_model_thinking_overrides()?,
-            workspace_mode: optional_env("WORKSPACE_MODE")?
-                .or_else(|| settings.agent.workspace_mode.clone())
-                .unwrap_or_else(|| "sandboxed".to_string()),
+            workspace_mode,
             workspace_root: optional_env("WORKSPACE_ROOT")?.map(std::path::PathBuf::from),
             notify_channel: optional_env("NOTIFY_CHANNEL")?
                 .or_else(|| settings.notifications.preferred_channel.clone()),
@@ -229,6 +258,21 @@ fn normalize_subagent_transparency_level(value: impl AsRef<str>) -> String {
                 "Unknown agent subagent transparency level; falling back to balanced"
             );
             "balanced".to_string()
+        }
+    }
+}
+
+fn normalize_tool_profile(value: impl AsRef<str>) -> ToolProfile {
+    match value.as_ref().trim().to_ascii_lowercase().as_str() {
+        "" | "standard" | "default" | "main" => ToolProfile::Standard,
+        "restricted" | "worker" => ToolProfile::Restricted,
+        "explicit_only" | "explicit-only" | "subagent" => ToolProfile::ExplicitOnly,
+        other => {
+            tracing::warn!(
+                value = %other,
+                "Unknown agent tool profile; falling back to standard"
+            );
+            ToolProfile::Standard
         }
     }
 }

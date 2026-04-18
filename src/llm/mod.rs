@@ -51,8 +51,8 @@ pub use provider::{
 };
 pub use provider_factory::{build_provider_chain, create_llm_provider};
 pub use reasoning::{
-    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,
-    TokenUsage, ToolSelection, is_silent_reply,
+    ActionPlan, PlannedAction, Reasoning, ReasoningContext, RespondOutput, RespondResult,
+    SILENT_REPLY_TOKEN, TokenUsage, ToolSelection, is_silent_reply,
 };
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};

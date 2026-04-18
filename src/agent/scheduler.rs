@@ -18,7 +18,7 @@ use crate::error::{Error, JobError};
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
 
 /// Message to send to a worker.
 #[derive(Debug)]
@@ -178,7 +178,8 @@ impl Scheduler {
     #[allow(clippy::too_many_arguments)]
     pub async fn dispatch_job_for_routine(
         &self,
-        user_id: &str,
+        principal_id: &str,
+        actor_id: &str,
         title: &str,
         description: &str,
         metadata: Option<serde_json::Value>,
@@ -187,7 +188,7 @@ impl Scheduler {
     ) -> Result<Uuid, JobError> {
         let job_id = self
             .context_manager
-            .create_job_for_user(user_id, title, description)
+            .create_job_for_identity(principal_id, actor_id, title, description)
             .await?;
 
         if let Some(meta) = metadata {
@@ -232,7 +233,8 @@ impl Scheduler {
     #[allow(clippy::too_many_arguments)]
     pub async fn dispatch_job_reserved_for_routine(
         &self,
-        user_id: &str,
+        principal_id: &str,
+        actor_id: &str,
         title: &str,
         description: &str,
         metadata: Option<serde_json::Value>,
@@ -242,7 +244,7 @@ impl Scheduler {
         // Use the reserved slot (max_jobs + 1) in ContextManager
         let job_id = self
             .context_manager
-            .create_job_reserved(user_id, title, description)
+            .create_job_reserved_for_identity(principal_id, actor_id, title, description)
             .await?;
 
         if let Some(meta) = metadata {
@@ -335,6 +337,7 @@ impl Scheduler {
                 routine_run_id: Some(routine_run_id),
                 workspace: self.workspace.clone(),
                 cost_tracker: self.cost_tracker.clone(),
+                tool_profile: self.config.worker_tool_profile,
             };
             let worker = Worker::new(job_id, deps);
 
@@ -420,6 +423,7 @@ impl Scheduler {
                 routine_run_id: Some(routine_run_id),
                 workspace: self.workspace.clone(),
                 cost_tracker: self.cost_tracker.clone(),
+                tool_profile: self.config.worker_tool_profile,
             };
             let worker = Worker::new(job_id, deps);
 
@@ -505,6 +509,7 @@ impl Scheduler {
                 routine_run_id: None,
                 workspace: self.workspace.clone(),
                 cost_tracker: self.cost_tracker.clone(),
+                tool_profile: self.config.worker_tool_profile,
             };
             let worker = Worker::new(job_id, deps);
 
@@ -576,12 +581,16 @@ impl Scheduler {
                 let tools = self.tools.clone();
                 let context_manager = self.context_manager.clone();
                 let safety = self.safety.clone();
+                let default_profile = self.config.worker_tool_profile;
+                let hooks = self.hooks.clone();
 
                 tokio::spawn(async move {
                     let result = Self::execute_tool_task(
                         tools,
                         context_manager,
                         safety,
+                        default_profile,
+                        hooks,
                         tool_parent_id,
                         &tool_name,
                         params,
@@ -708,19 +717,12 @@ impl Scheduler {
         tools: Arc<ToolRegistry>,
         context_manager: Arc<ContextManager>,
         safety: Arc<SafetyLayer>,
+        default_profile: ToolProfile,
+        hooks: Arc<HookRegistry>,
         job_id: Uuid,
         tool_name: &str,
         params: serde_json::Value,
     ) -> Result<TaskOutput, Error> {
-        let start = std::time::Instant::now();
-
-        // Get the tool
-        let tool = tools.get(tool_name).await.ok_or_else(|| {
-            Error::Tool(crate::error::ToolError::NotFound {
-                name: tool_name.to_string(),
-            })
-        })?;
-
         // Get job context
         let job_ctx: JobContext = context_manager.get_context(job_id).await?;
         if job_ctx.state == JobState::Cancelled {
@@ -731,50 +733,47 @@ impl Scheduler {
             .into());
         }
 
-        // In autonomous context (scheduler), auto-approve `UnlessAutoApproved`.
-        // Only block tools that unconditionally require explicit approval.
-        if tool.requires_approval(&params) == crate::tools::ApprovalRequirement::Always {
-            return Err(crate::error::ToolError::AuthRequired {
-                name: tool_name.to_string(),
+        let profile_override = job_ctx
+            .metadata
+            .get("tool_profile")
+            .and_then(|value| value.as_str())
+            .and_then(|value| match value {
+                "standard" => Some(ToolProfile::Standard),
+                "restricted" => Some(ToolProfile::Restricted),
+                "explicit_only" => Some(ToolProfile::ExplicitOnly),
+                _ => None,
+            });
+        let hook_context = format!("scheduler:{job_id}");
+
+        let prepared = match execution::prepare_tool_call(execution::ToolPrepareRequest {
+            tools: &tools,
+            safety: &safety,
+            job_ctx: &job_ctx,
+            tool_name,
+            params: &params,
+            lane: ToolExecutionLane::Scheduler,
+            default_profile,
+            profile_override,
+            approval_mode: execution::ToolApprovalMode::Autonomous,
+            hooks: Some(execution::ToolHookConfig {
+                registry: hooks.as_ref(),
+                user_id: &job_ctx.user_id,
+                context: &hook_context,
+            }),
+        })
+        .await?
+        {
+            execution::ToolPrepareOutcome::Ready(prepared) => prepared,
+            execution::ToolPrepareOutcome::NeedsApproval(_) => {
+                return Err(crate::error::ToolError::AuthRequired {
+                    name: tool_name.to_string(),
+                }
+                .into());
             }
-            .into());
-        }
+        };
 
-        // Validate tool parameters
-        let validation = safety.validator().validate_tool_params(&params);
-        if !validation.is_valid {
-            let details = validation
-                .errors
-                .iter()
-                .map(|e| format!("{}: {}", e.field, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(crate::error::ToolError::InvalidParameters {
-                name: tool_name.to_string(),
-                reason: format!("Invalid tool parameters: {}", details),
-            }
-            .into());
-        }
-
-        // Execute with per-tool timeout
-        let tool_timeout = tool.execution_timeout();
-        let result =
-            tokio::time::timeout(tool_timeout, async { tool.execute(params, &job_ctx).await })
-                .await
-                .map_err(|_| {
-                    Error::Tool(crate::error::ToolError::Timeout {
-                        name: tool_name.to_string(),
-                        timeout: tool_timeout,
-                    })
-                })?
-                .map_err(|e| {
-                    Error::Tool(crate::error::ToolError::ExecutionFailed {
-                        name: tool_name.to_string(),
-                        reason: e.to_string(),
-                    })
-                })?;
-
-        Ok(TaskOutput::new(result.result, start.elapsed()))
+        let output = execution::execute_tool_call(&prepared, &safety, &job_ctx).await?;
+        Ok(TaskOutput::new(output.result_json, output.elapsed))
     }
 
     /// Stop a running job.

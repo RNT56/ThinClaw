@@ -22,6 +22,12 @@ pub use crate::api::learning::{
     LearningRecentCounts, LearningRollbackActionResponse, LearningRollbackItem,
     LearningRollbackRequest, LearningRollbackResponse, LearningStatusResponse,
 };
+pub use crate::api::mcp::{
+    McpInteractionListResponse, McpInteractionRespondRequest, McpLogLevelRequest,
+    McpOAuthDiscoveryResponse, McpPromptRequest, McpPromptResponse, McpPromptsResponse,
+    McpReadResourceQuery, McpReadResourceResponse, McpResourceTemplatesResponse,
+    McpResourcesResponse, McpServerInfo, McpServerListResponse, McpToolsResponse,
+};
 use crate::api::system::ModelInfo;
 
 // --- Chat ---
@@ -109,6 +115,20 @@ pub struct ApprovalRequest {
     #[serde(default)]
     pub actor_id: Option<String>,
 }
+
+// --- Autonomy ---
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AutonomyPauseRequest {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+pub type AutonomyStatusResponse = crate::desktop_autonomy::AutonomyStatus;
+pub type AutonomyBootstrapResponse = crate::desktop_autonomy::AutonomyBootstrapReport;
+pub type AutonomyRolloutsResponse = crate::desktop_autonomy::AutonomyRolloutSummary;
+pub type AutonomyChecksResponse = crate::desktop_autonomy::AutonomyChecksSummary;
+pub type AutonomyEvidenceResponse = crate::desktop_autonomy::AutonomyEvidenceSummary;
 
 // --- Experiments ---
 
@@ -205,6 +225,14 @@ pub enum SseEvent {
         agent_id: String,
         name: String,
         task: String,
+        task_packet: crate::agent::subagent_executor::SubagentTaskPacket,
+        #[serde(default)]
+        allowed_tools: Vec<String>,
+        #[serde(default)]
+        allowed_skills: Vec<String>,
+        memory_mode: String,
+        tool_mode: String,
+        skill_mode: String,
         timestamp: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
@@ -226,6 +254,14 @@ pub enum SseEvent {
         response: String,
         duration_ms: u64,
         iterations: usize,
+        task_packet: crate::agent::subagent_executor::SubagentTaskPacket,
+        #[serde(default)]
+        allowed_tools: Vec<String>,
+        #[serde(default)]
+        allowed_skills: Vec<String>,
+        memory_mode: String,
+        tool_mode: String,
+        skill_mode: String,
         timestamp: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
@@ -378,6 +414,45 @@ pub enum SseEvent {
     BootstrapCompleted,
 }
 
+impl SseEvent {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            SseEvent::Response { .. } => "response",
+            SseEvent::Thinking { .. } => "thinking",
+            SseEvent::ReasoningContent { .. } => "reasoning_content",
+            SseEvent::ToolStarted { .. } => "tool_started",
+            SseEvent::ToolCompleted { .. } => "tool_completed",
+            SseEvent::ToolResult { .. } => "tool_result",
+            SseEvent::StreamChunk { .. } => "stream_chunk",
+            SseEvent::Status { .. } => "status",
+            SseEvent::SubagentSpawned { .. } => "subagent_spawned",
+            SseEvent::SubagentProgress { .. } => "subagent_progress",
+            SseEvent::SubagentCompleted { .. } => "subagent_completed",
+            SseEvent::JobStarted { .. } => "job_started",
+            SseEvent::ApprovalNeeded { .. } => "approval_needed",
+            SseEvent::AuthRequired { .. } => "auth_required",
+            SseEvent::AuthCompleted { .. } => "auth_completed",
+            SseEvent::Error { .. } => "error",
+            SseEvent::Heartbeat => "heartbeat",
+            SseEvent::JobMessage { .. } => "job_message",
+            SseEvent::JobToolUse { .. } => "job_tool_use",
+            SseEvent::JobToolResult { .. } => "job_tool_result",
+            SseEvent::JobStatus { .. } => "job_status",
+            SseEvent::JobResult { .. } => "job_result",
+            SseEvent::ExtensionStatus { .. } => "extension_status",
+            SseEvent::ChannelStatusChange { .. } => "channel_status_change",
+            SseEvent::RoutineLifecycle { .. } => "routine_lifecycle",
+            SseEvent::CostAlert { .. } => "cost_alert",
+            SseEvent::CanvasUpdate { .. } => "canvas_update",
+            SseEvent::ExperimentOpportunityUpdated { .. } => "experiment_opportunity_updated",
+            SseEvent::ExperimentCampaignUpdated { .. } => "experiment_campaign_updated",
+            SseEvent::ExperimentTrialUpdated { .. } => "experiment_trial_updated",
+            SseEvent::ExperimentRunnerUpdated { .. } => "experiment_runner_updated",
+            SseEvent::BootstrapCompleted => "bootstrap_completed",
+        }
+    }
+}
+
 // --- Memory ---
 
 #[derive(Debug, Serialize)]
@@ -452,6 +527,12 @@ pub struct JobInfo {
     pub user_id: String,
     pub created_at: String,
     pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -484,6 +565,16 @@ pub struct JobDetailResponse {
     pub project_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browse_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_isolation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub job_mode: Option<String>,
     pub transitions: Vec<TransitionInfo>,
@@ -1153,6 +1244,15 @@ mod tests {
             agent_id: "agent-1".to_string(),
             name: "researcher".to_string(),
             task: "Check docs".to_string(),
+            task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                objective: "Check docs".to_string(),
+                ..Default::default()
+            },
+            allowed_tools: vec!["read_file".to_string()],
+            allowed_skills: vec![],
+            memory_mode: "provided_context_only".to_string(),
+            tool_mode: "explicit_only".to_string(),
+            skill_mode: "explicit_only".to_string(),
             timestamp: "2026-04-12T12:00:00Z".to_string(),
             thread_id: Some("thread-1".to_string()),
         };
@@ -1162,6 +1262,8 @@ mod tests {
         assert_eq!(parsed["agent_id"], "agent-1");
         assert_eq!(parsed["name"], "researcher");
         assert_eq!(parsed["task"], "Check docs");
+        assert_eq!(parsed["task_packet"]["objective"], "Check docs");
+        assert_eq!(parsed["allowed_tools"][0], "read_file");
         assert_eq!(parsed["timestamp"], "2026-04-12T12:00:00Z");
         assert_eq!(parsed["thread_id"], "thread-1");
     }
@@ -1175,6 +1277,15 @@ mod tests {
             response: "Done".to_string(),
             duration_ms: 1250,
             iterations: 3,
+            task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                objective: "Summarize findings".to_string(),
+                ..Default::default()
+            },
+            allowed_tools: vec![],
+            allowed_skills: vec![],
+            memory_mode: "provided_context_only".to_string(),
+            tool_mode: "explicit_only".to_string(),
+            skill_mode: "explicit_only".to_string(),
             timestamp: "2026-04-12T12:00:03Z".to_string(),
             thread_id: None,
         };

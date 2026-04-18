@@ -50,6 +50,7 @@ use crate::identity::{
     ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, NewActorEndpointRecord,
     NewActorRecord,
 };
+use crate::tools::ToolProfile;
 use crate::workspace::{MemoryChunk, MemoryDocument, WorkspaceEntry};
 use crate::workspace::{SearchConfig, SearchResult};
 
@@ -165,6 +166,7 @@ pub trait ConversationStore: Send + Sync {
     async fn update_conversation_identity(
         &self,
         id: Uuid,
+        principal_id: Option<&str>,
         actor_id: Option<&str>,
         conversation_scope_id: Option<Uuid>,
         conversation_kind: ConversationKind,
@@ -249,6 +251,11 @@ pub trait ConversationStore: Send + Sync {
         risk_tier: Option<&str>,
         limit: i64,
     ) -> Result<Vec<LearningCandidate>, DatabaseError>;
+    async fn update_learning_candidate_proposal(
+        &self,
+        candidate_id: Uuid,
+        proposal: &serde_json::Value,
+    ) -> Result<(), DatabaseError>;
     async fn insert_learning_artifact_version(
         &self,
         version: &LearningArtifactVersion,
@@ -1067,6 +1074,9 @@ pub struct AgentWorkspaceRecord {
     /// Optional per-agent skill allowlist.
     #[serde(default)]
     pub allowed_skills: Option<Vec<String>>,
+    /// Optional execution profile override for this agent workspace.
+    #[serde(default)]
+    pub tool_profile: Option<ToolProfile>,
     /// Whether this is the default agent (receives unrouted messages).
     pub is_default: bool,
     /// When the record was created.

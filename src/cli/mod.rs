@@ -301,6 +301,13 @@ pub enum Command {
         #[arg(long)]
         workspace_root: Option<std::path::PathBuf>,
     },
+
+    /// Run the desktop autonomy shadow canary manifest (internal use).
+    #[command(name = "autonomy-shadow-canary", hide = true)]
+    AutonomyShadowCanary {
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+    },
 }
 
 impl Cli {

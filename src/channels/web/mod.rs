@@ -199,10 +199,22 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
             agent_id,
             name,
             task,
+            task_packet,
+            allowed_tools,
+            allowed_skills,
+            memory_mode,
+            tool_mode,
+            skill_mode,
         } => SseEvent::SubagentSpawned {
             agent_id,
             name,
             task,
+            task_packet,
+            allowed_tools,
+            allowed_skills,
+            memory_mode,
+            tool_mode,
+            skill_mode,
             timestamp: chrono::Utc::now().to_rfc3339(),
             thread_id,
         },
@@ -224,6 +236,12 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
             response,
             duration_ms,
             iterations,
+            task_packet,
+            allowed_tools,
+            allowed_skills,
+            memory_mode,
+            tool_mode,
+            skill_mode,
         } => SseEvent::SubagentCompleted {
             agent_id,
             name,
@@ -231,6 +249,12 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
             response,
             duration_ms,
             iterations,
+            task_packet,
+            allowed_tools,
+            allowed_skills,
+            memory_mode,
+            tool_mode,
+            skill_mode,
             timestamp: chrono::Utc::now().to_rfc3339(),
             thread_id,
         },
@@ -580,6 +604,13 @@ impl Channel for GatewayChannel {
         }
     }
 
+    async fn diagnostics(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "user_id": self.state.user_id.clone(),
+            "actor_id": self.state.actor_id.clone(),
+        }))
+    }
+
     async fn shutdown(&self) -> Result<(), ChannelError> {
         if let Some(tx) = self.state.shutdown_tx.write().await.take() {
             let _ = tx.send(());
@@ -591,9 +622,11 @@ impl Channel for GatewayChannel {
 
 #[cfg(test)]
 mod tests {
-    use super::status_update_to_sse_event;
+    use super::{GatewayChannel, status_update_to_sse_event};
     use crate::channels::StatusUpdate;
+    use crate::channels::channel::Channel;
     use crate::channels::web::types::SseEvent;
+    use crate::config::GatewayConfig;
 
     #[test]
     fn subagent_spawned_maps_to_typed_sse_event() {
@@ -602,6 +635,15 @@ mod tests {
                 agent_id: "agent-1".to_string(),
                 name: "researcher".to_string(),
                 task: "Check docs".to_string(),
+                task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                    objective: "Check docs".to_string(),
+                    ..Default::default()
+                },
+                allowed_tools: vec!["read_file".to_string()],
+                allowed_skills: vec![],
+                memory_mode: "provided_context_only".to_string(),
+                tool_mode: "explicit_only".to_string(),
+                skill_mode: "explicit_only".to_string(),
             },
             Some("thread-1".to_string()),
         );
@@ -611,12 +653,17 @@ mod tests {
                 agent_id,
                 name,
                 task,
+                task_packet,
+                allowed_tools,
                 timestamp,
                 thread_id,
+                ..
             } => {
                 assert_eq!(agent_id, "agent-1");
                 assert_eq!(name, "researcher");
                 assert_eq!(task, "Check docs");
+                assert_eq!(task_packet.objective, "Check docs");
+                assert_eq!(allowed_tools, vec!["read_file".to_string()]);
                 assert!(!timestamp.is_empty());
                 assert_eq!(thread_id.as_deref(), Some("thread-1"));
             }
@@ -634,6 +681,15 @@ mod tests {
                 response: "Done".to_string(),
                 duration_ms: 2400,
                 iterations: 4,
+                task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                    objective: "Summarize findings".to_string(),
+                    ..Default::default()
+                },
+                allowed_tools: vec![],
+                allowed_skills: vec![],
+                memory_mode: "provided_context_only".to_string(),
+                tool_mode: "explicit_only".to_string(),
+                skill_mode: "explicit_only".to_string(),
             },
             None,
         );
@@ -646,8 +702,10 @@ mod tests {
                 response,
                 duration_ms,
                 iterations,
+                task_packet,
                 timestamp,
                 thread_id,
+                ..
             } => {
                 assert_eq!(agent_id, "agent-2");
                 assert_eq!(name, "summarizer");
@@ -655,10 +713,36 @@ mod tests {
                 assert_eq!(response, "Done");
                 assert_eq!(duration_ms, 2400);
                 assert_eq!(iterations, 4);
+                assert_eq!(task_packet.objective, "Summarize findings");
                 assert!(!timestamp.is_empty());
                 assert!(thread_id.is_none());
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn gateway_diagnostics_expose_identity_scope() {
+        let gateway = GatewayChannel::new(GatewayConfig {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+            auth_token: Some("test-token".to_string()),
+            user_id: "household-user".to_string(),
+            actor_id: Some("desk-actor".to_string()),
+        });
+
+        let diagnostics = gateway
+            .diagnostics()
+            .await
+            .expect("gateway should expose diagnostics");
+
+        assert_eq!(
+            diagnostics.get("user_id").and_then(|v| v.as_str()),
+            Some("household-user")
+        );
+        assert_eq!(
+            diagnostics.get("actor_id").and_then(|v| v.as_str()),
+            Some("desk-actor")
+        );
     }
 }

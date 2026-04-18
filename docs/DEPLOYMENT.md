@@ -7,6 +7,7 @@ It covers:
 - local standalone use
 - long-running service mode
 - remote gateway access
+- reckless desktop autonomy
 - Scrappy-connected deployments
 - source-build feature choices
 
@@ -19,6 +20,7 @@ For onboarding details, use [../src/setup/README.md](../src/setup/README.md). Fo
 | Local standalone | laptop, workstation, single-user local run | `thinclaw run --no-onboard` |
 | Long-running service | Mac Mini, home server, Linux box, Windows workstation/server, VPS | launchd, systemd user service, or Windows Service Control Manager |
 | Remote gateway | controlled LAN or Tailscale access | bind gateway to non-loopback host |
+| Reckless desktop autonomy | operator-approved host-level desktop agenting | `desktop_autonomy.profile = "reckless_desktop"` plus bootstrap |
 | Scrappy backend | desktop app + remote or local ThinClaw runtime | Scrappy talks to ThinClaw over the gateway |
 
 ## Defaults And Important Truths
@@ -28,6 +30,7 @@ For onboarding details, use [../src/setup/README.md](../src/setup/README.md). Fo
 - Remote access is opt-in through host/bind settings, not the default
 - Source builds default to the `light` feature set, which does **not** include the web gateway, tunnel support, or Docker sandbox
 - If you need the gateway from source, build with `--features full` or explicitly add `web-gateway`
+- Desktop autonomy is a separate privileged operator mode; enabling it grants host-level app/UI/screen control and managed build promotion/rollback
 
 ## Fast Local Path
 
@@ -99,6 +102,7 @@ Relevant reference:
 
 - [BUILD_PROFILES.md](BUILD_PROFILES.md)
 - [EXTERNAL_DEPENDENCIES.md](EXTERNAL_DEPENDENCIES.md)
+- [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md)
 
 ## Configuration Layers
 
@@ -146,6 +150,80 @@ Windows notes:
 - `thinclaw service install` registers ThinClaw with the Windows Service Control Manager.
 - Service logs are written under the ThinClaw runtime logs directory.
 - Setup, status, and reset flows use OS secure-store wording on Windows; they do not require Unix shell syntax.
+
+## Reckless Desktop Autonomy
+
+Desktop autonomy is the deployment path for operators who want ThinClaw to act inside the host GUI session, use local productivity apps, capture evidence, and manage its own local code rollout path.
+
+This mode is controlled through the top-level `desktop_autonomy` settings group. The relevant operator settings are:
+
+- `desktop_autonomy.enabled`
+- `desktop_autonomy.profile`
+- `desktop_autonomy.deployment_mode`
+- `desktop_autonomy.target_username`
+- `desktop_autonomy.desktop_max_concurrent_jobs`
+- `desktop_autonomy.desktop_action_timeout_secs`
+- `desktop_autonomy.capture_evidence`
+- `desktop_autonomy.emergency_stop_path`
+- `desktop_autonomy.pause_on_bootstrap_failure`
+- `desktop_autonomy.kill_switch_hotkey`
+
+`reckless_desktop` is intentionally stronger than a normal local run:
+
+- it enables host desktop tools
+- it seeds desktop routines and skills
+- it captures screenshots/OCR/action evidence
+- it allows managed local code autorollout with canaries, promotion, and rollback
+
+Use [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md) as the canonical operator guide for that mode. The rest of this section is the deployment summary.
+
+### Deployment Modes
+
+Desktop autonomy supports two operator-facing deployment shapes:
+
+| Mode | Intended Use | Notes |
+|---|---|---|
+| `whole_machine_admin` | Main logged-in machine account | Default |
+| `dedicated_user` | Separate desktop session reserved for autonomy | Requires `target_username` and an active GUI login |
+
+Dedicated-user deployment still uses a real GUI session. ThinClaw can install the launcher and create the user when privilege is available, but it does not auto-login that user or bypass the one-time permission grant.
+
+### Bootstrap Expectations
+
+Desktop autonomy bootstrap:
+
+1. checks sidecar health and permissions
+2. validates platform-specific prerequisites
+3. prepares the dedicated-user path when requested
+4. creates canary fixtures
+5. seeds starter skills and routines
+6. writes and optionally loads the desktop session launcher
+
+If bootstrap fails and `desktop_autonomy.pause_on_bootstrap_failure = true`, ThinClaw pauses desktop autonomy automatically until the operator fixes the blocker and resumes it.
+
+### Platform Notes
+
+Desktop autonomy exists across platforms, but it is not equally mature everywhere.
+
+- macOS is the most polished path today and expects Calendar, Numbers, Pages, and TextEdit
+- Windows is supported through the native Windows bridge path and expects Outlook, Excel, Word, and Notepad plus an interactive session
+- Linux is best-effort and prerequisite-heavy, requiring a compatible desktop session plus LibreOffice/Evolution/accessibility tooling
+
+Treat bootstrap output as the source of truth for whether a given host is ready.
+
+### Emergency Stop And Live Smoke
+
+Desktop autonomy checks the emergency-stop file before routines fire and before actions run. The default path is:
+
+```text
+~/.thinclaw/AUTONOMY_DISABLED
+```
+
+Live desktop smoke coverage is intentionally ignored by default and should be run only on a sacrificial host with permissions already granted:
+
+```bash
+THINCLAW_LIVE_DESKTOP_SMOKE=1 cargo test --test desktop_autonomy_live_smoke -- --ignored
+```
 
 ## Remote Gateway Access
 

@@ -186,6 +186,9 @@ impl ChatMessage {
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
     pub messages: Vec<ChatMessage>,
+    /// Ephemeral context fragments that should be passed as provider-side
+    /// documents instead of folded into the stable system preamble.
+    pub context_documents: Vec<String>,
     /// Optional per-request model override.
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
@@ -202,6 +205,7 @@ impl CompletionRequest {
     pub fn new(messages: Vec<ChatMessage>) -> Self {
         Self {
             messages,
+            context_documents: Vec::new(),
             model: None,
             max_tokens: None,
             temperature: None,
@@ -220,6 +224,15 @@ impl CompletionRequest {
     /// Set max tokens.
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    /// Set ephemeral context documents to pass alongside the chat history.
+    pub fn with_context_documents(mut self, documents: Vec<String>) -> Self {
+        self.context_documents = documents
+            .into_iter()
+            .filter(|doc| !doc.trim().is_empty())
+            .collect();
         self
     }
 
@@ -296,6 +309,9 @@ pub struct ToolResult {
 #[derive(Debug, Clone)]
 pub struct ToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
+    /// Ephemeral context fragments that should be passed as provider-side
+    /// documents instead of folded into the stable system preamble.
+    pub context_documents: Vec<String>,
     pub tools: Vec<ToolDefinition>,
     /// Optional per-request model override.
     pub model: Option<String>,
@@ -314,6 +330,7 @@ impl ToolCompletionRequest {
     pub fn new(messages: Vec<ChatMessage>, tools: Vec<ToolDefinition>) -> Self {
         Self {
             messages,
+            context_documents: Vec::new(),
             tools,
             model: None,
             max_tokens: None,
@@ -339,6 +356,15 @@ impl ToolCompletionRequest {
     /// Set temperature.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
+        self
+    }
+
+    /// Set ephemeral context documents to pass alongside the chat history.
+    pub fn with_context_documents(mut self, documents: Vec<String>) -> Self {
+        self.context_documents = documents
+            .into_iter()
+            .filter(|doc| !doc.trim().is_empty())
+            .collect();
         self
     }
 

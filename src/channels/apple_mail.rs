@@ -745,7 +745,12 @@ mod tests {
         let _guard = APPLE_MAIL_HOME_LOCK.lock().unwrap();
 
         let home = tempdir().unwrap();
-        let mail_dir = home.path().join("Library").join("Mail").join("V12").join("MailData");
+        let mail_dir = home
+            .path()
+            .join("Library")
+            .join("Mail")
+            .join("V12")
+            .join("MailData");
         fs::create_dir_all(&mail_dir).unwrap();
         let expected = mail_dir.join("Envelope Index");
         fs::write(&expected, b"").unwrap();

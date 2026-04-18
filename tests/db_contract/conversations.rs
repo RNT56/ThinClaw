@@ -110,6 +110,7 @@ async fn conversation_message_flow_contract() {
     ctx.db
         .update_conversation_identity(
             conversation_id,
+            Some(&user),
             Some("actor-1"),
             Some(Uuid::new_v4()),
             ConversationKind::Direct,
@@ -117,6 +118,87 @@ async fn conversation_message_flow_contract() {
         )
         .await
         .expect("update_conversation_identity should succeed");
+}
+
+#[tokio::test]
+async fn legacy_direct_conversations_without_actor_are_listed_for_principal_actor() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+    let user = fixtures::user("legacy_actor_user");
+    let conversation_id = ctx
+        .db
+        .create_conversation("gateway", &user, Some("legacy-thread"))
+        .await
+        .expect("create_conversation should succeed");
+
+    ctx.db
+        .update_conversation_identity(
+            conversation_id,
+            Some(&user),
+            None,
+            Some(Uuid::new_v4()),
+            ConversationKind::Direct,
+            Some("gateway://direct/legacy"),
+        )
+        .await
+        .expect("update_conversation_identity should succeed");
+
+    let summaries = ctx
+        .db
+        .list_actor_conversations_for_recall(&user, &user, false, 10)
+        .await
+        .expect("list_actor_conversations_for_recall should succeed");
+
+    assert!(
+        summaries
+            .iter()
+            .any(|summary| summary.id == conversation_id)
+    );
+}
+
+#[tokio::test]
+async fn conversation_identity_repair_updates_principal_owner() {
+    let Some(ctx) = contract_db_or_skip().await else {
+        return;
+    };
+    let placeholder_user = fixtures::user("placeholder_owner");
+    let real_user = fixtures::user("repaired_owner");
+    let conversation_id = ctx
+        .db
+        .create_conversation("gateway", &placeholder_user, Some("repair-thread"))
+        .await
+        .expect("create_conversation should succeed");
+
+    ctx.db
+        .update_conversation_identity(
+            conversation_id,
+            Some(&real_user),
+            Some(&real_user),
+            Some(Uuid::new_v4()),
+            ConversationKind::Direct,
+            Some("gateway://direct/repaired"),
+        )
+        .await
+        .expect("update_conversation_identity should succeed");
+
+    let summaries = ctx
+        .db
+        .list_actor_conversations_for_recall(&real_user, &real_user, false, 10)
+        .await
+        .expect("list_actor_conversations_for_recall should succeed");
+    let belongs = ctx
+        .db
+        .conversation_belongs_to_actor(conversation_id, &real_user, &real_user)
+        .await
+        .expect("conversation_belongs_to_actor should succeed");
+
+    assert!(belongs);
+    assert!(
+        summaries
+            .iter()
+            .any(|summary| summary.id == conversation_id)
+    );
 }
 
 #[tokio::test]

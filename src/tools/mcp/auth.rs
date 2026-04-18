@@ -11,6 +11,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
 use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
@@ -58,6 +59,10 @@ pub struct ProtectedResourceMetadata {
     /// The protected resource identifier.
     pub resource: String,
 
+    /// Optional user-facing resource name.
+    #[serde(default)]
+    pub resource_name: Option<String>,
+
     /// Authorization servers that can issue tokens for this resource.
     #[serde(default)]
     pub authorization_servers: Vec<String>,
@@ -65,6 +70,18 @@ pub struct ProtectedResourceMetadata {
     /// Scopes supported by this resource.
     #[serde(default)]
     pub scopes_supported: Vec<String>,
+
+    /// Supported bearer token presentation methods.
+    #[serde(default)]
+    pub bearer_methods_supported: Vec<String>,
+
+    /// Optional documentation URL for the protected resource.
+    #[serde(default)]
+    pub resource_documentation: Option<String>,
+
+    /// Optional metadata bag preserved for forward compatibility.
+    #[serde(flatten, default)]
+    pub extra: HashMap<String, serde_json::Value>,
 }
 
 /// OAuth authorization server metadata.
@@ -99,6 +116,25 @@ pub struct AuthorizationServerMetadata {
     /// Scopes supported by this server.
     #[serde(default)]
     pub scopes_supported: Vec<String>,
+
+    /// Revocation endpoint.
+    #[serde(default)]
+    pub revocation_endpoint: Option<String>,
+
+    /// Optional pushed authorization request endpoint.
+    #[serde(default)]
+    pub pushed_authorization_request_endpoint: Option<String>,
+
+    /// Optional metadata bag preserved for forward compatibility.
+    #[serde(flatten, default)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+/// Combined discovery result for a protected resource and its authorization server.
+#[derive(Debug, Clone)]
+pub struct OAuthDiscoveryBundle {
+    pub protected_resource: ProtectedResourceMetadata,
+    pub authorization_server: AuthorizationServerMetadata,
 }
 
 /// Dynamic Client Registration request.
@@ -181,6 +217,50 @@ pub struct PkceChallenge {
     pub challenge: String,
 }
 
+/// Captured OAuth callback payload.
+#[derive(Debug, Clone)]
+struct AuthorizationCallback {
+    code: String,
+}
+
+fn origin_from_server_url(server_url: &str) -> Result<String, AuthError> {
+    let parsed = reqwest::Url::parse(server_url)
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid server URL: {}", e)))?;
+    Ok(parsed.origin().ascii_serialization())
+}
+
+fn resolve_resource_identifier(server_url: &str, metadata: &ProtectedResourceMetadata) -> String {
+    if !metadata.resource.trim().is_empty() {
+        metadata.resource.clone()
+    } else {
+        origin_from_server_url(server_url).unwrap_or_else(|_| server_url.to_string())
+    }
+}
+
+async fn fetch_authorization_server_metadata(
+    client: &reqwest::Client,
+    metadata_url: &str,
+) -> Result<AuthorizationServerMetadata, AuthError> {
+    let response = client
+        .get(metadata_url)
+        .send()
+        .await
+        .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
+
+    if !response.status().is_success() {
+        return Err(AuthError::DiscoveryFailed(format!(
+            "HTTP {} from {}",
+            response.status(),
+            metadata_url
+        )));
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid metadata: {}", e)))
+}
+
 impl PkceChallenge {
     /// Generate a new PKCE challenge pair.
     pub fn generate() -> Self {
@@ -210,9 +290,7 @@ pub async fn discover_protected_resource(
 
     // Parse the server URL to extract the origin (scheme + host + port)
     // The .well-known endpoints are always at the root of the origin, not under any path
-    let parsed = reqwest::Url::parse(server_url)
-        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid server URL: {}", e)))?;
-    let origin = parsed.origin().ascii_serialization();
+    let origin = origin_from_server_url(server_url)?;
 
     // Try the well-known endpoint at the origin root
     let well_known_url = format!("{}/.well-known/oauth-protected-resource", origin);
@@ -227,10 +305,14 @@ pub async fn discover_protected_resource(
         return Err(AuthError::NotSupported);
     }
 
-    response
+    let mut metadata: ProtectedResourceMetadata = response
         .json()
         .await
-        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid metadata: {}", e)))
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid metadata: {}", e)))?;
+    if metadata.resource.trim().is_empty() {
+        metadata.resource = origin;
+    }
+    Ok(metadata)
 }
 
 /// Discover authorization server metadata.
@@ -243,25 +325,22 @@ pub async fn discover_authorization_server(
         .map_err(|e| AuthError::Http(e.to_string()))?;
 
     let base_url = auth_server_url.trim_end_matches('/');
-    let well_known_url = format!("{}/.well-known/oauth-authorization-server", base_url);
+    let metadata_urls = [
+        format!("{}/.well-known/oauth-authorization-server", base_url),
+        format!("{}/.well-known/openid-configuration", base_url),
+    ];
 
-    let response = client
-        .get(&well_known_url)
-        .send()
-        .await
-        .map_err(|e| AuthError::DiscoveryFailed(e.to_string()))?;
-
-    if !response.status().is_success() {
-        return Err(AuthError::DiscoveryFailed(format!(
-            "HTTP {}",
-            response.status()
-        )));
+    let mut last_error = None;
+    for metadata_url in metadata_urls {
+        match fetch_authorization_server_metadata(&client, &metadata_url).await {
+            Ok(metadata) => return Ok(metadata),
+            Err(error) => last_error = Some(error),
+        }
     }
 
-    response
-        .json()
-        .await
-        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid metadata: {}", e)))
+    Err(last_error.unwrap_or_else(|| {
+        AuthError::DiscoveryFailed("Unable to discover authorization server metadata".to_string())
+    }))
 }
 
 /// Discover OAuth endpoints for an MCP server.
@@ -301,17 +380,23 @@ pub async fn discover_oauth_endpoints(
 pub async fn discover_full_oauth_metadata(
     server_url: &str,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
-    // Try to discover from the server
-    let resource_meta = discover_protected_resource(server_url).await?;
+    Ok(discover_oauth_bundle(server_url)
+        .await?
+        .authorization_server)
+}
 
-    // Get the first authorization server
+/// Discover both protected-resource and authorization-server metadata.
+pub async fn discover_oauth_bundle(server_url: &str) -> Result<OAuthDiscoveryBundle, AuthError> {
+    let resource_meta = discover_protected_resource(server_url).await?;
     let auth_server_url = resource_meta
         .authorization_servers
         .first()
         .ok_or_else(|| AuthError::DiscoveryFailed("No authorization servers listed".to_string()))?;
-
-    // Discover the authorization server metadata
-    discover_authorization_server(auth_server_url).await
+    let auth_meta = discover_authorization_server(auth_server_url).await?;
+    Ok(OAuthDiscoveryBundle {
+        protected_resource: resource_meta,
+        authorization_server: auth_meta,
+    })
 }
 
 /// Perform Dynamic Client Registration with an authorization server.
@@ -394,22 +479,60 @@ pub async fn authorize_mcp_server(
     }
 
     // Determine client_id and endpoints
-    let (client_id, authorization_url, token_url, use_pkce, scopes, extra_params) =
+    let state = uuid::Uuid::new_v4().to_string();
+    let (client_id, authorization_url, token_url, use_pkce, scopes, extra_params, resource) =
         if let Some(oauth) = &server_config.oauth {
             // Pre-configured OAuth
-            let (auth_url, tok_url) = discover_oauth_endpoints(server_config).await?;
+            let bundle = discover_oauth_bundle(&server_config.url).await.ok();
+            let (auth_url, tok_url) = if let (Some(auth_url), Some(token_url)) =
+                (&oauth.authorization_url, &oauth.token_url)
+            {
+                (auth_url.clone(), token_url.clone())
+            } else {
+                let bundle = bundle.as_ref().ok_or(AuthError::NotSupported)?;
+                (
+                    bundle.authorization_server.authorization_endpoint.clone(),
+                    bundle.authorization_server.token_endpoint.clone(),
+                )
+            };
+            let resolved_scopes = if oauth.scopes.is_empty() {
+                bundle
+                    .as_ref()
+                    .map(|bundle| {
+                        if bundle.protected_resource.scopes_supported.is_empty() {
+                            bundle.authorization_server.scopes_supported.clone()
+                        } else {
+                            bundle.protected_resource.scopes_supported.clone()
+                        }
+                    })
+                    .unwrap_or_default()
+            } else {
+                oauth.scopes.clone()
+            };
             (
                 oauth.client_id.clone(),
                 auth_url,
                 tok_url,
                 oauth.use_pkce,
-                oauth.scopes.clone(),
+                resolved_scopes,
                 oauth.extra_params.clone(),
+                oauth.resource.clone().unwrap_or_else(|| {
+                    bundle
+                        .as_ref()
+                        .map(|bundle| {
+                            resolve_resource_identifier(
+                                &server_config.url,
+                                &bundle.protected_resource,
+                            )
+                        })
+                        .unwrap_or_else(|| server_config.url.clone())
+                }),
             )
         } else {
             // Try Dynamic Client Registration
             println!("  Discovering OAuth endpoints...");
-            let auth_meta = discover_full_oauth_metadata(&server_config.url).await?;
+            let bundle = discover_oauth_bundle(&server_config.url).await?;
+            let auth_meta = bundle.authorization_server.clone();
 
             let registration_endpoint = auth_meta
                 .registration_endpoint
@@ -418,14 +541,22 @@ pub async fn authorize_mcp_server(
             println!("  Registering client dynamically...");
             let registration = register_client(&registration_endpoint, &redirect_uri).await?;
             println!("  ✓ Client registered: {}", registration.client_id);
+            let resolved_scopes = if bundle.protected_resource.scopes_supported.is_empty() {
+                auth_meta.scopes_supported.clone()
+            } else {
+                bundle.protected_resource.scopes_supported.clone()
+            };
+            let resource =
+                resolve_resource_identifier(&server_config.url, &bundle.protected_resource);
 
             (
                 registration.client_id,
                 auth_meta.authorization_endpoint,
                 auth_meta.token_endpoint,
                 true, // Always use PKCE for DCR clients
-                auth_meta.scopes_supported,
+                resolved_scopes,
                 HashMap::new(),
+                resource,
             )
         };
 
@@ -443,6 +574,8 @@ pub async fn authorize_mcp_server(
         &redirect_uri,
         &scopes,
         pkce.as_ref(),
+        Some(&state),
+        Some(&resource),
         &extra_params,
     );
 
@@ -457,14 +590,21 @@ pub async fn authorize_mcp_server(
     println!("  Waiting for authorization...");
 
     // Wait for callback
-    let code = wait_for_authorization_callback(listener, &server_config.name).await?;
+    let callback =
+        wait_for_authorization_callback(listener, &server_config.name, Some(&state)).await?;
 
     println!("  Exchanging code for token...");
 
     // Exchange code for token
-    let token =
-        exchange_code_for_token(&token_url, &client_id, &code, &redirect_uri, pkce.as_ref())
-            .await?;
+    let token = exchange_code_for_token(
+        &token_url,
+        &client_id,
+        &callback.code,
+        &redirect_uri,
+        pkce.as_ref(),
+        Some(&resource),
+    )
+    .await?;
 
     // Store the tokens
     store_tokens(secrets, user_id, server_config, &token).await?;
@@ -492,6 +632,8 @@ pub fn build_authorization_url(
     redirect_uri: &str,
     scopes: &[String],
     pkce: Option<&PkceChallenge>,
+    state: Option<&str>,
+    resource: Option<&str>,
     extra_params: &HashMap<String, String>,
 ) -> String {
     let mut url = format!(
@@ -515,7 +657,28 @@ pub fn build_authorization_url(
         ));
     }
 
+    if let Some(state) = state {
+        url.push_str(&format!("&state={}", urlencoding::encode(state)));
+    }
+
+    if let Some(resource) = resource {
+        url.push_str(&format!("&resource={}", urlencoding::encode(resource)));
+    }
+
     for (key, value) in extra_params {
+        if matches!(
+            key.as_str(),
+            "client_id"
+                | "response_type"
+                | "redirect_uri"
+                | "scope"
+                | "code_challenge"
+                | "code_challenge_method"
+                | "state"
+                | "resource"
+        ) {
+            continue;
+        }
         url.push_str(&format!(
             "&{}={}",
             urlencoding::encode(key),
@@ -526,21 +689,81 @@ pub fn build_authorization_url(
     url
 }
 
-/// Wait for the authorization callback and extract the code.
-pub async fn wait_for_authorization_callback(
+/// Wait for the authorization callback and validate an optional state nonce.
+async fn wait_for_authorization_callback(
     listener: TcpListener,
     server_name: &str,
-) -> Result<String, AuthError> {
-    oauth_defaults::wait_for_callback(listener, "/callback", "code", server_name)
-        .await
-        .map_err(|e| match e {
-            oauth_defaults::OAuthCallbackError::Denied => AuthError::AuthorizationDenied,
-            oauth_defaults::OAuthCallbackError::Timeout => AuthError::Timeout,
-            oauth_defaults::OAuthCallbackError::PortInUse(_, msg) => {
-                AuthError::Http(format!("Port error: {}", msg))
+    expected_state: Option<&str>,
+) -> Result<AuthorizationCallback, AuthError> {
+    let expected_state = expected_state.map(str::to_string);
+    tokio::time::timeout(Duration::from_secs(300), async move {
+        loop {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .map_err(|e| AuthError::Http(e.to_string()))?;
+
+            let mut reader = BufReader::new(&mut socket);
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .await
+                .map_err(|e| AuthError::Http(e.to_string()))?;
+
+            if let Some(path) = request_line.split_whitespace().nth(1)
+                && path.starts_with("/callback")
+            {
+                let query = path.split('?').nth(1).unwrap_or_default();
+                let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
+                    .into_owned()
+                    .collect();
+
+                if params.contains_key("error") {
+                    let response = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
+                        oauth_defaults::landing_html(server_name, false)
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    return Err(AuthError::AuthorizationDenied);
+                }
+
+                let Some(code) = params.get("code").cloned() else {
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                        .await;
+                    continue;
+                };
+
+                if let Some(expected_state) = expected_state.as_deref()
+                    && params.get("state").map(String::as_str) != Some(expected_state)
+                {
+                    let response = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
+                        oauth_defaults::landing_html(server_name, false)
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    return Err(AuthError::AuthorizationDenied);
+                }
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n{}",
+                    oauth_defaults::landing_html(server_name, true)
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+
+                return Ok(AuthorizationCallback {
+                    code,
+                });
             }
-            oauth_defaults::OAuthCallbackError::Io(msg) => AuthError::Http(msg),
-        })
+
+            let _ = socket
+                .write_all(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+                .await;
+        }
+    })
+    .await
+    .map_err(|_| AuthError::Timeout)?
 }
 
 /// Exchange the authorization code for an access token.
@@ -550,6 +773,7 @@ pub async fn exchange_code_for_token(
     code: &str,
     redirect_uri: &str,
     pkce: Option<&PkceChallenge>,
+    resource: Option<&str>,
 ) -> Result<AccessToken, AuthError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -565,6 +789,10 @@ pub async fn exchange_code_for_token(
 
     if let Some(pkce) = pkce {
         params.push(("code_verifier", pkce.verifier.clone()));
+    }
+
+    if let Some(resource) = resource {
+        params.push(("resource", resource.to_string()));
     }
 
     let response = client
@@ -721,18 +949,38 @@ pub async fn refresh_access_token(
         .map_err(|e| AuthError::RefreshFailed(format!("No refresh token: {}", e)))?;
 
     // Discover the token endpoint
-    let token_url = if let Some(ref oauth) = server_config.oauth {
+    let (token_url, resource) = if let Some(ref oauth) = server_config.oauth {
         if let Some(ref url) = oauth.token_url {
-            url.clone()
+            (
+                url.clone(),
+                oauth
+                    .resource
+                    .clone()
+                    .or_else(|| Some(server_config.url.clone())),
+            )
         } else {
             // Discover from server
-            let auth_meta = discover_full_oauth_metadata(&server_config.url).await?;
-            auth_meta.token_endpoint
+            let bundle = discover_oauth_bundle(&server_config.url).await?;
+            (
+                bundle.authorization_server.token_endpoint,
+                oauth.resource.clone().or_else(|| {
+                    Some(resolve_resource_identifier(
+                        &server_config.url,
+                        &bundle.protected_resource,
+                    ))
+                }),
+            )
         }
     } else {
         // DCR - always discover
-        let auth_meta = discover_full_oauth_metadata(&server_config.url).await?;
-        auth_meta.token_endpoint
+        let bundle = discover_oauth_bundle(&server_config.url).await?;
+        (
+            bundle.authorization_server.token_endpoint,
+            Some(resolve_resource_identifier(
+                &server_config.url,
+                &bundle.protected_resource,
+            )),
+        )
     };
 
     let client = reqwest::Client::builder()
@@ -745,6 +993,10 @@ pub async fn refresh_access_token(
         ("refresh_token", refresh_token.expose().to_string()),
         ("client_id", client_id),
     ];
+    let mut params = params;
+    if let Some(resource) = resource {
+        params.push(("resource", resource));
+    }
 
     let response = client
         .post(&token_url)
@@ -811,6 +1063,8 @@ mod tests {
             "http://localhost:9876/callback",
             &["read".to_string(), "write".to_string()],
             None,
+            None,
+            None,
             &HashMap::new(),
         );
 
@@ -830,6 +1084,8 @@ mod tests {
             "http://localhost:9876/callback",
             &[],
             Some(&pkce),
+            None,
+            None,
             &HashMap::new(),
         );
 
@@ -849,10 +1105,38 @@ mod tests {
             "http://localhost:9876/callback",
             &[],
             None,
+            None,
+            None,
             &extra,
         );
 
         assert!(url.contains("owner=user"));
-        assert!(url.contains("state=abc123"));
+        assert!(!url.contains("state=abc123"));
+    }
+
+    #[test]
+    fn test_build_authorization_url_preserves_generated_state() {
+        let mut extra = HashMap::new();
+        extra.insert("state".to_string(), "override".to_string());
+        extra.insert(
+            "resource".to_string(),
+            "https://wrong.example.com".to_string(),
+        );
+
+        let url = build_authorization_url(
+            "https://auth.example.com/authorize",
+            "client-123",
+            "http://localhost:9876/callback",
+            &[],
+            None,
+            Some("expected-state"),
+            Some("https://resource.example.com"),
+            &extra,
+        );
+
+        assert!(url.contains("state=expected-state"));
+        assert!(url.contains("resource=https%3A%2F%2Fresource.example.com"));
+        assert!(!url.contains("override"));
+        assert!(!url.contains("wrong.example.com"));
     }
 }

@@ -9,6 +9,7 @@ mod agent;
 mod builder;
 mod channels;
 mod database;
+mod desktop_autonomy;
 mod embeddings;
 mod experiments;
 pub mod formats;
@@ -46,6 +47,7 @@ pub use self::channels::{
     HttpConfig, NostrConfig, SignalConfig, SlackChannelConfig, TelegramConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
+pub use self::desktop_autonomy::DesktopAutonomyConfig;
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::experiments::ExperimentsConfig;
 pub use self::heartbeat::HeartbeatConfig;
@@ -183,6 +185,7 @@ pub struct Config {
     pub tunnel: TunnelConfig,
     pub channels: ChannelsConfig,
     pub agent: AgentConfig,
+    pub desktop_autonomy: DesktopAutonomyConfig,
     pub safety: SafetyConfig,
     pub wasm: WasmConfig,
     pub secrets: SecretsConfig,
@@ -321,6 +324,7 @@ impl Config {
             tunnel: TunnelConfig::resolve(settings)?,
             channels: ChannelsConfig::resolve(settings)?,
             agent: AgentConfig::resolve(settings)?,
+            desktop_autonomy: DesktopAutonomyConfig::resolve(settings)?,
             safety: SafetyConfig::resolve(settings)?,
             wasm: WasmConfig::resolve(settings)?,
             secrets: SecretsConfig::resolve().await?,

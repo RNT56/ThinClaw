@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolError, ToolMetadata, ToolOutput, ToolRouteIntent};
 
 /// System/device information tool.
 ///
@@ -126,9 +126,9 @@ impl Tool for DeviceInfoTool {
     }
 
     fn description(&self) -> &str {
-        "Get system and device information: CPU (name, cores, usage), memory (total, used, available), \
-         disk (mount points, capacity, usage), OS (name, version, kernel), hostname, and uptime. \
-         No parameters required."
+        "Inspect the current machine's hardware and OS state. Use this for questions \
+         about CPU, memory, disks, uptime, hostname, or operating-system details, \
+         especially when troubleshooting local environment issues."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -146,6 +146,10 @@ impl Tool for DeviceInfoTool {
             },
             "required": []
         })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::live_authoritative(ToolRouteIntent::LocalState)
     }
 
     async fn execute(

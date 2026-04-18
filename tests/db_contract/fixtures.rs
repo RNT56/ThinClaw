@@ -210,6 +210,8 @@ pub(crate) fn experiment_runner_profile() -> ExperimentRunnerProfile {
         secret_references: vec![],
         cache_policy: serde_json::json!({}),
         status: ExperimentRunnerStatus::Draft,
+        readiness_class: thinclaw::experiments::ExperimentRunnerReadinessClass::ManualOnly,
+        launch_eligible: false,
         created_at: now,
         updated_at: now,
     }
@@ -221,6 +223,7 @@ pub(crate) fn experiment_campaign(project_id: Uuid, runner_profile_id: Uuid) -> 
         id: Uuid::new_v4(),
         project_id,
         runner_profile_id,
+        owner_user_id: "default".to_string(),
         status: ExperimentCampaignStatus::PendingBaseline,
         baseline_commit: Some("abc123".to_string()),
         best_commit: None,

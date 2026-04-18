@@ -124,7 +124,10 @@ fn is_disallowed_ip(ip: IpAddr) -> bool {
 
 fn normalize_ip(ip: IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(v6)),
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
         other => other,
     }
 }

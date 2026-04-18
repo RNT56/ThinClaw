@@ -10,7 +10,9 @@ use uuid::Uuid;
 
 use crate::api::experiments as experiments_api;
 use crate::channels::web::handlers::providers::secret_exists;
-use crate::channels::web::identity_helpers::request_user_id;
+use crate::channels::web::identity_helpers::{
+    GatewayRequestIdentity, request_identity_with_overrides,
+};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::db::Database;
@@ -239,13 +241,23 @@ fn research_limit(value: Option<usize>, default: usize) -> usize {
     value.unwrap_or(default).clamp(1, 500)
 }
 
+async fn experiments_request_identity(
+    state: &GatewayState,
+    request_identity: &GatewayRequestIdentity,
+    requested_user_id: Option<&str>,
+) -> GatewayRequestIdentity {
+    request_identity_with_overrides(state, request_identity, requested_user_id, None).await
+}
+
 pub(crate) async fn experiments_projects_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<ExperimentsQuery>,
 ) -> Result<Json<experiments_api::ExperimentProjectListResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    experiments_api::list_projects(store, &user_id)
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
+    experiments_api::list_projects(store, &request_identity.principal_id)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -253,14 +265,16 @@ pub(crate) async fn experiments_projects_list_handler(
 
 pub(crate) async fn experiments_project_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Query(query): Query<ExperimentsQuery>,
 ) -> Result<Json<crate::experiments::ExperimentProject>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid project ID".to_string()))?;
-    experiments_api::get_project(store, &user_id, id)
+    experiments_api::get_project(store, &request_identity.principal_id, id)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -268,11 +282,11 @@ pub(crate) async fn experiments_project_detail_handler(
 
 pub(crate) async fn experiments_project_create_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Json(req): Json<experiments_api::CreateExperimentProjectRequest>,
 ) -> Result<(StatusCode, Json<crate::experiments::ExperimentProject>), (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
-    experiments_api::create_project(store, &user_id, req)
+    experiments_api::create_project(store, &request_identity.principal_id, req)
         .await
         .map(|project| (StatusCode::CREATED, Json(project)))
         .map_err(experiment_api_error)
@@ -280,14 +294,14 @@ pub(crate) async fn experiments_project_create_handler(
 
 pub(crate) async fn experiments_project_update_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Json(req): Json<experiments_api::UpdateExperimentProjectRequest>,
 ) -> Result<Json<crate::experiments::ExperimentProject>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid project ID".to_string()))?;
-    experiments_api::update_project(store, &user_id, id, req)
+    experiments_api::update_project(store, &request_identity.principal_id, id, req)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -295,13 +309,13 @@ pub(crate) async fn experiments_project_update_handler(
 
 pub(crate) async fn experiments_project_delete_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid project ID".to_string()))?;
-    let deleted = experiments_api::delete_project(store, &user_id, id)
+    let deleted = experiments_api::delete_project(store, &request_identity.principal_id, id)
         .await
         .map_err(experiment_api_error)?;
     Ok(Json(serde_json::json!({ "deleted": deleted })))
@@ -309,11 +323,13 @@ pub(crate) async fn experiments_project_delete_handler(
 
 pub(crate) async fn experiments_runners_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<ExperimentsQuery>,
 ) -> Result<Json<experiments_api::ExperimentRunnerListResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    experiments_api::list_runners(store, &user_id)
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
+    experiments_api::list_runners(store, &request_identity.principal_id)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -321,14 +337,16 @@ pub(crate) async fn experiments_runners_list_handler(
 
 pub(crate) async fn experiments_runner_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Query(query): Query<ExperimentsQuery>,
 ) -> Result<Json<crate::experiments::ExperimentRunnerProfile>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid runner ID".to_string()))?;
-    experiments_api::get_runner(store, &user_id, id)
+    experiments_api::get_runner(store, &request_identity.principal_id, id)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -336,6 +354,7 @@ pub(crate) async fn experiments_runner_detail_handler(
 
 pub(crate) async fn experiments_runner_create_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Json(req): Json<experiments_api::CreateExperimentRunnerProfileRequest>,
 ) -> Result<
     (
@@ -345,8 +364,7 @@ pub(crate) async fn experiments_runner_create_handler(
     (StatusCode, String),
 > {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
-    experiments_api::create_runner(store, &user_id, req)
+    experiments_api::create_runner(store, &request_identity.principal_id, req)
         .await
         .map(|runner| (StatusCode::CREATED, Json(runner)))
         .map_err(experiment_api_error)
@@ -354,14 +372,14 @@ pub(crate) async fn experiments_runner_create_handler(
 
 pub(crate) async fn experiments_runner_update_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Json(req): Json<experiments_api::UpdateExperimentRunnerProfileRequest>,
 ) -> Result<Json<crate::experiments::ExperimentRunnerProfile>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid runner ID".to_string()))?;
-    experiments_api::update_runner(store, &user_id, id, req)
+    experiments_api::update_runner(store, &request_identity.principal_id, id, req)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -369,13 +387,13 @@ pub(crate) async fn experiments_runner_update_handler(
 
 pub(crate) async fn experiments_runner_delete_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid runner ID".to_string()))?;
-    let deleted = experiments_api::delete_runner(store, &user_id, id)
+    let deleted = experiments_api::delete_runner(store, &request_identity.principal_id, id)
         .await
         .map_err(experiment_api_error)?;
     Ok(Json(serde_json::json!({ "deleted": deleted })))
@@ -383,13 +401,13 @@ pub(crate) async fn experiments_runner_delete_handler(
 
 pub(crate) async fn experiments_runner_validate_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<experiments_api::ExperimentRunnerValidationResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid runner ID".to_string()))?;
-    let response = experiments_api::validate_runner(store, &user_id, id)
+    let response = experiments_api::validate_runner(store, &request_identity.principal_id, id)
         .await
         .map_err(experiment_api_error)?;
     state.sse.broadcast(SseEvent::ExperimentRunnerUpdated {
@@ -405,6 +423,7 @@ pub(crate) async fn experiments_runner_validate_handler(
 
 pub(crate) async fn experiments_campaign_start_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Json(req): Json<experiments_api::StartExperimentCampaignRequest>,
 ) -> Result<
@@ -415,10 +434,9 @@ pub(crate) async fn experiments_campaign_start_handler(
     (StatusCode, String),
 > {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid project ID".to_string()))?;
-    let response = experiments_api::start_campaign(store, &user_id, id, req)
+    let response = experiments_api::start_campaign(store, &request_identity.principal_id, id, req)
         .await
         .map_err(experiment_api_error)?;
     broadcast_campaign_update(&state, &response);
@@ -427,11 +445,13 @@ pub(crate) async fn experiments_campaign_start_handler(
 
 pub(crate) async fn experiments_campaigns_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<ExperimentsQuery>,
 ) -> Result<Json<experiments_api::ExperimentCampaignListResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    experiments_api::list_campaigns(store, &user_id)
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
+    experiments_api::list_campaigns(store, &request_identity.principal_id)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -439,14 +459,16 @@ pub(crate) async fn experiments_campaigns_list_handler(
 
 pub(crate) async fn experiments_campaign_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Query(query): Query<ExperimentsQuery>,
 ) -> Result<Json<crate::experiments::ExperimentCampaign>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid campaign ID".to_string()))?;
-    experiments_api::get_campaign(store, &user_id, id)
+    experiments_api::get_campaign(store, &request_identity.principal_id, id)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -454,13 +476,13 @@ pub(crate) async fn experiments_campaign_detail_handler(
 
 pub(crate) async fn experiments_campaign_pause_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<experiments_api::ExperimentCampaignActionResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid campaign ID".to_string()))?;
-    let response = experiments_api::pause_campaign(store, &user_id, id)
+    let response = experiments_api::pause_campaign(store, &request_identity.principal_id, id)
         .await
         .map_err(experiment_api_error)?;
     broadcast_campaign_update(&state, &response);
@@ -469,13 +491,13 @@ pub(crate) async fn experiments_campaign_pause_handler(
 
 pub(crate) async fn experiments_campaign_resume_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<experiments_api::ExperimentCampaignActionResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid campaign ID".to_string()))?;
-    let response = experiments_api::resume_campaign(store, &user_id, id)
+    let response = experiments_api::resume_campaign(store, &request_identity.principal_id, id)
         .await
         .map_err(experiment_api_error)?;
     broadcast_campaign_update(&state, &response);
@@ -484,13 +506,13 @@ pub(crate) async fn experiments_campaign_resume_handler(
 
 pub(crate) async fn experiments_campaign_cancel_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<experiments_api::ExperimentCampaignActionResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid campaign ID".to_string()))?;
-    let response = experiments_api::cancel_campaign(store, &user_id, id)
+    let response = experiments_api::cancel_campaign(store, &request_identity.principal_id, id)
         .await
         .map_err(experiment_api_error)?;
     broadcast_campaign_update(&state, &response);
@@ -499,13 +521,13 @@ pub(crate) async fn experiments_campaign_cancel_handler(
 
 pub(crate) async fn experiments_campaign_promote_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<experiments_api::ExperimentCampaignActionResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid campaign ID".to_string()))?;
-    let response = experiments_api::promote_campaign(store, &user_id, id)
+    let response = experiments_api::promote_campaign(store, &request_identity.principal_id, id)
         .await
         .map_err(experiment_api_error)?;
     broadcast_campaign_update(&state, &response);
@@ -514,14 +536,16 @@ pub(crate) async fn experiments_campaign_promote_handler(
 
 pub(crate) async fn experiments_trials_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Query(query): Query<ExperimentsQuery>,
 ) -> Result<Json<experiments_api::ExperimentTrialListResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid campaign ID".to_string()))?;
-    experiments_api::list_trials(store, &user_id, id)
+    experiments_api::list_trials(store, &request_identity.principal_id, id)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -529,14 +553,16 @@ pub(crate) async fn experiments_trials_list_handler(
 
 pub(crate) async fn experiments_trial_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Query(query): Query<ExperimentsQuery>,
 ) -> Result<Json<crate::experiments::ExperimentTrial>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid trial ID".to_string()))?;
-    experiments_api::get_trial(store, &user_id, id)
+    experiments_api::get_trial(store, &request_identity.principal_id, id)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -544,14 +570,16 @@ pub(crate) async fn experiments_trial_detail_handler(
 
 pub(crate) async fn experiments_artifacts_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Query(query): Query<ExperimentsQuery>,
 ) -> Result<Json<experiments_api::ExperimentArtifactListResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid trial ID".to_string()))?;
-    experiments_api::list_artifacts(store, &user_id, id)
+    experiments_api::list_artifacts(store, &request_identity.principal_id, id)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -559,11 +587,13 @@ pub(crate) async fn experiments_artifacts_list_handler(
 
 pub(crate) async fn experiments_targets_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<ExperimentsQuery>,
 ) -> Result<Json<experiments_api::ExperimentTargetListResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    experiments_api::list_targets(store, &user_id)
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
+    experiments_api::list_targets(store, &request_identity.principal_id)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -571,11 +601,11 @@ pub(crate) async fn experiments_targets_list_handler(
 
 pub(crate) async fn experiments_target_create_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Json(req): Json<experiments_api::CreateExperimentTargetRequest>,
 ) -> Result<(StatusCode, Json<crate::experiments::ExperimentTarget>), (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
-    let target = experiments_api::create_target(store, &user_id, req)
+    let target = experiments_api::create_target(store, &request_identity.principal_id, req)
         .await
         .map_err(experiment_api_error)?;
     broadcast_experiment_opportunity_update(
@@ -589,11 +619,11 @@ pub(crate) async fn experiments_target_create_handler(
 
 pub(crate) async fn experiments_target_link_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Json(req): Json<experiments_api::LinkExperimentTargetRequest>,
 ) -> Result<Json<crate::experiments::ExperimentTarget>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
-    let target = experiments_api::link_target(store, &user_id, req)
+    let target = experiments_api::link_target(store, &request_identity.principal_id, req)
         .await
         .map_err(experiment_api_error)?;
     broadcast_experiment_opportunity_update(
@@ -607,14 +637,14 @@ pub(crate) async fn experiments_target_link_handler(
 
 pub(crate) async fn experiments_target_update_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Json(req): Json<experiments_api::UpdateExperimentTargetRequest>,
 ) -> Result<Json<crate::experiments::ExperimentTarget>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid target ID".to_string()))?;
-    let target = experiments_api::update_target(store, &user_id, id, req)
+    let target = experiments_api::update_target(store, &request_identity.principal_id, id, req)
         .await
         .map_err(experiment_api_error)?;
     broadcast_experiment_opportunity_update(
@@ -628,13 +658,13 @@ pub(crate) async fn experiments_target_update_handler(
 
 pub(crate) async fn experiments_target_delete_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid target ID".to_string()))?;
-    if !experiments_api::delete_target(store, &user_id, id)
+    if !experiments_api::delete_target(store, &request_identity.principal_id, id)
         .await
         .map_err(experiment_api_error)?
     {
@@ -654,41 +684,60 @@ pub(crate) async fn experiments_target_delete_handler(
 
 pub(crate) async fn experiments_model_usage_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<ExperimentsLimitQuery>,
 ) -> Result<Json<experiments_api::ExperimentModelUsageListResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    experiments_api::list_model_usage(store, &user_id, research_limit(query.limit, 100))
-        .await
-        .map(Json)
-        .map_err(experiment_api_error)
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
+    experiments_api::list_model_usage(
+        store,
+        &request_identity.principal_id,
+        research_limit(query.limit, 100),
+    )
+    .await
+    .map(Json)
+    .map_err(experiment_api_error)
 }
 
 pub(crate) async fn experiments_opportunities_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<ExperimentsLimitQuery>,
 ) -> Result<Json<experiments_api::ExperimentOpportunityListResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    experiments_api::list_opportunities(store, &user_id, research_limit(query.limit, 100))
-        .await
-        .map(Json)
-        .map_err(experiment_api_error)
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
+    experiments_api::list_opportunities(
+        store,
+        &request_identity.principal_id,
+        research_limit(query.limit, 100),
+    )
+    .await
+    .map(Json)
+    .map_err(experiment_api_error)
 }
 
 pub(crate) async fn experiments_gpu_clouds_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<ExperimentsQuery>,
 ) -> Result<Json<experiments_api::ExperimentGpuCloudProviderListResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    let mut response = experiments_api::list_gpu_cloud_providers(store, &user_id)
-        .await
-        .map_err(experiment_api_error)?;
+    let request_identity =
+        experiments_request_identity(&state, &request_identity, query.user_id.as_deref()).await;
+    let mut response =
+        experiments_api::list_gpu_cloud_providers(store, &request_identity.principal_id)
+            .await
+            .map_err(experiment_api_error)?;
     if let Some(secrets) = state.secrets_store.as_ref() {
         for provider in &mut response.providers {
-            provider.connected =
-                secret_exists(Some(secrets), &user_id, &provider.secret_name).await;
+            provider.connected = secret_exists(
+                Some(secrets),
+                &request_identity.principal_id,
+                &provider.secret_name,
+            )
+            .await;
         }
     }
     Ok(Json(response))
@@ -696,6 +745,7 @@ pub(crate) async fn experiments_gpu_clouds_list_handler(
 
 pub(crate) async fn experiments_gpu_cloud_connect_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(provider): Path<String>,
     Json(req): Json<ExperimentGpuCloudConnectRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -715,11 +765,13 @@ pub(crate) async fn experiments_gpu_cloud_connect_handler(
     if api_key.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "API key is required".to_string()));
     }
-    let _ = secrets.delete(&state.user_id, secret_name).await;
+    let _ = secrets
+        .delete(&request_identity.principal_id, secret_name)
+        .await;
     let params =
         crate::secrets::CreateSecretParams::new(secret_name, api_key).with_provider(backend.slug());
     secrets
-        .create(&state.user_id, params)
+        .create(&request_identity.principal_id, params)
         .await
         .map_err(|err| {
             tracing::error!(
@@ -729,7 +781,7 @@ pub(crate) async fn experiments_gpu_cloud_connect_handler(
             );
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
         })?;
-    let _ = crate::config::refresh_secrets(secrets.as_ref(), &state.user_id).await;
+    let _ = crate::config::refresh_secrets(secrets.as_ref(), &request_identity.principal_id).await;
     let info = research_gpu_cloud_info(&provider, true).ok_or((
         StatusCode::NOT_FOUND,
         "Unknown GPU cloud provider".to_string(),
@@ -749,6 +801,7 @@ pub(crate) async fn experiments_gpu_cloud_connect_handler(
 
 pub(crate) async fn experiments_gpu_cloud_validate_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(provider): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let backend = research_gpu_cloud_backend(&provider).ok_or((
@@ -763,13 +816,16 @@ pub(crate) async fn experiments_gpu_cloud_validate_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Secrets store not available".to_string(),
     ))?;
-    let connected = secret_exists(Some(secrets), &state.user_id, secret_name).await;
+    let connected = secret_exists(Some(secrets), &request_identity.principal_id, secret_name).await;
     let info = research_gpu_cloud_info(&provider, connected).ok_or((
         StatusCode::NOT_FOUND,
         "Unknown GPU cloud provider".to_string(),
     ))?;
     let (status, message) = if connected {
-        match secrets.get_decrypted(&state.user_id, secret_name).await {
+        match secrets
+            .get_decrypted(&request_identity.principal_id, secret_name)
+            .await
+        {
             Ok(secret) => match crate::experiments::adapters::validate_gpu_cloud_credentials(
                 backend,
                 secret.expose(),
@@ -800,12 +856,12 @@ pub(crate) async fn experiments_gpu_cloud_validate_handler(
 
 pub(crate) async fn experiments_gpu_cloud_template_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(provider): Path<String>,
     Json(req): Json<ExperimentGpuCloudTemplateRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
-    experiments_api::list_gpu_cloud_providers(store, &user_id)
+    experiments_api::list_gpu_cloud_providers(store, &request_identity.principal_id)
         .await
         .map_err(experiment_api_error)?;
     let backend = research_gpu_cloud_backend(&provider).ok_or((
@@ -814,7 +870,12 @@ pub(crate) async fn experiments_gpu_cloud_template_handler(
     ))?;
     let connected =
         if let Some(secret_name) = crate::experiments::adapters::gpu_cloud_secret_name(backend) {
-            secret_exists(state.secrets_store.as_ref(), &state.user_id, secret_name).await
+            secret_exists(
+                state.secrets_store.as_ref(),
+                &request_identity.principal_id,
+                secret_name,
+            )
+            .await
         } else {
             false
         };
@@ -846,6 +907,7 @@ pub(crate) async fn experiments_gpu_cloud_template_handler(
 
 pub(crate) async fn experiments_gpu_cloud_launch_test_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(provider): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let backend = research_gpu_cloud_backend(&provider).ok_or((
@@ -860,7 +922,7 @@ pub(crate) async fn experiments_gpu_cloud_launch_test_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Secrets store not available".to_string(),
     ))?;
-    let connected = secret_exists(Some(secrets), &state.user_id, secret_name).await;
+    let connected = secret_exists(Some(secrets), &request_identity.principal_id, secret_name).await;
     if !connected {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -875,7 +937,7 @@ pub(crate) async fn experiments_gpu_cloud_launch_test_handler(
         "Unknown GPU cloud provider".to_string(),
     ))?;
     let secret = secrets
-        .get_decrypted(&state.user_id, secret_name)
+        .get_decrypted(&request_identity.principal_id, secret_name)
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
     let validation_message =
@@ -910,13 +972,13 @@ pub(crate) async fn experiments_gpu_cloud_launch_test_handler(
 
 pub(crate) async fn experiments_campaign_reissue_lease_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<experiments_api::ExperimentCampaignActionResponse>, (StatusCode, String)> {
     let store = experiment_store(&state)?;
-    let user_id = request_user_id(&state, None).await;
     let id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid campaign ID".to_string()))?;
-    let response = experiments_api::reissue_lease(store, &user_id, id)
+    let response = experiments_api::reissue_lease(store, &request_identity.principal_id, id)
         .await
         .map_err(experiment_api_error)?;
     broadcast_campaign_update(&state, &response);
@@ -932,7 +994,10 @@ pub(crate) async fn experiment_lease_job_handler(
     let token = experiment_lease_token(&headers)?;
     let lease_id = Uuid::parse_str(&lease_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid lease ID".to_string()))?;
-    experiments_api::lease_job(store, &state.user_id, lease_id, &token)
+    let user_id = experiments_api::lease_owner_user_id(store, lease_id, &token)
+        .await
+        .map_err(experiment_api_error)?;
+    experiments_api::lease_job(store, &user_id, lease_id, &token)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -947,7 +1012,10 @@ pub(crate) async fn experiment_lease_credentials_handler(
     let token = experiment_lease_token(&headers)?;
     let lease_id = Uuid::parse_str(&lease_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid lease ID".to_string()))?;
-    experiments_api::lease_credentials(store, &state.user_id, lease_id, &token)
+    let user_id = experiments_api::lease_owner_user_id(store, lease_id, &token)
+        .await
+        .map_err(experiment_api_error)?;
+    experiments_api::lease_credentials(store, &user_id, lease_id, &token)
         .await
         .map(Json)
         .map_err(experiment_api_error)
@@ -963,7 +1031,10 @@ pub(crate) async fn experiment_lease_status_handler(
     let token = experiment_lease_token(&headers)?;
     let lease_id = Uuid::parse_str(&lease_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid lease ID".to_string()))?;
-    let response = experiments_api::lease_status(store, &state.user_id, lease_id, &token, req)
+    let user_id = experiments_api::lease_owner_user_id(store, lease_id, &token)
+        .await
+        .map_err(experiment_api_error)?;
+    let response = experiments_api::lease_status(store, &user_id, lease_id, &token, req)
         .await
         .map_err(experiment_api_error)?;
     broadcast_campaign_update(&state, &response);
@@ -980,7 +1051,10 @@ pub(crate) async fn experiment_lease_event_handler(
     let token = experiment_lease_token(&headers)?;
     let lease_id = Uuid::parse_str(&lease_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid lease ID".to_string()))?;
-    let response = experiments_api::lease_event(store, &state.user_id, lease_id, &token, req)
+    let user_id = experiments_api::lease_owner_user_id(store, lease_id, &token)
+        .await
+        .map_err(experiment_api_error)?;
+    let response = experiments_api::lease_event(store, &user_id, lease_id, &token, req)
         .await
         .map_err(experiment_api_error)?;
     broadcast_campaign_update(&state, &response);
@@ -997,7 +1071,10 @@ pub(crate) async fn experiment_lease_artifact_handler(
     let token = experiment_lease_token(&headers)?;
     let lease_id = Uuid::parse_str(&lease_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid lease ID".to_string()))?;
-    let response = experiments_api::lease_artifact(store, &state.user_id, lease_id, &token, req)
+    let user_id = experiments_api::lease_owner_user_id(store, lease_id, &token)
+        .await
+        .map_err(experiment_api_error)?;
+    let response = experiments_api::lease_artifact(store, &user_id, lease_id, &token, req)
         .await
         .map_err(experiment_api_error)?;
     broadcast_campaign_update(&state, &response);
@@ -1014,7 +1091,10 @@ pub(crate) async fn experiment_lease_complete_handler(
     let token = experiment_lease_token(&headers)?;
     let lease_id = Uuid::parse_str(&lease_id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid lease ID".to_string()))?;
-    let response = experiments_api::lease_complete(store, &state.user_id, lease_id, &token, req)
+    let user_id = experiments_api::lease_owner_user_id(store, lease_id, &token)
+        .await
+        .map_err(experiment_api_error)?;
+    let response = experiments_api::lease_complete(store, &user_id, lease_id, &token, req)
         .await
         .map_err(experiment_api_error)?;
     broadcast_campaign_update(&state, &response);

@@ -149,9 +149,7 @@ pub async fn register_bundled_hooks(registry: &Arc<HookRegistry>) -> HookRegistr
 
     let audit_hook = Arc::new(AuditLogHook);
     if !existing.contains(&audit_hook.name().to_string()) {
-        registry
-            .register_with_priority(audit_hook, 25)
-            .await;
+        registry.register_with_priority(audit_hook, 25).await;
         registered += 1;
     }
 

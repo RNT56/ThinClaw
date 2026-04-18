@@ -831,6 +831,53 @@ pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
     Ok(routine)
 }
 
+// ── 21. openclaw_autonomy_* ───────────────────────────────────────────
+
+pub async fn autonomy_status() -> Result<crate::desktop_autonomy::AutonomyStatus, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    Ok(manager.status().await)
+}
+
+pub async fn autonomy_pause(reason: Option<String>) -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.pause(reason).await;
+    Ok(serde_json::json!({"paused": true}))
+}
+
+pub async fn autonomy_resume() -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.resume().await?;
+    Ok(serde_json::json!({"paused": false}))
+}
+
+pub async fn desktop_permission_status() -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.desktop_permission_status().await
+}
+
+pub async fn autonomy_bootstrap() -> Result<crate::desktop_autonomy::AutonomyBootstrapReport, String>
+{
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.bootstrap().await
+}
+
+pub async fn autonomy_rollback() -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.rollback().await
+}
+
 // ── Convenience: list all available command names ──────────────────────
 
 /// List all available Tauri command names from this facade.
@@ -856,6 +903,12 @@ pub fn available_commands() -> Vec<&'static str> {
         "openclaw_canvas_panel_dismiss",
         "openclaw_channel_status_list",
         "openclaw_routine_create",
+        "openclaw_autonomy_status",
+        "openclaw_autonomy_pause",
+        "openclaw_autonomy_resume",
+        "openclaw_desktop_permission_status",
+        "openclaw_autonomy_bootstrap",
+        "openclaw_autonomy_rollback",
     ]
 }
 
@@ -1024,7 +1077,9 @@ mod tests {
     #[test]
     fn test_available_commands() {
         let cmds = available_commands();
-        assert_eq!(cmds.len(), 20);
+        let unique: std::collections::HashSet<_> = cmds.iter().copied().collect();
+        assert_eq!(unique.len(), cmds.len());
+        assert!(cmds.iter().all(|cmd| cmd.starts_with("openclaw_")));
         assert!(cmds.contains(&"openclaw_cost_summary"));
         assert!(cmds.contains(&"openclaw_manifest_validate"));
         assert!(cmds.contains(&"openclaw_routing_rules_list"));
@@ -1033,6 +1088,8 @@ mod tests {
         assert!(cmds.contains(&"openclaw_gmail_oauth_start"));
         assert!(cmds.contains(&"openclaw_channel_status_list"));
         assert!(cmds.contains(&"openclaw_routine_create"));
+        assert!(cmds.contains(&"openclaw_autonomy_status"));
+        assert!(cmds.contains(&"openclaw_autonomy_bootstrap"));
     }
 
     #[test]

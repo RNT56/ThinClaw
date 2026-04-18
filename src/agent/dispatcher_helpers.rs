@@ -9,6 +9,7 @@
 
 use crate::error::Error;
 use crate::llm::ChatMessage;
+use crate::tools::{ToolExecutionLane, ToolProfile, execution};
 
 /// Execute a chat tool without requiring `&Agent`.
 ///
@@ -21,108 +22,45 @@ pub(crate) async fn execute_chat_tool_standalone(
     tool_name: &str,
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
+    lane: ToolExecutionLane,
+    default_profile: ToolProfile,
 ) -> Result<String, Error> {
-    let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
-    if let Some(reason) = tool_policies.denial_reason_for_metadata(tool_name, &job_ctx.metadata) {
-        return Err(crate::error::ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            reason,
-        }
-        .into());
-    }
+    let profile_override = job_ctx
+        .metadata
+        .get("tool_profile")
+        .and_then(|value| value.as_str())
+        .and_then(|value| match value {
+            "standard" => Some(ToolProfile::Standard),
+            "restricted" => Some(ToolProfile::Restricted),
+            "explicit_only" => Some(ToolProfile::ExplicitOnly),
+            _ => None,
+        });
 
-    if !crate::tools::ToolRegistry::tool_name_allowed_by_metadata(&job_ctx.metadata, tool_name) {
-        return Err(crate::error::ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            reason: "Tool is not permitted in this agent context".to_string(),
-        }
-        .into());
-    }
-
-    let tool = tools
-        .get(tool_name)
-        .await
-        .ok_or_else(|| crate::error::ToolError::NotFound {
-            name: tool_name.to_string(),
-        })?;
-
-    // Validate tool parameters
-    let validation = safety.validator().validate_tool_params(params);
-    if !validation.is_valid {
-        let details = validation
-            .errors
-            .iter()
-            .map(|e| format!("{}: {}", e.field, e.message))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(crate::error::ToolError::InvalidParameters {
-            name: tool_name.to_string(),
-            reason: format!("Invalid tool parameters: {}", details),
-        }
-        .into());
-    }
-
-    tracing::debug!(
-        tool = %tool_name,
-        params = %params,
-        "Tool call started"
-    );
-
-    // Execute with per-tool timeout
-    let timeout = tool.execution_timeout();
-    let start = std::time::Instant::now();
-    let result = tokio::time::timeout(timeout, async {
-        tool.execute(params.clone(), job_ctx).await
+    let prepared = match execution::prepare_tool_call(execution::ToolPrepareRequest {
+        tools,
+        safety,
+        job_ctx,
+        tool_name,
+        params,
+        lane,
+        default_profile,
+        profile_override,
+        approval_mode: execution::ToolApprovalMode::Bypass,
+        hooks: None,
     })
-    .await;
-    let elapsed = start.elapsed();
+    .await?
+    {
+        execution::ToolPrepareOutcome::Ready(prepared) => prepared,
+        execution::ToolPrepareOutcome::NeedsApproval(_) => {
+            return Err(crate::error::ToolError::AuthRequired {
+                name: tool_name.to_string(),
+            }
+            .into());
+        }
+    };
 
-    match &result {
-        Ok(Ok(output)) => {
-            let result_str = serde_json::to_string(&output.result)
-                .unwrap_or_else(|_| "<serialize error>".to_string());
-            tracing::debug!(
-                tool = %tool_name,
-                elapsed_ms = elapsed.as_millis() as u64,
-                result = %result_str,
-                "Tool call succeeded"
-            );
-        }
-        Ok(Err(e)) => {
-            tracing::debug!(
-                tool = %tool_name,
-                elapsed_ms = elapsed.as_millis() as u64,
-                error = %e,
-                "Tool call failed"
-            );
-        }
-        Err(_) => {
-            tracing::debug!(
-                tool = %tool_name,
-                elapsed_ms = elapsed.as_millis() as u64,
-                timeout_secs = timeout.as_secs(),
-                "Tool call timed out"
-            );
-        }
-    }
-
-    let result = result
-        .map_err(|_| crate::error::ToolError::Timeout {
-            name: tool_name.to_string(),
-            timeout,
-        })?
-        .map_err(|e| crate::error::ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            reason: e.to_string(),
-        })?;
-
-    serde_json::to_string_pretty(&result.result).map_err(|e| {
-        crate::error::ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            reason: format!("Failed to serialize result: {}", e),
-        }
-        .into()
-    })
+    let output = execution::execute_tool_call(&prepared, safety, job_ctx).await?;
+    Ok(output.sanitized_content)
 }
 
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
@@ -372,6 +310,9 @@ mod tests {
                 thinking_enabled: false,
                 thinking_budget_tokens: 10_000,
                 auto_approve_tools: false,
+                main_tool_profile: crate::tools::ToolProfile::Standard,
+                worker_tool_profile: crate::tools::ToolProfile::Restricted,
+                subagent_tool_profile: crate::tools::ToolProfile::ExplicitOnly,
                 subagent_transparency_level: "balanced".to_string(),
                 model_thinking_overrides: std::collections::HashMap::new(),
                 workspace_mode: "unrestricted".to_string(),
@@ -617,6 +558,8 @@ mod tests {
             "echo",
             &serde_json::json!({"message": "hello"}),
             &job_ctx,
+            crate::tools::ToolExecutionLane::Chat,
+            crate::tools::ToolProfile::Standard,
         )
         .await;
 
@@ -649,6 +592,8 @@ mod tests {
             "nonexistent",
             &serde_json::json!({}),
             &job_ctx,
+            crate::tools::ToolExecutionLane::Chat,
+            crate::tools::ToolProfile::Standard,
         )
         .await;
 

@@ -218,6 +218,7 @@ impl Tool for RoutineCreateTool {
                 max_iterations: 10,
                 allowed_tools: None,
                 allowed_skills: None,
+                tool_profile: None,
             },
             other => {
                 return Err(ToolError::InvalidParameters(format!(
@@ -307,7 +308,8 @@ impl Tool for RoutineListTool {
     }
 
     fn description(&self) -> &str {
-        "List all routines with their status, trigger info, and next fire time."
+        "List all existing routines with their status, trigger info, and next fire time. \
+         Use this before modifying or deleting a routine when you need to inspect what already exists."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -383,8 +385,8 @@ impl Tool for RoutineUpdateTool {
     }
 
     fn description(&self) -> &str {
-        "Update an existing routine. Can modify trigger, prompt, schedule, or toggle enabled state. \
-         Pass the routine name and only the fields you want to change."
+        "Update an existing routine's schedule, prompt, trigger, description, or enabled \
+         state. Use this when the user wants to change a routine rather than create a new one."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -517,7 +519,8 @@ impl Tool for RoutineDeleteTool {
     }
 
     fn description(&self) -> &str {
-        "Delete a routine permanently. This also removes all run history."
+        "Delete a routine permanently. Use this when the user explicitly wants a routine \
+         removed; this also removes its stored run history."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -596,7 +599,8 @@ impl Tool for RoutineHistoryTool {
     }
 
     fn description(&self) -> &str {
-        "View the execution history of a routine. Shows recent runs with status, duration, and results."
+        "View a routine's recent execution history. Use this to debug missed runs, inspect \
+         failures, or confirm what a recurring task has been doing."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

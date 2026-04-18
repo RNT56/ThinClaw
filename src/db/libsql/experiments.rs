@@ -202,11 +202,11 @@ impl ExperimentStore for LibSqlBackend {
             INSERT INTO experiment_runner_profiles (
                 id, name, backend, backend_config, image_or_runtime,
                 gpu_requirements, env_grants, secret_references,
-                cache_policy, status, created_at, updated_at
+                cache_policy, status, readiness_class, launch_eligible, created_at, updated_at
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5,
                 ?6, ?7, ?8,
-                ?9, ?10, ?11, ?12
+                ?9, ?10, ?11, ?12, ?13, ?14
             )
             "#,
             params![
@@ -222,6 +222,9 @@ impl ExperimentStore for LibSqlBackend {
                     .unwrap_or_else(|_| "[]".to_string()),
                 profile.cache_policy.to_string(),
                 serde_json::to_string(&profile.status).unwrap_or_else(|_| "\"draft\"".to_string()),
+                serde_json::to_string(&profile.readiness_class)
+                    .unwrap_or_else(|_| "\"manual_only\"".to_string()),
+                if profile.launch_eligible { 1 } else { 0 },
                 fmt_ts(&profile.created_at),
                 fmt_ts(&profile.updated_at),
             ],
@@ -292,7 +295,9 @@ impl ExperimentStore for LibSqlBackend {
                 secret_references = ?8,
                 cache_policy = ?9,
                 status = ?10,
-                updated_at = ?11
+                readiness_class = ?11,
+                launch_eligible = ?12,
+                updated_at = ?13
             WHERE id = ?1
             "#,
             params![
@@ -308,6 +313,9 @@ impl ExperimentStore for LibSqlBackend {
                     .unwrap_or_else(|_| "[]".to_string()),
                 profile.cache_policy.to_string(),
                 serde_json::to_string(&profile.status).unwrap_or_else(|_| "\"draft\"".to_string()),
+                serde_json::to_string(&profile.readiness_class)
+                    .unwrap_or_else(|_| "\"manual_only\"".to_string()),
+                if profile.launch_eligible { 1 } else { 0 },
                 fmt_ts(&profile.updated_at),
             ],
         )
@@ -336,7 +344,7 @@ impl ExperimentStore for LibSqlBackend {
         conn.execute(
             r#"
             INSERT INTO experiment_campaigns (
-                id, project_id, runner_profile_id, status, baseline_commit,
+                id, project_id, runner_profile_id, owner_user_id, status, baseline_commit,
                 best_commit, best_metrics, experiment_branch, remote_ref,
                 worktree_path, started_at, ended_at, trial_count,
                 failure_count, pause_reason, queue_state, queue_position,
@@ -344,19 +352,20 @@ impl ExperimentStore for LibSqlBackend {
                 consecutive_non_improving_trials, max_trials_override, gateway_url,
                 metadata, created_at, updated_at, total_llm_cost_usd, total_runner_cost_usd
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5,
-                ?6, ?7, ?8, ?9,
-                ?10, ?11, ?12, ?13,
-                ?14, ?15, ?16, ?17,
-                ?18, ?19, ?20,
-                ?21, ?22, ?23,
-                ?24, ?25, ?26, ?27, ?28
+                ?1, ?2, ?3, ?4, ?5, ?6,
+                ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18,
+                ?19, ?20, ?21,
+                ?22, ?23, ?24,
+                ?25, ?26, ?27, ?28, ?29
             )
             "#,
             params![
                 campaign.id.to_string(),
                 campaign.project_id.to_string(),
                 campaign.runner_profile_id.to_string(),
+                campaign.owner_user_id.as_str(),
                 serde_json::to_string(&campaign.status)
                     .unwrap_or_else(|_| "\"pending_baseline\"".to_string()),
                 super::opt_text(campaign.baseline_commit.as_deref()),
@@ -442,36 +451,38 @@ impl ExperimentStore for LibSqlBackend {
             UPDATE experiment_campaigns SET
                 project_id = ?2,
                 runner_profile_id = ?3,
-                status = ?4,
-                baseline_commit = ?5,
-                best_commit = ?6,
-                best_metrics = ?7,
-                experiment_branch = ?8,
-                remote_ref = ?9,
-                worktree_path = ?10,
-                started_at = ?11,
-                ended_at = ?12,
-                trial_count = ?13,
-                failure_count = ?14,
-                pause_reason = ?15,
-                queue_state = ?16,
-                queue_position = ?17,
-                active_trial_id = ?18,
-                total_runtime_ms = ?19,
-                total_cost_usd = ?20,
-                consecutive_non_improving_trials = ?21,
-                max_trials_override = ?22,
-                gateway_url = ?23,
-                metadata = ?24,
-                updated_at = ?25,
-                total_llm_cost_usd = ?26,
-                total_runner_cost_usd = ?27
+                owner_user_id = ?4,
+                status = ?5,
+                baseline_commit = ?6,
+                best_commit = ?7,
+                best_metrics = ?8,
+                experiment_branch = ?9,
+                remote_ref = ?10,
+                worktree_path = ?11,
+                started_at = ?12,
+                ended_at = ?13,
+                trial_count = ?14,
+                failure_count = ?15,
+                pause_reason = ?16,
+                queue_state = ?17,
+                queue_position = ?18,
+                active_trial_id = ?19,
+                total_runtime_ms = ?20,
+                total_cost_usd = ?21,
+                consecutive_non_improving_trials = ?22,
+                max_trials_override = ?23,
+                gateway_url = ?24,
+                metadata = ?25,
+                updated_at = ?26,
+                total_llm_cost_usd = ?27,
+                total_runner_cost_usd = ?28
             WHERE id = ?1
             "#,
             params![
                 campaign.id.to_string(),
                 campaign.project_id.to_string(),
                 campaign.runner_profile_id.to_string(),
+                campaign.owner_user_id.as_str(),
                 serde_json::to_string(&campaign.status)
                     .unwrap_or_else(|_| "\"pending_baseline\"".to_string()),
                 super::opt_text(campaign.baseline_commit.as_deref()),
@@ -1215,8 +1226,11 @@ fn row_to_runner(row: &libsql::Row) -> Result<ExperimentRunnerProfile, DatabaseE
         secret_references: row_json_to(row, 7)?,
         cache_policy: get_json(row, 8),
         status: row_json_to(row, 9)?,
-        created_at: get_ts(row, 10),
-        updated_at: get_ts(row, 11),
+        readiness_class: row_json_to(row, 10)
+            .unwrap_or(crate::experiments::ExperimentRunnerReadinessClass::ManualOnly),
+        launch_eligible: crate::db::libsql::get_i64(row, 11) != 0,
+        created_at: get_ts(row, 12),
+        updated_at: get_ts(row, 13),
     })
 }
 
@@ -1228,39 +1242,40 @@ fn row_to_campaign(row: &libsql::Row) -> Result<ExperimentCampaign, DatabaseErro
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?,
         runner_profile_id: Uuid::parse_str(&get_text(row, 2))
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?,
-        status: row_json_to(row, 3)?,
-        baseline_commit: get_opt_text(row, 4),
-        best_commit: get_opt_text(row, 5),
-        best_metrics: get_json(row, 6),
-        experiment_branch: get_opt_text(row, 7),
-        remote_ref: get_opt_text(row, 8),
-        worktree_path: get_opt_text(row, 9),
-        started_at: get_opt_ts(row, 10),
-        ended_at: get_opt_ts(row, 11),
-        trial_count: get_i64(row, 12) as u32,
-        failure_count: get_i64(row, 13) as u32,
-        pause_reason: get_opt_text(row, 14),
-        queue_state: get_text(row, 15)
+        owner_user_id: get_text(row, 3),
+        status: row_json_to(row, 4)?,
+        baseline_commit: get_opt_text(row, 5),
+        best_commit: get_opt_text(row, 6),
+        best_metrics: get_json(row, 7),
+        experiment_branch: get_opt_text(row, 8),
+        remote_ref: get_opt_text(row, 9),
+        worktree_path: get_opt_text(row, 10),
+        started_at: get_opt_ts(row, 11),
+        ended_at: get_opt_ts(row, 12),
+        trial_count: get_i64(row, 13) as u32,
+        failure_count: get_i64(row, 14) as u32,
+        pause_reason: get_opt_text(row, 15),
+        queue_state: get_text(row, 16)
             .parse()
             .map_err(DatabaseError::Serialization)?,
-        queue_position: get_i64(row, 16) as u32,
-        active_trial_id: get_opt_text(row, 17).and_then(|value| Uuid::parse_str(&value).ok()),
-        total_runtime_ms: get_i64(row, 18) as u64,
-        total_cost_usd: get_opt_text(row, 19)
+        queue_position: get_i64(row, 17) as u32,
+        active_trial_id: get_opt_text(row, 18).and_then(|value| Uuid::parse_str(&value).ok()),
+        total_runtime_ms: get_i64(row, 19) as u64,
+        total_cost_usd: get_opt_text(row, 20)
             .and_then(|value| value.parse::<f64>().ok())
             .unwrap_or(0.0),
-        total_llm_cost_usd: get_opt_text(row, 26)
+        total_llm_cost_usd: get_opt_text(row, 27)
             .and_then(|value| value.parse::<f64>().ok())
             .unwrap_or(0.0),
-        total_runner_cost_usd: get_opt_text(row, 27)
+        total_runner_cost_usd: get_opt_text(row, 28)
             .and_then(|value| value.parse::<f64>().ok())
             .unwrap_or(0.0),
-        consecutive_non_improving_trials: get_i64(row, 20) as u32,
-        max_trials_override: row.get::<i64>(21).ok().map(|value| value as u32),
-        gateway_url: get_opt_text(row, 22),
-        metadata: get_json(row, 23),
-        created_at: get_ts(row, 24),
-        updated_at: get_ts(row, 25),
+        consecutive_non_improving_trials: get_i64(row, 21) as u32,
+        max_trials_override: row.get::<i64>(22).ok().map(|value| value as u32),
+        gateway_url: get_opt_text(row, 23),
+        metadata: get_json(row, 24),
+        created_at: get_ts(row, 25),
+        updated_at: get_ts(row, 26),
     })
 }
 

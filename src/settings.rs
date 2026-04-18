@@ -331,6 +331,22 @@ fn default_learning_publish_mode() -> String {
     "branch_pr_draft".to_string()
 }
 
+fn default_desktop_emergency_stop_path() -> String {
+    "~/.thinclaw/AUTONOMY_DISABLED".to_string()
+}
+
+fn default_desktop_max_concurrent_jobs() -> usize {
+    1
+}
+
+fn default_desktop_action_timeout_secs() -> u64 {
+    60
+}
+
+fn default_desktop_kill_switch_hotkey() -> String {
+    "ctrl+option+command+period".to_string()
+}
+
 fn default_experiments_ui_visibility() -> String {
     "hidden_until_enabled".to_string()
 }
@@ -429,12 +445,43 @@ pub struct LearningProviderSettings {
     pub config: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveLearningProvider {
+    #[default]
+    None,
+    Honcho,
+    Zep,
+}
+
+impl ActiveLearningProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Honcho => "honcho",
+            Self::Zep => "zep",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningProvidersSettings {
+    #[serde(default)]
+    pub active: ActiveLearningProvider,
     #[serde(default)]
     pub honcho: LearningProviderSettings,
     #[serde(default)]
     pub zep: LearningProviderSettings,
+}
+
+impl Default for LearningProvidersSettings {
+    fn default() -> Self {
+        Self {
+            active: ActiveLearningProvider::None,
+            honcho: LearningProviderSettings::default(),
+            zep: LearningProviderSettings::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -452,6 +499,9 @@ pub struct LearningCodeProposalSettings {
     /// Publish mode after approval: `branch_pr_draft`, `branch_only`, or `bundle_only`.
     #[serde(default = "default_learning_publish_mode")]
     pub publish_mode: String,
+    /// When true, approved code proposals can be auto-published without a human review step.
+    #[serde(default)]
+    pub auto_apply_without_review: bool,
 }
 
 impl Default for LearningCodeProposalSettings {
@@ -459,6 +509,88 @@ impl Default for LearningCodeProposalSettings {
         Self {
             enabled: true,
             publish_mode: default_learning_publish_mode(),
+            auto_apply_without_review: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopAutonomyProfile {
+    #[default]
+    Off,
+    RecklessDesktop,
+}
+
+impl DesktopAutonomyProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::RecklessDesktop => "reckless_desktop",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopDeploymentMode {
+    #[default]
+    WholeMachineAdmin,
+    DedicatedUser,
+}
+
+impl DesktopDeploymentMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WholeMachineAdmin => "whole_machine_admin",
+            Self::DedicatedUser => "dedicated_user",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopAutonomySettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub profile: DesktopAutonomyProfile,
+    #[serde(default)]
+    pub deployment_mode: DesktopDeploymentMode,
+    #[serde(default)]
+    pub target_username: Option<String>,
+    #[serde(default = "default_desktop_max_concurrent_jobs")]
+    pub desktop_max_concurrent_jobs: usize,
+    #[serde(default = "default_desktop_action_timeout_secs")]
+    pub desktop_action_timeout_secs: u64,
+    #[serde(default = "default_true")]
+    pub capture_evidence: bool,
+    #[serde(default = "default_desktop_emergency_stop_path")]
+    pub emergency_stop_path: String,
+    #[serde(default = "default_true")]
+    pub pause_on_bootstrap_failure: bool,
+    #[serde(default = "default_desktop_kill_switch_hotkey")]
+    pub kill_switch_hotkey: String,
+}
+
+impl DesktopAutonomySettings {
+    pub fn is_reckless_enabled(&self) -> bool {
+        self.enabled && matches!(self.profile, DesktopAutonomyProfile::RecklessDesktop)
+    }
+}
+
+impl Default for DesktopAutonomySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            profile: DesktopAutonomyProfile::Off,
+            deployment_mode: DesktopDeploymentMode::WholeMachineAdmin,
+            target_username: None,
+            desktop_max_concurrent_jobs: default_desktop_max_concurrent_jobs(),
+            desktop_action_timeout_secs: default_desktop_action_timeout_secs(),
+            capture_evidence: true,
+            emergency_stop_path: default_desktop_emergency_stop_path(),
+            pause_on_bootstrap_failure: true,
+            kill_switch_hotkey: default_desktop_kill_switch_hotkey(),
         }
     }
 }
@@ -501,7 +633,7 @@ fn default_learning_outcomes_default_ttl_hours() -> u32 {
 impl Default for LearningOutcomeSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             evaluation_interval_secs: default_learning_outcomes_evaluation_interval_secs(),
             max_due_per_tick: default_learning_outcomes_max_due_per_tick(),
             default_ttl_hours: default_learning_outcomes_default_ttl_hours(),
@@ -538,7 +670,7 @@ pub struct LearningSettings {
 impl Default for LearningSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             auto_apply_classes: default_learning_auto_apply_classes(),
             safe_mode: LearningSafeModeSettings::default(),
             reflection: LearningReflectionSettings::default(),
@@ -681,6 +813,11 @@ pub struct Settings {
     /// Determines where proactive messages (heartbeats, routine alerts) are sent.
     #[serde(default)]
     pub notifications: NotificationSettings,
+
+    // === Step 6c: Desktop Autonomy ===
+    /// Host-level desktop autonomy settings for macOS sidecar control.
+    #[serde(default)]
+    pub desktop_autonomy: DesktopAutonomySettings,
 
     // === Step 7: Heartbeat ===
     /// Heartbeat configuration.
@@ -1409,11 +1546,26 @@ pub struct AgentSettings {
     #[serde(default = "default_subagent_transparency_level")]
     pub subagent_transparency_level: String,
 
+    /// Default tool profile for the main interactive agent.
+    #[serde(default = "default_main_tool_profile")]
+    pub main_tool_profile: String,
+
+    /// Default tool profile for background workers and scheduled jobs.
+    #[serde(default = "default_worker_tool_profile")]
+    pub worker_tool_profile: String,
+
+    /// Default tool profile for subagents and delegated execution.
+    #[serde(default = "default_subagent_tool_profile")]
+    pub subagent_tool_profile: String,
+
     /// Workspace mode: "unrestricted", "sandboxed", or "project".
     /// Controls the system prompt and filesystem restrictions.
     /// - "unrestricted": full access to host filesystem and OS APIs
-    /// - "sandboxed": file tools confined to workspace_root
-    /// - "project": shell cwd = workspace_root, files accessible anywhere
+    /// - "sandboxed": file tools confined to workspace_root; `execute_code` runs
+    ///   only when the Docker sandbox is enabled; background `process` is disabled
+    /// - "project": shell cwd = workspace_root, files accessible anywhere; host-side
+    ///   `execute_code` and background `process` are disabled because they do not
+    ///   have hard execution isolation in this mode
     /// Set by the wizard based on autonomy level. Defaults to None (= "sandboxed").
     #[serde(default)]
     pub workspace_mode: Option<String>,
@@ -1496,6 +1648,18 @@ fn default_subagent_transparency_level() -> String {
     "balanced".to_string()
 }
 
+fn default_main_tool_profile() -> String {
+    "standard".to_string()
+}
+
+fn default_worker_tool_profile() -> String {
+    "restricted".to_string()
+}
+
+fn default_subagent_tool_profile() -> String {
+    "explicit_only".to_string()
+}
+
 fn default_persona_seed() -> String {
     "default".to_string()
 }
@@ -1554,6 +1718,9 @@ impl Default for AgentSettings {
             auto_approve_tools: false,
             allow_local_tools: false,
             subagent_transparency_level: default_subagent_transparency_level(),
+            main_tool_profile: default_main_tool_profile(),
+            worker_tool_profile: default_worker_tool_profile(),
+            subagent_tool_profile: default_subagent_tool_profile(),
             workspace_mode: None,
             model_guidance_enabled: true,
             cli_skin: default_cli_skin(),

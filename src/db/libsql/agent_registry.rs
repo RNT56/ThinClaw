@@ -10,7 +10,7 @@ use super::{LibSqlBackend, fmt_ts, get_i64, get_opt_text, get_text, get_ts};
 /// Column list for agent_workspaces table (matches positional access).
 const AGENT_WS_COLUMNS: &str = "\
     id, agent_id, display_name, system_prompt, model, \
-    bound_channels, trigger_keywords, allowed_tools, allowed_skills, \
+    bound_channels, trigger_keywords, allowed_tools, allowed_skills, tool_profile, \
     is_default, created_at, updated_at";
 
 fn row_to_agent_workspace(row: &libsql::Row) -> AgentWorkspaceRecord {
@@ -18,6 +18,7 @@ fn row_to_agent_workspace(row: &libsql::Row) -> AgentWorkspaceRecord {
     let trigger_keywords_json = get_text(row, 6);
     let allowed_tools_json = get_opt_text(row, 7);
     let allowed_skills_json = get_opt_text(row, 8);
+    let tool_profile = get_opt_text(row, 9);
 
     AgentWorkspaceRecord {
         id: get_text(row, 0).parse().unwrap_or_default(),
@@ -33,9 +34,15 @@ fn row_to_agent_workspace(row: &libsql::Row) -> AgentWorkspaceRecord {
         allowed_skills: allowed_skills_json
             .as_deref()
             .and_then(|json| serde_json::from_str(json).ok()),
-        is_default: get_i64(row, 9) != 0,
-        created_at: get_ts(row, 10),
-        updated_at: get_ts(row, 11),
+        tool_profile: tool_profile.as_deref().and_then(|value| match value {
+            "standard" => Some(crate::tools::ToolProfile::Standard),
+            "restricted" => Some(crate::tools::ToolProfile::Restricted),
+            "explicit_only" => Some(crate::tools::ToolProfile::ExplicitOnly),
+            _ => None,
+        }),
+        is_default: get_i64(row, 10) != 0,
+        created_at: get_ts(row, 11),
+        updated_at: get_ts(row, 12),
     }
 }
 
@@ -55,11 +62,12 @@ impl AgentRegistryStore for LibSqlBackend {
             .allowed_skills
             .as_ref()
             .and_then(|skills| serde_json::to_string(skills).ok());
+        let tool_profile = ws.tool_profile.map(|profile| profile.as_str().to_string());
 
         conn.execute(
             &format!(
                 "INSERT INTO agent_workspaces ({AGENT_WS_COLUMNS}) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
             ),
             libsql::params![
                 ws.id.to_string(),
@@ -79,6 +87,9 @@ impl AgentRegistryStore for LibSqlBackend {
                     .map(libsql::Value::Text)
                     .unwrap_or(libsql::Value::Null),
                 allowed_skills
+                    .map(libsql::Value::Text)
+                    .unwrap_or(libsql::Value::Null),
+                tool_profile
                     .map(libsql::Value::Text)
                     .unwrap_or(libsql::Value::Null),
                 ws.is_default as i64,
@@ -158,14 +169,15 @@ impl AgentRegistryStore for LibSqlBackend {
             .allowed_skills
             .as_ref()
             .and_then(|skills| serde_json::to_string(skills).ok());
+        let tool_profile = ws.tool_profile.map(|profile| profile.as_str().to_string());
 
         let affected = conn
             .execute(
                 "UPDATE agent_workspaces SET \
                  display_name = ?1, system_prompt = ?2, model = ?3, \
                  bound_channels = ?4, trigger_keywords = ?5, allowed_tools = ?6, \
-                 allowed_skills = ?7, is_default = ?8, updated_at = ?9 \
-                 WHERE agent_id = ?10",
+                 allowed_skills = ?7, tool_profile = ?8, is_default = ?9, updated_at = ?10 \
+                 WHERE agent_id = ?11",
                 libsql::params![
                     ws.display_name.clone(),
                     ws.system_prompt
@@ -182,6 +194,9 @@ impl AgentRegistryStore for LibSqlBackend {
                         .map(libsql::Value::Text)
                         .unwrap_or(libsql::Value::Null),
                     allowed_skills
+                        .map(libsql::Value::Text)
+                        .unwrap_or(libsql::Value::Null),
+                    tool_profile
                         .map(libsql::Value::Text)
                         .unwrap_or(libsql::Value::Null),
                     ws.is_default as i64,
@@ -230,6 +245,7 @@ mod tests {
             trigger_keywords: vec![],
             allowed_tools: None,
             allowed_skills: None,
+            tool_profile: None,
             is_default: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),

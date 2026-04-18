@@ -13,9 +13,9 @@ use std::sync::atomic::AtomicBool;
 use futures::StreamExt;
 use uuid::Uuid;
 
+use crate::agent::AgentRunDriver;
 use crate::agent::agent_router::AgentRouter;
 use crate::agent::context_monitor::ContextMonitor;
-use crate::agent::learning::{TrajectoryLogger, TrajectoryTurnRecord, hydrate_trajectory_record};
 use crate::agent::outcomes::{OutcomeService, spawn_outcome_service};
 use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
@@ -647,8 +647,9 @@ impl Agent {
                     let user_tz = self
                         .heartbeat_config
                         .as_ref()
-                        .and_then(|hb| hb.user_timezone.clone());
-                    engine = engine.with_user_timezone(user_tz);
+                        .and_then(|hb| hb.user_timezone.clone())
+                        .or_else(|| Some(workspace.effective_timezone().name().to_string()));
+                    engine = engine.with_user_timezone(user_tz.clone());
 
                     let engine = Arc::new(engine);
 
@@ -663,9 +664,37 @@ impl Agent {
                     // ── Auto-register heartbeat as a routine ─────────────
                     if let Some(ref hb_config) = self.heartbeat_config
                         && hb_config.enabled
-                        && let Err(e) = upsert_heartbeat_routine(store, hb_config).await
                     {
-                        tracing::error!("Failed to register heartbeat routine: {}", e);
+                        let gateway_diagnostics =
+                            self.channels.channel_diagnostics("gateway").await;
+                        let (heartbeat_user_id, heartbeat_actor_id) =
+                            heartbeat_routine_owner_from_diagnostics(
+                                gateway_diagnostics.as_ref(),
+                                workspace.user_id(),
+                            );
+                        if let Err(e) = upsert_heartbeat_routine(
+                            store,
+                            hb_config,
+                            &heartbeat_user_id,
+                            &heartbeat_actor_id,
+                        )
+                        .await
+                        {
+                            tracing::error!("Failed to register heartbeat routine: {}", e);
+                        }
+                    }
+
+                    let routine_user_id = workspace.user_id().to_string();
+                    if let Err(e) = crate::profile_evolution::upsert_profile_evolution_routine(
+                        store,
+                        workspace,
+                        &routine_user_id,
+                        &routine_user_id,
+                        user_tz.as_deref(),
+                    )
+                    .await
+                    {
+                        tracing::error!("Failed to register profile evolution routine: {}", e);
                     }
 
                     // Spawn notification forwarder (IC-003: track handle for cleanup)
@@ -1206,7 +1235,13 @@ impl Agent {
         // The channel is set to the hook name (e.g. "boot", "bootstrap")
         // so handle_message can identify the source. The user_id is the
         // resolved notification recipient (e.g. Telegram owner_id).
-        let message = IncomingMessage::new(hook_name, notify_user, content);
+        let message = IncomingMessage::new(hook_name, notify_user, content).with_metadata(
+            serde_json::json!({
+                "synthetic_origin": "startup_hook",
+                "startup_hook": hook_name,
+                "hide_from_webui_chat": true,
+            }),
+        );
 
         match self.handle_message(&message).await {
             Ok(Some(response)) if !response.is_empty() => {
@@ -1304,8 +1339,21 @@ impl Agent {
         };
 
         // Save the agent's startup response
+        let metadata = serde_json::json!({
+            "synthetic_origin": "startup_hook",
+            "startup_hook": hook_name,
+            "hide_from_webui_chat": true,
+        });
         if let Err(e) = store
-            .add_conversation_message(conversation_id, "assistant", response)
+            .add_conversation_message_with_attribution(
+                conversation_id,
+                "assistant",
+                response,
+                None,
+                None,
+                None,
+                Some(&metadata),
+            )
             .await
         {
             tracing::warn!("Failed to persist {} hook response: {}", hook_name, e);
@@ -1566,7 +1614,7 @@ impl Agent {
         &self,
         message: &IncomingMessage,
     ) -> Result<Option<String>, Error> {
-        let trajectory_logger = TrajectoryLogger::new();
+        let run_driver = AgentRunDriver::new();
         if let Some(ref external_thread_id) = message.thread_id {
             self.maybe_hydrate_thread(message, external_thread_id).await;
         } else {
@@ -1589,7 +1637,7 @@ impl Agent {
 
         self.record_trajectory_turn(
             message,
-            &trajectory_logger,
+            &run_driver,
             session,
             thread_id,
             starting_turn_count,
@@ -1602,7 +1650,7 @@ impl Agent {
     async fn record_trajectory_turn(
         &self,
         message: &IncomingMessage,
-        trajectory_logger: &TrajectoryLogger,
+        run_driver: &AgentRunDriver,
         session: Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
         thread_id: Uuid,
         starting_turn_count: usize,
@@ -1624,25 +1672,52 @@ impl Agent {
             return;
         };
 
-        if turn.state != crate::agent::session::TurnState::Completed {
-            return;
+        let harness = crate::agent::AgentRunHarness::with_driver(
+            run_driver.clone(),
+            self.store().map(Arc::clone),
+        );
+        match harness
+            .record_chat_turn(
+                &self.config.name,
+                &self.llm().active_model_name(),
+                &session_snapshot,
+                thread_id,
+                message,
+                turn,
+            )
+            .await
+        {
+            Ok(_artifact) => {}
+            Err(err) => {
+                tracing::debug!(
+                    thread = %thread_id,
+                    error = %err,
+                    "Canonical run artifact logging failed"
+                );
+            }
         }
 
-        let mut record = TrajectoryTurnRecord::from_turn(
-            &session_snapshot,
-            thread_id,
-            &thread_snapshot,
-            message,
-            turn,
-        );
-        hydrate_trajectory_record(&mut record, self.store()).await;
-
-        if let Err(err) = trajectory_logger.append_turn(&record).await {
-            tracing::debug!(
-                thread = %thread_id,
-                error = %err,
-                "Trajectory logging failed"
+        if let Some(store) = self.store().map(Arc::clone) {
+            let orchestrator = crate::agent::learning::LearningOrchestrator::new(
+                store,
+                self.workspace().cloned(),
+                self.skill_registry().cloned(),
             );
+            if let Err(err) = orchestrator
+                .review_completed_turn_for_generated_skill(
+                    &session_snapshot,
+                    thread_id,
+                    message,
+                    turn,
+                )
+                .await
+            {
+                tracing::debug!(
+                    thread = %thread_id,
+                    error = %err,
+                    "Generated skill reviewer skipped turn"
+                );
+            }
         }
     }
 
@@ -1704,6 +1779,8 @@ impl Agent {
 async fn upsert_heartbeat_routine(
     store: &Arc<dyn Database>,
     hb_config: &HeartbeatConfig,
+    user_id: &str,
+    actor_id: &str,
 ) -> Result<(), Error> {
     use crate::agent::routine::{
         NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, heartbeat_schedule_hint,
@@ -1738,112 +1815,179 @@ async fn upsert_heartbeat_routine(
         dedup_window: None,
     };
 
-    let existing = store.get_routine_by_name("default", "__heartbeat__").await;
+    let existing = store
+        .get_routine_by_name_for_actor(user_id, actor_id, "__heartbeat__")
+        .await;
+    let legacy_default = if user_id != "default" || actor_id != "default" {
+        match store
+            .get_routine_by_name_for_actor("default", "default", "__heartbeat__")
+            .await
+        {
+            Ok(routine) => routine,
+            Err(e) => {
+                tracing::error!("Failed to load legacy default heartbeat routine: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
-    match existing {
-        Ok(Some(mut routine)) => {
-            // Check if trigger, notify config, or enabled state changed
-            let trigger_changed = match &routine.trigger {
-                Trigger::Cron { schedule: s } => *s != schedule,
-                _ => true,
-            };
-            let notify_changed = routine.notify.channel != notify.channel
-                || routine.notify.user != notify.user
-                || routine.notify.on_attention != notify.on_attention
-                || routine.notify.on_failure != notify.on_failure
-                || routine.notify.on_success != notify.on_success;
-            let action_changed = routine.action.type_tag() != action.type_tag()
-                || routine.action.to_config_json() != action.to_config_json();
-            let guardrails_changed = routine.guardrails.cooldown != guardrails.cooldown
-                || routine.guardrails.max_concurrent != guardrails.max_concurrent
-                || routine.guardrails.dedup_window != guardrails.dedup_window;
-            let needs_next_fire = routine.next_fire_at.is_none();
-
-            if trigger_changed
-                || notify_changed
-                || action_changed
-                || guardrails_changed
-                || !routine.enabled
-                || needs_next_fire
-            {
-                routine.trigger = Trigger::Cron {
-                    schedule: schedule.clone(),
+    let mut routine = match existing {
+        Ok(Some(routine)) => routine,
+        Ok(None) => match legacy_default.clone() {
+            Some(legacy) => legacy,
+            None => {
+                let mut routine = Routine {
+                    id: uuid::Uuid::new_v4(),
+                    name: "__heartbeat__".to_string(),
+                    description: "Periodic background awareness check — reads HEARTBEAT.md and acts on checklist items".to_string(),
+                    user_id: user_id.to_string(),
+                    actor_id: actor_id.to_string(),
+                    enabled: true,
+                    trigger: Trigger::Cron {
+                        schedule: schedule.clone(),
+                    },
+                    action,
+                    guardrails,
+                    notify,
+                    last_run_at: None,
+                    next_fire_at: None,
+                    run_count: 0,
+                    consecutive_failures: 0,
+                    state: serde_json::json!({}),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
                 };
-                routine.enabled = true;
-                routine.action = action;
-                routine.notify = notify;
-                routine.guardrails = guardrails;
                 routine.next_fire_at = next_fire_for_routine(
                     &routine,
                     hb_config.user_timezone.as_deref(),
                     chrono::Utc::now(),
                 )
                 .unwrap_or(None);
-                routine.updated_at = chrono::Utc::now();
-                store.update_routine(&routine).await.map_err(|e| {
+
+                store.create_routine(&routine).await.map_err(|e| {
                     Error::Database(crate::error::DatabaseError::Query(e.to_string()))
                 })?;
+
                 tracing::info!(
-                    "Updated heartbeat routine: schedule='{}', notify_channel={:?}, next_fire={:?}",
-                    schedule,
-                    routine.notify.channel,
-                    routine.next_fire_at
+                    id = %routine.id,
+                    user_id = %routine.user_id,
+                    actor_id = %routine.actor_id,
+                    schedule = %schedule,
+                    next_fire = ?routine.next_fire_at,
+                    "Created heartbeat routine"
                 );
-            } else {
-                tracing::debug!("Heartbeat routine already up-to-date");
+                return Ok(());
             }
-        }
-        Ok(None) => {
-            // Create new heartbeat routine
-            let mut routine = Routine {
-                id: uuid::Uuid::new_v4(),
-                name: "__heartbeat__".to_string(),
-                description: "Periodic background awareness check — reads HEARTBEAT.md and acts on checklist items".to_string(),
-                user_id: "default".to_string(),
-                actor_id: "default".to_string(),
-                enabled: true,
-                trigger: Trigger::Cron { schedule: schedule.clone() },
-                action,
-                guardrails,
-                notify,
-                last_run_at: None,
-                next_fire_at: None,
-                run_count: 0,
-                consecutive_failures: 0,
-                state: serde_json::json!({}),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            };
-            routine.next_fire_at = next_fire_for_routine(
-                &routine,
-                hb_config.user_timezone.as_deref(),
-                chrono::Utc::now(),
-            )
-            .unwrap_or(None);
-
-            store
-                .create_routine(&routine)
-                .await
-                .map_err(|e| Error::Database(crate::error::DatabaseError::Query(e.to_string())))?;
-
-            tracing::info!(
-                "Created heartbeat routine: id={}, schedule='{}', next_fire={:?}",
-                routine.id,
-                schedule,
-                routine.next_fire_at
-            );
-        }
+        },
         Err(e) => {
             tracing::error!("Failed to check existing heartbeat routine: {}", e);
+            return Ok(());
         }
+    };
+
+    if let Some(legacy) = legacy_default
+        && legacy.id != routine.id
+    {
+        let deleted = store
+            .delete_routine(legacy.id)
+            .await
+            .map_err(|e| Error::Database(crate::error::DatabaseError::Query(e.to_string())))?;
+        tracing::info!(
+            legacy_id = %legacy.id,
+            current_id = %routine.id,
+            deleted,
+            "Removed duplicate legacy default heartbeat routine"
+        );
+    }
+
+    let ownership_changed = routine.user_id != user_id || routine.owner_actor_id() != actor_id;
+    let trigger_changed = match &routine.trigger {
+        Trigger::Cron { schedule: s } => *s != schedule,
+        _ => true,
+    };
+    let notify_changed = routine.notify.channel != notify.channel
+        || routine.notify.user != notify.user
+        || routine.notify.on_attention != notify.on_attention
+        || routine.notify.on_failure != notify.on_failure
+        || routine.notify.on_success != notify.on_success;
+    let action_changed = routine.action.type_tag() != action.type_tag()
+        || routine.action.to_config_json() != action.to_config_json();
+    let guardrails_changed = routine.guardrails.cooldown != guardrails.cooldown
+        || routine.guardrails.max_concurrent != guardrails.max_concurrent
+        || routine.guardrails.dedup_window != guardrails.dedup_window;
+    let needs_next_fire = routine.next_fire_at.is_none();
+
+    if ownership_changed
+        || trigger_changed
+        || notify_changed
+        || action_changed
+        || guardrails_changed
+        || !routine.enabled
+        || needs_next_fire
+    {
+        routine.user_id = user_id.to_string();
+        routine.actor_id = actor_id.to_string();
+        routine.trigger = Trigger::Cron {
+            schedule: schedule.clone(),
+        };
+        routine.enabled = true;
+        routine.action = action;
+        routine.notify = notify;
+        routine.guardrails = guardrails;
+        routine.next_fire_at = next_fire_for_routine(
+            &routine,
+            hb_config.user_timezone.as_deref(),
+            chrono::Utc::now(),
+        )
+        .unwrap_or(None);
+        routine.updated_at = chrono::Utc::now();
+        store
+            .update_routine(&routine)
+            .await
+            .map_err(|e| Error::Database(crate::error::DatabaseError::Query(e.to_string())))?;
+        tracing::info!(
+            id = %routine.id,
+            user_id = %routine.user_id,
+            actor_id = %routine.actor_id,
+            schedule = %schedule,
+            next_fire = ?routine.next_fire_at,
+            "Updated heartbeat routine ownership and configuration"
+        );
+    } else {
+        tracing::debug!("Heartbeat routine already up-to-date");
     }
 
     Ok(())
 }
 
+fn heartbeat_routine_owner_from_diagnostics(
+    diagnostics: Option<&serde_json::Value>,
+    fallback_user_id: &str,
+) -> (String, String) {
+    let user_id = diagnostics
+        .and_then(|value| value.get("user_id"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_user_id)
+        .to_string();
+    let actor_id = diagnostics
+        .and_then(|value| value.get("actor_id"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(user_id.as_str())
+        .to_string();
+    (user_id, actor_id)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{telegram_startup_thread_id, truncate_for_preview};
+    use super::{
+        heartbeat_routine_owner_from_diagnostics, telegram_startup_thread_id, truncate_for_preview,
+    };
 
     #[test]
     fn test_truncate_short_input() {
@@ -1922,5 +2066,33 @@ mod tests {
             Some("boot")
         );
         assert_eq!(telegram_startup_thread_id("bootstrap", "web", true), None);
+    }
+
+    #[test]
+    fn test_heartbeat_routine_owner_prefers_gateway_identity() {
+        let diagnostics = serde_json::json!({
+            "user_id": "household-user",
+            "actor_id": "desk-actor",
+        });
+
+        let (user_id, actor_id) =
+            heartbeat_routine_owner_from_diagnostics(Some(&diagnostics), "fallback-user");
+
+        assert_eq!(user_id, "household-user");
+        assert_eq!(actor_id, "desk-actor");
+    }
+
+    #[test]
+    fn test_heartbeat_routine_owner_falls_back_to_workspace_user() {
+        let diagnostics = serde_json::json!({
+            "user_id": "",
+            "actor_id": "",
+        });
+
+        let (user_id, actor_id) =
+            heartbeat_routine_owner_from_diagnostics(Some(&diagnostics), "fallback-user");
+
+        assert_eq!(user_id, "fallback-user");
+        assert_eq!(actor_id, "fallback-user");
     }
 }

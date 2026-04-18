@@ -24,8 +24,7 @@ use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
 use crate::safety::SafetyLayer;
-use crate::tools::ToolRegistry;
-use crate::tools::rate_limiter::RateLimitResult;
+use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
 use crate::workspace::Workspace;
 
 /// Shared dependencies for worker execution.
@@ -57,6 +56,8 @@ pub struct WorkerDeps {
     /// this worker. Without this, autonomous worker costs are invisible to the
     /// Cost Dashboard.
     pub cost_tracker: Option<Arc<tokio::sync::Mutex<CostTracker>>>,
+    /// Default tool profile for this worker lane.
+    pub tool_profile: ToolProfile,
 }
 
 /// Worker that executes a single job.
@@ -396,12 +397,22 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             .tool_definitions_for_autonomous_capabilities(
                 allowed_tools.as_deref(),
                 allowed_skills.as_deref(),
+                None,
             )
             .await;
         reason_ctx.available_tools = tool_policies.filter_tool_definitions_for_metadata(
             reason_ctx.available_tools.clone(),
             &capability_metadata,
         );
+        reason_ctx.available_tools = self
+            .tools()
+            .filter_tool_definitions_for_execution_profile(
+                reason_ctx.available_tools.clone(),
+                ToolExecutionLane::Worker,
+                self.deps.tool_profile,
+                &capability_metadata,
+            )
+            .await;
 
         // Generate plan if planning is enabled
         let plan = if self.use_planning() {
@@ -576,12 +587,22 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                 .tool_definitions_for_autonomous_capabilities(
                     allowed_tools.as_deref(),
                     allowed_skills.as_deref(),
+                    None,
                 )
                 .await;
             reason_ctx.available_tools = tool_policies.filter_tool_definitions_for_metadata(
                 reason_ctx.available_tools.clone(),
                 &capability_metadata,
             );
+            reason_ctx.available_tools = self
+                .tools()
+                .filter_tool_definitions_for_execution_profile(
+                    reason_ctx.available_tools.clone(),
+                    ToolExecutionLane::Worker,
+                    self.deps.tool_profile,
+                    &capability_metadata,
+                )
+                .await;
 
             // Select next tool(s) to use
             let selections = reasoning.select_tools(reason_ctx).await?;
@@ -756,6 +777,32 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             return results;
         }
 
+        let mut parallel_safe = true;
+        for selection in selections {
+            match self.tools().tool_descriptor(&selection.tool_name).await {
+                Some(descriptor) if descriptor.metadata.parallel_safe => {}
+                _ => {
+                    parallel_safe = false;
+                    break;
+                }
+            }
+        }
+
+        if !parallel_safe {
+            let mut results = Vec::with_capacity(count);
+            for selection in selections {
+                let result = Self::execute_tool_inner(
+                    &self.deps,
+                    self.job_id,
+                    &selection.tool_name,
+                    &selection.parameters,
+                )
+                .await;
+                results.push(ToolExecResult { result });
+            }
+            return results;
+        }
+
         let keepalive =
             WorkerActivityKeepalive::spawn(activity_tx.clone(), Duration::from_secs(15));
         let mut join_set = JoinSet::new();
@@ -831,96 +878,8 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         tool_name: &str,
         params: &serde_json::Value,
     ) -> Result<String, Error> {
-        let tool =
-            deps.tools
-                .get(tool_name)
-                .await
-                .ok_or_else(|| crate::error::ToolError::NotFound {
-                    name: tool_name.to_string(),
-                })?;
-
-        // In autonomous workers (routines), `UnlessAutoApproved` tools are
-        // auto-approved — there is no human to prompt.  Only block tools
-        // that unconditionally require explicit approval (`Always`).
-        if tool.requires_approval(params) == crate::tools::ApprovalRequirement::Always {
-            return Err(crate::error::ToolError::AuthRequired {
-                name: tool_name.to_string(),
-            }
-            .into());
-        }
-
         // Fetch job context early so we have the real user_id for hooks and rate limiting
         let job_ctx = deps.context_manager.get_context(job_id).await?;
-        let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
-        if let Some(reason) = tool_policies.denial_reason_for_metadata(tool_name, &job_ctx.metadata)
-        {
-            return Err(crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason,
-            }
-            .into());
-        }
-        if !crate::tools::ToolRegistry::tool_name_allowed_by_metadata(&job_ctx.metadata, tool_name)
-        {
-            return Err(crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason: "Tool is not permitted in this agent context".to_string(),
-            }
-            .into());
-        }
-
-        // Check per-tool rate limit before running hooks or executing (cheaper check first)
-        if let Some(config) = tool.rate_limit_config()
-            && let RateLimitResult::Limited { retry_after, .. } = deps
-                .tools
-                .rate_limiter()
-                .check_and_record(&job_ctx.user_id, tool_name, &config)
-                .await
-        {
-            return Err(crate::error::ToolError::RateLimited {
-                name: tool_name.to_string(),
-                retry_after: Some(retry_after),
-            }
-            .into());
-        }
-
-        // Run BeforeToolCall hook
-        let params = {
-            use crate::hooks::{HookError, HookEvent, HookOutcome};
-            let event = HookEvent::ToolCall {
-                tool_name: tool_name.to_string(),
-                parameters: params.clone(),
-                user_id: job_ctx.user_id.clone(),
-                context: format!("job:{}", job_id),
-            };
-            match deps.hooks.run(&event).await {
-                Err(HookError::Rejected { reason }) => {
-                    return Err(crate::error::ToolError::ExecutionFailed {
-                        name: tool_name.to_string(),
-                        reason: format!("Blocked by hook: {}", reason),
-                    }
-                    .into());
-                }
-                Err(err) => {
-                    return Err(crate::error::ToolError::ExecutionFailed {
-                        name: tool_name.to_string(),
-                        reason: format!("Blocked by hook failure mode: {}", err),
-                    }
-                    .into());
-                }
-                Ok(HookOutcome::Continue {
-                    modified: Some(new_params),
-                }) => serde_json::from_str(&new_params).unwrap_or_else(|e| {
-                    tracing::warn!(
-                        tool = %tool_name,
-                        "Hook returned non-JSON modification for ToolCall, ignoring: {}",
-                        e
-                    );
-                    params.clone()
-                }),
-                _ => params.clone(),
-            }
-        };
         if job_ctx.state == JobState::Cancelled {
             return Err(crate::error::ToolError::ExecutionFailed {
                 name: tool_name.to_string(),
@@ -929,131 +888,74 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             .into());
         }
 
-        // Validate tool parameters
-        let validation = deps.safety.validator().validate_tool_params(&params);
-        if !validation.is_valid {
-            let details = validation
-                .errors
-                .iter()
-                .map(|e| format!("{}: {}", e.field, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(crate::error::ToolError::InvalidParameters {
-                name: tool_name.to_string(),
-                reason: format!("Invalid tool parameters: {}", details),
-            }
-            .into());
-        }
-
-        tracing::debug!(
-            tool = %tool_name,
-            params = %params,
-            job = %job_id,
-            "Tool call started"
-        );
-
-        // Execute with per-tool timeout and timing
-        let tool_timeout = tool.execution_timeout();
-        let start = std::time::Instant::now();
-        let result = tokio::time::timeout(tool_timeout, async {
-            tool.execute(params.clone(), &job_ctx).await
+        let hook_context = format!("job:{job_id}");
+        let prepared = match execution::prepare_tool_call(execution::ToolPrepareRequest {
+            tools: &deps.tools,
+            safety: &deps.safety,
+            job_ctx: &job_ctx,
+            tool_name,
+            params,
+            lane: ToolExecutionLane::Worker,
+            default_profile: deps.tool_profile,
+            profile_override: None,
+            approval_mode: execution::ToolApprovalMode::Autonomous,
+            hooks: Some(execution::ToolHookConfig {
+                registry: &deps.hooks,
+                user_id: &job_ctx.user_id,
+                context: &hook_context,
+            }),
         })
-        .await;
-        let elapsed = start.elapsed();
+        .await?
+        {
+            execution::ToolPrepareOutcome::Ready(prepared) => prepared,
+            execution::ToolPrepareOutcome::NeedsApproval(_) => {
+                return Err(crate::error::ToolError::AuthRequired {
+                    name: tool_name.to_string(),
+                }
+                .into());
+            }
+        };
 
-        match &result {
-            Ok(Ok(output)) => {
-                let result_str = serde_json::to_string(&output.result)
-                    .unwrap_or_else(|_| "<serialize error>".to_string());
-                tracing::debug!(
-                    tool = %tool_name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    result = %result_str,
-                    "Tool call succeeded"
-                );
-            }
-            Ok(Err(e)) => {
-                tracing::debug!(
-                    tool = %tool_name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    error = %e,
-                    "Tool call failed"
-                );
-            }
-            Err(_) => {
-                tracing::debug!(
-                    tool = %tool_name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    timeout_secs = tool_timeout.as_secs(),
-                    "Tool call timed out"
-                );
-            }
-        }
+        let params = prepared.params.clone();
+        let result = execution::execute_tool_call(&prepared, &deps.safety, &job_ctx).await;
 
         // Record action in memory and get the ActionRecord for persistence
         let action = match &result {
-            Ok(Ok(output)) => {
-                let output_str = serde_json::to_string_pretty(&output.result)
-                    .ok()
-                    .map(|s| deps.safety.sanitize_tool_output(tool_name, &s).content);
-                match deps
-                    .context_manager
-                    .update_memory(job_id, |mem| {
-                        let rec = mem.create_action(tool_name, params.clone()).succeed(
-                            output_str.clone(),
-                            output.result.clone(),
-                            elapsed,
-                        );
-                        mem.record_action(rec.clone());
-                        rec
-                    })
-                    .await
-                {
-                    Ok(rec) => Some(rec),
-                    Err(e) => {
-                        tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {e}");
-                        None
-                    }
+            Ok(output) => match deps
+                .context_manager
+                .update_memory(job_id, |mem| {
+                    let rec = mem
+                        .create_action(tool_name, params.clone())
+                        .succeed(None, output.sanitized_value.clone(), output.elapsed)
+                        .with_warnings(output.warnings.clone());
+                    mem.record_action(rec.clone());
+                    rec
+                })
+                .await
+            {
+                Ok(rec) => Some(rec),
+                Err(e) => {
+                    tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {e}");
+                    None
                 }
-            }
-            Ok(Err(e)) => {
-                match deps
-                    .context_manager
-                    .update_memory(job_id, |mem| {
-                        let rec = mem
-                            .create_action(tool_name, params.clone())
-                            .fail(e.to_string(), elapsed);
-                        mem.record_action(rec.clone());
-                        rec
-                    })
-                    .await
-                {
-                    Ok(rec) => Some(rec),
-                    Err(e) => {
-                        tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {e}");
-                        None
-                    }
+            },
+            Err(e) => match deps
+                .context_manager
+                .update_memory(job_id, |mem| {
+                    let rec = mem
+                        .create_action(tool_name, params.clone())
+                        .fail(e.to_string(), std::time::Duration::ZERO);
+                    mem.record_action(rec.clone());
+                    rec
+                })
+                .await
+            {
+                Ok(rec) => Some(rec),
+                Err(err) => {
+                    tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {err}");
+                    None
                 }
-            }
-            Err(_) => {
-                match deps
-                    .context_manager
-                    .update_memory(job_id, |mem| {
-                        let rec = mem
-                            .create_action(tool_name, params.clone())
-                            .fail("Execution timeout", elapsed);
-                        mem.record_action(rec.clone());
-                        rec
-                    })
-                    .await
-                {
-                    Ok(rec) => Some(rec),
-                    Err(e) => {
-                        tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {e}");
-                        None
-                    }
-                }
-            }
+            },
         };
 
         // Persist action to database (fire-and-forget)
@@ -1065,25 +967,8 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             });
         }
 
-        // Handle the result
-        let output = result
-            .map_err(|_| crate::error::ToolError::Timeout {
-                name: tool_name.to_string(),
-                timeout: tool_timeout,
-            })?
-            .map_err(|e| crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason: e.to_string(),
-            })?;
-
-        // Return result as string
-        serde_json::to_string_pretty(&output.result).map_err(|e| {
-            crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason: format!("Failed to serialize result: {}", e),
-            }
-            .into()
-        })
+        let output = result?;
+        Ok(output.sanitized_content)
     }
 
     /// Process a tool execution result and add it to the reasoning context.
@@ -1260,21 +1145,57 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                 action.reasoning
             );
 
-            // Execute the planned tool
-            let result = self
-                .execute_tool(&action.tool_name, &action.parameters, activity_tx)
-                .await;
-
-            // Create a synthetic ToolSelection for process_tool_result.
-            // Plan actions don't originate from an LLM tool_call response so
-            // there is no real tool_call_id; generate a unique one.
-            let selection = ToolSelection {
+            let mut selection = ToolSelection {
                 tool_name: action.tool_name.clone(),
                 parameters: action.parameters.clone(),
                 reasoning: action.reasoning.clone(),
                 alternatives: vec![],
                 tool_call_id: format!("plan_{}_{}", self.job_id, i),
             };
+
+            // Execute the planned tool
+            let mut result = self
+                .execute_tool(&action.tool_name, &selection.parameters, activity_tx)
+                .await;
+
+            if let Err(crate::error::Error::Tool(crate::error::ToolError::InvalidParameters {
+                reason,
+                ..
+            })) = &result
+            {
+                let repair_action = crate::llm::PlannedAction {
+                    tool_name: action.tool_name.clone(),
+                    parameters: selection.parameters.clone(),
+                    reasoning: action.reasoning.clone(),
+                    expected_outcome: action.expected_outcome.clone(),
+                };
+
+                match reasoning
+                    .repair_plan_action(reason_ctx, &repair_action, reason)
+                    .await
+                {
+                    Ok(repaired_params) if repaired_params != selection.parameters => {
+                        tracing::info!(
+                            job_id = %self.job_id,
+                            tool = %action.tool_name,
+                            "Retrying planned action with repaired parameters"
+                        );
+                        selection.parameters = repaired_params;
+                        result = self
+                            .execute_tool(&action.tool_name, &selection.parameters, activity_tx)
+                            .await;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            job_id = %self.job_id,
+                            tool = %action.tool_name,
+                            "Planned action repair failed: {}",
+                            err
+                        );
+                    }
+                }
+            }
 
             // Process the result
             let completed = self
@@ -1794,6 +1715,7 @@ mod tests {
             routine_run_id: None,
             workspace: None,
             cost_tracker: None,
+            tool_profile: ToolProfile::Restricted,
         };
 
         Worker::new(job_id, deps)

@@ -10,7 +10,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::header,
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use tokio::sync::{mpsc, oneshot};
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -30,9 +30,7 @@ use crate::sandbox_types::{ContainerJobManager, PendingPrompt};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
-pub(crate) use crate::channels::web::handlers::chat::{
-    build_turns_from_db_messages, clear_auth_mode,
-};
+pub(crate) use crate::channels::web::handlers::chat::build_turns_from_db_messages;
 #[cfg(test)]
 pub(crate) use crate::channels::web::handlers::providers::{
     ProviderConfigEntry, build_provider_models_response, build_routing_provider_entries,
@@ -180,6 +178,9 @@ pub async fn start_server(
             token: auth_token,
             trusted_proxy_header,
             trusted_proxy_ips,
+            fallback_principal_id: state.user_id.clone(),
+            fallback_actor_id: state.actor_id.clone(),
+            store: state.store.clone(),
         }
     };
     let protected = Router::new()
@@ -194,6 +195,19 @@ pub async fn start_server(
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
         .route("/api/chat/thread/{id}", delete(chat_delete_thread_handler))
+        // Autonomy
+        .route("/api/autonomy/status", get(autonomy_status_handler))
+        .route("/api/autonomy/bootstrap", post(autonomy_bootstrap_handler))
+        .route("/api/autonomy/pause", post(autonomy_pause_handler))
+        .route("/api/autonomy/resume", post(autonomy_resume_handler))
+        .route(
+            "/api/autonomy/permissions",
+            get(autonomy_permissions_handler),
+        )
+        .route("/api/autonomy/rollback", post(autonomy_rollback_handler))
+        .route("/api/autonomy/rollouts", get(autonomy_rollouts_handler))
+        .route("/api/autonomy/checks", get(autonomy_checks_handler))
+        .route("/api/autonomy/evidence", get(autonomy_evidence_handler))
         // Memory
         .route("/api/memory/tree", get(memory_tree_handler))
         .route("/api/memory/list", get(memory_list_handler))
@@ -237,6 +251,46 @@ pub async fn start_server(
         .route(
             "/api/extensions/{name}/setup",
             get(extensions_setup_handler).post(extensions_setup_submit_handler),
+        )
+        // MCP
+        .route("/api/mcp/servers", get(mcp_servers_handler))
+        .route("/api/mcp/interactions", get(mcp_interactions_handler))
+        .route(
+            "/api/mcp/interactions/{interaction_id}/respond",
+            post(mcp_interaction_respond_handler),
+        )
+        .route("/api/mcp/servers/{name}", get(mcp_server_handler))
+        .route(
+            "/api/mcp/servers/{name}/tools",
+            get(mcp_server_tools_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/resources",
+            get(mcp_server_resources_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/resources/read",
+            get(mcp_server_read_resource_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/resource-templates",
+            get(mcp_server_resource_templates_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/prompts",
+            get(mcp_server_prompts_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/prompts/{prompt_name}",
+            post(mcp_server_prompt_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/oauth",
+            get(mcp_server_oauth_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/log-level",
+            put(mcp_server_log_level_handler),
         )
         // Gateway management
         .route("/api/gateway/restart", post(gateway_restart_handler))
@@ -594,13 +648,15 @@ pub async fn start_server(
     *state.shutdown_tx.write().await = Some(shutdown_tx);
 
     tokio::spawn(async move {
-        if let Err(e) =
-            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-                tracing::info!("Web gateway shutting down");
-            })
-            .await
+        if let Err(e) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+            tracing::info!("Web gateway shutting down");
+        })
+        .await
         {
             tracing::error!("Web gateway server error: {}", e);
         }
@@ -1141,6 +1197,58 @@ mod tests {
     fn test_build_turns_from_db_messages_empty() {
         let turns = build_turns_from_db_messages(&[]);
         assert!(turns.is_empty());
+    }
+
+    #[test]
+    fn test_build_turns_from_db_messages_hides_startup_hook_turns() {
+        let now = chrono::Utc::now();
+        let messages = vec![
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "boot prompt".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({"hide_from_webui_chat": true}),
+                created_at: now,
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "boot reply".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({"hide_from_webui_chat": true}),
+                created_at: now + chrono::TimeDelta::seconds(1),
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "real question".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
+                created_at: now + chrono::TimeDelta::seconds(2),
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "real answer".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
+                created_at: now + chrono::TimeDelta::seconds(3),
+            },
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].user_input, "real question");
+        assert_eq!(turns[0].response.as_deref(), Some("real answer"));
     }
 
     #[test]

@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::agent::personality;
+use crate::agent::prompt_assembly::PromptAssemblyV2;
 use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
@@ -18,6 +19,7 @@ use crate::error::Error;
 use crate::llm::{
     ChatMessage, Reasoning, ReasoningContext, RespondOutput, RespondResult, ToolDefinition,
 };
+use crate::tools::ToolExecutionLane;
 
 // Helper functions extracted to dispatcher_helpers.rs
 use super::dispatcher_helpers::compact_messages_for_retry;
@@ -45,6 +47,7 @@ pub(super) enum AgenticLoopResult {
 struct LlmTurnOptions {
     force_text: bool,
     thinking: crate::llm::ThinkingConfig,
+    context_documents: Vec<String>,
     stream_to_user: bool,
     emit_progress_status: bool,
     emit_thinking_status: bool,
@@ -72,28 +75,6 @@ enum ToolPhaseTextOutcome {
     NoToolsSignal,
     PrimaryFinalText,
     PrimaryNeedsFinalization,
-}
-
-fn merge_capability_allowlist(
-    inherited: Option<&[String]>,
-    requested: Option<Vec<String>>,
-) -> Option<Vec<String>> {
-    match (inherited, requested) {
-        (None, None) => None,
-        (Some(inherited), None) => Some(inherited.to_vec()),
-        (None, Some(requested)) => Some(requested),
-        (Some(inherited), Some(requested)) => {
-            let inherited: std::collections::HashSet<&str> =
-                inherited.iter().map(String::as_str).collect();
-            let mut merged: Vec<String> = requested
-                .into_iter()
-                .filter(|name| inherited.contains(name.as_str()))
-                .collect();
-            merged.sort();
-            merged.dedup();
-            Some(merged)
-        }
-    }
 }
 
 fn is_tool_phase_no_tools_signal(text: &str) -> bool {
@@ -194,7 +175,7 @@ impl Agent {
 
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
         // In group chats, MEMORY.md is excluded to prevent leaking personal context.
-        let mut system_prompt = if let Some(ws) = effective_workspace.as_ref() {
+        let mut workspace_prompt = if let Some(ws) = effective_workspace.as_ref() {
             match ws
                 .system_prompt_for_identity(
                     Some(&identity),
@@ -217,7 +198,7 @@ impl Agent {
             .as_ref()
             .and_then(|agent| agent.system_prompt.as_ref())
         {
-            system_prompt = Some(match system_prompt.take() {
+            workspace_prompt = Some(match workspace_prompt.take() {
                 Some(prompt) if !prompt.is_empty() => {
                     format!("{}\n\n## Agent Override\n\n{}", prompt, agent_prompt)
                 }
@@ -248,65 +229,39 @@ impl Agent {
         //   [### Available Skills — always present when any skills are loaded]
         //   name, name, name   ← compact directory
         //   If a task might benefit from a listed skill, use `skill_read` to check it.
-        let skill_context = if !all_skills.is_empty() {
-            let mut parts: Vec<String> = Vec::new();
-
-            // Active skills section (prefilter matches) — only when there are matches
-            if !active_skills.is_empty() {
-                parts.push("### Active Skills".to_string());
-                for skill in &active_skills {
-                    tracing::info!(
-                        skill_name = skill.name(),
-                        skill_version = skill.version(),
-                        trust = %skill.trust,
-                        "Skill activated"
-                    );
-                    parts.push(format!(
-                        "- **{}** (v{}, {}): {}",
-                        skill.name(),
-                        skill.version(),
-                        skill.trust,
-                        skill.manifest.description,
-                    ));
-                }
-                parts.push(
-                    "\nUse `skill_read` with the skill name to load full instructions before using a skill.".to_string()
-                );
+        let skill_index_context = if !all_skills.is_empty() {
+            let mut parts: Vec<String> = vec!["### Available Skills".to_string()];
+            for (name, desc) in &all_skills {
+                parts.push(format!("- **{}**: {}", name, desc));
             }
+            parts.push(
+                "\nUse `skill_read` with a skill name to inspect full instructions before relying on a skill.".to_string(),
+            );
+            Some(parts.join("\n"))
+        } else {
+            None
+        };
 
-            // Always-on skill directory — one entry per skill with name + description.
-            // Active skills are excluded (already listed in detail above).
-            // Descriptions allow the agent to evaluate relevance without calling
-            // skill_read blindly on every available skill.
-            let active_names: std::collections::HashSet<&str> =
-                active_skills.iter().map(|s| s.name()).collect();
-            let inactive_skills: Vec<&(String, String)> = all_skills
-                .iter()
-                .filter(|(name, _)| !active_names.contains(name.as_str()))
-                .collect();
-
-            if !inactive_skills.is_empty() {
-                let mut dir_lines = vec!["### Available Skills".to_string()];
-                for (name, desc) in &inactive_skills {
-                    dir_lines.push(format!("- **{}**: {}", name, desc));
-                }
-                if active_skills.is_empty() {
-                    dir_lines.push(
-                        "\nIf a task would benefit from one of these skills, use `skill_read` to load its full instructions first.".to_string()
-                    );
-                } else {
-                    dir_lines.push(
-                        "\nOther skills above may also be relevant — use `skill_read` to explore their instructions.".to_string()
-                    );
-                }
-                parts.push(dir_lines.join("\n"));
-            } else if !active_skills.is_empty() {
-                // All loaded skills are already active — nothing extra to show
-                parts.push(
-                    "### Available Skills\n(all installed skills are already active)".to_string(),
+        let active_skill_context = if !active_skills.is_empty() {
+            let mut parts: Vec<String> = vec!["### Active Skills".to_string()];
+            for skill in &active_skills {
+                tracing::info!(
+                    skill_name = skill.name(),
+                    skill_version = skill.version(),
+                    trust = %skill.trust,
+                    "Skill activated"
                 );
+                parts.push(format!(
+                    "- **{}** (v{}, {}): {}",
+                    skill.name(),
+                    skill.version(),
+                    skill.trust,
+                    skill.manifest.description,
+                ));
             }
-
+            parts.push(
+                "\nUse `skill_read` with the skill name to load full instructions before using a skill.".to_string(),
+            );
             Some(parts.join("\n"))
         } else {
             None
@@ -334,6 +289,165 @@ impl Agent {
                 .as_ref()
                 .map(personality::format_overlay)
         };
+        let linked_recall_block = if matches!(
+            identity.conversation_kind,
+            crate::identity::ConversationKind::Direct
+        ) && let Some(store) = self.store().map(Arc::clone)
+            && let Ok(mut conversations) = store
+                .list_actor_conversations_for_recall(
+                    &identity.principal_id,
+                    &identity.actor_id,
+                    false,
+                    8,
+                )
+                .await
+        {
+            conversations.retain(|summary| summary.id != thread_id);
+            crate::history::LinkedConversationRecall::new(
+                identity.principal_id.clone(),
+                identity.actor_id.clone(),
+                false,
+                conversations,
+            )
+            .compact_block()
+        } else {
+            None
+        };
+        let (provider_context, provider_tool_extensions) =
+            if let Some(store) = self.store().map(Arc::clone) {
+                let orchestrator = crate::agent::learning::LearningOrchestrator::new(
+                    store,
+                    self.workspace().cloned(),
+                    self.skill_registry().cloned(),
+                );
+                (
+                    orchestrator
+                        .prefetch_provider_context(&identity.principal_id, &message.content, 6)
+                        .await,
+                    orchestrator
+                        .provider_tool_extensions(&identity.principal_id)
+                        .await,
+                )
+            } else {
+                (None, Vec::new())
+            };
+        let post_compaction_fragment = if let Some(store) = self.store().map(Arc::clone)
+            && let Ok(Some(runtime)) = crate::agent::load_thread_runtime(&store, thread_id).await
+        {
+            runtime.post_compaction_context
+        } else {
+            None
+        };
+        let runtime_capability_hint = {
+            let has_execute_code = self.tools().has("execute_code").await;
+            let has_shell = self.tools().has("shell").await;
+            let has_process = self.tools().has("process").await;
+            let has_create_job = self.tools().has("create_job").await;
+            let mut caps = Vec::new();
+            if has_execute_code {
+                let host_local_network =
+                    crate::tools::execution_backend::host_local_network_deny_support().as_str();
+                caps.push(format!(
+                    "execute_code(host-local no-network={host_local_network})"
+                ));
+            }
+            if has_shell {
+                let host_local_network =
+                    crate::tools::execution_backend::host_local_network_deny_support().as_str();
+                caps.push(format!("shell(host-local no-network={host_local_network})"));
+            }
+            if has_process {
+                caps.push("process(long-running host process)".to_string());
+            }
+            if has_create_job {
+                caps.push("create_job(persistent sandbox job runtimes)".to_string());
+            }
+            if caps.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "Runtime capability hints: available execution surfaces include {}. Use them based on policy, approvals, and current tool availability.",
+                    caps.join(", ")
+                ))
+            }
+        };
+        let prompt_assembly = PromptAssemblyV2::new()
+            .push_stable("workspace_prompt", workspace_prompt.unwrap_or_default())
+            .push_stable(
+                "skills_index",
+                skill_index_context
+                    .map(|ctx| format!("## Skills\n{ctx}"))
+                    .unwrap_or_default(),
+            )
+            .push_ephemeral("transcript_guidance", "Channel transcript guidance: when the user asks about prior Telegram, WebUI, or other channel conversations, use session_search to inspect transcript history. Do not use communication/action tools like telegram_actions to read transcript history or infer account login state; those tools perform live platform actions only.")
+            .push_ephemeral(
+                "provider_recall",
+                provider_context
+                    .as_ref()
+                    .map(|ctx| format!("## External Memory Recall\n{}", ctx.rendered_context))
+                    .unwrap_or_default(),
+            )
+            .push_ephemeral(
+                "linked_recall",
+                linked_recall_block
+                    .as_ref()
+                    .map(|block| format!("## Linked Recall\n{block}"))
+                    .unwrap_or_default(),
+            )
+            .push_ephemeral(
+                "channel_formatting_hints",
+                active_channel_hint
+                    .as_ref()
+                    .map(|hints| {
+                        format!(
+                            "## Platform Formatting ({})\n{}",
+                            message.channel,
+                            hints
+                        )
+                    })
+                    .unwrap_or_default(),
+            )
+            .push_ephemeral(
+                "personality_overlay",
+                active_personality_overlay
+                    .as_ref()
+                    .map(|overlay| format!("## Temporary Personality\n\n{overlay}"))
+                    .unwrap_or_default(),
+            )
+            .push_ephemeral(
+                "runtime_capabilities",
+                runtime_capability_hint.unwrap_or_default(),
+            )
+            .push_ephemeral(
+                "active_skills",
+                active_skill_context
+                    .map(|ctx| format!("## Skill Expansion\n{ctx}"))
+                    .unwrap_or_default(),
+            )
+            .push_ephemeral(
+                "post_compaction_fragment",
+                post_compaction_fragment.unwrap_or_default(),
+            )
+            .with_provider_context_refs(
+                provider_context
+                    .as_ref()
+                    .map(|ctx| ctx.context_refs.clone())
+                    .unwrap_or_default(),
+            )
+            .build();
+        if let Some(store) = self.store().map(Arc::clone) {
+            let stable_hash = prompt_assembly.stable_hash.clone();
+            let ephemeral_hash = prompt_assembly.ephemeral_hash.clone();
+            let segment_order = prompt_assembly.segment_order.clone();
+            let provider_context_refs = prompt_assembly.provider_context_refs.clone();
+            let _ = crate::agent::mutate_thread_runtime(&store, thread_id, |runtime| {
+                runtime.prompt_snapshot_hash = Some(stable_hash.clone());
+                runtime.ephemeral_overlay_hash = Some(ephemeral_hash.clone());
+                runtime.prompt_segment_order = segment_order.clone();
+                runtime.provider_context_refs = provider_context_refs.clone();
+            })
+            .await;
+        }
 
         // Capture the routed model name for cost tracking, thinking config, etc.
         // When smart routing selects the cheap model, this differs from
@@ -359,9 +473,6 @@ impl Agent {
                     .as_ref()
                     .map(|p| p.display().to_string()),
             );
-        if let Some(hints) = active_channel_hint {
-            reasoning = reasoning.with_channel_formatting_hints(hints);
-        }
         if let Some(ref tracker) = self.deps.cost_tracker {
             reasoning = reasoning.with_cost_tracker(Arc::clone(tracker));
         }
@@ -369,63 +480,15 @@ impl Agent {
             reasoning = reasoning.with_response_cache(Arc::clone(cache));
         }
 
-        if let Some(prompt) = system_prompt {
-            reasoning = reasoning.with_system_prompt(prompt);
+        if !prompt_assembly.stable_snapshot.trim().is_empty() {
+            reasoning = reasoning.with_system_prompt(prompt_assembly.stable_snapshot.clone());
         }
-        if let Some(overlay) = active_personality_overlay {
-            reasoning = reasoning.with_personality_overlay(overlay);
-        }
-        if let Some(ctx) = skill_context {
-            reasoning = reasoning.with_skill_context(ctx);
-        }
+        let prompt_context_documents = prompt_assembly.ephemeral_documents.clone();
 
         // Build context with messages that we'll mutate during the loop
         let mut context_messages = initial_messages;
-        let mut prefixed_context: Vec<ChatMessage> = Vec::new();
-
-        prefixed_context.push(ChatMessage::system(
-            "Channel transcript guidance: when the user asks about prior Telegram, WebUI, or other channel conversations, use session_search to inspect transcript history. Do not use communication/action tools like telegram_actions to read transcript history or infer account login state; those tools perform live platform actions only.",
-        ));
-
-        if matches!(
-            identity.conversation_kind,
-            crate::identity::ConversationKind::Direct
-        ) && let Some(store) = self.store().map(Arc::clone)
-            && let Ok(mut conversations) = store
-                .list_actor_conversations_for_recall(
-                    &identity.principal_id,
-                    &identity.actor_id,
-                    false,
-                    8,
-                )
-                .await
-        {
-            conversations.retain(|summary| summary.id != thread_id);
-            if !conversations.is_empty() {
-                let recall = crate::history::LinkedConversationRecall::new(
-                    identity.principal_id.clone(),
-                    identity.actor_id.clone(),
-                    false,
-                    conversations,
-                );
-                if let Some(block) = recall.compact_block() {
-                    prefixed_context.push(ChatMessage::system(block));
-                }
-            }
-        }
-
-        for message in prefixed_context.into_iter().rev() {
-            context_messages.insert(0, message);
-        }
 
         let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
-        if let Some(store) = self.store().map(Arc::clone)
-            && let Ok(Some(runtime)) = crate::agent::load_thread_runtime(&store, thread_id).await
-            && let Some(fragment) = runtime.post_compaction_context
-            && !fragment.trim().is_empty()
-        {
-            context_messages.insert(0, ChatMessage::system(fragment));
-        }
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
         let mut job_ctx = JobContext::with_identity(
@@ -484,6 +547,12 @@ impl Agent {
                     metadata.insert(
                         "allowed_skills".to_string(),
                         serde_json::json!(allowed_skills),
+                    );
+                }
+                if let Some(tool_profile) = agent.tool_profile {
+                    metadata.insert(
+                        "tool_profile".to_string(),
+                        serde_json::json!(tool_profile.as_str()),
                     );
                 }
             }
@@ -687,7 +756,11 @@ impl Agent {
 
                     let flush_ctx = ReasoningContext::new()
                         .with_messages(flush_msgs)
-                        .with_tools(self.tools().tool_definitions().await);
+                        .with_tools(
+                            self.tools()
+                                .tool_definitions_for_capabilities(None, None, None)
+                                .await,
+                        );
 
                     match reasoning.respond_with_tools(&flush_ctx).await {
                         Ok(flush_out) => {
@@ -874,7 +947,11 @@ impl Agent {
             // Refresh tool definitions each iteration so newly built tools become visible
             let tool_defs = self
                 .tools()
-                .tool_definitions_for_capabilities(routed_allowed_tools, routed_allowed_skills)
+                .tool_definitions_for_capabilities(
+                    routed_allowed_tools,
+                    routed_allowed_skills,
+                    Some(&provider_tool_extensions),
+                )
                 .await;
             let tool_defs =
                 tool_policies.filter_tool_definitions_for_metadata(tool_defs, &job_ctx.metadata);
@@ -894,6 +971,25 @@ impl Agent {
             } else {
                 tool_defs
             };
+            let tool_defs = self
+                .tools()
+                .filter_tool_definitions_for_execution_profile(
+                    tool_defs,
+                    ToolExecutionLane::Chat,
+                    job_ctx
+                        .metadata
+                        .get("tool_profile")
+                        .and_then(|value| value.as_str())
+                        .and_then(|value| match value {
+                            "standard" => Some(crate::tools::ToolProfile::Standard),
+                            "restricted" => Some(crate::tools::ToolProfile::Restricted),
+                            "explicit_only" => Some(crate::tools::ToolProfile::ExplicitOnly),
+                            _ => None,
+                        })
+                        .unwrap_or(self.config.main_tool_profile),
+                    &job_ctx.metadata,
+                )
+                .await;
 
             if force_text {
                 tracing::info!(
@@ -939,6 +1035,7 @@ impl Agent {
                         } else {
                             crate::llm::ThinkingConfig::Disabled
                         },
+                        context_documents: prompt_context_documents.clone(),
                         stream_to_user: !use_tool_phase_synthesis,
                         emit_progress_status: !use_tool_phase_synthesis,
                         emit_thinking_status: !use_tool_phase_synthesis,
@@ -985,6 +1082,7 @@ impl Agent {
                                             force_text: true,
                                             thinking: self
                                                 .thinking_config_for_model(&cheap_model_name),
+                                            context_documents: prompt_context_documents.clone(),
                                             stream_to_user: true,
                                             emit_progress_status: true,
                                             emit_thinking_status: true,
@@ -1036,6 +1134,7 @@ impl Agent {
                                     .finalize_primary_text_only(
                                         &mut reasoning,
                                         &mut context_messages,
+                                        &prompt_context_documents,
                                         thread_id,
                                         message,
                                         &persistent_draft,
@@ -1089,6 +1188,7 @@ impl Agent {
                             .finalize_primary_text_only(
                                 &mut reasoning,
                                 &mut context_messages,
+                                &prompt_context_documents,
                                 thread_id,
                                 message,
                                 &persistent_draft,
@@ -1257,7 +1357,24 @@ impl Agent {
                     let mut exec_results: Vec<Option<Result<String, Error>>> =
                         (0..preflight.len()).map(|_| None).collect();
 
-                    if runnable.len() <= 1 {
+                    let mut parallel_safe = runnable.len() > 1;
+                    if parallel_safe {
+                        for (_, tc) in &runnable {
+                            if tc.name == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
+                                parallel_safe = false;
+                                break;
+                            }
+                            match self.tools().tool_descriptor(&tc.name).await {
+                                Some(descriptor) if descriptor.metadata.parallel_safe => {}
+                                _ => {
+                                    parallel_safe = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if !parallel_safe {
                         // Single tool (or none): execute inline
                         for (pf_idx, tc) in &runnable {
                             let _ = self
@@ -1357,6 +1474,7 @@ impl Agent {
                             let tc = tc.clone();
                             let channel = message.channel.clone();
                             let metadata = message.metadata.clone();
+                            let main_tool_profile = self.config.main_tool_profile;
 
                             join_set.spawn(async move {
                                 let _ = channels
@@ -1376,6 +1494,8 @@ impl Agent {
                                     &tc.name,
                                     &tc.arguments,
                                     &job_ctx,
+                                    ToolExecutionLane::Chat,
+                                    main_tool_profile,
                                 )
                                 .await;
 
@@ -1626,17 +1746,14 @@ impl Agent {
                                                         ) {
                                                             request.principal_id.get_or_insert_with(|| identity.principal_id.clone());
                                                             request.actor_id.get_or_insert_with(|| identity.actor_id.clone());
-                                                            request.allowed_tools = merge_capability_allowlist(
-                                                                routed_allowed_tools,
-                                                                request.allowed_tools.take(),
-                                                            );
-                                                            request.allowed_skills = merge_capability_allowlist(
-                                                                routed_allowed_skills,
-                                                                request.allowed_skills.take(),
-                                                            );
                                                             if request.agent_workspace_id.is_none() {
                                                                 request.agent_workspace_id = routed_agent_workspace_id;
                                                             }
+                                                            request.normalize_strict(
+                                                                routed_allowed_tools,
+                                                                routed_allowed_skills,
+                                                                self.config.subagent_tool_profile,
+                                                            );
                                                             let pending_resume_request = if request.wait {
                                                                 None
                                                             } else {
@@ -1756,22 +1873,32 @@ impl Agent {
                                         .get("target_workspace_id")
                                         .and_then(|v| v.as_str())
                                         .and_then(|v| Uuid::parse_str(v).ok());
+                                    let target_tool_profile = parsed
+                                        .get("target_tool_profile")
+                                        .and_then(|v| v.as_str())
+                                        .map(|value| match value {
+                                            "standard" => crate::tools::ToolProfile::Standard,
+                                            "restricted" => crate::tools::ToolProfile::Restricted,
+                                            "explicit_only" => {
+                                                crate::tools::ToolProfile::ExplicitOnly
+                                            }
+                                            _ => self.config.subagent_tool_profile,
+                                        });
                                     let parent_identity = message.resolved_identity();
 
                                     if let Some(executor) = self.subagent_executor.as_ref() {
-                                        let request =
+                                        let mut request =
                                             crate::agent::subagent_executor::SubagentSpawnRequest {
                                                 name: format!("a2a:{}", target_id),
                                                 task: a2a_message.to_string(),
                                                 system_prompt: Some(system_prompt.to_string()),
-                                                allowed_tools: merge_capability_allowlist(
-                                                    routed_allowed_tools,
-                                                    target_allowed_tools,
-                                                ),
-                                                allowed_skills: merge_capability_allowlist(
-                                                    routed_allowed_skills,
-                                                    target_allowed_skills,
-                                                ),
+                                                task_packet: None,
+                                                memory_mode: None,
+                                                tool_mode: None,
+                                                skill_mode: None,
+                                                tool_profile: target_tool_profile,
+                                                allowed_tools: target_allowed_tools,
+                                                allowed_skills: target_allowed_skills,
                                                 principal_id: Some(
                                                     parent_identity.principal_id.clone(),
                                                 ),
@@ -1781,6 +1908,11 @@ impl Agent {
                                                 wait: true,
                                                 timeout_secs: Some(timeout_secs),
                                             };
+                                        request.normalize_strict(
+                                            routed_allowed_tools,
+                                            routed_allowed_skills,
+                                            self.config.subagent_tool_profile,
+                                        );
                                         let mut spawn_metadata = message.metadata.clone();
                                         if !spawn_metadata.is_object() {
                                             spawn_metadata = serde_json::json!({});
@@ -1969,6 +2101,7 @@ impl Agent {
         }
         let mut context = ReasoningContext::new()
             .with_messages(messages)
+            .with_context_documents(options.context_documents.clone())
             .with_tools(available_tools)
             .with_metadata({
                 let mut metadata = std::collections::HashMap::new();
@@ -1994,6 +2127,7 @@ impl Agent {
         &self,
         reasoning: &mut Reasoning,
         context_messages: &mut Vec<ChatMessage>,
+        context_documents: &[String],
         thread_id: Uuid,
         message: &IncomingMessage,
         persistent_draft: &Arc<tokio::sync::Mutex<Option<crate::channels::DraftReplyState>>>,
@@ -2015,6 +2149,7 @@ impl Agent {
                 LlmTurnOptions {
                     force_text: true,
                     thinking: self.thinking_config_for_model(&final_model_name),
+                    context_documents: context_documents.to_vec(),
                     stream_to_user: true,
                     emit_progress_status: true,
                     emit_thinking_status: true,
@@ -2604,7 +2739,16 @@ impl Agent {
         params: &serde_json::Value,
         job_ctx: &JobContext,
     ) -> Result<String, Error> {
-        execute_chat_tool_standalone(self.tools(), self.safety(), tool_name, params, job_ctx).await
+        execute_chat_tool_standalone(
+            self.tools(),
+            self.safety(),
+            tool_name,
+            params,
+            job_ctx,
+            ToolExecutionLane::Chat,
+            self.config.main_tool_profile,
+        )
+        .await
     }
 }
 
@@ -2646,6 +2790,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct CapturedRequest {
         messages: Vec<ChatMessage>,
+        context_documents: Vec<String>,
         tool_names: Vec<String>,
         max_tokens: Option<u32>,
         thinking: ThinkingConfig,
@@ -2734,12 +2879,14 @@ mod tests {
         async fn record_request(
             &self,
             messages: Vec<ChatMessage>,
+            context_documents: Vec<String>,
             tool_names: Vec<String>,
             max_tokens: Option<u32>,
             thinking: ThinkingConfig,
         ) {
             self.requests.lock().await.push(CapturedRequest {
                 messages,
+                context_documents,
                 tool_names,
                 max_tokens,
                 thinking,
@@ -2763,6 +2910,7 @@ mod tests {
         ) -> Result<CompletionResponse, LlmError> {
             self.record_request(
                 request.messages,
+                request.context_documents,
                 Vec::new(),
                 request.max_tokens,
                 request.thinking,
@@ -2792,6 +2940,7 @@ mod tests {
         ) -> Result<ToolCompletionResponse, LlmError> {
             self.record_request(
                 request.messages,
+                request.context_documents,
                 request.tools.iter().map(|tool| tool.name.clone()).collect(),
                 request.max_tokens,
                 request.thinking,
@@ -3169,6 +3318,9 @@ mod tests {
                 thinking_enabled,
                 thinking_budget_tokens: 128,
                 auto_approve_tools: false,
+                main_tool_profile: crate::tools::ToolProfile::Standard,
+                worker_tool_profile: crate::tools::ToolProfile::Restricted,
+                subagent_tool_profile: crate::tools::ToolProfile::ExplicitOnly,
                 subagent_transparency_level: "balanced".to_string(),
                 model_thinking_overrides: HashMap::new(),
                 workspace_mode: "unrestricted".to_string(),
@@ -3927,9 +4079,10 @@ mod tests {
         }
 
         let requests = primary.requests().await;
-        assert!(requests.iter().any(|req| req.messages.iter().any(|msg| {
-            msg.content
-                .contains("Test channel prefers plain text only.")
-        })));
+        assert!(requests.iter().any(|req| {
+            req.context_documents
+                .iter()
+                .any(|doc| doc.contains("Test channel prefers plain text only."))
+        }));
     }
 }

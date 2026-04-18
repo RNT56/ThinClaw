@@ -42,6 +42,9 @@ pub fn is_silent_reply(text: &str) -> bool {
 pub struct ReasoningContext {
     /// Conversation history.
     pub messages: Vec<ChatMessage>,
+    /// Ephemeral context fragments routed alongside the conversation instead of
+    /// being merged into the stable system preamble.
+    pub context_documents: Vec<String>,
     /// Available tools.
     pub available_tools: Vec<ToolDefinition>,
     /// Job description if working on a job.
@@ -65,6 +68,7 @@ impl ReasoningContext {
     pub fn new() -> Self {
         Self {
             messages: Vec::new(),
+            context_documents: Vec::new(),
             available_tools: Vec::new(),
             job_description: None,
             current_state: None,
@@ -84,6 +88,15 @@ impl ReasoningContext {
     /// Set messages directly (for session-based context).
     pub fn with_messages(mut self, messages: Vec<ChatMessage>) -> Self {
         self.messages = messages;
+        self
+    }
+
+    /// Set ephemeral context documents to pass alongside the conversation.
+    pub fn with_context_documents(mut self, documents: Vec<String>) -> Self {
+        self.context_documents = documents
+            .into_iter()
+            .filter(|doc| !doc.trim().is_empty())
+            .collect();
         self
     }
 
@@ -243,6 +256,251 @@ fn merge_streamed_tool_calls(
     let mut seen_ids = std::collections::HashSet::new();
     tool_calls.retain(|tc| seen_ids.insert(tc.id.clone()));
     tool_calls
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthoritativeIntent {
+    CurrentTime,
+    TranscriptHistory,
+    MemoryRecall,
+    LocalState,
+}
+
+impl AuthoritativeIntent {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CurrentTime => "current time/date",
+            Self::TranscriptHistory => "conversation history",
+            Self::MemoryRecall => "remembered context",
+            Self::LocalState => "local/device state",
+        }
+    }
+
+    fn preferred_tools(self) -> &'static [&'static str] {
+        match self {
+            Self::CurrentTime => &["time"],
+            Self::TranscriptHistory => &["session_search"],
+            Self::MemoryRecall => &["memory_search", "memory_read", "external_memory_recall"],
+            Self::LocalState => &["device_info", "homeassistant"],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ToolRoutingDecision {
+    available_tools: Vec<ToolDefinition>,
+    tool_choice: &'static str,
+    unavailable_instruction: Option<String>,
+}
+
+fn last_user_message(messages: &[ChatMessage]) -> Option<&str> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message.role, crate::llm::Role::User))
+        .map(|message| message.content.as_str())
+}
+
+fn detect_authoritative_intent(messages: &[ChatMessage]) -> Option<AuthoritativeIntent> {
+    let text = last_user_message(messages)?.to_ascii_lowercase();
+
+    let current_time = [
+        "what time",
+        "current time",
+        "what date",
+        "current date",
+        "what day is it",
+        "today's date",
+        "what day is today",
+        "what date is today",
+        "what day is tomorrow",
+        "what date is tomorrow",
+        "what day was yesterday",
+        "what date was yesterday",
+        "right now",
+        "local time",
+    ];
+    if current_time.iter().any(|needle| text.contains(needle)) {
+        return Some(AuthoritativeIntent::CurrentTime);
+    }
+
+    let transcript_history = [
+        "earlier in this conversation",
+        "earlier in the conversation",
+        "earlier in this chat",
+        "conversation history",
+        "chat history",
+        "what did i say",
+        "what did we say",
+        "previous message",
+        "scroll back",
+        "session history",
+    ];
+    if transcript_history
+        .iter()
+        .any(|needle| text.contains(needle))
+    {
+        return Some(AuthoritativeIntent::TranscriptHistory);
+    }
+
+    let memory_recall = [
+        "what do you remember",
+        "what do you know about me",
+        "from memory",
+        "did we decide",
+        "what did we decide",
+        "my preference",
+        "my preferences",
+        "remembered",
+    ];
+    if memory_recall.iter().any(|needle| text.contains(needle)) {
+        return Some(AuthoritativeIntent::MemoryRecall);
+    }
+
+    let local_state = [
+        "disk space",
+        "device info",
+        "disk usage",
+        "memory usage",
+        "cpu usage",
+        "system uptime",
+        "lights on",
+        "thermostat",
+        "temperature at home",
+        "home assistant",
+    ];
+    if local_state.iter().any(|needle| text.contains(needle)) {
+        return Some(AuthoritativeIntent::LocalState);
+    }
+
+    None
+}
+
+fn authoritative_unavailable_instruction(intent: AuthoritativeIntent) -> String {
+    format!(
+        "The user is asking about {}. No authoritative tool for that intent is available in this turn. Do not guess or fabricate the answer; explain that the required tool is unavailable.",
+        intent.label()
+    )
+}
+
+fn schema_type_label(schema: &serde_json::Value) -> String {
+    match schema.get("type") {
+        Some(serde_json::Value::String(value)) => value.clone(),
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .filter_map(|value| value.as_str())
+            .collect::<Vec<_>>()
+            .join("|"),
+        _ => "any".to_string(),
+    }
+}
+
+fn schema_required_set(schema: &serde_json::Value) -> std::collections::HashSet<String> {
+    schema
+        .get("required")
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn render_compact_schema_fields(schema: &serde_json::Value, depth: usize) -> Vec<String> {
+    let Some(properties) = schema.get("properties").and_then(|value| value.as_object()) else {
+        return Vec::new();
+    };
+
+    let required = schema_required_set(schema);
+    let mut names = properties.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let property = properties.get(&name)?;
+            let mut line = format!(
+                "- {}{}: {}",
+                name,
+                if required.contains(&name) {
+                    " (required)"
+                } else {
+                    ""
+                },
+                schema_type_label(property)
+            );
+
+            if let Some(enum_values) = property.get("enum").and_then(|value| value.as_array()) {
+                let enum_preview = enum_values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .take(6)
+                    .collect::<Vec<_>>();
+                if !enum_preview.is_empty() {
+                    line.push_str(&format!(" [{}]", enum_preview.join(", ")));
+                }
+            }
+
+            if depth == 0 {
+                if property.get("type").and_then(|value| value.as_str()) == Some("object") {
+                    let nested = render_compact_schema_fields(property, depth + 1);
+                    if !nested.is_empty() {
+                        let nested_inline = nested
+                            .into_iter()
+                            .map(|value| value.trim_start_matches("- ").to_string())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        line.push_str(&format!(" {{ {} }}", nested_inline));
+                    }
+                } else if property.get("type").and_then(|value| value.as_str()) == Some("array")
+                    && let Some(items) = property.get("items")
+                {
+                    let item_type = schema_type_label(items);
+                    if item_type != "any" {
+                        line.push_str(&format!(" of {}", item_type));
+                    }
+                    if items.get("type").and_then(|value| value.as_str()) == Some("object") {
+                        let nested = render_compact_schema_fields(items, depth + 1);
+                        if !nested.is_empty() {
+                            let nested_inline = nested
+                                .into_iter()
+                                .map(|value| value.trim_start_matches("- ").to_string())
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            line.push_str(&format!(" {{ {} }}", nested_inline));
+                        }
+                    }
+                }
+            }
+
+            Some(line)
+        })
+        .collect()
+}
+
+fn compact_tool_card(tool: &ToolDefinition) -> String {
+    let mut required = schema_required_set(&tool.parameters)
+        .into_iter()
+        .collect::<Vec<_>>();
+    required.sort();
+    let required_line = if required.is_empty() {
+        "none".to_string()
+    } else {
+        required.join(", ")
+    };
+    let fields = render_compact_schema_fields(&tool.parameters, 0);
+    let fields_text = if fields.is_empty() {
+        "- none".to_string()
+    } else {
+        fields.join("\n")
+    };
+
+    format!(
+        "### {}\n{}\nRequired fields: {}\nFields:\n{}",
+        tool.name, tool.description, required_line, fields_text
+    )
 }
 
 /// Reasoning engine for the agent.
@@ -501,7 +759,7 @@ impl Reasoning {
         request: CompletionRequest,
     ) -> Result<(String, TokenUsage), LlmError> {
         // Try cache first for non-tool completions
-        let cache_key = Self::make_cache_key(&request.messages);
+        let cache_key = Self::make_cache_key(&request.messages, &request.context_documents);
         if let Some(ref cache) = self.response_cache {
             // CachedResponseStore::get() takes &mut self (updates last_accessed for LRU),
             // so we need a write() guard rather than read(). Pre-existing bug fixed.
@@ -548,13 +806,16 @@ impl Reasoning {
     ///
     /// Uses `DefaultHasher` (guaranteed to be SipHasher13 since Rust 1.71).
     /// The cache is process-local so cross-version stability is not required.
-    fn make_cache_key(messages: &[ChatMessage]) -> String {
+    fn make_cache_key(messages: &[ChatMessage], context_documents: &[String]) -> String {
         use std::hash::{DefaultHasher, Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         // Use last 2 messages to keep the key short but distinctive
         for msg in messages.iter().rev().take(2) {
             msg.content.hash(&mut hasher);
             format!("{:?}", msg.role).hash(&mut hasher);
+        }
+        for document in context_documents {
+            document.hash(&mut hasher);
         }
         format!("llm:{:016x}", hasher.finish())
     }
@@ -605,6 +866,59 @@ impl Reasoning {
         tracker.lock().await.record(entry);
     }
 
+    fn resolve_tool_routing_decision(&self, context: &ReasoningContext) -> ToolRoutingDecision {
+        let intent = detect_authoritative_intent(&context.messages);
+
+        if context.force_text {
+            return ToolRoutingDecision {
+                available_tools: Vec::new(),
+                tool_choice: "none",
+                unavailable_instruction: intent.map(authoritative_unavailable_instruction),
+            };
+        }
+
+        if context.available_tools.is_empty() {
+            return ToolRoutingDecision {
+                available_tools: Vec::new(),
+                tool_choice: "none",
+                unavailable_instruction: intent.map(authoritative_unavailable_instruction),
+            };
+        }
+
+        let Some(intent) = intent else {
+            return ToolRoutingDecision {
+                available_tools: context.available_tools.clone(),
+                tool_choice: "auto",
+                unavailable_instruction: None,
+            };
+        };
+
+        let shortlisted = context
+            .available_tools
+            .iter()
+            .filter(|tool| intent.preferred_tools().contains(&tool.name.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if shortlisted.is_empty() {
+            ToolRoutingDecision {
+                available_tools: Vec::new(),
+                tool_choice: "none",
+                unavailable_instruction: Some(authoritative_unavailable_instruction(intent)),
+            }
+        } else {
+            ToolRoutingDecision {
+                available_tools: shortlisted,
+                tool_choice: "required",
+                unavailable_instruction: None,
+            }
+        }
+    }
+
+    fn tool_unavailable_note_message(&self, note: Option<&str>) -> Option<ChatMessage> {
+        note.map(|note| self.system_message(note.to_string()))
+    }
+
     /// Generate a plan for completing a goal.
     pub async fn plan(&self, context: &ReasoningContext) -> Result<ActionPlan, LlmError> {
         let system_prompt = self.build_planning_prompt(context);
@@ -642,6 +956,60 @@ impl Reasoning {
         self.parse_plan(&response.content)
     }
 
+    /// Repair invalid parameters for a planned action using the full schema of the selected tool.
+    pub async fn repair_plan_action(
+        &self,
+        context: &ReasoningContext,
+        action: &PlannedAction,
+        failure_reason: &str,
+    ) -> Result<serde_json::Value, LlmError> {
+        let tool = context
+            .available_tools
+            .iter()
+            .find(|tool| tool.name == action.tool_name)
+            .ok_or_else(|| LlmError::InvalidResponse {
+                provider: self.llm.active_model_name(),
+                reason: format!("Tool '{}' unavailable for repair", action.tool_name),
+            })?;
+
+        let schema =
+            serde_json::to_string_pretty(&tool.parameters).unwrap_or_else(|_| "{}".to_string());
+        let current =
+            serde_json::to_string_pretty(&action.parameters).unwrap_or_else(|_| "{}".to_string());
+        let repair_prompt = format!(
+            "Repair the parameters for this planned action. Return ONLY a JSON object for the corrected parameters.\n\nTool: {}\nDescription: {}\nFailure: {}\nCurrent parameters:\n{}\n\nFull JSON Schema:\n{}",
+            tool.name, tool.description, failure_reason, current, schema
+        );
+
+        let mut request = CompletionRequest::new(vec![
+            self.system_message(
+                "You repair tool-call parameter objects. Respond with a single JSON object and no prose.",
+            ),
+            ChatMessage::user(repair_prompt),
+        ])
+        .with_max_tokens(1024)
+        .with_temperature(0.1);
+        self.mark_request_metadata(&mut request.metadata);
+
+        let response = self.llm.complete(request).await?;
+        let usage = TokenUsage {
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+        };
+        self.record_cost(
+            &usage,
+            response.provider_model.as_deref(),
+            response.cost_usd,
+        )
+        .await;
+
+        let json_str = extract_json(&response.content).unwrap_or(&response.content);
+        serde_json::from_str(json_str).map_err(|error| LlmError::InvalidResponse {
+            provider: self.llm.active_model_name(),
+            reason: format!("Failed to parse repaired parameters: {error}"),
+        })
+    }
+
     /// Select the best tool for the current situation.
     pub async fn select_tool(
         &self,
@@ -663,10 +1031,20 @@ impl Reasoning {
             return Ok(vec![]);
         }
 
+        let routing = self.resolve_tool_routing_decision(context);
+        if routing.unavailable_instruction.is_some() {
+            return Ok(vec![]);
+        }
+
+        if routing.available_tools.is_empty() {
+            return Ok(vec![]);
+        }
+
         let mut request =
-            ToolCompletionRequest::new(context.messages.clone(), context.available_tools.clone())
+            ToolCompletionRequest::new(context.messages.clone(), routing.available_tools)
+                .with_context_documents(context.context_documents.clone())
                 .with_max_tokens(1024)
-                .with_tool_choice("auto");
+                .with_tool_choice(routing.tool_choice);
         request.metadata = context.metadata.clone();
         self.mark_request_metadata(&mut request.metadata);
 
@@ -791,8 +1169,14 @@ Respond in JSON format:
         context: &ReasoningContext,
     ) -> Result<RespondOutput, LlmError> {
         let system_prompt = self.build_conversation_prompt(context);
+        let routing = self.resolve_tool_routing_decision(context);
 
         let mut messages = vec![self.system_message(system_prompt)];
+        if let Some(note) =
+            self.tool_unavailable_note_message(routing.unavailable_instruction.as_deref())
+        {
+            messages.push(note);
+        }
         messages.extend(context.messages.clone());
 
         // ── Pre-prompt context diagnostics ────────────────────────────
@@ -801,8 +1185,8 @@ Respond in JSON format:
         {
             let msg_count = messages.len();
             let char_count: usize = messages.iter().map(|m| m.estimated_chars()).sum();
-            let tool_count = context.available_tools.len();
-            let tool_def_chars: usize = context
+            let tool_count = routing.available_tools.len();
+            let tool_def_chars: usize = routing
                 .available_tools
                 .iter()
                 .map(|t| t.name.len() + t.description.len() + 100) // ~100 chars overhead per tool schema
@@ -816,20 +1200,17 @@ Respond in JSON format:
             );
         }
 
-        let effective_tools = if context.force_text {
-            Vec::new()
-        } else {
-            context.available_tools.clone()
-        };
+        let effective_tools = routing.available_tools.clone();
 
         let max_output_tokens = context.max_output_tokens.unwrap_or(4096);
 
         // If we have tools, use tool completion mode
         if !effective_tools.is_empty() {
             let mut request = ToolCompletionRequest::new(messages, effective_tools)
+                .with_context_documents(context.context_documents.clone())
                 .with_max_tokens(max_output_tokens)
                 .with_temperature(0.7)
-                .with_tool_choice("auto")
+                .with_tool_choice(routing.tool_choice)
                 .set_thinking(context.thinking);
             request.metadata = context.metadata.clone();
             self.mark_request_metadata(&mut request.metadata);
@@ -870,7 +1251,7 @@ Respond in JSON format:
             // Some models (e.g. GLM-4.7) emit tool calls as XML tags in content
             // instead of using the structured tool_calls field. Try to recover
             // them before giving up and returning plain text.
-            let recovered = recover_tool_calls_from_content(&content, &context.available_tools);
+            let recovered = recover_tool_calls_from_content(&content, &routing.available_tools);
             if !recovered.is_empty() {
                 let cleaned = clean_response(&content);
                 return Ok(RespondOutput {
@@ -914,6 +1295,7 @@ Respond in JSON format:
         } else {
             // No tools, use simple completion
             let mut request = CompletionRequest::new(messages)
+                .with_context_documents(context.context_documents.clone())
                 .with_max_tokens(max_output_tokens)
                 .with_temperature(0.7)
                 .set_thinking(context.thinking);
@@ -973,16 +1355,22 @@ Respond in JSON format:
         use futures::StreamExt;
 
         let system_prompt = self.build_conversation_prompt(context);
+        let routing = self.resolve_tool_routing_decision(context);
 
         let mut messages = vec![self.system_message(system_prompt)];
+        if let Some(note) =
+            self.tool_unavailable_note_message(routing.unavailable_instruction.as_deref())
+        {
+            messages.push(note);
+        }
         messages.extend(context.messages.clone());
 
         // Pre-prompt context diagnostics (same as non-streaming)
         {
             let msg_count = messages.len();
             let char_count: usize = messages.iter().map(|m| m.estimated_chars()).sum();
-            let tool_count = context.available_tools.len();
-            let tool_def_chars: usize = context
+            let tool_count = routing.available_tools.len();
+            let tool_def_chars: usize = routing
                 .available_tools
                 .iter()
                 .map(|t| t.name.len() + t.description.len() + 100)
@@ -997,26 +1385,24 @@ Respond in JSON format:
             );
         }
 
-        let effective_tools = if context.force_text {
-            Vec::new()
-        } else {
-            context.available_tools.clone()
-        };
+        let effective_tools = routing.available_tools.clone();
 
         // Use streaming completion
         let max_output_tokens = context.max_output_tokens.unwrap_or(4096);
 
         let mut stream = if !effective_tools.is_empty() {
             let mut request = ToolCompletionRequest::new(messages, effective_tools)
+                .with_context_documents(context.context_documents.clone())
                 .with_max_tokens(max_output_tokens)
                 .with_temperature(0.7)
-                .with_tool_choice("auto")
+                .with_tool_choice(routing.tool_choice)
                 .set_thinking(context.thinking);
             request.metadata = context.metadata.clone();
             self.mark_request_metadata(&mut request.metadata);
             self.llm.complete_stream_with_tools(request).await?
         } else {
             let mut request = CompletionRequest::new(messages)
+                .with_context_documents(context.context_documents.clone())
                 .with_max_tokens(max_output_tokens)
                 .with_temperature(0.7)
                 .set_thinking(context.thinking);
@@ -1119,7 +1505,7 @@ Respond in JSON format:
 
         // Try to recover tool calls from XML-style content (same as non-streaming)
         if !context.force_text {
-            let recovered = recover_tool_calls_from_content(&cleaned, &context.available_tools);
+            let recovered = recover_tool_calls_from_content(&cleaned, &routing.available_tools);
             if !recovered.is_empty() {
                 return Ok(RespondOutput {
                     result: RespondResult::ToolCalls {
@@ -1164,14 +1550,7 @@ Respond in JSON format:
             context
                 .available_tools
                 .iter()
-                .map(|t| {
-                    // Include the full parameter schema so the LLM can fill
-                    // in required fields. Without this, every tool call in the
-                    // plan ends up with empty `{}` parameters and fails.
-                    let params =
-                        serde_json::to_string(&t.parameters).unwrap_or_else(|_| "{}".to_string());
-                    format!("### {}\n{}\nParameters: {}", t.name, t.description, params)
-                })
+                .map(compact_tool_card)
                 .collect::<Vec<_>>()
                 .join("\n\n")
         };
@@ -1509,7 +1888,7 @@ mod tests {
     use crate::error::LlmError;
     use crate::llm::{
         CompletionRequest, CompletionResponse, FinishReason, ToolCompletionRequest,
-        ToolCompletionResponse,
+        ToolCompletionResponse, ToolDefinition,
     };
     use crate::testing::StubLlm;
 
@@ -1523,6 +1902,11 @@ mod tests {
 
     struct NonCachingCaptureLlm {
         last_request: Arc<tokio::sync::Mutex<Option<CompletionRequest>>>,
+    }
+
+    struct RoutingCaptureLlm {
+        last_completion: Arc<tokio::sync::Mutex<Option<CompletionRequest>>>,
+        last_tool_completion: Arc<tokio::sync::Mutex<Option<ToolCompletionRequest>>>,
     }
 
     #[async_trait]
@@ -1653,6 +2037,54 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: self.response,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for RoutingCaptureLlm {
+        fn model_name(&self) -> &str {
+            "routing-capture"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            *self.last_completion.lock().await = Some(request);
+            Ok(CompletionResponse {
+                content: "authoritative tool unavailable".to_string(),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: Some(0.0),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            *self.last_tool_completion.lock().await = Some(request);
+            Ok(ToolCompletionResponse {
+                content: Some("tool route".to_string()),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: Some(0.0),
+                tool_calls: vec![ToolCall {
+                    id: "call_time".to_string(),
+                    name: "time".to_string(),
+                    arguments: serde_json::json!({"operation": "now"}),
+                }],
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
             })
         }
     }
@@ -2078,6 +2510,113 @@ mod tests {
                 .get("anthropic")
                 .and_then(|metadata| metadata.get("cache_control"))
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn select_tools_routes_current_time_to_required_time_tool() {
+        let llm = Arc::new(RoutingCaptureLlm {
+            last_completion: Arc::new(tokio::sync::Mutex::new(None)),
+            last_tool_completion: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        let reasoning = Reasoning::new(
+            llm.clone(),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        );
+
+        let context = ReasoningContext::new()
+            .with_messages(vec![ChatMessage::user("What time is it right now?")])
+            .with_tools(vec![
+                ToolDefinition {
+                    name: "memory_search".to_string(),
+                    description: "Search memory".to_string(),
+                    parameters: serde_json::json!({"type":"object"}),
+                },
+                ToolDefinition {
+                    name: "time".to_string(),
+                    description: "Current time".to_string(),
+                    parameters: serde_json::json!({
+                        "type":"object",
+                        "properties":{"operation":{"type":"string"}},
+                        "required":["operation"]
+                    }),
+                },
+            ]);
+
+        let selections = reasoning
+            .select_tools(&context)
+            .await
+            .expect("tool routing should succeed");
+
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections[0].tool_name, "time");
+
+        let request = llm
+            .last_tool_completion
+            .lock()
+            .await
+            .clone()
+            .expect("tool request should be captured");
+        assert_eq!(request.tool_choice.as_deref(), Some("required"));
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tools[0].name, "time");
+    }
+
+    #[tokio::test]
+    async fn respond_with_tools_refuses_current_time_when_authoritative_tool_missing() {
+        let llm = Arc::new(RoutingCaptureLlm {
+            last_completion: Arc::new(tokio::sync::Mutex::new(None)),
+            last_tool_completion: Arc::new(tokio::sync::Mutex::new(None)),
+        });
+        let reasoning = Reasoning::new(
+            llm.clone(),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        );
+
+        let context = ReasoningContext::new()
+            .with_messages(vec![ChatMessage::user("What time is it right now?")])
+            .with_tools(vec![ToolDefinition {
+                name: "memory_search".to_string(),
+                description: "Search memory".to_string(),
+                parameters: serde_json::json!({"type":"object"}),
+            }]);
+
+        let output = reasoning
+            .respond_with_tools(&context)
+            .await
+            .expect("response should succeed");
+
+        assert!(matches!(output.result, RespondResult::Text(_)));
+        assert!(llm.last_tool_completion.lock().await.is_none());
+        let request = llm
+            .last_completion
+            .lock()
+            .await
+            .clone()
+            .expect("text request should be captured");
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| message.content.contains("Do not guess or fabricate"))
         );
     }
 }

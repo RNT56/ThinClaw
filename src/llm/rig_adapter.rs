@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use rig::OneOrMany;
 use rig::completion::{
-    AssistantContent, CompletionModel, CompletionRequest as RigRequest,
+    AssistantContent, CompletionModel, CompletionRequest as RigRequest, Document as RigDocument,
     ToolDefinition as RigToolDefinition, Usage as RigUsage,
 };
 use rig::message::{
@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::LlmError;
 use crate::llm::costs;
@@ -532,6 +532,7 @@ fn saturate_u32(val: u64) -> u32 {
 fn build_rig_request(
     preamble: Option<String>,
     mut history: Vec<RigMessage>,
+    context_documents: Vec<String>,
     tools: Vec<RigToolDefinition>,
     tool_choice: Option<RigToolChoice>,
     temperature: Option<f32>,
@@ -551,13 +552,34 @@ fn build_rig_request(
     Ok(RigRequest {
         preamble,
         chat_history,
-        documents: Vec::new(),
+        documents: convert_context_documents(context_documents),
         tools,
         temperature: temperature.map(|t| t as f64),
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
         additional_params,
     })
+}
+
+fn convert_context_documents(context_documents: Vec<String>) -> Vec<RigDocument> {
+    context_documents
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, text)| {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            Some(RigDocument {
+                id: format!("context-{}", index + 1),
+                text,
+                additional_props: HashMap::from([(
+                    "source".to_string(),
+                    "ephemeral_context".to_string(),
+                )]),
+            })
+        })
+        .collect()
 }
 
 /// Convert a ThinkingConfig into provider-specific additional_params JSON.
@@ -623,6 +645,7 @@ where
         let rig_req = build_rig_request(
             preamble,
             history,
+            request.context_documents,
             Vec::new(),
             None,
             request.temperature,
@@ -737,6 +760,7 @@ where
         let rig_req = build_rig_request(
             preamble,
             history,
+            request.context_documents,
             tools,
             tool_choice,
             request.temperature,
@@ -835,6 +859,7 @@ where
         let rig_req = build_rig_request(
             preamble,
             history,
+            request.context_documents,
             Vec::new(),
             None,
             request.temperature,
@@ -919,6 +944,7 @@ where
         let rig_req = build_rig_request(
             preamble,
             history,
+            request.context_documents,
             tools,
             tool_choice,
             request.temperature,
@@ -1160,6 +1186,36 @@ mod tests {
         assert_eq!(preamble, Some("System 1\nSystem 2".to_string()));
         assert_eq!(history.len(), 1);
         assert!(!cache_hint_requested);
+    }
+
+    #[test]
+    fn build_rig_request_preserves_context_documents() {
+        let request = build_rig_request(
+            Some("Stable preamble".to_string()),
+            vec![RigMessage::user("hello")],
+            vec![
+                "## External Memory Recall\nRemember this".to_string(),
+                "## Skill Expansion\nUse the active skill".to_string(),
+            ],
+            Vec::new(),
+            None,
+            Some(0.2),
+            Some(512),
+            None,
+        )
+        .expect("rig request should build");
+
+        assert_eq!(request.preamble.as_deref(), Some("Stable preamble"));
+        assert_eq!(request.documents.len(), 2);
+        assert_eq!(request.documents[0].id, "context-1");
+        assert_eq!(
+            request.documents[0]
+                .additional_props
+                .get("source")
+                .map(String::as_str),
+            Some("ephemeral_context")
+        );
+        assert!(request.documents[1].text.contains("Skill Expansion"));
     }
 
     #[test]

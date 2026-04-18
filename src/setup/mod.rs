@@ -38,10 +38,7 @@ pub use wizard::{OnboardingProfile, SetupConfig, SetupWizard, UiMode};
 /// because onboarding has not been completed yet, or `None` when the system
 /// is ready to start normally.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-pub fn check_onboard_needed(
-    toml_path: Option<&std::path::Path>,
-    no_db: bool,
-) -> Option<String> {
+pub fn check_onboard_needed(toml_path: Option<&std::path::Path>, no_db: bool) -> Option<String> {
     use std::path::{Path, PathBuf};
 
     use crate::settings::Settings;

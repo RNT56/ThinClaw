@@ -21,7 +21,6 @@ use thinclaw::config::Config;
 use thinclaw::pairing::PairingStore;
 use thinclaw::secrets::SecretsStore;
 
-
 const STARTUP_SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
 
 /// Minimal terminal spinner shown during quiet interactive startup.

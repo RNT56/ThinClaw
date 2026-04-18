@@ -11,11 +11,13 @@ use uuid::Uuid;
 
 use crate::agent::outcomes;
 use crate::channels::IncomingMessage;
+use crate::channels::web::identity_helpers::{GatewayRequestIdentity, gateway_identity};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
 pub(crate) async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<Json<RoutineListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -23,7 +25,7 @@ pub(crate) async fn routines_list_handler(
     ))?;
 
     let routines = store
-        .list_routines_for_actor(&state.user_id, &state.actor_id)
+        .list_routines_for_actor(&request_identity.principal_id, &request_identity.actor_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -34,6 +36,7 @@ pub(crate) async fn routines_list_handler(
 
 pub(crate) async fn routines_summary_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<Json<RoutineSummaryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -41,7 +44,7 @@ pub(crate) async fn routines_summary_handler(
     ))?;
 
     let routines = store
-        .list_routines_for_actor(&state.user_id, &state.actor_id)
+        .list_routines_for_actor(&request_identity.principal_id, &request_identity.actor_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -54,9 +57,9 @@ pub(crate) async fn routines_summary_handler(
         .count() as u64;
 
     let today_start = crate::timezone::local_day_start_utc(
-        Some(&state.user_id),
+        Some(&request_identity.principal_id),
         None,
-        crate::timezone::today_for_user(Some(&state.user_id), None),
+        crate::timezone::today_for_user(Some(&request_identity.principal_id), None),
     );
     let runs_today = routines
         .iter()
@@ -74,6 +77,7 @@ pub(crate) async fn routines_summary_handler(
 
 pub(crate) async fn routines_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<RoutineDetailResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -89,7 +93,9 @@ pub(crate) async fn routines_detail_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-    if routine.owner_actor_id() != state.actor_id {
+    if routine.user_id != request_identity.principal_id
+        || routine.owner_actor_id() != request_identity.actor_id
+    {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -131,6 +137,7 @@ pub(crate) async fn routines_detail_handler(
 
 pub(crate) async fn routines_trigger_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -146,7 +153,9 @@ pub(crate) async fn routines_trigger_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-    if routine.owner_actor_id() != state.actor_id {
+    if routine.user_id != request_identity.principal_id
+        || routine.owner_actor_id() != request_identity.actor_id
+    {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -164,7 +173,12 @@ pub(crate) async fn routines_trigger_handler(
     };
 
     let content = format!("[routine:{}] {}", routine.name, prompt);
-    let msg = IncomingMessage::new("gateway", &state.user_id, content);
+    let mut msg = IncomingMessage::new("gateway", &request_identity.principal_id, content);
+    msg = msg.with_identity(gateway_identity(
+        &request_identity.principal_id,
+        &request_identity.actor_id,
+        None,
+    ));
 
     let tx_guard = state.msg_tx.read().await;
     let tx = tx_guard.as_ref().ok_or((
@@ -192,6 +206,7 @@ pub(crate) struct ToggleRequest {
 
 pub(crate) async fn routines_toggle_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     body: Option<Json<ToggleRequest>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -208,7 +223,9 @@ pub(crate) async fn routines_toggle_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-    if routine.owner_actor_id() != state.actor_id {
+    if routine.user_id != request_identity.principal_id
+        || routine.owner_actor_id() != request_identity.actor_id
+    {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -233,6 +250,7 @@ pub(crate) async fn routines_toggle_handler(
 
 pub(crate) async fn routines_delete_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -248,7 +266,9 @@ pub(crate) async fn routines_delete_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-    if routine.owner_actor_id() != state.actor_id {
+    if routine.user_id != request_identity.principal_id
+        || routine.owner_actor_id() != request_identity.actor_id
+    {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -270,6 +290,7 @@ pub(crate) async fn routines_delete_handler(
 
 pub(crate) async fn routines_runs_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -285,7 +306,9 @@ pub(crate) async fn routines_runs_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
-    if routine.owner_actor_id() != state.actor_id {
+    if routine.user_id != request_identity.principal_id
+        || routine.owner_actor_id() != request_identity.actor_id
+    {
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
@@ -409,7 +432,12 @@ pub(crate) async fn webhook_routine_trigger_handler(
         };
 
         let content = format!("[webhook:{}] {}", routine.name, prompt);
-        let msg = IncomingMessage::new("webhook", &state.user_id, content);
+        let mut msg = IncomingMessage::new("webhook", &routine.user_id, content);
+        msg = msg.with_identity(gateway_identity(
+            &routine.user_id,
+            routine.owner_actor_id(),
+            None,
+        ));
 
         let tx_guard = state.msg_tx.read().await;
         let tx = tx_guard.as_ref().ok_or((
