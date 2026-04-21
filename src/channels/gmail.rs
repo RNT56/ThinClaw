@@ -934,11 +934,13 @@ impl GmailChannel {
                     }
 
                     // Fetch actual emails from Gmail API.
+                    let mut should_ack = false;
                     match channel
                         .fetch_new_messages(latest_notification_history_id)
                         .await
                     {
                         Ok(result) => {
+                            let mut delivery_failed = false;
                             for gmail_msg in &result.messages {
                                 if let Some(incoming) = channel.to_incoming_message(gmail_msg) {
                                     let tx_guard = state.msg_tx.read().await;
@@ -946,6 +948,7 @@ impl GmailChannel {
                                         if tx.send(incoming).await.is_err() {
                                             tracing::error!("Gmail message channel closed");
                                             *state.running.write().await = false;
+                                            delivery_failed = true;
                                             break;
                                         }
                                         state
@@ -972,6 +975,14 @@ impl GmailChannel {
                                     "Failed to persist Gmail history cursor"
                                 );
                             }
+
+                            if delivery_failed {
+                                tracing::warn!(
+                                    "Skipping Pub/Sub ack because message delivery failed"
+                                );
+                            } else {
+                                should_ack = true;
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Failed to fetch Gmail messages");
@@ -979,9 +990,15 @@ impl GmailChannel {
                         }
                     }
 
-                    // Acknowledge Pub/Sub messages.
-                    if let Err(e) = channel.ack_pubsub(ack_ids).await {
-                        tracing::warn!(error = %e, "Failed to ack Pub/Sub messages");
+                    // Only acknowledge when we successfully fetched and processed.
+                    if should_ack {
+                        if let Err(e) = channel.ack_pubsub(ack_ids).await {
+                            tracing::warn!(error = %e, "Failed to ack Pub/Sub messages");
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Skipping Pub/Sub ack due to processing failure; message will be retried"
+                        );
                     }
                 }
                 Ok(_) => {

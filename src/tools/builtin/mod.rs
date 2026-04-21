@@ -30,6 +30,7 @@ mod learning_tools;
 mod location;
 mod memory;
 mod moa;
+mod nostr_actions;
 pub(crate) mod process;
 pub mod routine;
 mod screen_capture;
@@ -88,6 +89,7 @@ pub use memory::{
     SessionSearchTool,
 };
 pub use moa::MoaTool;
+pub use nostr_actions::NostrActionsTool;
 pub use process::{ProcessTool, SharedProcessRegistry, start_reaper};
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,

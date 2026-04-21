@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::branding::art::wordmark_plain_lines;
 use crate::branding::skin::{CliSkin, color_to_hex, mix_color};
 
 /// WebChat theme preference.
@@ -85,9 +86,36 @@ pub struct WebChatBootstrap {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WebChatPresentation {
+    pub bootstrap: WebChatBootstrap,
+    pub runtime_css: String,
+    pub skin_catalog: Vec<WebSkinCatalogEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolvedWebSkin {
     pub name: String,
+    pub source: String,
     pub tagline: Option<String>,
+    pub logo_art: Vec<String>,
+    pub hero_art: Vec<String>,
+    pub prompt_symbol: String,
+    pub tool_emojis: std::collections::HashMap<String, String>,
+    pub chrome_style: String,
+    pub surface_pattern: String,
+    pub message_shape: String,
+    pub elevation: String,
+    pub css_vars: WebSkinCssVars,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSkinCatalogEntry {
+    pub name: String,
+    pub tagline: Option<String>,
+    pub logo_art: Vec<String>,
+    pub hero_art: Vec<String>,
     pub prompt_symbol: String,
     pub tool_emojis: std::collections::HashMap<String, String>,
     pub chrome_style: String,
@@ -205,6 +233,14 @@ impl WebChatConfig {
         self.skin.as_deref().unwrap_or(&self.cli_skin)
     }
 
+    pub fn resolved_skin_source(&self) -> &'static str {
+        if self.skin.is_some() {
+            "webchat"
+        } else {
+            "cli"
+        }
+    }
+
     pub fn resolved_skin(&self) -> CliSkin {
         CliSkin::load(self.resolved_skin_name())
     }
@@ -218,7 +254,10 @@ impl WebChatConfig {
             available_skins: CliSkin::available_names(),
             resolved_skin: ResolvedWebSkin {
                 name: skin.name.clone(),
+                source: self.resolved_skin_source().to_string(),
                 tagline: skin.tagline.clone(),
+                logo_art: wordmark_plain_lines(),
+                hero_art: skin.hero_art.clone(),
                 prompt_symbol: skin.prompt_symbol.clone(),
                 tool_emojis: skin.tool_emojis.clone(),
                 chrome_style: skin.web_chrome_style().to_string(),
@@ -227,6 +266,14 @@ impl WebChatConfig {
                 elevation: skin.web_elevation().to_string(),
                 css_vars: self.css_vars_for_skin(&skin, !matches!(self.theme, WebChatTheme::Light)),
             },
+        }
+    }
+
+    pub fn presentation_payload(&self) -> WebChatPresentation {
+        WebChatPresentation {
+            bootstrap: self.bootstrap_payload(),
+            runtime_css: self.runtime_css(),
+            skin_catalog: self.skin_catalog(),
         }
     }
 
@@ -281,6 +328,29 @@ impl WebChatConfig {
             .as_deref()
             .filter(|value| is_safe_hex_color(value))
             .map(ToOwned::to_owned)
+    }
+
+    pub fn skin_catalog(&self) -> Vec<WebSkinCatalogEntry> {
+        let theme_is_dark = !matches!(self.theme, WebChatTheme::Light);
+        CliSkin::available_names()
+            .into_iter()
+            .map(|name| {
+                let skin = CliSkin::load(&name);
+                WebSkinCatalogEntry {
+                    name: skin.name.clone(),
+                    tagline: skin.tagline.clone(),
+                    logo_art: wordmark_plain_lines(),
+                    hero_art: skin.hero_art.clone(),
+                    prompt_symbol: skin.prompt_symbol.clone(),
+                    tool_emojis: skin.tool_emojis.clone(),
+                    chrome_style: skin.web_chrome_style().to_string(),
+                    surface_pattern: skin.web_surface_pattern().to_string(),
+                    message_shape: skin.web_message_shape().to_string(),
+                    elevation: skin.web_elevation().to_string(),
+                    css_vars: self.css_vars_for_skin(&skin, theme_is_dark),
+                }
+            })
+            .collect()
     }
 
     fn css_vars_for_skin(&self, skin: &CliSkin, theme_is_dark: bool) -> WebSkinCssVars {
@@ -593,6 +663,29 @@ mod tests {
     }
 
     #[test]
+    fn test_resolved_skin_source_tracks_follow_vs_override() {
+        let following = WebChatConfig {
+            theme: WebChatTheme::Dark,
+            agent_name: "thinclaw".into(),
+            skin: None,
+            cli_skin: "midnight".into(),
+            accent_color: None,
+            show_branding: true,
+        };
+        assert_eq!(following.resolved_skin_source(), "cli");
+
+        let override_skin = WebChatConfig {
+            theme: WebChatTheme::Dark,
+            agent_name: "thinclaw".into(),
+            skin: Some("athena".into()),
+            cli_skin: "midnight".into(),
+            accent_color: None,
+            show_branding: true,
+        };
+        assert_eq!(override_skin.resolved_skin_source(), "webchat");
+    }
+
+    #[test]
     fn test_bootstrap_payload_contains_expected_shape() {
         let config = WebChatConfig::default();
         let payload = config.bootstrap_payload();
@@ -601,11 +694,31 @@ mod tests {
         assert!(json.contains("availableSkins"));
         assert!(json.contains("resolvedSkin"));
         assert!(json.contains("cssVars"));
+        assert!(json.contains("logoArt"));
+        assert!(json.contains("heroArt"));
         assert!(json.contains("promptSymbol"));
         assert!(json.contains("chromeStyle"));
         assert!(json.contains("surfacePattern"));
         assert!(json.contains("messageShape"));
         assert!(json.contains("elevation"));
+        assert!(json.contains("source"));
+    }
+
+    #[test]
+    fn test_bootstrap_payload_marks_skin_source() {
+        let config = WebChatConfig {
+            theme: WebChatTheme::Dark,
+            agent_name: "thinclaw".into(),
+            skin: Some("athena".into()),
+            cli_skin: "midnight".into(),
+            accent_color: None,
+            show_branding: true,
+        };
+        let payload = config.bootstrap_payload();
+        assert_eq!(payload.resolved_skin.name, "athena");
+        assert_eq!(payload.resolved_skin.source, "webchat");
+        assert!(!payload.resolved_skin.logo_art.is_empty());
+        assert!(!payload.resolved_skin.hero_art.is_empty());
     }
 
     #[test]
@@ -642,6 +755,25 @@ mod tests {
         assert!(css.contains("@media (prefers-color-scheme: dark)"));
         assert!(css.contains("@media (prefers-color-scheme: light)"));
         assert!(css.contains("html[data-webchat-theme=\"system\"]"));
+    }
+
+    #[test]
+    fn test_presentation_payload_contains_skin_catalog() {
+        let config = WebChatConfig::default();
+        let payload = config.presentation_payload();
+        assert!(!payload.skin_catalog.is_empty());
+        assert!(
+            payload
+                .skin_catalog
+                .iter()
+                .any(|entry| !entry.hero_art.is_empty() && !entry.logo_art.is_empty())
+        );
+        assert!(
+            payload
+                .skin_catalog
+                .iter()
+                .all(|entry| !entry.chrome_style.trim().is_empty())
+        );
     }
 
     #[test]

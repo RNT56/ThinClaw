@@ -373,13 +373,17 @@ async fn test_workspace_system_prompt() {
     if try_connect(&pool).await.is_none() {
         return;
     }
+    let temp_home = tempfile::tempdir().expect("temp home");
+    let previous_home = std::env::var_os("THINCLAW_HOME");
+    unsafe {
+        std::env::set_var("THINCLAW_HOME", temp_home.path());
+    }
     let user_id = "test_system_prompt";
     cleanup_user(&pool, user_id).await;
 
     let workspace = Workspace::new(user_id, pool.clone());
 
-    // Write identity files using structured markdown that matches
-    // compact_identity()'s extraction patterns.
+    // Write identity files and the canonical home soul.
     workspace
         .write(
             paths::AGENTS,
@@ -387,13 +391,10 @@ async fn test_workspace_system_prompt() {
         )
         .await
         .unwrap();
-    workspace
-        .write(
-            paths::SOUL,
-            "# SOUL.md\n\n- **Presentation:** Be kind and thorough",
-        )
-        .await
-        .unwrap();
+    thinclaw::identity::soul_store::write_home_soul(
+        &thinclaw::identity::soul::compose_seeded_soul("balanced").unwrap(),
+    )
+    .unwrap();
     workspace
         .write(paths::USER, "# USER.md\n\n- **Name:** Alice")
         .await
@@ -410,7 +411,7 @@ async fn test_workspace_system_prompt() {
         "Should include AGENTS.md content, got: {prompt}"
     );
     assert!(
-        prompt.contains("kind and thorough"),
+        prompt.contains("## Soul"),
         "Should include SOUL.md content, got: {prompt}"
     );
     assert!(
@@ -419,4 +420,13 @@ async fn test_workspace_system_prompt() {
     );
 
     cleanup_user(&pool, user_id).await;
+    if let Some(previous_home) = previous_home {
+        unsafe {
+            std::env::set_var("THINCLAW_HOME", previous_home);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("THINCLAW_HOME");
+        }
+    }
 }

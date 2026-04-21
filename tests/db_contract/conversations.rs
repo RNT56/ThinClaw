@@ -287,7 +287,9 @@ async fn outcome_contract_flow_contract() {
         return;
     };
     let user = fixtures::user("outcome_contract_user");
+    let other_user = fixtures::user("outcome_contract_other_user");
     let contract = fixtures::outcome_contract(&user);
+    let other_contract = fixtures::outcome_contract(&other_user);
     let contract_id = ctx
         .db
         .insert_outcome_contract(&contract)
@@ -332,14 +334,36 @@ async fn outcome_contract_flow_contract() {
         .expect("list_outcome_observations should succeed");
     assert_eq!(observations.len(), 1);
 
+    let pending_before_claim = ctx
+        .db
+        .list_users_with_pending_outcome_work(chrono::Utc::now())
+        .await
+        .expect("list_users_with_pending_outcome_work should succeed");
+    assert!(
+        pending_before_claim
+            .iter()
+            .any(|entry| entry.user_id == user),
+        "expected user with due outcome work to be listed before claim"
+    );
+
+    let other_contract_id = ctx
+        .db
+        .insert_outcome_contract(&other_contract)
+        .await
+        .expect("insert_outcome_contract for other user should succeed");
+
     let claimed = ctx
         .db
-        .claim_due_outcome_contracts(10, chrono::Utc::now())
+        .claim_due_outcome_contracts_for_user(&user, 10, chrono::Utc::now())
         .await
-        .expect("claim_due_outcome_contracts should succeed");
+        .expect("claim_due_outcome_contracts_for_user should succeed");
     assert!(
         claimed.iter().any(|entry| entry.id == contract_id),
-        "expected claimed due contract"
+        "expected scoped claim to include the due contract"
+    );
+    assert!(
+        claimed.iter().all(|entry| entry.user_id == user),
+        "scoped claim should only return contracts for the requested user"
     );
 
     let stats = ctx
@@ -355,8 +379,14 @@ async fn outcome_contract_flow_contract() {
         .await
         .expect("list_users_with_pending_outcome_work should succeed");
     assert!(
-        pending_users.iter().any(|entry| entry.user_id == user),
-        "expected user with due outcome work to be listed"
+        pending_users.iter().all(|entry| entry.user_id != user),
+        "claimed evaluating work should not continue to schedule the user"
+    );
+    assert!(
+        pending_users
+            .iter()
+            .any(|entry| entry.user_id == other_user),
+        "other users with still-open due work should remain pending"
     );
 
     let health = ctx
@@ -367,6 +397,16 @@ async fn outcome_contract_flow_contract() {
     assert!(
         health.oldest_due_at.is_some() || health.oldest_evaluating_claimed_at.is_some(),
         "expected outcome evaluator health markers for active outcome work"
+    );
+
+    let remaining = ctx
+        .db
+        .claim_due_outcome_contracts(10, chrono::Utc::now())
+        .await
+        .expect("claim_due_outcome_contracts should succeed");
+    assert!(
+        remaining.iter().any(|entry| entry.id == other_contract_id),
+        "global claim should still pick up other users' due work"
     );
 }
 

@@ -69,7 +69,7 @@ impl ChunkConfig {
 
     /// Calculate the step size (chunk_size - overlap).
     fn step_size(&self) -> usize {
-        self.chunk_size.saturating_sub(self.overlap_size())
+        self.chunk_size.saturating_sub(self.overlap_size()).max(1)
     }
 }
 
@@ -100,8 +100,10 @@ pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
         return Vec::new();
     }
 
+    let chunk_size = config.chunk_size.max(1);
+
     // If content is smaller than chunk size, return as single chunk
-    if words.len() <= config.chunk_size {
+    if words.len() <= chunk_size {
         return vec![content.to_string()];
     }
 
@@ -110,7 +112,7 @@ pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
     let mut start = 0;
 
     while start < words.len() {
-        let end = (start + config.chunk_size).min(words.len());
+        let end = (start + chunk_size).min(words.len());
         let chunk_words = &words[start..end];
 
         // Don't create tiny trailing chunks, merge with previous

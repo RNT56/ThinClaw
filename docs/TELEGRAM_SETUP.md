@@ -33,8 +33,12 @@ thinclaw onboard
 When prompted, enable the Telegram channel and paste your bot token. The wizard will:
 
 - Validate the token
+- Offer Telegram owner binding by waiting for a fresh private DM to the bot
+- Fall back to manual numeric Telegram ID entry if auto-binding does not complete
 - Optionally configure a webhook secret
 - Set up tunnel (if you want webhook mode)
+
+When onboarding is launched in the normal local path, ThinClaw now continues directly into runtime afterward. To come back later, use `thinclaw` for the standard local runtime or `thinclaw tui` for the full-screen runtime.
 
 ### 3. (Optional) Configure Tunnel for Webhooks
 

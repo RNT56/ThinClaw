@@ -2,7 +2,10 @@
 
 use crate::config::resolve_personality_pack_from_settings;
 use crate::settings::KeySource;
-use crate::setup::prompts::{confirm, print_info, print_success, print_warning};
+use crate::setup::prompts::{
+    PromptUiMode as PromptRenderMode, confirm, current_prompt_ui_mode, print_info, print_success,
+    print_warning,
+};
 
 use super::helpers::capitalize_first;
 use super::{SetupError, SetupWizard};
@@ -25,6 +28,13 @@ impl SetupWizard {
         // Write bootstrap env (also idempotent)
         self.write_bootstrap_env()?;
 
+        if current_prompt_ui_mode() == PromptRenderMode::Tui {
+            print_success("Configuration saved to database");
+            print_info(&self.runtime_handoff_summary());
+            self.offer_path_setup();
+            return Ok(());
+        }
+
         println!();
         print_success("Configuration saved to database");
         println!();
@@ -33,6 +43,10 @@ impl SetupWizard {
         println!("Ready to Use");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("  Status: {}", readiness.headline);
+        println!(
+            "  Readiness: {} ready · {} attention · {} follow-ups",
+            readiness.ready_now, readiness.needs_attention, readiness.followups
+        );
 
         let backend = self
             .settings
@@ -195,11 +209,12 @@ impl SetupWizard {
         }
 
         if self.settings.claude_code_enabled {
+            let default_claude_model = crate::config::ClaudeCodeConfig::default().model;
             let model = self
                 .settings
                 .claude_code_model
                 .as_deref()
-                .unwrap_or("sonnet");
+                .unwrap_or(default_claude_model.as_str());
             println!("  Claude Code: enabled (model: {})", model);
         }
 
@@ -262,8 +277,16 @@ impl SetupWizard {
 
         println!("What Happens Next");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        print_info("ThinClaw will start normally with the settings you just reviewed.");
-        print_info("There is no second setup loop here; the runtime uses these settings directly.");
+        print_info(&self.runtime_handoff_summary());
+        if self.should_continue_to_runtime() {
+            print_info(
+                "There is no second setup loop here; the runtime uses these settings directly.",
+            );
+        } else {
+            print_info(
+                "This was a settings pass only, so runtime stays paused until you launch it yourself.",
+            );
+        }
         println!();
 
         // ── PATH check & symlink offer ──────────────────────────
@@ -273,12 +296,10 @@ impl SetupWizard {
 
         println!("Resume Later");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("To start ThinClaw, run:");
-        println!("  thinclaw");
-        println!();
-        println!("To update settings later:");
+        for command in self.what_next_commands() {
+            println!("  {}", command);
+        }
         println!("  thinclaw config set <setting> <value>");
-        println!("  thinclaw onboard");
         println!();
 
         Ok(())

@@ -11,10 +11,12 @@ use uuid::Uuid;
 use crate::agent::{learning::LearningOrchestrator, outcomes};
 use crate::context::JobContext;
 use crate::db::Database;
+use crate::error::WorkspaceError;
 use crate::history::{
     LearningArtifactVersion as DbLearningArtifactVersion,
     OutcomeContractQuery as DbOutcomeContractQuery,
 };
+use crate::settings::LearningSettings;
 use crate::skills::{
     MAX_PROMPT_FILE_SIZE, SkillSource, normalize_line_endings,
     parser::parse_skill_md,
@@ -24,7 +26,7 @@ use crate::tools::ToolRegistry;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{Workspace, paths};
 
-const PROMPT_TARGETS: &[&str] = &[paths::SOUL, paths::AGENTS, paths::USER];
+const PROMPT_TARGETS: &[&str] = &[paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER];
 const SKILL_FILE_NAME: &str = "SKILL.md";
 
 fn tool_error_from_skill(err: SkillRegistryError) -> ToolError {
@@ -72,25 +74,27 @@ fn validate_prompt_content(content: &str) -> Result<(), ToolError> {
 }
 
 fn validate_prompt_safety(target: &str, content: &str) -> Result<(), ToolError> {
-    let lowered = content.to_ascii_lowercase();
-    let required_markers: &[&str] = match target {
-        paths::SOUL => &["boundar", "ask before", "private"],
-        paths::AGENTS => &["red lines", "ask first", "don't"],
-        _ => &[],
-    };
-    if required_markers.is_empty() {
-        return Ok(());
+    match target {
+        paths::SOUL => crate::identity::soul::validate_canonical_soul(content)
+            .map_err(ToolError::InvalidParameters),
+        paths::SOUL_LOCAL => crate::identity::soul::validate_local_overlay(content)
+            .map_err(ToolError::InvalidParameters),
+        paths::AGENTS => {
+            let lowered = content.to_ascii_lowercase();
+            let required_markers = ["red lines", "ask first", "don't"];
+            if required_markers
+                .iter()
+                .all(|marker| !lowered.contains(marker))
+            {
+                return Err(ToolError::InvalidParameters(format!(
+                    "{} update rejected: core safety guidance appears to be missing",
+                    target
+                )));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
-    if required_markers
-        .iter()
-        .all(|marker| !lowered.contains(marker))
-    {
-        return Err(ToolError::InvalidParameters(format!(
-            "{} update rejected: core safety guidance appears to be missing",
-            target
-        )));
-    }
-    Ok(())
 }
 
 fn normalize_heading_name(raw: &str) -> String {
@@ -217,6 +221,26 @@ fn validate_skill_admin_available(ctx: &JobContext, tool_name: &str) -> Result<(
     }
 }
 
+fn validate_prompt_manage_available(ctx: &JobContext) -> Result<(), ToolError> {
+    if ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_skills").is_some() {
+        Err(ToolError::NotAuthorized(
+            "prompt_manage is not available when the current agent is restricted to a specific skill allowlist.".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_prompt_manage_settings(settings: &LearningSettings) -> Result<(), ToolError> {
+    if settings.prompt_mutation.enabled {
+        Ok(())
+    } else {
+        Err(ToolError::ExecutionFailed(
+            "prompt mutation is disabled in the learning settings".to_string(),
+        ))
+    }
+}
+
 fn prompt_manage_user_target(scope: &str, ctx: &JobContext) -> Result<String, ToolError> {
     let actor_id = ctx
         .metadata
@@ -256,6 +280,49 @@ fn prompt_manage_user_target(scope: &str, ctx: &JobContext) -> Result<String, To
             other
         ))),
     }
+}
+
+async fn read_prompt_target_content(
+    workspace: &Workspace,
+    resolved_target: &str,
+) -> Result<String, ToolError> {
+    if resolved_target.eq_ignore_ascii_case(paths::SOUL) {
+        return match crate::identity::soul_store::read_home_soul() {
+            Ok(content) => Ok(content),
+            Err(WorkspaceError::DocumentNotFound { .. }) => Ok(String::new()),
+            Err(err) => Err(ToolError::ExecutionFailed(format!(
+                "failed to read canonical SOUL.md: {}",
+                err
+            ))),
+        };
+    }
+
+    Ok(workspace
+        .read(resolved_target)
+        .await
+        .ok()
+        .map(|doc| doc.content)
+        .unwrap_or_default())
+}
+
+async fn write_prompt_target_content(
+    workspace: &Workspace,
+    resolved_target: &str,
+    content: &str,
+) -> Result<(), ToolError> {
+    if resolved_target.eq_ignore_ascii_case(paths::SOUL) {
+        return crate::identity::soul_store::write_home_soul(content).map_err(|err| {
+            ToolError::ExecutionFailed(format!("failed to update canonical SOUL.md: {}", err))
+        });
+    }
+
+    workspace
+        .write(resolved_target, content)
+        .await
+        .map(|_| ())
+        .map_err(|err| {
+            ToolError::ExecutionFailed(format!("failed to update '{}': {}", resolved_target, err))
+        })
 }
 
 fn validate_relative_skill_path(path: &str) -> Result<PathBuf, ToolError> {
@@ -448,7 +515,7 @@ impl Tool for PromptManageTool {
     }
 
     fn description(&self) -> &str {
-        "Update SOUL.md, AGENTS.md, or USER.md in workspace memory. Run session_search + memory_search before mutation, then apply bounded prompt edits with validation and version recording."
+        "Update the canonical SOUL.md, workspace SOUL.local.md, AGENTS.md, or USER.md. Run session_search + memory_search before mutation, then apply bounded prompt edits with validation and version recording."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -463,7 +530,7 @@ impl Tool for PromptManageTool {
                 },
                 "target": {
                     "type": "string",
-                    "enum": [paths::SOUL, paths::AGENTS, paths::USER],
+                    "enum": [paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER],
                     "description": "Which prompt file to update"
                 },
                 "scope": {
@@ -495,12 +562,9 @@ impl Tool for PromptManageTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        validate_prompt_manage_available(ctx)?;
         let settings = self.orchestrator.load_settings_for_user(&ctx.user_id).await;
-        if !settings.prompt_mutation.enabled {
-            return Err(ToolError::ExecutionFailed(
-                "prompt mutation is disabled in the learning settings".to_string(),
-            ));
-        }
+        validate_prompt_manage_settings(&settings)?;
 
         let operation = params
             .get("operation")
@@ -533,13 +597,7 @@ impl Tool for PromptManageTool {
                 || owner_actor_user
                     .as_deref()
                     .is_some_and(|path| resolved_target == path));
-        let before = self
-            .workspace
-            .read(&resolved_target)
-            .await
-            .ok()
-            .map(|doc| doc.content)
-            .unwrap_or_default();
+        let before = read_prompt_target_content(&self.workspace, &resolved_target).await?;
         let before_timezone = if timezone_sync_target {
             crate::timezone::extract_markdown_timezone(&before)
         } else {
@@ -582,22 +640,8 @@ impl Tool for PromptManageTool {
                 .map_err(ToolError::InvalidParameters)?;
         }
 
-        self.workspace
-            .write(&resolved_target, &next_content)
-            .await
-            .map_err(|err| {
-                ToolError::ExecutionFailed(format!(
-                    "failed to update '{}': {}",
-                    resolved_target, err
-                ))
-            })?;
-        let after = self
-            .workspace
-            .read(&resolved_target)
-            .await
-            .ok()
-            .map(|doc| doc.content)
-            .unwrap_or_default();
+        write_prompt_target_content(&self.workspace, &resolved_target, &next_content).await?;
+        let after = read_prompt_target_content(&self.workspace, &resolved_target).await?;
         let after_timezone = if timezone_sync_target {
             crate::timezone::extract_markdown_timezone(&after)
         } else {
@@ -659,6 +703,7 @@ impl Tool for PromptManageTool {
             "operation": operation,
             "target": resolved_target,
             "bytes_written": next_content.len(),
+            "user_notification_required": target == paths::SOUL || target == paths::SOUL_LOCAL,
             "version_label": version_label,
             "artifact_version_recorded": version_result.is_ok(),
             "artifact_version_error": version_result.err(),
@@ -1690,5 +1735,25 @@ mod tests {
         let updated = remove_markdown_section(source, "A").expect("section A should exist");
         assert!(!updated.contains("## A"));
         assert!(updated.contains("## B\ntwo"));
+    }
+
+    #[test]
+    fn prompt_manage_is_blocked_for_skill_restricted_contexts() {
+        let mut ctx = JobContext::with_user("learning-test", "chat", "prompt gate");
+        ctx.metadata = serde_json::json!({
+            "allowed_skills": ["github"]
+        });
+
+        let err = validate_prompt_manage_available(&ctx).expect_err("should block");
+        assert!(matches!(err, ToolError::NotAuthorized(_)));
+    }
+
+    #[test]
+    fn prompt_manage_respects_learning_settings_gate() {
+        let mut settings = LearningSettings::default();
+        settings.prompt_mutation.enabled = false;
+
+        let err = validate_prompt_manage_settings(&settings).expect_err("should block");
+        assert!(matches!(err, ToolError::ExecutionFailed(_)));
     }
 }

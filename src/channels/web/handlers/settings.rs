@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
 };
 
+use crate::channels::web::handlers::nostr::reconcile_nostr_runtime;
 use crate::channels::web::handlers::providers::reload_llm_runtime;
 use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
@@ -42,6 +43,7 @@ fn is_sensitive_settings_key(key: &str) -> bool {
             | "channels.slack_bot_token"
             | "channels.slack_app_token"
             | "channels.gateway_auth_token"
+            | "channels.nostr_private_key"
     )
 }
 
@@ -73,6 +75,10 @@ fn normalize_telegram_transport_mode(value: Option<&str>) -> String {
         "polling" | "poll" | "off" | "disabled" => "polling".to_string(),
         _ => "auto".to_string(),
     }
+}
+
+fn is_nostr_settings_key(key: &str) -> bool {
+    key.starts_with("channels.nostr_") || key.starts_with("nostr_")
 }
 
 fn telegram_transport_runtime_updates(
@@ -353,6 +359,19 @@ pub(crate) async fn settings_set_handler(
         })?;
     }
 
+    if is_nostr_settings_key(&key) {
+        reconcile_nostr_runtime(state.as_ref(), &request_identity.principal_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    "Nostr runtime reconcile failed after settings update '{}': {}",
+                    key,
+                    err
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -457,6 +476,19 @@ pub(crate) async fn settings_delete_handler(
         })?;
     }
 
+    if is_nostr_settings_key(&key) {
+        reconcile_nostr_runtime(state.as_ref(), &request_identity.principal_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    "Nostr runtime reconcile failed after settings delete '{}': {}",
+                    key,
+                    err
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -485,6 +517,27 @@ pub(crate) async fn settings_export_handler(
         .collect();
 
     Ok(Json(SettingsExportResponse { settings }))
+}
+
+pub(crate) async fn webchat_presentation_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+) -> Result<Json<crate::config::WebChatPresentation>, StatusCode> {
+    let webchat = if let Some(store) = state.store.as_ref() {
+        let map = store
+            .get_all_settings(&request_identity.principal_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load webchat presentation settings: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        let settings = crate::settings::Settings::from_db_map(&map);
+        crate::config::WebChatConfig::from_settings(&settings)
+    } else {
+        crate::config::WebChatConfig::from_env()
+    };
+
+    Ok(Json(webchat.presentation_payload()))
 }
 
 pub(crate) async fn settings_import_handler(
@@ -527,6 +580,18 @@ pub(crate) async fn settings_import_handler(
         tracing::error!("Runtime reload failed after settings import: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    if settings.keys().any(|key| is_nostr_settings_key(key)) {
+        reconcile_nostr_runtime(state.as_ref(), &request_identity.principal_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    "Nostr runtime reconcile failed after settings import: {}",
+                    err
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

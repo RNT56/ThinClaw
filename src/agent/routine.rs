@@ -86,6 +86,11 @@ pub enum Trigger {
         path: Option<String>,
         /// Optional shared secret for HMAC validation.
         secret: Option<String>,
+        /// Allow unsigned webhook calls.
+        ///
+        /// Defaults to `false` so webhook calls are signed by default.
+        #[serde(default)]
+        allow_unsigned_webhook: bool,
     },
     /// Only fires via tool call or CLI.
     Manual,
@@ -151,7 +156,15 @@ impl Trigger {
                     .get("secret")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                Ok(Trigger::Webhook { path, secret })
+                let allow_unsigned_webhook = config
+                    .get("allow_unsigned_webhook")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                Ok(Trigger::Webhook {
+                    path,
+                    secret,
+                    allow_unsigned_webhook,
+                })
             }
             "manual" => Ok(Trigger::Manual),
             "system_event" => {
@@ -183,9 +196,14 @@ impl Trigger {
                 "pattern": pattern,
                 "channel": channel,
             }),
-            Trigger::Webhook { path, secret } => serde_json::json!({
+            Trigger::Webhook {
+                path,
+                secret,
+                allow_unsigned_webhook,
+            } => serde_json::json!({
                 "path": path,
                 "secret": secret,
+                "allow_unsigned_webhook": allow_unsigned_webhook,
             }),
             Trigger::Manual => serde_json::json!({}),
             Trigger::SystemEvent { message, schedule } => serde_json::json!({
@@ -360,12 +378,22 @@ impl RoutineAction {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(default_max_iterations() as u64)
                     as u32;
-                let allowed_tools = config
-                    .get("allowed_tools")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
-                let allowed_skills = config
-                    .get("allowed_skills")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                let parse_optional_allowlist =
+                    |key: &str| -> Result<Option<Vec<String>>, RoutineError> {
+                        let Some(value) = config.get(key) else {
+                            return Ok(None);
+                        };
+                        if value.is_null() {
+                            return Ok(None);
+                        }
+                        serde_json::from_value::<Vec<String>>(value.clone())
+                            .map(Some)
+                            .map_err(|e| RoutineError::InvalidCron {
+                                reason: format!("invalid full_job.{key}: {e}"),
+                            })
+                    };
+                let allowed_tools = parse_optional_allowlist("allowed_tools")?;
+                let allowed_skills = parse_optional_allowlist("allowed_skills")?;
                 let tool_profile = config
                     .get("tool_profile")
                     .and_then(|v| v.as_str())
@@ -477,14 +505,40 @@ impl RoutineAction {
                 allowed_tools,
                 allowed_skills,
                 tool_profile,
-            } => serde_json::json!({
-                "title": title,
-                "description": description,
-                "max_iterations": max_iterations,
-                "allowed_tools": allowed_tools,
-                "allowed_skills": allowed_skills,
-                "tool_profile": tool_profile.map(|profile| profile.as_str().to_string()),
-            }),
+            } => {
+                let mut config = serde_json::Map::new();
+                config.insert(
+                    "title".to_string(),
+                    serde_json::Value::String(title.clone()),
+                );
+                config.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(description.clone()),
+                );
+                config.insert(
+                    "max_iterations".to_string(),
+                    serde_json::json!(*max_iterations),
+                );
+                if let Some(allowed_tools) = allowed_tools {
+                    config.insert(
+                        "allowed_tools".to_string(),
+                        serde_json::json!(allowed_tools),
+                    );
+                }
+                if let Some(allowed_skills) = allowed_skills {
+                    config.insert(
+                        "allowed_skills".to_string(),
+                        serde_json::json!(allowed_skills),
+                    );
+                }
+                if let Some(tool_profile) = tool_profile {
+                    config.insert(
+                        "tool_profile".to_string(),
+                        serde_json::Value::String(tool_profile.as_str().to_string()),
+                    );
+                }
+                serde_json::Value::Object(config)
+            }
             RoutineAction::Heartbeat {
                 light_context,
                 prompt,
@@ -1133,6 +1187,41 @@ mod tests {
     }
 
     #[test]
+    fn test_action_full_job_accepts_null_allowlists() {
+        let json = serde_json::json!({
+            "title": "Deploy review",
+            "description": "Review and deploy pending changes",
+            "max_iterations": 5,
+            "allowed_tools": null,
+            "allowed_skills": null,
+            "tool_profile": "restricted"
+        });
+        let parsed = RoutineAction::from_db("full_job", json).expect("parse full_job");
+        assert!(
+            matches!(parsed, RoutineAction::FullJob { allowed_tools, allowed_skills, tool_profile, .. }
+            if allowed_tools.is_none()
+                && allowed_skills.is_none()
+                && tool_profile == Some(ToolProfile::Restricted))
+        );
+    }
+
+    #[test]
+    fn test_action_full_job_omits_empty_allowlists_in_json() {
+        let action = RoutineAction::FullJob {
+            title: "Deploy review".to_string(),
+            description: "Review and deploy pending changes".to_string(),
+            max_iterations: 5,
+            allowed_tools: None,
+            allowed_skills: None,
+            tool_profile: None,
+        };
+        let json = action.to_config_json();
+        assert!(json.get("allowed_tools").is_none());
+        assert!(json.get("allowed_skills").is_none());
+        assert!(json.get("tool_profile").is_none());
+    }
+
+    #[test]
     fn test_run_status_display_parse() {
         for status in [
             RunStatus::Running,
@@ -1485,7 +1574,8 @@ mod tests {
         assert_eq!(
             Trigger::Webhook {
                 path: None,
-                secret: None
+                secret: None,
+                allow_unsigned_webhook: false,
             }
             .type_tag(),
             "webhook"

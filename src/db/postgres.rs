@@ -494,6 +494,17 @@ impl ConversationStore for PgBackend {
         self.store.claim_due_outcome_contracts(limit, now).await
     }
 
+    async fn claim_due_outcome_contracts_for_user(
+        &self,
+        user_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.store
+            .claim_due_outcome_contracts_for_user(Some(user_id), limit, now)
+            .await
+    }
+
     async fn update_outcome_contract(
         &self,
         contract: &OutcomeContract,
@@ -929,8 +940,27 @@ impl ExperimentStore for PgBackend {
         self.store.get_experiment_campaign(id).await
     }
 
+    async fn get_experiment_campaign_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentCampaign>, DatabaseError> {
+        self.store
+            .get_experiment_campaign_for_owner(id, owner_user_id)
+            .await
+    }
+
     async fn list_experiment_campaigns(&self) -> Result<Vec<ExperimentCampaign>, DatabaseError> {
         self.store.list_experiment_campaigns().await
+    }
+
+    async fn list_experiment_campaigns_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentCampaign>, DatabaseError> {
+        self.store
+            .list_experiment_campaigns_for_owner(owner_user_id)
+            .await
     }
 
     async fn update_experiment_campaign(
@@ -951,11 +981,31 @@ impl ExperimentStore for PgBackend {
         self.store.get_experiment_trial(id).await
     }
 
+    async fn get_experiment_trial_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentTrial>, DatabaseError> {
+        self.store
+            .get_experiment_trial_for_owner(id, owner_user_id)
+            .await
+    }
+
     async fn list_experiment_trials(
         &self,
         campaign_id: Uuid,
     ) -> Result<Vec<ExperimentTrial>, DatabaseError> {
         self.store.list_experiment_trials(campaign_id).await
+    }
+
+    async fn list_experiment_trials_for_owner(
+        &self,
+        campaign_id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentTrial>, DatabaseError> {
+        self.store
+            .list_experiment_trials_for_owner(campaign_id, owner_user_id)
+            .await
     }
 
     async fn update_experiment_trial(&self, trial: &ExperimentTrial) -> Result<(), DatabaseError> {
@@ -977,6 +1027,16 @@ impl ExperimentStore for PgBackend {
         trial_id: Uuid,
     ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError> {
         self.store.list_experiment_artifacts(trial_id).await
+    }
+
+    async fn list_experiment_artifacts_for_owner(
+        &self,
+        trial_id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError> {
+        self.store
+            .list_experiment_artifacts_for_owner(trial_id, owner_user_id)
+            .await
     }
 
     async fn create_experiment_target(

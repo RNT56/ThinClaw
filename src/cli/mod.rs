@@ -74,7 +74,7 @@ pub use update::{UpdateCommand, run_update_command};
 
 use clap::{Parser, Subcommand};
 
-use crate::setup::UiMode;
+use crate::setup::{GuideTopic, UiMode};
 
 #[derive(Parser, Debug)]
 #[command(name = "thinclaw")]
@@ -115,6 +115,9 @@ pub enum Command {
     /// Run the agent (default if no subcommand given)
     Run,
 
+    /// Run the agent with the full-screen terminal UI
+    Tui,
+
     /// Interactive onboarding wizard
     Onboard {
         /// Skip authentication (use existing session)
@@ -124,6 +127,10 @@ pub enum Command {
         /// Reconfigure channels only
         #[arg(long)]
         channels_only: bool,
+
+        /// Revisit guided settings by topic. Use without a value to open the topic menu.
+        #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "menu")]
+        guide: Option<GuideTopic>,
 
         /// Onboarding interface mode
         #[arg(long, value_enum, default_value_t = UiMode::Auto)]
@@ -265,8 +272,8 @@ pub enum Command {
         #[arg(long, default_value = "50")]
         max_turns: u32,
 
-        /// Claude model to use (e.g. "sonnet", "opus").
-        #[arg(long, default_value = "sonnet")]
+        /// Claude model to use (e.g. "claude-sonnet-4-6", "claude-opus-4-5").
+        #[arg(long, default_value = "claude-sonnet-4-6")]
         model: String,
     },
 
@@ -313,7 +320,7 @@ pub enum Command {
 impl Cli {
     /// Check if we should run the agent (default behavior or explicit `run` command).
     pub fn should_run_agent(&self) -> bool {
-        matches!(self.command, None | Some(Command::Run))
+        matches!(self.command, None | Some(Command::Run) | Some(Command::Tui))
     }
 }
 
@@ -343,5 +350,12 @@ mod tests {
             .expect("parse cli with global debug flag");
         assert!(cli.debug);
         assert!(matches!(cli.command, Some(Command::Status)));
+    }
+
+    #[test]
+    fn test_tui_command_runs_agent() {
+        let cli = Cli::try_parse_from(["thinclaw", "tui"]).expect("parse tui command");
+        assert!(cli.should_run_agent());
+        assert!(matches!(cli.command, Some(Command::Tui)));
     }
 }

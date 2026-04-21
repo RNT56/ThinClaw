@@ -100,20 +100,40 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
             instructions,
             auth_url,
             setup_url,
+            auth_mode,
+            auth_status,
+            shared_auth_provider,
+            missing_scopes,
+            thread_id: auth_thread_id,
         } => SseEvent::AuthRequired {
             extension_name,
             instructions,
             auth_url,
             setup_url,
+            auth_mode,
+            auth_status,
+            shared_auth_provider,
+            missing_scopes,
+            thread_id: auth_thread_id.or(thread_id),
         },
         StatusUpdate::AuthCompleted {
             extension_name,
             success,
             message,
+            auth_mode,
+            auth_status,
+            shared_auth_provider,
+            missing_scopes,
+            thread_id: auth_thread_id,
         } => SseEvent::AuthCompleted {
             extension_name,
             success,
             message,
+            auth_mode,
+            auth_status,
+            shared_auth_provider,
+            missing_scopes,
+            thread_id: auth_thread_id.or(thread_id),
         },
         StatusUpdate::Error { message, code } => SseEvent::Status {
             message: format!(
@@ -589,7 +609,7 @@ impl Channel for GatewayChannel {
     ) -> Result<(), ChannelError> {
         self.state.sse.broadcast(SseEvent::Response {
             content: response.content,
-            thread_id: String::new(),
+            thread_id: response.thread_id.unwrap_or_default(),
         });
         Ok(())
     }
@@ -623,10 +643,12 @@ impl Channel for GatewayChannel {
 #[cfg(test)]
 mod tests {
     use super::{GatewayChannel, status_update_to_sse_event};
+    use crate::channels::OutgoingResponse;
     use crate::channels::StatusUpdate;
     use crate::channels::channel::Channel;
     use crate::channels::web::types::SseEvent;
     use crate::config::GatewayConfig;
+    use futures::StreamExt;
 
     #[test]
     fn subagent_spawned_maps_to_typed_sse_event() {
@@ -744,5 +766,39 @@ mod tests {
             diagnostics.get("actor_id").and_then(|v| v.as_str()),
             Some("desk-actor")
         );
+    }
+
+    #[tokio::test]
+    async fn gateway_broadcast_uses_outgoing_thread_id() {
+        let gateway = GatewayChannel::new(GatewayConfig {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+            auth_token: Some("test-token".to_string()),
+            user_id: "household-user".to_string(),
+            actor_id: Some("desk-actor".to_string()),
+        });
+        let mut events = Box::pin(
+            gateway
+                .state()
+                .sse
+                .subscribe_raw()
+                .expect("should subscribe to SSE"),
+        );
+
+        gateway
+            .broadcast(
+                "household-user",
+                OutgoingResponse::text("boot reply").in_thread("thread-123"),
+            )
+            .await
+            .expect("broadcast should succeed");
+
+        match events.next().await.expect("expected SSE event") {
+            SseEvent::Response { content, thread_id } => {
+                assert_eq!(content, "boot reply");
+                assert_eq!(thread_id, "thread-123");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

@@ -1,8 +1,9 @@
 //! Agent identity packs and temporary session personality overlays.
 //!
-//! The durable workspace identity still lives in `IDENTITY.md`, `SOUL.md`,
-//! `USER.md`, and `AGENTS.md`. This module defines the operator-facing
-//! personality vocabulary used by setup, chat commands, and prompt overlays.
+//! The durable identity lives in the canonical home `SOUL.md` plus the
+//! workspace-scoped `IDENTITY.md`, `USER.md`, and `AGENTS.md`. This module
+//! defines the operator-facing personality vocabulary used by setup, chat
+//! commands, and prompt overlays.
 
 use std::borrow::Cow;
 
@@ -138,17 +139,9 @@ pub fn canonical_personality_pack_name(requested: &str) -> &'static str {
         .unwrap_or("balanced")
 }
 
-pub fn personality_pack_seed_markdown(requested: &str) -> &'static str {
-    match canonical_personality_pack_name(requested) {
-        "professional" => include_str!("../../assets/personality_packs/professional.md"),
-        "creative_partner" => include_str!("../../assets/personality_packs/creative_partner.md"),
-        "research_assistant" => {
-            include_str!("../../assets/personality_packs/research_assistant.md")
-        }
-        "mentor" => include_str!("../../assets/personality_packs/mentor.md"),
-        "minimal" => include_str!("../../assets/personality_packs/minimal.md"),
-        _ => include_str!("../../assets/personality_packs/balanced.md"),
-    }
+pub fn personality_pack_seed_markdown(requested: &str) -> String {
+    crate::identity::soul::compose_seeded_soul(canonical_personality_pack_name(requested))
+        .unwrap_or_else(|_| include_str!("../../assets/soul/base.md").to_string())
 }
 
 pub fn resolve_personality(requested: &str) -> SessionPersonalityOverlay {

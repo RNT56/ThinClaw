@@ -30,7 +30,7 @@ impl SetupWizard {
         print_info("Tools available from the registry:");
         print_info("Pick the tools to install now. You can add more later with:");
         print_info("  thinclaw registry install <name>");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let default_bundle = match self.selected_profile {
             super::OnboardingProfile::LocalAndPrivate => 0,
@@ -185,12 +185,12 @@ impl SetupWizard {
         }
 
         if installed_count > 0 {
-            println!();
+            crate::setup::prompts::print_blank_line();
             print_success(&format!("{} tool(s) installed.", installed_count));
         }
 
         if !auth_needed.is_empty() {
-            println!();
+            crate::setup::prompts::print_blank_line();
             print_info("Some tools still need authentication. Run these after setup:");
             for hint in &auth_needed {
                 print_info(hint);

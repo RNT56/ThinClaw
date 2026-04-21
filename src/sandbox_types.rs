@@ -76,8 +76,11 @@ mod fallback {
 
     #[derive(Debug, Clone)]
     pub struct CompletionResult {
+        pub status: String,
+        pub session_id: Option<String>,
         pub success: bool,
         pub message: Option<String>,
+        pub iterations: u32,
     }
 
     #[derive(Debug, Clone)]

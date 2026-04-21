@@ -15,6 +15,9 @@ use crate::channels::status_view::{ChannelStatusEntry, ChannelViewState};
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 
+const LEGACY_WEB_CHANNEL_ALIAS: &str = "web";
+const GATEWAY_CHANNEL_NAME: &str = "gateway";
+
 /// Per-channel atomic message counters.
 struct ChannelCounters {
     received: AtomicU64,
@@ -102,6 +105,30 @@ impl ChannelManager {
         }
         if let Ok(mut guard) = counter.last_error_at.write() {
             *guard = Some(failed_at);
+        }
+    }
+
+    fn clear_channel_error(counter: &ChannelCounters) {
+        if let Ok(mut guard) = counter.last_error.write() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = counter.last_error_at.write() {
+            *guard = None;
+        }
+    }
+
+    fn resolve_channel_name<'a>(
+        requested: &'a str,
+        channels: &'a HashMap<String, Box<dyn Channel>>,
+    ) -> &'a str {
+        if channels.contains_key(requested) {
+            requested
+        } else if requested == LEGACY_WEB_CHANNEL_ALIAS
+            && channels.contains_key(GATEWAY_CHANNEL_NAME)
+        {
+            GATEWAY_CHANNEL_NAME
+        } else {
+            requested
         }
     }
 
@@ -245,6 +272,7 @@ impl ChannelManager {
     pub async fn record_received(&self, channel_name: &str) {
         let counter = self.counter_for(channel_name).await;
         counter.received.fetch_add(1, Ordering::Relaxed);
+        Self::clear_channel_error(counter.as_ref());
         if let Ok(mut guard) = counter.last_message_at.write() {
             *guard = Some(Utc::now().to_rfc3339());
         }
@@ -256,21 +284,26 @@ impl ChannelManager {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let channel_name = msg.channel.clone();
+        let requested_channel_name = msg.channel.clone();
+        let resolved_channel_name = {
+            let channels = self.channels.read().await;
+            Self::resolve_channel_name(&requested_channel_name, &channels).to_string()
+        };
         let result = {
             let channels = self.channels.read().await;
-            if let Some(channel) = channels.get(&channel_name) {
+            if let Some(channel) = channels.get(&resolved_channel_name) {
                 channel.respond(msg, response).await
             } else {
                 return Err(ChannelError::SendFailed {
-                    name: channel_name,
+                    name: requested_channel_name,
                     reason: "Channel not found".to_string(),
                 });
             }
         }; // lock guard drops here
-        let counter = self.counter_for(&channel_name).await;
+        let counter = self.counter_for(&resolved_channel_name).await;
         if result.is_ok() {
             counter.sent.fetch_add(1, Ordering::Relaxed);
+            Self::clear_channel_error(counter.as_ref());
         } else if let Err(ref err) = result {
             Self::record_channel_error(counter.as_ref(), err);
         }
@@ -288,6 +321,7 @@ impl ChannelManager {
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
         let channels = self.channels.read().await;
+        let channel_name = Self::resolve_channel_name(channel_name, &channels);
         if let Some(channel) = channels.get(channel_name) {
             channel.send_status(status, metadata).await
         } else {
@@ -305,9 +339,13 @@ impl ChannelManager {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let resolved_channel_name = {
+            let channels = self.channels.read().await;
+            Self::resolve_channel_name(channel_name, &channels).to_string()
+        };
         let result = {
             let channels = self.channels.read().await;
-            if let Some(channel) = channels.get(channel_name) {
+            if let Some(channel) = channels.get(&resolved_channel_name) {
                 channel.broadcast(user_id, response).await
             } else {
                 return Err(ChannelError::SendFailed {
@@ -316,7 +354,7 @@ impl ChannelManager {
                 });
             }
         }; // lock drops here
-        let counter = self.counter_for(channel_name).await;
+        let counter = self.counter_for(&resolved_channel_name).await;
         if result.is_ok() {
             counter.sent.fetch_add(1, Ordering::Relaxed);
         } else if let Err(ref err) = result {
@@ -387,9 +425,9 @@ impl ChannelManager {
 
     /// Return formatting guidance from the active channel implementation.
     pub async fn formatting_hints_for(&self, channel_name: &str) -> Option<String> {
-        self.channels
-            .read()
-            .await
+        let channels = self.channels.read().await;
+        let channel_name = Self::resolve_channel_name(channel_name, &channels);
+        channels
             .get(channel_name)
             .and_then(|channel| channel.formatting_hints())
     }
@@ -397,6 +435,7 @@ impl ChannelManager {
     /// Return channel-specific diagnostics when the implementation exposes them.
     pub async fn channel_diagnostics(&self, channel_name: &str) -> Option<serde_json::Value> {
         let channels = self.channels.read().await;
+        let channel_name = Self::resolve_channel_name(channel_name, &channels);
         let channel = channels.get(channel_name)?;
         channel.diagnostics().await
     }
@@ -629,6 +668,7 @@ impl ChannelManager {
     /// For channels that don't support debug mode (e.g., REPL), returns `false`.
     pub async fn toggle_debug_mode(&self, channel_name: &str) -> bool {
         let channels = self.channels.read().await;
+        let channel_name = Self::resolve_channel_name(channel_name, &channels);
         if let Some(channel) = channels.get(channel_name) {
             channel.toggle_debug_mode().await
         } else {
@@ -640,5 +680,115 @@ impl ChannelManager {
 impl Default for ChannelManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::stream;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[derive(Default)]
+    struct MockChannelState {
+        broadcasts: Mutex<Vec<(String, String)>>,
+        diagnostics_calls: Mutex<usize>,
+    }
+
+    struct MockChannel {
+        name: String,
+        state: Arc<MockChannelState>,
+    }
+
+    impl MockChannel {
+        fn new(name: &str, state: Arc<MockChannelState>) -> Self {
+            Self {
+                name: name.to_string(),
+                state,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Channel for MockChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn start(&self) -> Result<MessageStream, ChannelError> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn broadcast(
+            &self,
+            user_id: &str,
+            response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            self.state
+                .broadcasts
+                .lock()
+                .await
+                .push((user_id.to_string(), response.content));
+            Ok(())
+        }
+
+        async fn diagnostics(&self) -> Option<serde_json::Value> {
+            let mut calls = self.state.diagnostics_calls.lock().await;
+            *calls += 1;
+            Some(serde_json::json!({"channel": self.name}))
+        }
+
+        async fn health_check(&self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_resolves_legacy_web_alias_to_gateway() {
+        let manager = ChannelManager::new();
+        let state = Arc::new(MockChannelState::default());
+        manager
+            .add(Box::new(MockChannel::new("gateway", Arc::clone(&state))))
+            .await;
+
+        manager
+            .broadcast("web", "user-1", OutgoingResponse::text("hello"))
+            .await
+            .expect("legacy web alias should reach gateway channel");
+
+        let broadcasts = state.broadcasts.lock().await;
+        assert_eq!(
+            broadcasts.as_slice(),
+            &[("user-1".to_string(), "hello".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_diagnostics_resolves_legacy_web_alias_to_gateway() {
+        let manager = ChannelManager::new();
+        let state = Arc::new(MockChannelState::default());
+        manager
+            .add(Box::new(MockChannel::new("gateway", Arc::clone(&state))))
+            .await;
+
+        let diagnostics = manager
+            .channel_diagnostics("web")
+            .await
+            .expect("legacy web alias should resolve diagnostics");
+        assert_eq!(
+            diagnostics.get("channel").and_then(|value| value.as_str()),
+            Some("gateway")
+        );
+        assert_eq!(*state.diagnostics_calls.lock().await, 1);
     }
 }

@@ -3,6 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use nostr_sdk::ToBech32;
+use nostr_sdk::prelude::Keys;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::channels::wasm::ChannelCapabilitiesFile;
@@ -11,16 +13,533 @@ use crate::setup::channels::{
     SecretsContext, setup_http, setup_signal, setup_telegram, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_info, print_success, secret_input, select_many,
+    confirm, input, optional_input, print_info, print_success, print_warning, secret_input,
+    select_many, select_one,
 };
 
 use super::helpers::{
     build_channel_options, capitalize_first, discover_wasm_channels,
     install_selected_bundled_channels, install_selected_registry_channels, mask_api_key,
 };
-use super::{SetupError, SetupWizard};
+use super::{FollowupDraft, SetupError, SetupWizard};
+use crate::settings::{OnboardingFollowupCategory, OnboardingFollowupStatus};
 
 impl SetupWizard {
+    fn reset_quick_channel_selection(&mut self) {
+        self.settings.channels.http_enabled = false;
+        self.settings.channels.signal_enabled = false;
+        self.settings.channels.discord_enabled = false;
+        self.settings.channels.slack_enabled = false;
+        self.settings.channels.nostr_enabled = false;
+        self.settings.channels.gmail_enabled = false;
+        self.settings.channels.bluebubbles_enabled = false;
+        #[cfg(target_os = "macos")]
+        {
+            self.settings.channels.imessage_enabled = false;
+            self.settings.channels.apple_mail_enabled = false;
+        }
+        self.settings.channels.wasm_channels.clear();
+        self.quick_primary_channel = None;
+    }
+
+    fn quick_channel_install_failure(&mut self, channel_name: &str, reason: &str) {
+        print_warning(&format!(
+            "{} could not be prepared during quick setup: {}",
+            channel_name, reason
+        ));
+        print_info("Falling back to the Web Dashboard for now.");
+        self.quick_primary_channel = Some("web".to_string());
+        self.add_followup(FollowupDraft {
+            id: format!("quick-channel-{}", channel_name.to_ascii_lowercase()),
+            title: format!("Finish {} channel setup", channel_name),
+            category: OnboardingFollowupCategory::Verification,
+            status: OnboardingFollowupStatus::NeedsAttention,
+            instructions: format!(
+                "{} could not be fully prepared during quick setup. ThinClaw was left on the Web Dashboard so onboarding could continue.",
+                channel_name
+            ),
+            action_hint: Some(
+                "Open Guided Settings > Channels & Notifications to retry the channel setup."
+                    .to_string(),
+            ),
+        });
+    }
+
+    async fn configure_nostr_channel(
+        &mut self,
+        secrets: Option<&SecretsContext>,
+        owner_required: bool,
+    ) -> Result<bool, SetupError> {
+        let default_relays = "wss://relay.damus.io,wss://nos.lol";
+        let relays = optional_input("Relay URLs (comma-separated)", Some(default_relays))
+            .map_err(SetupError::Io)?
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| default_relays.to_string());
+
+        let private_key = secret_input("Nostr private key (nsec or hex)")
+            .map_err(SetupError::Io)?
+            .expose_secret()
+            .trim()
+            .to_string();
+        if private_key.is_empty() {
+            print_warning("Nostr private key is required.");
+            return Ok(false);
+        }
+
+        let keys = match Keys::parse(&private_key) {
+            Ok(keys) => keys,
+            Err(err) => {
+                print_warning(&format!(
+                    "The Nostr private key could not be parsed: {}",
+                    err
+                ));
+                return Ok(false);
+            }
+        };
+        let bot_npub = keys
+            .public_key()
+            .to_bech32()
+            .unwrap_or_else(|_| keys.public_key().to_hex());
+        print_info(&format!("This agent will appear on Nostr as {}.", bot_npub));
+
+        let owner_prompt = if owner_required {
+            "Owner public key (hex or npub)"
+        } else {
+            "Owner public key (hex or npub, blank keeps command ingress disabled)"
+        };
+        let owner_hint = self.settings.channels.nostr_owner_pubkey.as_deref();
+        let owner_pubkey = optional_input(owner_prompt, owner_hint)
+            .map_err(SetupError::Io)?
+            .filter(|value| !value.trim().is_empty())
+            .map(|raw| crate::channels::nostr_runtime::normalize_public_key(&raw))
+            .transpose()
+            .map_err(SetupError::Config)?;
+
+        if owner_required && owner_pubkey.is_none() {
+            print_warning(
+                "An owner public key is required so the agent knows whose DMs may control it.",
+            );
+            return Ok(false);
+        }
+        if owner_pubkey.is_none() {
+            print_warning(
+                "No Nostr owner public key was set, so inbound Nostr commands will stay disabled until you add one.",
+            );
+        }
+
+        let social_dm_enabled = confirm(
+            "Allow non-owner social DMs to be readable through nostr_actions?",
+            self.settings.channels.nostr_social_dm_enabled,
+        )
+        .map_err(SetupError::Io)?;
+
+        if let Some(ctx) = secrets {
+            if let Err(err) = ctx
+                .save_secret(
+                    "nostr_private_key",
+                    &SecretString::from(private_key.clone()),
+                )
+                .await
+            {
+                print_warning(&format!(
+                    "Could not save the Nostr private key to the secrets store: {}",
+                    err
+                ));
+                print_info(
+                    "Set NOSTR_PRIVATE_KEY manually before starting if you do not retry secret storage.",
+                );
+            }
+        } else {
+            print_warning(
+                "Secrets store not available during onboarding. Set NOSTR_PRIVATE_KEY manually before starting.",
+            );
+        }
+
+        self.settings.channels.nostr_enabled = true;
+        self.settings.channels.nostr_relays = Some(relays);
+        self.settings.channels.nostr_owner_pubkey = owner_pubkey;
+        self.settings.channels.nostr_social_dm_enabled = social_dm_enabled;
+        self.settings.channels.nostr_allow_from = None;
+
+        Ok(true)
+    }
+
+    fn ensure_wasm_channel_enabled(&mut self, channel_name: &str) {
+        if !self
+            .settings
+            .channels
+            .wasm_channels
+            .iter()
+            .any(|existing| existing == channel_name)
+        {
+            self.settings
+                .channels
+                .wasm_channels
+                .push(channel_name.to_string());
+        }
+    }
+
+    async fn install_and_discover_quick_wasm_channel(
+        &mut self,
+        channel_name: &str,
+        display_name: &str,
+    ) -> Result<Option<ChannelCapabilitiesFile>, SetupError> {
+        let channels_dir = dirs::home_dir()
+            .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
+            .join(".thinclaw/channels");
+
+        let mut discovered = discover_wasm_channels(&channels_dir).await;
+        let installed_names: HashSet<String> =
+            discovered.iter().map(|(name, _)| name.clone()).collect();
+
+        if !installed_names.contains(channel_name) {
+            print_info(&format!("Preparing {}...", display_name));
+            let selection = vec![channel_name.to_string()];
+            let bundled_installed =
+                install_selected_bundled_channels(&channels_dir, &selection, &installed_names)
+                    .await?
+                    .unwrap_or_default();
+            let bundled_installed_set: HashSet<String> = bundled_installed.into_iter().collect();
+            let _ = install_selected_registry_channels(
+                &channels_dir,
+                &selection,
+                &installed_names,
+                &bundled_installed_set,
+            )
+            .await;
+            discovered = discover_wasm_channels(&channels_dir).await;
+        }
+
+        Ok(discovered
+            .into_iter()
+            .find(|(name, _)| name == channel_name)
+            .map(|(_, caps)| caps))
+    }
+
+    async fn maybe_prepare_quick_channel_tunnel(
+        &mut self,
+        caps: &ChannelCapabilitiesFile,
+        secrets: Option<&SecretsContext>,
+    ) -> Result<(), SetupError> {
+        if caps
+            .capabilities
+            .channel
+            .as_ref()
+            .is_some_and(|channel| !channel.allow_polling)
+        {
+            print_info("This channel needs a webhook endpoint, so ThinClaw is preparing a tunnel.");
+            match setup_tunnel(&self.settings, secrets).await {
+                Ok(tunnel_settings) => {
+                    self.settings.tunnel = tunnel_settings;
+                }
+                Err(e) => {
+                    return Err(SetupError::Channel(format!(
+                        "Tunnel setup is required for this channel: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn configure_quick_telegram_channel(&mut self) -> Result<(), SetupError> {
+        let caps = match self
+            .install_and_discover_quick_wasm_channel("telegram", "Telegram")
+            .await?
+        {
+            Some(caps) => caps,
+            None => {
+                self.quick_channel_install_failure("Telegram", "the channel package is missing");
+                return Ok(());
+            }
+        };
+
+        let secrets = self.init_secrets_context().await?;
+        self.maybe_prepare_quick_channel_tunnel(&caps, Some(&secrets))
+            .await?;
+
+        let telegram_result = setup_telegram(&secrets, &self.settings).await?;
+        if !telegram_result.enabled {
+            self.quick_channel_install_failure(
+                "Telegram",
+                "setup was cancelled before the bot could be configured",
+            );
+            return Ok(());
+        }
+
+        if let Some(owner_id) = telegram_result.owner_id {
+            self.settings.channels.telegram_owner_id = Some(owner_id);
+        }
+        self.ensure_wasm_channel_enabled("telegram");
+        print_success("Telegram is ready as your primary channel.");
+        Ok(())
+    }
+
+    async fn configure_quick_wasm_channel(
+        &mut self,
+        channel_name: &str,
+        display_name: &str,
+    ) -> Result<(), SetupError> {
+        let caps = match self
+            .install_and_discover_quick_wasm_channel(channel_name, display_name)
+            .await?
+        {
+            Some(caps) => caps,
+            None => {
+                self.quick_channel_install_failure(
+                    display_name,
+                    "the channel package could not be installed",
+                );
+                return Ok(());
+            }
+        };
+
+        let secrets = self.init_secrets_context().await?;
+        self.maybe_prepare_quick_channel_tunnel(&caps, Some(&secrets))
+            .await?;
+
+        let setup_result = setup_wasm_channel(&secrets, channel_name, &caps.setup).await?;
+        if !setup_result.enabled {
+            self.quick_channel_install_failure(
+                display_name,
+                "setup was cancelled before the channel could be enabled",
+            );
+            return Ok(());
+        }
+
+        self.ensure_wasm_channel_enabled(&setup_result.channel_name);
+        print_success(&format!(
+            "{} is ready as your primary channel.",
+            display_name
+        ));
+        Ok(())
+    }
+
+    pub(super) async fn step_primary_channel_quick(&mut self) -> Result<(), SetupError> {
+        self.reset_quick_channel_selection();
+
+        let channels_dir = dirs::home_dir()
+            .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
+            .join(".thinclaw/channels");
+        let discovered_channels = discover_wasm_channels(&channels_dir).await;
+        let wasm_channel_names = build_channel_options(&discovered_channels);
+
+        let mut options: Vec<(&str, String)> = vec![
+            (
+                "web",
+                "Web Dashboard  - fastest start, built in, no extra install".to_string(),
+            ),
+            (
+                "telegram",
+                if wasm_channel_names.iter().any(|name| name == "telegram") {
+                    "Telegram       - bot chat on Telegram".to_string()
+                } else {
+                    "Telegram       - bot chat on Telegram (will install)".to_string()
+                },
+            ),
+            (
+                "signal",
+                "Signal         - direct messages through signal-cli".to_string(),
+            ),
+            (
+                "discord",
+                "Discord        - bot in Discord DMs or servers".to_string(),
+            ),
+            (
+                "slack",
+                "Slack          - workspace chat via bot/app tokens".to_string(),
+            ),
+            (
+                "gmail",
+                "Gmail          - email-triggered agent access".to_string(),
+            ),
+            (
+                "bluebubbles",
+                "BlueBubbles    - iMessage bridge from a Mac".to_string(),
+            ),
+            (
+                "nostr",
+                "Nostr          - relay-based messaging".to_string(),
+            ),
+        ];
+
+        if wasm_channel_names.iter().any(|name| name == "whatsapp") {
+            options.insert(
+                2,
+                (
+                    "whatsapp",
+                    "WhatsApp       - WhatsApp integration (will install)".to_string(),
+                ),
+            );
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            options.push((
+                "imessage",
+                "iMessage       - native macOS Messages access".to_string(),
+            ));
+            options.push((
+                "apple_mail",
+                "Apple Mail     - native macOS Mail access".to_string(),
+            ));
+        }
+
+        let labels: Vec<&str> = options.iter().map(|(_, label)| label.as_str()).collect();
+        print_info("Choose the main place people will use to reach ThinClaw.");
+        print_info("Quick setup configures only the essentials for that channel.");
+        crate::setup::prompts::print_blank_line();
+        let choice = select_one("Primary channel", &labels).map_err(SetupError::Io)?;
+        let selected = options
+            .get(choice)
+            .map(|(key, _)| *key)
+            .unwrap_or("web")
+            .to_string();
+
+        self.quick_primary_channel = Some(selected.clone());
+        match selected.as_str() {
+            "web" => {
+                print_success("Web Dashboard selected as your primary channel.");
+            }
+            "telegram" => {
+                self.configure_quick_telegram_channel().await?;
+            }
+            "whatsapp" => {
+                self.configure_quick_wasm_channel("whatsapp", "WhatsApp")
+                    .await?;
+            }
+            "signal" => {
+                print_info("Configuring Signal with the minimum required fields.");
+                let result = setup_signal(&self.settings).await?;
+                self.settings.channels.signal_http_url = Some(result.http_url);
+                self.settings.channels.signal_account = Some(result.account.clone());
+                self.settings.channels.signal_allow_from = Some(result.allow_from);
+                self.settings.channels.signal_allow_from_groups = Some(result.allow_from_groups);
+                self.settings.channels.signal_dm_policy = Some(result.dm_policy);
+                self.settings.channels.signal_group_policy = Some(result.group_policy);
+                self.settings.channels.signal_group_allow_from = Some(result.group_allow_from);
+                self.settings.channels.signal_enabled = result.enabled;
+            }
+            "discord" => {
+                print_info("Discord needs a bot token to connect.");
+                let token = secret_input("Discord bot token").map_err(SetupError::Io)?;
+                let token = token.expose_secret().trim().to_string();
+                if token.is_empty() {
+                    self.quick_channel_install_failure(
+                        "Discord",
+                        "a bot token is required to make the channel usable",
+                    );
+                } else {
+                    self.settings.channels.discord_bot_token = Some(token);
+                    self.settings.channels.discord_enabled = true;
+                    print_success("Discord is ready as your primary channel.");
+                }
+            }
+            "slack" => {
+                print_info("Slack needs both a bot token and an app token for Socket Mode.");
+                let bot_token = secret_input("Slack bot token (xoxb-...)")
+                    .map_err(SetupError::Io)?
+                    .expose_secret()
+                    .trim()
+                    .to_string();
+                let app_token = secret_input("Slack app token (xapp-...)")
+                    .map_err(SetupError::Io)?
+                    .expose_secret()
+                    .trim()
+                    .to_string();
+                if bot_token.is_empty() || app_token.is_empty() {
+                    self.quick_channel_install_failure(
+                        "Slack",
+                        "both the bot token and app token are required",
+                    );
+                } else {
+                    self.settings.channels.slack_bot_token = Some(bot_token);
+                    self.settings.channels.slack_app_token = Some(app_token);
+                    self.settings.channels.slack_enabled = true;
+                    print_success("Slack is ready as your primary channel.");
+                }
+            }
+            "gmail" => {
+                print_info("Gmail needs the Pub/Sub project details for push notifications.");
+                let project_id = input("GCP project ID").map_err(SetupError::Io)?;
+                let subscription_id = input("Pub/Sub subscription ID").map_err(SetupError::Io)?;
+                let topic_id = input("Pub/Sub topic ID").map_err(SetupError::Io)?;
+                if project_id.trim().is_empty()
+                    || subscription_id.trim().is_empty()
+                    || topic_id.trim().is_empty()
+                {
+                    self.quick_channel_install_failure(
+                        "Gmail",
+                        "project, subscription, and topic are all required",
+                    );
+                } else {
+                    self.settings.channels.gmail_project_id = Some(project_id);
+                    self.settings.channels.gmail_subscription_id = Some(subscription_id);
+                    self.settings.channels.gmail_topic_id = Some(topic_id);
+                    self.settings.channels.gmail_enabled = true;
+                    print_success("Gmail is ready as your primary channel.");
+                }
+            }
+            "bluebubbles" => {
+                print_info("BlueBubbles needs the server URL and password from your Mac bridge.");
+                let server_url = input("BlueBubbles server URL").map_err(SetupError::Io)?;
+                let password = secret_input("BlueBubbles server password")
+                    .map_err(SetupError::Io)?
+                    .expose_secret()
+                    .trim()
+                    .to_string();
+                if server_url.trim().is_empty() || password.is_empty() {
+                    self.quick_channel_install_failure(
+                        "BlueBubbles",
+                        "both the server URL and password are required",
+                    );
+                } else {
+                    self.settings.channels.bluebubbles_server_url = Some(server_url);
+                    self.settings.channels.bluebubbles_password = Some(password);
+                    self.settings.channels.bluebubbles_webhook_host = Some("127.0.0.1".to_string());
+                    self.settings.channels.bluebubbles_webhook_port = Some(8645);
+                    self.settings.channels.bluebubbles_enabled = true;
+                    print_success("BlueBubbles is ready as your primary channel.");
+                }
+            }
+            "nostr" => {
+                let secrets = self.init_secrets_context().await.ok();
+                if self.configure_nostr_channel(secrets.as_ref(), true).await? {
+                    print_success("Nostr is ready as your primary channel.");
+                } else {
+                    self.quick_channel_install_failure(
+                        "Nostr",
+                        "a valid private key and owner public key are required",
+                    );
+                }
+            }
+            #[cfg(target_os = "macos")]
+            "imessage" => {
+                self.settings.channels.imessage_enabled = true;
+                self.settings.channels.imessage_poll_interval = Some(5);
+                print_success("iMessage is ready as your primary channel.");
+            }
+            #[cfg(target_os = "macos")]
+            "apple_mail" => {
+                self.settings.channels.apple_mail_enabled = true;
+                self.settings.channels.apple_mail_poll_interval = Some(10);
+                self.settings.channels.apple_mail_unread_only = true;
+                self.settings.channels.apple_mail_mark_as_read = true;
+                print_success("Apple Mail is ready as your primary channel.");
+            }
+            _ => {
+                self.quick_channel_install_failure(
+                    "Selected channel",
+                    "this quick-setup path is not available yet",
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     pub(super) async fn init_secrets_context(&mut self) -> Result<SecretsContext, SetupError> {
         // Get crypto (should be set from step 2, or load from OS secure store/env)
         let crypto = if let Some(ref c) = self.secrets_crypto {
@@ -164,7 +683,7 @@ impl SetupWizard {
                 print_info(&format!("Tunnel setup skipped: {}", e));
             }
         }
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         // Discover available WASM channels
         let channels_dir = dirs::home_dir()
@@ -188,14 +707,14 @@ impl SetupWizard {
         print_info(
             "A verification pass runs after setup and does not send live messages unless you test later.",
         );
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         print_info("Common channels");
         let common_options = [("HTTP webhook", self.settings.channels.http_enabled)];
         let common_selected =
             select_many("Enable common channels", &common_options).map_err(SetupError::Io)?;
         let enable_http = common_selected.contains(&0);
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         print_info("Native channels");
         #[allow(unused_mut)]
@@ -235,14 +754,14 @@ impl SetupWizard {
         let enable_imessage = pick_native("imessage");
         #[cfg(target_os = "macos")]
         let enable_apple_mail = pick_native("apple_mail");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         print_info("Advanced channels");
         let advanced_options = [("Nostr", self.settings.channels.nostr_enabled)];
         let advanced_selected =
             select_many("Enable advanced channels", &advanced_options).map_err(SetupError::Io)?;
         let enable_nostr = advanced_selected.contains(&0);
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let selected_wasm_channels = if wasm_channel_names.is_empty() {
             Vec::new()
@@ -266,7 +785,7 @@ impl SetupWizard {
                 .collect();
             let wasm_selected =
                 select_many("Enable WASM channels", &wasm_option_refs).map_err(SetupError::Io)?;
-            println!();
+            crate::setup::prompts::print_blank_line();
             wasm_selected
                 .into_iter()
                 .filter_map(|idx| wasm_channel_names.get(idx).cloned())
@@ -328,7 +847,7 @@ impl SetupWizard {
 
         // HTTP channel
         if enable_http {
-            println!();
+            crate::setup::prompts::print_blank_line();
             if let Some(ref ctx) = secrets {
                 let result = setup_http(ctx).await?;
                 self.settings.channels.http_enabled = result.enabled;
@@ -348,7 +867,7 @@ impl SetupWizard {
 
         // Signal channel
         if enable_signal {
-            println!();
+            crate::setup::prompts::print_blank_line();
             let result = setup_signal(&self.settings).await?;
             self.settings.channels.signal_enabled = result.enabled;
             self.settings.channels.signal_http_url = Some(result.http_url);
@@ -371,11 +890,11 @@ impl SetupWizard {
 
         // Discord channel
         if enable_discord {
-            println!();
+            crate::setup::prompts::print_blank_line();
             print_info(
                 "Discord needs a bot token from https://discord.com/developers/applications",
             );
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             let token = if let Some(existing) = std::env::var("DISCORD_BOT_TOKEN")
                 .ok()
@@ -442,12 +961,12 @@ impl SetupWizard {
 
         // Slack channel
         if enable_slack {
-            println!();
+            crate::setup::prompts::print_blank_line();
             print_info(
                 "Slack needs both a bot token (xoxb-...) and an app-level token (xapp-...).",
             );
             print_info("Create them at https://api.slack.com/apps");
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             let bot_token = if let Some(existing) = std::env::var("SLACK_BOT_TOKEN")
                 .ok()
@@ -543,42 +1062,34 @@ impl SetupWizard {
 
         // Nostr channel
         if enable_nostr {
-            println!();
+            crate::setup::prompts::print_blank_line();
             print_info("Nostr connects to relay servers to receive and send messages.");
-            println!();
-
-            let default_relays = "wss://relay.damus.io,wss://nos.lol";
-            let relays = optional_input("Relay URLs (comma-separated)", Some(default_relays))
-                .map_err(SetupError::Io)?;
-            let relay_str = relays
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| default_relays.to_string());
-            self.settings.channels.nostr_relays = Some(relay_str);
-
-            let allow_from = optional_input(
-                "Allowed public keys (comma-separated hex/npub, '*' = all, blank = all)",
-                None,
-            )
-            .map_err(SetupError::Io)?;
-            if let Some(ref af) = allow_from
-                && !af.is_empty()
+            crate::setup::prompts::print_blank_line();
+            if self
+                .configure_nostr_channel(secrets.as_ref(), false)
+                .await?
             {
-                self.settings.channels.nostr_allow_from = Some(af.clone());
+                print_success("Nostr channel configured");
+            } else {
+                self.settings.channels.nostr_enabled = false;
+                self.settings.channels.nostr_owner_pubkey = None;
+                self.settings.channels.nostr_social_dm_enabled = false;
+                print_warning(
+                    "Nostr channel was left disabled because the key or owner configuration was incomplete.",
+                );
             }
-
-            self.settings.channels.nostr_enabled = true;
-            print_success("Nostr channel configured");
-            print_info("Set NOSTR_SECRET_KEY in your environment before starting.");
         } else {
             self.settings.channels.nostr_enabled = false;
+            self.settings.channels.nostr_owner_pubkey = None;
+            self.settings.channels.nostr_social_dm_enabled = false;
         }
 
         // Gmail channel
         if enable_gmail {
-            println!();
+            crate::setup::prompts::print_blank_line();
             print_info("Gmail requires GCP project with Pub/Sub and Gmail API enabled.");
             print_info("Follow: https://developers.google.com/gmail/api/guides/push");
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             let project_id = input("GCP project ID").map_err(SetupError::Io)?;
             self.settings.channels.gmail_project_id = Some(project_id);
@@ -610,10 +1121,10 @@ impl SetupWizard {
         // iMessage channel (macOS only)
         #[cfg(target_os = "macos")]
         if enable_imessage {
-            println!();
+            crate::setup::prompts::print_blank_line();
             print_info("iMessage uses the native macOS Messages database.");
             print_info("Grant Full Disk Access in System Settings > Privacy.");
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             let allow_from = optional_input(
                 "Allowed contacts (comma-separated phone/email, blank = all)",
@@ -645,7 +1156,7 @@ impl SetupWizard {
         // Apple Mail channel (macOS only)
         #[cfg(target_os = "macos")]
         if enable_apple_mail {
-            println!();
+            crate::setup::prompts::print_blank_line();
             print_info("Apple Mail uses the native macOS Mail.app Envelope Index database.");
             print_info("Grant Full Disk Access in System Settings > Privacy.");
             print_info("Make sure Mail.app is signed in and already configured.");
@@ -655,7 +1166,7 @@ impl SetupWizard {
             print_info(
                 "For safety, enter your own email addresses so only you can control it through email.",
             );
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             let allow_from = optional_input(
                 "Allowed email addresses (comma-separated, blank = anyone can control the agent)",
@@ -694,7 +1205,7 @@ impl SetupWizard {
 
         // BlueBubbles iMessage bridge (cross-platform)
         if enable_bluebubbles {
-            println!();
+            crate::setup::prompts::print_blank_line();
             #[cfg(target_os = "macos")]
             {
                 print_info("BlueBubbles bridges iMessage via a dedicated macOS server app.");
@@ -716,7 +1227,7 @@ impl SetupWizard {
                 );
             }
             print_info("Download the server: https://bluebubbles.app/");
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             let server_url = input("BlueBubbles server URL (e.g. http://192.168.1.50:1234)")
                 .map_err(SetupError::Io)?;
@@ -776,7 +1287,7 @@ impl SetupWizard {
         // Process selected WASM channels
         let mut enabled_wasm_channels = Vec::new();
         for channel_name in selected_wasm_channels {
-            println!();
+            crate::setup::prompts::print_blank_line();
             if let Some(ref ctx) = secrets {
                 let result = if let Some(cap_file) = discovered_by_name.get(&channel_name) {
                     if !cap_file.setup.required_secrets.is_empty() {

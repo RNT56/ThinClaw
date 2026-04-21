@@ -484,11 +484,17 @@ impl Default for LearningProvidersSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningPromptMutationSettings {
     /// Gate autonomous prompt mutation via prompt_manage.
     #[serde(default)]
     pub enabled: bool,
+}
+
+impl Default for LearningPromptMutationSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -847,7 +853,7 @@ pub struct Settings {
     #[serde(default)]
     pub claude_code_enabled: bool,
 
-    /// Claude Code model (e.g., "sonnet", "opus").
+    /// Claude Code model (e.g., "claude-sonnet-4-6", "claude-opus-4-5").
     #[serde(default)]
     pub claude_code_model: Option<String>,
 
@@ -1211,7 +1217,16 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub nostr_relays: Option<String>,
 
+    /// Nostr owner public key (hex or npub) authorized to control the agent.
+    #[serde(default)]
+    pub nostr_owner_pubkey: Option<String>,
+
+    /// Whether non-owner Nostr DMs are readable through the tool layer.
+    #[serde(default)]
+    pub nostr_social_dm_enabled: bool,
+
     /// Nostr public keys allowed to interact (comma-separated hex/npub, or '*').
+    /// Deprecated for command authorization; kept for backward compatibility.
     #[serde(default)]
     pub nostr_allow_from: Option<String>,
 
@@ -1356,6 +1371,8 @@ impl Default for ChannelSettings {
             slack_allow_from: None,
             nostr_enabled: false,
             nostr_relays: None,
+            nostr_owner_pubkey: None,
+            nostr_social_dm_enabled: false,
             nostr_allow_from: None,
             gmail_enabled: false,
             gmail_project_id: None,
@@ -3025,5 +3042,11 @@ mod tests {
             anthropic_slots.cheap,
             Some("claude-3-5-haiku-latest".to_string())
         );
+    }
+
+    #[test]
+    fn test_learning_prompt_mutation_enabled_by_default() {
+        let settings = Settings::default();
+        assert!(settings.learning.prompt_mutation.enabled);
     }
 }

@@ -130,6 +130,43 @@ impl ChannelCapabilitiesFile {
             .unwrap_or_else(|| format!("{}_webhook_secret", self.name))
     }
 
+    /// Get the webhook secret validation mode for this channel.
+    pub fn webhook_secret_validation(&self) -> WebhookSecretValidation {
+        self.capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())
+            .map(|w| w.secret_validation)
+            .unwrap_or_default()
+    }
+
+    /// Get the query parameter name used for GET/HEAD webhook verification.
+    pub fn webhook_verify_token_param(&self) -> Option<&str> {
+        self.capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())
+            .and_then(|w| w.verify_token_param.as_deref())
+    }
+
+    /// Get the verify-token secret name for GET/HEAD webhook verification.
+    pub fn webhook_verify_token_secret_name(&self) -> Option<String> {
+        let webhook = self
+            .capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())?;
+
+        webhook.verify_token_param.as_ref()?;
+
+        Some(
+            webhook
+                .verify_token_secret_name
+                .clone()
+                .unwrap_or_else(|| self.webhook_secret_name()),
+        )
+    }
+
     /// Get formatting hints declared by the channel package, if any.
     pub fn formatting_hints(&self) -> Option<&str> {
         self.formatting_hints.as_deref()
@@ -242,6 +279,31 @@ pub struct WebhookSchema {
     /// Default: "{channel_name}_webhook_secret"
     #[serde(default)]
     pub secret_name: Option<String>,
+
+    /// How POST webhook secrets should be validated.
+    #[serde(default)]
+    pub secret_validation: WebhookSecretValidation,
+
+    /// Query parameter name used for GET/HEAD webhook verification.
+    #[serde(default)]
+    pub verify_token_param: Option<String>,
+
+    /// Secret name in secrets store for GET/HEAD verify-token validation.
+    ///
+    /// Defaults to `secret_name` when omitted.
+    #[serde(default)]
+    pub verify_token_secret_name: Option<String>,
+}
+
+/// Validation mode for webhook secrets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookSecretValidation {
+    /// Compare the provided secret directly with the configured secret value.
+    #[default]
+    Equals,
+    /// Validate the request body using the header value as an HMAC-SHA256 signature.
+    HmacSha256Body,
 }
 
 /// Setup configuration schema.
@@ -384,7 +446,7 @@ pub struct PollConfigSchema {
 
 #[cfg(test)]
 mod tests {
-    use crate::channels::wasm::schema::ChannelCapabilitiesFile;
+    use crate::channels::wasm::schema::{ChannelCapabilitiesFile, WebhookSecretValidation};
 
     #[test]
     fn test_parse_minimal() {
@@ -540,7 +602,10 @@ mod tests {
                     "allowed_paths": ["/webhook/telegram"],
                     "webhook": {
                         "secret_header": "X-Telegram-Bot-Api-Secret-Token",
-                        "secret_name": "telegram_webhook_secret"
+                        "secret_name": "telegram_webhook_secret",
+                        "secret_validation": "hmac_sha256_body",
+                        "verify_token_param": "hub.verify_token",
+                        "verify_token_secret_name": "telegram_verify_token"
                     }
                 }
             }
@@ -552,6 +617,15 @@ mod tests {
             Some("X-Telegram-Bot-Api-Secret-Token")
         );
         assert_eq!(file.webhook_secret_name(), "telegram_webhook_secret");
+        assert_eq!(
+            file.webhook_secret_validation(),
+            WebhookSecretValidation::HmacSha256Body
+        );
+        assert_eq!(file.webhook_verify_token_param(), Some("hub.verify_token"));
+        assert_eq!(
+            file.webhook_verify_token_secret_name().as_deref(),
+            Some("telegram_verify_token")
+        );
     }
 
     #[test]
@@ -564,6 +638,33 @@ mod tests {
         let file = ChannelCapabilitiesFile::from_json(json).unwrap();
         assert_eq!(file.webhook_secret_header(), None);
         assert_eq!(file.webhook_secret_name(), "mybot_webhook_secret");
+        assert_eq!(
+            file.webhook_secret_validation(),
+            WebhookSecretValidation::Equals
+        );
+        assert_eq!(file.webhook_verify_token_param(), None);
+        assert_eq!(file.webhook_verify_token_secret_name(), None);
+    }
+
+    #[test]
+    fn test_webhook_verify_token_secret_name_defaults_to_post_secret() {
+        let json = r#"{
+            "name": "whatsapp",
+            "capabilities": {
+                "channel": {
+                    "webhook": {
+                        "secret_name": "whatsapp_app_secret",
+                        "verify_token_param": "hub.verify_token"
+                    }
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            file.webhook_verify_token_secret_name().as_deref(),
+            Some("whatsapp_app_secret")
+        );
     }
 
     #[test]

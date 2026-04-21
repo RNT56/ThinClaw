@@ -43,7 +43,7 @@ for consent, then stores refresh + access tokens encrypted in the secret store.
 ### Secret Name
 
 `google_oauth_token` — shared with all Google tools (Calendar, Docs, Drive, Sheets, Slides).
-Authenticating once with `thinclaw tool auth gmail` gives the shared Google token to the other Google tools too.
+Authenticating once with any installed Google tool gives the shared `google_oauth_token` to the other Google tools too. Re-running `thinclaw tool auth <google-tool>` later upgrades the shared scopes when needed.
 
 ## Available Actions (6)
 

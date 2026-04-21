@@ -178,12 +178,22 @@ pub enum StatusUpdate {
         instructions: Option<String>,
         auth_url: Option<String>,
         setup_url: Option<String>,
+        auth_mode: String,
+        auth_status: String,
+        shared_auth_provider: Option<String>,
+        missing_scopes: Vec<String>,
+        thread_id: Option<String>,
     },
     /// Extension authentication completed.
     AuthCompleted {
         extension_name: String,
         success: bool,
         message: String,
+        auth_mode: Option<String>,
+        auth_status: Option<String>,
+        shared_auth_provider: Option<String>,
+        missing_scopes: Vec<String>,
+        thread_id: Option<String>,
     },
     /// Turn-level error surfaced to the UI (e.g., LLM unreachable, safety rejection).
     ///

@@ -255,6 +255,43 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
     Ok(Arc::new(RigAdapter::new(model, &compat.model)))
 }
 
+fn runtime_extra_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let raw = crate::config::helpers::optional_env("LLM_EXTRA_HEADERS")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    for part in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let Some((key, value)) = part.split_once(':') else {
+            tracing::warn!(entry = %part, "Skipping malformed LLM_EXTRA_HEADERS entry");
+            continue;
+        };
+
+        let name = match reqwest::header::HeaderName::from_bytes(key.trim().as_bytes()) {
+            Ok(name) => name,
+            Err(err) => {
+                tracing::warn!(header = %key, error = %err, "Skipping invalid header name");
+                continue;
+            }
+        };
+        let value = match reqwest::header::HeaderValue::from_str(value.trim()) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(header = %key, error = %err, "Skipping invalid header value");
+                continue;
+            }
+        };
+        headers.insert(name, value);
+    }
+
+    headers
+}
+
 /// Create an LLM provider from a catalog entry.
 ///
 /// Used to instantiate fallback providers for the FailoverProvider chain,
@@ -310,6 +347,7 @@ fn create_provider_for_catalog_entry_with_api_key(
             let client: openai::CompletionsClient = openai::Client::builder()
                 .base_url(endpoint.base_url)
                 .api_key(&key)
+                .http_headers(runtime_extra_headers())
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
                     provider: provider_slug.to_string(),
@@ -354,6 +392,7 @@ fn create_provider_for_catalog_entry_with_api_key(
             let client: openai::CompletionsClient = openai::Client::builder()
                 .base_url(endpoint.base_url)
                 .api_key(&key)
+                .http_headers(runtime_extra_headers())
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
                     provider: provider_slug.to_string(),

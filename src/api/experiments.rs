@@ -991,12 +991,9 @@ pub async fn list_campaigns(
 ) -> ApiResult<ExperimentCampaignListResponse> {
     ensure_experiments_enabled(store, user_id).await?;
     let campaigns = store
-        .list_experiment_campaigns()
+        .list_experiment_campaigns_for_owner(user_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .into_iter()
-        .filter(|campaign| campaign.owner_user_id == user_id)
-        .collect();
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(ExperimentCampaignListResponse { campaigns })
 }
 
@@ -1007,15 +1004,10 @@ pub async fn get_campaign(
 ) -> ApiResult<ExperimentCampaign> {
     ensure_experiments_enabled(store, user_id).await?;
     let campaign = store
-        .get_experiment_campaign(id)
+        .get_experiment_campaign_for_owner(id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::SessionNotFound(format!("Experiment campaign {id} not found")))?;
-    if campaign.owner_user_id != user_id {
-        return Err(ApiError::SessionNotFound(format!(
-            "Experiment campaign {id} not found"
-        )));
-    }
     Ok(campaign)
 }
 
@@ -1027,7 +1019,7 @@ pub async fn list_trials(
     ensure_experiments_enabled(store, user_id).await?;
     let campaign = get_campaign(store, user_id, campaign_id).await?;
     let trials = store
-        .list_experiment_trials(campaign.id)
+        .list_experiment_trials_for_owner(campaign.id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(ExperimentTrialListResponse { trials })
@@ -1040,11 +1032,10 @@ pub async fn get_trial(
 ) -> ApiResult<ExperimentTrial> {
     ensure_experiments_enabled(store, user_id).await?;
     let trial = store
-        .get_experiment_trial(id)
+        .get_experiment_trial_for_owner(id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::SessionNotFound(format!("Experiment trial {id} not found")))?;
-    let _ = get_campaign(store, user_id, trial.campaign_id).await?;
     Ok(trial)
 }
 
@@ -1055,7 +1046,7 @@ pub async fn list_artifacts(
 ) -> ApiResult<ExperimentArtifactListResponse> {
     ensure_experiments_enabled(store, user_id).await?;
     let artifacts = store
-        .list_experiment_artifacts(trial_id)
+        .list_experiment_artifacts_for_owner(trial_id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(ExperimentArtifactListResponse { artifacts })
@@ -1834,6 +1825,17 @@ pub async fn start_campaign(
             "This runner requires operator action and cannot be queued for automatic launch. Wait for a free slot or use a launch-ready runner.".to_string(),
         ));
     }
+    let normalized_gateway_url = req
+        .gateway_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if req.gateway_url.is_some() && normalized_gateway_url.is_none() {
+        return Err(ApiError::InvalidInput(
+            "gateway_url must not be empty when provided.".to_string(),
+        ));
+    }
 
     let now = Utc::now();
     let campaign_id = Uuid::new_v4();
@@ -1865,7 +1867,7 @@ pub async fn start_campaign(
         total_runner_cost_usd: 0.0,
         consecutive_non_improving_trials: 0,
         max_trials_override: req.max_trials_override,
-        gateway_url: req.gateway_url,
+        gateway_url: normalized_gateway_url,
         metadata: serde_json::json!({}),
         created_at: now,
         updated_at: now,

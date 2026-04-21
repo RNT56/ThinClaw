@@ -250,7 +250,7 @@ SANDBOX_EXTRA_DOMAINS=api.openai.com,api.anthropic.com
 docker build -f Dockerfile.worker -t thinclaw-worker .
 ```
 
-The onboarding wizard (step 8) offers to build this automatically.
+The onboarding wizard offers to build this automatically during worker sandbox setup.
 
 **Verify:**
 
@@ -413,7 +413,7 @@ ThinClaw gracefully falls back when ffmpeg is not available — video processing
 | Priority | Source | How to Set |
 |----------|--------|------------|
 | 1 | `ANTHROPIC_API_KEY` env var | `export ANTHROPIC_API_KEY=sk-ant-api03-...` |
-| 2 | OS secure store | Set during `thinclaw onboard` (wizard step 12) |
+| 2 | OS secure store | Set during `thinclaw onboard` when Claude Code credentials are configured |
 | 3 | Claude Code OAuth | Run `claude login` on the host machine |
 
 **ThinClaw configuration:**

@@ -544,6 +544,12 @@ pub async fn try_auto_launch(
     provider_api_key: Option<&str>,
 ) -> Result<RunnerLaunchOutcome, String> {
     let gateway_url = gateway_url.unwrap_or_default().trim();
+    if gateway_url.is_empty() {
+        return Err(
+            "Experiment runner launch requires a non-empty gateway_url (set campaign.gateway_url)."
+                .to_string(),
+        );
+    }
     let bootstrap_command = build_bootstrap_command(gateway_url, auth);
 
     match runner.backend {

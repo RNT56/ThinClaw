@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Path, Query, State, WebSocketUpgrade},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
@@ -32,6 +32,7 @@ pub(crate) struct HistoryQuery {
 
 pub(crate) async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
     request_identity: GatewayRequestIdentity,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
@@ -53,12 +54,19 @@ pub(crate) async fn chat_send_handler(
     let actor_id = request_identity.actor_id.clone();
     let mut msg = IncomingMessage::new("gateway", &user_id, &req.content);
     msg = msg.with_identity(request_identity.resolved_identity(req.thread_id.as_deref()));
+    let browser_origin = request_origin(&headers);
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
         msg = msg.with_metadata(serde_json::json!({
             "thread_id": thread_id,
             "actor_id": actor_id,
+            "browser_origin": browser_origin,
+        }));
+    } else if browser_origin.is_some() {
+        msg = msg.with_metadata(serde_json::json!({
+            "actor_id": actor_id,
+            "browser_origin": browser_origin,
         }));
     }
 
@@ -88,6 +96,7 @@ pub(crate) async fn chat_send_handler(
 
 pub(crate) async fn chat_approval_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
     request_identity: GatewayRequestIdentity,
     Json(req): Json<ApprovalRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
@@ -130,11 +139,23 @@ pub(crate) async fn chat_approval_handler(
     )
     .await;
     let user_id = request_identity.principal_id.clone();
+    let actor_id = request_identity.actor_id.clone();
+    let browser_origin = request_origin(&headers);
     let mut msg = IncomingMessage::new("gateway", &user_id, content);
     msg = msg.with_identity(request_identity.resolved_identity(req.thread_id.as_deref()));
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
+        msg = msg.with_metadata(serde_json::json!({
+            "thread_id": thread_id,
+            "actor_id": actor_id,
+            "browser_origin": browser_origin,
+        }));
+    } else if browser_origin.is_some() {
+        msg = msg.with_metadata(serde_json::json!({
+            "actor_id": actor_id,
+            "browser_origin": browser_origin,
+        }));
     }
 
     let msg_id = msg.id;
@@ -171,12 +192,13 @@ pub(crate) async fn chat_auth_token_handler(
         "Extension manager not available".to_string(),
     ))?;
 
+    let thread_id = active_thread_id_for_identity(&state, &request_identity).await;
     let result = ext_mgr
         .auth(&req.extension_name, Some(&req.token))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if result.status == "authenticated" {
+    if result.auth_status == "authenticated" || result.auth_status == "no_auth_required" {
         let msg = match ext_mgr.activate(&req.extension_name).await {
             Ok(r) => format!(
                 "{} authenticated ({} tools loaded)",
@@ -195,6 +217,11 @@ pub(crate) async fn chat_auth_token_handler(
             extension_name: req.extension_name,
             success: true,
             message: msg.clone(),
+            auth_mode: Some(result.auth_mode),
+            auth_status: Some(result.auth_status),
+            shared_auth_provider: result.shared_auth_provider,
+            missing_scopes: result.missing_scopes,
+            thread_id,
         });
 
         Ok(Json(ActionResponse::ok(msg)))
@@ -204,12 +231,27 @@ pub(crate) async fn chat_auth_token_handler(
             instructions: result.instructions.clone(),
             auth_url: result.auth_url.clone(),
             setup_url: result.setup_url.clone(),
+            auth_mode: result.auth_mode.clone(),
+            auth_status: result.auth_status.clone(),
+            shared_auth_provider: result.shared_auth_provider.clone(),
+            missing_scopes: result.missing_scopes.clone(),
+            thread_id: thread_id.clone(),
         });
-        Ok(Json(ActionResponse::fail(
-            result
-                .instructions
+        let instructions = result.instructions.clone();
+        let mut response = ActionResponse::fail(
+            instructions
+                .clone()
                 .unwrap_or_else(|| "Invalid token".to_string()),
-        )))
+        );
+        response.auth_url = result.auth_url;
+        response.setup_url = result.setup_url;
+        response.auth_mode = Some(result.auth_mode);
+        response.auth_status = Some(result.auth_status);
+        response.awaiting_token = Some(result.awaiting_token);
+        response.instructions = instructions;
+        response.shared_auth_provider = result.shared_auth_provider;
+        response.missing_scopes = result.missing_scopes;
+        Ok(Json(response))
     }
 }
 
@@ -237,6 +279,43 @@ pub(crate) async fn clear_auth_mode_for_identity(
             thread.pending_auth = None;
         }
     }
+}
+
+pub(crate) fn request_origin(headers: &HeaderMap) -> Option<String> {
+    if let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        return Some(origin.trim_end_matches('/').to_string());
+    }
+
+    headers
+        .get(axum::http::header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| url::Url::parse(value).ok())
+        .and_then(|url| {
+            Some(format!(
+                "{}://{}",
+                url.scheme(),
+                url.host_str().map(str::to_string).unwrap_or_default()
+                    + &url
+                        .port()
+                        .map(|port| format!(":{port}"))
+                        .unwrap_or_default()
+            ))
+        })
+}
+
+pub(crate) async fn active_thread_id_for_identity(
+    state: &GatewayState,
+    request_identity: &GatewayRequestIdentity,
+) -> Option<String> {
+    let sm = state.session_manager.as_ref()?;
+    let session = sm
+        .get_or_create_session_for_identity(&request_identity.resolved_identity(None))
+        .await;
+    let sess = session.lock().await;
+    sess.active_thread.map(|id| id.to_string())
 }
 
 pub(crate) async fn chat_events_handler(
@@ -285,6 +364,7 @@ pub(crate) async fn chat_ws_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let browser_origin = request_origin(&headers);
     if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
         let parsed = url::Url::parse(origin).map_err(|_| {
             (
@@ -300,7 +380,12 @@ pub(crate) async fn chat_ws_handler(
         }
     }
     Ok(ws.on_upgrade(move |socket| {
-        crate::channels::web::ws::handle_ws_connection(socket, state, request_identity)
+        crate::channels::web::ws::handle_ws_connection(
+            socket,
+            state,
+            request_identity,
+            browser_origin,
+        )
     }))
 }
 
@@ -388,10 +473,14 @@ pub(crate) async fn chat_history_handler(
         let turns: Vec<TurnInfo> = thread
             .turns
             .iter()
-            .filter(|t| !t.hidden_from_ui)
             .map(|t| TurnInfo {
                 turn_number: t.turn_number,
-                user_input: t.user_input.clone(),
+                user_input: if t.hide_user_input_from_ui {
+                    String::new()
+                } else {
+                    t.user_input.clone()
+                },
+                hide_user_input: t.hide_user_input_from_ui,
                 response: t.response.clone(),
                 state: format!("{:?}", t.state),
                 started_at: t.started_at.to_rfc3339(),
@@ -451,23 +540,16 @@ pub(crate) fn build_turns_from_db_messages(
 
     while let Some(msg) = iter.next() {
         if msg.role == "user" {
-            let should_hide_turn = message_hidden_from_main_chat(&msg.metadata)
-                || iter
-                    .peek()
-                    .filter(|next| next.role == "assistant")
-                    .is_some_and(|next| message_hidden_from_main_chat(&next.metadata));
-            if should_hide_turn {
-                if let Some(next) = iter.peek()
-                    && next.role == "assistant"
-                {
-                    let _ = iter.next();
-                }
-                continue;
-            }
+            let hide_user_input = message_hidden_from_main_chat(&msg.metadata);
 
             let mut turn = TurnInfo {
                 turn_number,
-                user_input: msg.content.clone(),
+                user_input: if hide_user_input {
+                    String::new()
+                } else {
+                    msg.content.clone()
+                },
+                hide_user_input,
                 response: None,
                 state: "Completed".to_string(),
                 started_at: msg.created_at.to_rfc3339(),
@@ -487,7 +569,23 @@ pub(crate) fn build_turns_from_db_messages(
                 turn.state = "Failed".to_string();
             }
 
+            if turn.hide_user_input && turn.response.is_none() {
+                continue;
+            }
+
             turns.push(turn);
+            turn_number += 1;
+        } else if msg.role == "assistant" && message_is_startup_hook(&msg.metadata) {
+            turns.push(TurnInfo {
+                turn_number,
+                user_input: String::new(),
+                hide_user_input: true,
+                response: Some(msg.content.clone()),
+                state: "Completed".to_string(),
+                started_at: msg.created_at.to_rfc3339(),
+                completed_at: Some(msg.created_at.to_rfc3339()),
+                tool_calls: Vec::new(),
+            });
             turn_number += 1;
         }
     }
@@ -497,9 +595,21 @@ pub(crate) fn build_turns_from_db_messages(
 
 pub(crate) fn message_hidden_from_main_chat(metadata: &serde_json::Value) -> bool {
     metadata
-        .get("hide_from_webui_chat")
+        .get("hide_user_input_from_webui_chat")
         .and_then(|value| value.as_bool())
+        .or_else(|| {
+            metadata
+                .get("hide_from_webui_chat")
+                .and_then(|value| value.as_bool())
+        })
         .unwrap_or(false)
+}
+
+fn message_is_startup_hook(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("synthetic_origin")
+        .and_then(|value| value.as_str())
+        == Some("startup_hook")
 }
 
 pub(crate) async fn chat_threads_handler(
@@ -583,7 +693,7 @@ pub(crate) async fn chat_threads_handler(
         .map(|t| ThreadInfo {
             id: t.id,
             state: format!("{:?}", t.state),
-            turn_count: t.turns.iter().filter(|turn| !turn.hidden_from_ui).count(),
+            turn_count: t.turns.len(),
             created_at: t.created_at.to_rfc3339(),
             updated_at: t.updated_at.to_rfc3339(),
             title: None,
@@ -626,11 +736,7 @@ pub(crate) async fn chat_new_thread_handler(
     let info = ThreadInfo {
         id: thread.id,
         state: format!("{:?}", thread.state),
-        turn_count: thread
-            .turns
-            .iter()
-            .filter(|turn| !turn.hidden_from_ui)
-            .count(),
+        turn_count: thread.turns.len(),
         created_at: thread.created_at.to_rfc3339(),
         updated_at: thread.updated_at.to_rfc3339(),
         title: None,
@@ -650,6 +756,13 @@ pub(crate) async fn chat_new_thread_handler(
 
     let mut sess = session.lock().await;
     sess.insert_thread(thread);
+    drop(sess);
+
+    state.sse.broadcast(SseEvent::ConversationUpdated {
+        thread_id: thread_id.to_string(),
+        reason: "thread_created".to_string(),
+        channel: Some("gateway".to_string()),
+    });
 
     Ok(Json(info))
 }
@@ -754,6 +867,14 @@ pub(crate) async fn chat_delete_thread_handler(
 
     tracing::info!(thread_id = %thread_id, deleted = deleted, "Thread deleted");
 
+    if deleted {
+        state.sse.broadcast(SseEvent::ConversationDeleted {
+            thread_id: thread_id.to_string(),
+            principal_id: user_id,
+            actor_id,
+        });
+    }
+
     Ok(Json(serde_json::json!({
         "deleted": deleted,
         "thread_id": thread_id.to_string(),
@@ -763,6 +884,7 @@ pub(crate) async fn chat_delete_thread_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
 
     fn test_gateway_state(
         session_manager: Arc<crate::agent::SessionManager>,
@@ -806,9 +928,15 @@ mod tests {
         let store: Arc<dyn crate::db::Database> = db.clone();
         let session_manager = Arc::new(crate::agent::SessionManager::new());
         let state = test_gateway_state(session_manager, Some(store.clone()));
+        let mut sse = Box::pin(
+            state
+                .sse
+                .subscribe_raw()
+                .expect("conversation event stream should subscribe"),
+        );
 
         let Json(info) = chat_new_thread_handler(
-            State(state),
+            State(Arc::clone(&state)),
             GatewayRequestIdentity::new(
                 "user-1",
                 "actor-1",
@@ -849,5 +977,85 @@ mod tests {
             metadata.get("last_active_channel"),
             Some(&serde_json::json!("gateway"))
         );
+
+        let event = sse.next().await.expect("thread creation event");
+        match event {
+            SseEvent::ConversationUpdated {
+                thread_id,
+                reason,
+                channel,
+            } => {
+                assert_eq!(thread_id, info.id.to_string());
+                assert_eq!(reason, "thread_created");
+                assert_eq!(channel.as_deref(), Some("gateway"));
+            }
+            other => panic!("unexpected SSE event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_thread_handler_emits_conversation_deleted() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let store: Arc<dyn crate::db::Database> = db.clone();
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let state = test_gateway_state(session_manager, Some(store.clone()));
+        let identity = GatewayRequestIdentity::new(
+            "user-1",
+            "actor-1",
+            crate::channels::web::identity_helpers::GatewayAuthSource::TrustedProxy,
+            false,
+        );
+
+        let Json(info) = chat_new_thread_handler(
+            State(Arc::clone(&state)),
+            identity.clone(),
+            Query(HistoryQuery {
+                thread_id: None,
+                limit: None,
+                before: None,
+                user_id: None,
+                actor_id: None,
+            }),
+        )
+        .await
+        .expect("create thread should succeed");
+
+        let mut sse = Box::pin(
+            state
+                .sse
+                .subscribe_raw()
+                .expect("conversation event stream should subscribe"),
+        );
+
+        let Json(payload) = chat_delete_thread_handler(
+            State(Arc::clone(&state)),
+            identity,
+            Path(info.id.to_string()),
+            Query(HistoryQuery {
+                thread_id: None,
+                limit: None,
+                before: None,
+                user_id: None,
+                actor_id: None,
+            }),
+        )
+        .await
+        .expect("delete thread should succeed");
+
+        assert_eq!(payload.get("deleted"), Some(&serde_json::json!(true)));
+
+        let event = sse.next().await.expect("thread deletion event");
+        match event {
+            SseEvent::ConversationDeleted {
+                thread_id,
+                principal_id,
+                actor_id,
+            } => {
+                assert_eq!(thread_id, info.id.to_string());
+                assert_eq!(principal_id, "user-1");
+                assert_eq!(actor_id, "actor-1");
+            }
+            other => panic!("unexpected SSE event: {other:?}"),
+        }
     }
 }

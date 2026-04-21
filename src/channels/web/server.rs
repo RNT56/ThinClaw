@@ -531,6 +531,12 @@ pub async fn start_server(
             "/api/providers/{slug}/key",
             axum::routing::delete(providers_delete_key_handler),
         )
+        .route("/api/nostr/key", post(nostr_save_key_handler))
+        .route("/api/nostr/key", delete(nostr_delete_key_handler))
+        .route(
+            "/api/webchat/presentation",
+            get(webchat_presentation_handler),
+        )
         // Settings
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))
@@ -1200,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_turns_from_db_messages_hides_startup_hook_turns() {
+    fn test_build_turns_from_db_messages_hides_only_startup_user_prompt() {
         let now = chrono::Utc::now();
         let messages = vec![
             crate::history::ConversationMessage {
@@ -1220,7 +1226,7 @@ mod tests {
                 actor_id: None,
                 actor_display_name: None,
                 raw_sender_id: None,
-                metadata: serde_json::json!({"hide_from_webui_chat": true}),
+                metadata: serde_json::json!({"synthetic_origin": "startup_hook"}),
                 created_at: now + chrono::TimeDelta::seconds(1),
             },
             crate::history::ConversationMessage {
@@ -1246,9 +1252,33 @@ mod tests {
         ];
 
         let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 2);
+        assert!(turns[0].hide_user_input);
+        assert_eq!(turns[0].user_input, "");
+        assert_eq!(turns[0].response.as_deref(), Some("boot reply"));
+        assert_eq!(turns[1].user_input, "real question");
+        assert_eq!(turns[1].response.as_deref(), Some("real answer"));
+    }
+
+    #[test]
+    fn test_build_turns_from_db_messages_preserves_legacy_assistant_only_startup_reply() {
+        let now = chrono::Utc::now();
+        let messages = vec![crate::history::ConversationMessage {
+            id: Uuid::new_v4(),
+            role: "assistant".to_string(),
+            content: "boot reply".to_string(),
+            actor_id: None,
+            actor_display_name: None,
+            raw_sender_id: None,
+            metadata: serde_json::json!({"synthetic_origin": "startup_hook"}),
+            created_at: now,
+        }];
+
+        let turns = build_turns_from_db_messages(&messages);
         assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].user_input, "real question");
-        assert_eq!(turns[0].response.as_deref(), Some("real answer"));
+        assert!(turns[0].hide_user_input);
+        assert_eq!(turns[0].user_input, "");
+        assert_eq!(turns[0].response.as_deref(), Some("boot reply"));
     }
 
     #[test]

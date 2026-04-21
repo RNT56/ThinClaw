@@ -163,6 +163,7 @@ pub(crate) fn agent_workspace(agent_id: &str) -> AgentWorkspaceRecord {
         trigger_keywords: vec!["contract".to_string()],
         allowed_tools: Some(vec!["memory_read".to_string()]),
         allowed_skills: Some(vec!["github:github".to_string()]),
+        tool_profile: None,
         is_default: false,
         created_at: now,
         updated_at: now,

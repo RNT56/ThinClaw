@@ -7,7 +7,7 @@ version: '3.9'
 #   # Edit .env: set GATEWAY_AUTH_TOKEN and at least one LLM key
 #   docker compose up -d --build
 #
-# Scrappy connects via: http://<server-ip>:18789
+# Scrappy connects via: http://<server-ip>:3000
 # Auth token: value of GATEWAY_AUTH_TOKEN in .env
 
 services:
@@ -18,13 +18,13 @@ services:
     container_name: thinclaw-remote
     restart: unless-stopped
     ports:
-      - "18789:18789"   # Gateway HTTP API (Scrappy connects here)
+      - "3000:3000"   # Gateway HTTP API (Scrappy connects here)
     env_file:
       - .env
     environment:
       # Gateway — always bind to all interfaces inside container
       - GATEWAY_HOST=0.0.0.0
-      - GATEWAY_PORT=18789
+      - GATEWAY_PORT=3000
       - CLI_ENABLED=false
       - HEARTBEAT_ENABLED=true
       - HEARTBEAT_NOTIFY_CHANNEL=gateway

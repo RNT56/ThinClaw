@@ -4,8 +4,12 @@
 //! - `channels list` — list all configured channels and their status
 //! - `channels info` — show channel details
 
+use std::sync::Arc;
+
 use clap::Subcommand;
 
+use crate::app::{AppBuilder, AppBuilderFlags};
+use crate::channels::web::log_layer::LogBroadcaster;
 use crate::terminal_branding::TerminalBranding;
 
 #[derive(Subcommand, Debug, Clone)]
@@ -57,8 +61,8 @@ const KNOWN_CHANNELS: &[ChannelCheck] = &[
     },
     ChannelCheck {
         name: "nostr",
-        env_key: "NOSTR_SECRET_KEY",
-        description: "Nostr NIP-04 encrypted DM channel",
+        env_key: "NOSTR_ENABLED + NOSTR_PRIVATE_KEY",
+        description: "Nostr owner DM control + social actions",
     },
     ChannelCheck {
         name: "http",
@@ -97,11 +101,12 @@ async fn list_channels(format: &str) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     let _ = dotenvy::dotenv();
     crate::bootstrap::load_thinclaw_env();
+    let resolved = load_resolved_config().await?;
 
     let mut channels: Vec<serde_json::Value> = Vec::new();
 
     for ch in KNOWN_CHANNELS {
-        let configured = std::env::var(ch.env_key).is_ok();
+        let configured = channel_is_configured(&resolved, ch.name);
         let status = if configured {
             "configured"
         } else {
@@ -188,12 +193,13 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     let _ = dotenvy::dotenv();
     crate::bootstrap::load_thinclaw_env();
+    let resolved = load_resolved_config().await?;
 
     let known = KNOWN_CHANNELS.iter().find(|c| c.name == channel);
 
     match known {
         Some(ch) => {
-            let configured = std::env::var(ch.env_key).is_ok();
+            let configured = channel_is_configured(&resolved, ch.name);
             branding.print_banner("Channels", Some("Inspect a configured surface"));
             println!("{}", branding.key_value("Channel", ch.name));
             println!("{}", branding.key_value("Description", ch.description));
@@ -222,7 +228,8 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
                     );
                 }
                 "signal" => {
-                    if let Ok(url) = std::env::var("SIGNAL_HTTP_URL") {
+                    if let Some(signal) = resolved.channels.signal.as_ref() {
+                        let url = &signal.http_url;
                         // Redact URL for security.
                         let redacted = if url.len() > 20 {
                             // Safe char-boundary slicing to avoid UTF-8 panics
@@ -235,17 +242,83 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
                                 url.char_indices().rev().nth(4).map(|(i, _)| i).unwrap_or(0);
                             format!("{}...{}", &url[..prefix_end], &url[suffix_start..])
                         } else {
-                            url
+                            url.to_string()
                         };
                         println!("{}", branding.key_value("HTTP URL", redacted));
                     }
                 }
+                "nostr" => {
+                    if let Some(nostr) = resolved.channels.nostr.as_ref() {
+                        let channel = crate::channels::NostrChannel::new(nostr.clone())?;
+                        let runtime = channel.runtime();
+                        println!("{}", branding.key_value("Enabled", branding.good("yes")));
+                        println!("{}", branding.key_value("Private key", "••••••• (set)"));
+                        println!(
+                            "{}",
+                            branding.key_value("Public key", runtime.public_key_hex())
+                        );
+                        println!("{}", branding.key_value("npub", runtime.public_key_npub()));
+                        println!(
+                            "{}",
+                            branding.key_value(
+                                "Owner pubkey",
+                                runtime
+                                    .owner_pubkey_hex()
+                                    .unwrap_or_else(|| "not configured".to_string())
+                            )
+                        );
+                        println!(
+                            "{}",
+                            branding.key_value(
+                                "Owner npub",
+                                runtime
+                                    .owner_pubkey_npub()
+                                    .unwrap_or_else(|| "not configured".to_string())
+                            )
+                        );
+                        println!(
+                            "{}",
+                            branding.key_value("Relay count", nostr.relays.len().to_string())
+                        );
+                        println!(
+                            "{}",
+                            branding.key_value(
+                                "Control ready",
+                                if nostr.owner_pubkey.is_some() {
+                                    branding.good("yes")
+                                } else {
+                                    branding.warn("no")
+                                }
+                            )
+                        );
+                        println!(
+                            "{}",
+                            branding.key_value(
+                                "Social DM reads",
+                                if nostr.social_dm_enabled {
+                                    branding.good("enabled")
+                                } else {
+                                    branding.warn("disabled")
+                                }
+                            )
+                        );
+                        if !nostr.allow_from.is_empty() {
+                            println!(
+                                "{}",
+                                branding.key_value(
+                                    "Legacy allow_from",
+                                    format!("deprecated ({})", nostr.allow_from.join(", "))
+                                )
+                            );
+                        }
+                    }
+                }
                 "telegram" => {
-                    if std::env::var("TELEGRAM_BOT_TOKEN").is_ok() {
+                    if resolved.channels.telegram.is_some() {
                         println!("{}", branding.key_value("Bot token", "••••••• (set)"));
                     }
-                    if let Ok(owner) = std::env::var("TELEGRAM_OWNER_ID") {
-                        println!("{}", branding.key_value("Owner ID", owner));
+                    if let Some(owner) = resolved.channels.telegram_owner_id {
+                        println!("{}", branding.key_value("Owner ID", owner.to_string()));
                     }
                 }
                 _ => {}
@@ -278,4 +351,47 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn load_resolved_config() -> anyhow::Result<crate::config::Config> {
+    let config = crate::config::Config::from_env().await?;
+    let mut builder = AppBuilder::new(
+        config,
+        AppBuilderFlags::default(),
+        None,
+        Arc::new(LogBroadcaster::new()),
+    );
+
+    if let Err(err) = builder.init_database().await {
+        tracing::warn!(
+            "Channels CLI could not initialize the database for secrets-backed channel detection: {}",
+            err
+        );
+        return Ok(builder.config().clone());
+    }
+
+    if let Err(err) = builder.init_secrets().await {
+        tracing::warn!(
+            "Channels CLI could not initialize secrets-backed channel detection: {}",
+            err
+        );
+    }
+
+    Ok(builder.config().clone())
+}
+
+fn channel_is_configured(config: &crate::config::Config, name: &str) -> bool {
+    match name {
+        "gateway" => config.channels.gateway.is_some(),
+        "cli" => config.channels.cli.enabled,
+        "signal" => config.channels.signal.is_some(),
+        "nostr" => config.channels.nostr.is_some(),
+        "http" => config.channels.http.is_some(),
+        "telegram" => config.channels.telegram.is_some(),
+        "slack" => config.channels.slack.is_some(),
+        "discord" => config.channels.discord.is_some(),
+        "imessage" => config.channels.imessage.is_some(),
+        "apple_mail" => config.channels.apple_mail.is_some(),
+        _ => false,
+    }
 }

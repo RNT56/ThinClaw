@@ -607,20 +607,61 @@ impl LlmProvider for FailoverProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<crate::llm::StreamChunkStream, LlmError> {
-        // For streaming, we don't attempt failover mid-stream.
-        // Use the last-used (or primary) provider directly.
-        let idx = self.last_used.load(Ordering::Relaxed);
-        self.providers[idx].complete_stream(request).await
+        // We cannot fail over mid-stream, but we can try alternate providers
+        // before the stream starts.
+        let start = self.last_used.load(Ordering::Relaxed);
+        for offset in 0..self.providers.len() {
+            let idx = (start + offset) % self.providers.len();
+            match self.providers[idx].complete_stream(request.clone()).await {
+                Ok(stream) => {
+                    self.last_used.store(idx, Ordering::Relaxed);
+                    return Ok(stream);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        provider = %self.providers[idx].model_name(),
+                        error = %err,
+                        "Streaming start failed, trying next failover provider"
+                    );
+                }
+            }
+        }
+
+        Err(LlmError::RequestFailed {
+            provider: self.model_name().to_owned(),
+            reason: "All failover providers failed to start streaming".to_string(),
+        })
     }
 
     async fn complete_stream_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<crate::llm::StreamChunkStream, LlmError> {
-        let idx = self.last_used.load(Ordering::Relaxed);
-        self.providers[idx]
-            .complete_stream_with_tools(request)
-            .await
+        let start = self.last_used.load(Ordering::Relaxed);
+        for offset in 0..self.providers.len() {
+            let idx = (start + offset) % self.providers.len();
+            match self.providers[idx]
+                .complete_stream_with_tools(request.clone())
+                .await
+            {
+                Ok(stream) => {
+                    self.last_used.store(idx, Ordering::Relaxed);
+                    return Ok(stream);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        provider = %self.providers[idx].model_name(),
+                        error = %err,
+                        "Tool streaming start failed, trying next failover provider"
+                    );
+                }
+            }
+        }
+
+        Err(LlmError::RequestFailed {
+            provider: self.model_name().to_owned(),
+            reason: "All failover providers failed to start tool streaming".to_string(),
+        })
     }
 
     fn supports_streaming(&self) -> bool {

@@ -9,16 +9,20 @@ warn = "#E2A84B"
 bad = "#D96C7B"
 header = "#5B3E96"
 prompt_symbol = "::"
-ascii_art = [
-  '            .-========-.',
-  '           /  _  ||  _  \',
-  '          /  /_\ || /_\  \',
-  '         |      _||_      |',
-  '         |     /_()_\     |  DELPHI',
-  '          \      ||      /',
-  '           `-.________.-`',
+hero_art = [
+  '      ╭─╮      ',
+  '    ╭─┤◌├─╮    ',
+  '   ╱╲ ╰┬╯ ╱╲   ',
+  '  │◌╰╮ │ ╭╯◌│  ',
+  '  │ ╭╯ │ ╰╮ │  ',
+  '  ╰╮╰─╮◈╭─╯╭╯  ',
+  '   │  ╰┼╯  │   ',
+  '   │ ╭╯█╰╮ │   ',
+  '   │ ╰╮█╭╯ │   ',
+  '   ╰──╯█╰──╯   ',
+  '      ╱ ╲      ',
 ]
-tool_emojis = { shell = "🔥", browser = "🔮", memory = "🌿", search_files = "📖", todo = "🏛️", subagent = "🪄" }
+tool_emojis = { shell = "✶", browser = "◇", memory = "❖", search_files = "⌕", todo = "∴", subagent = "⟡" }
 
 [web]
 aura_primary = "#9B6EF3"

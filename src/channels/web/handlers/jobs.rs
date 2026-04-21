@@ -13,13 +13,58 @@ use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 use crate::sandbox_types::{CredentialGrant, JobMode, PendingPrompt};
-use crate::tools::execution_backend::{ExecutionBackendKind, sandbox_job_runtime_descriptor};
+use crate::tools::execution_backend::{
+    ExecutionBackendKind, RuntimeDescriptor, sandbox_job_runtime_descriptor,
+};
 
-fn parse_job_mode(mode: Option<&str>) -> JobMode {
-    match mode {
-        Some("claude_code") => JobMode::ClaudeCode,
-        Some("codex_code") => JobMode::CodexCode,
-        _ => JobMode::Worker,
+#[derive(Debug, Clone)]
+struct ParsedJobMode {
+    resolved: JobMode,
+    unknown_raw: Option<String>,
+}
+
+fn parse_job_mode(mode: Option<&str>) -> ParsedJobMode {
+    let normalized = mode
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase());
+
+    match normalized.as_deref() {
+        Some("claude_code") => ParsedJobMode {
+            resolved: JobMode::ClaudeCode,
+            unknown_raw: None,
+        },
+        Some("codex_code") => ParsedJobMode {
+            resolved: JobMode::CodexCode,
+            unknown_raw: None,
+        },
+        Some("worker") | None => ParsedJobMode {
+            resolved: JobMode::Worker,
+            unknown_raw: None,
+        },
+        Some(other) => ParsedJobMode {
+            resolved: JobMode::Worker,
+            unknown_raw: Some(other.to_string()),
+        },
+    }
+}
+
+fn runtime_descriptor_for_mode(parsed: &ParsedJobMode) -> RuntimeDescriptor {
+    let mut descriptor = sandbox_job_runtime_descriptor(parsed.resolved);
+    if parsed.unknown_raw.is_some() {
+        descriptor.runtime_mode = "unknown".to_string();
+    }
+    descriptor
+}
+
+fn normalized_job_mode_for_response(parsed: &ParsedJobMode) -> Option<String> {
+    if parsed.unknown_raw.is_some() {
+        return Some("unknown".to_string());
+    }
+    match parsed.resolved {
+        JobMode::Worker => None,
+        JobMode::ClaudeCode => Some("claude_code".to_string()),
+        JobMode::CodexCode => Some("codex_code".to_string()),
     }
 }
 
@@ -49,7 +94,8 @@ pub(crate) async fn jobs_list_handler(
             s => s,
         };
         let runtime_mode = store.get_sandbox_job_mode(j.id).await.ok().flatten();
-        let runtime = sandbox_job_runtime_descriptor(parse_job_mode(runtime_mode.as_deref()));
+        let parsed_mode = parse_job_mode(runtime_mode.as_deref());
+        let runtime = runtime_descriptor_for_mode(&parsed_mode);
         JobInfo {
             id: j.id,
             title: j.task.clone(),
@@ -60,6 +106,7 @@ pub(crate) async fn jobs_list_handler(
             execution_backend: Some(ExecutionBackendKind::DockerSandbox.as_str().to_string()),
             runtime_family: Some(runtime.runtime_family),
             runtime_mode: Some(runtime.runtime_mode),
+            unknown_job_mode_raw: parsed_mode.unknown_raw,
         }
     });
     let mut jobs = join_all(jobs).await;
@@ -143,7 +190,8 @@ pub(crate) async fn jobs_detail_handler(
         }
 
         let runtime_mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
-        let runtime = sandbox_job_runtime_descriptor(parse_job_mode(runtime_mode.as_deref()));
+        let parsed_mode = parse_job_mode(runtime_mode.as_deref());
+        let runtime = runtime_descriptor_for_mode(&parsed_mode);
 
         return Ok(Json(JobDetailResponse {
             id: job.id,
@@ -162,7 +210,8 @@ pub(crate) async fn jobs_detail_handler(
             runtime_mode: Some(runtime.runtime_mode.clone()),
             runtime_capabilities: runtime.runtime_capabilities,
             network_isolation: runtime.network_isolation,
-            job_mode: runtime_mode.filter(|m| m != "worker"),
+            job_mode: normalized_job_mode_for_response(&parsed_mode),
+            unknown_job_mode_raw: parsed_mode.unknown_raw,
             transitions,
         }));
     }

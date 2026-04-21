@@ -26,7 +26,10 @@ use crate::llm::routing_policy::{RouteCandidate, RoutingContext, RoutingPolicy, 
 use crate::llm::usage_tracking::{
     USAGE_TRACKING_ENDPOINT_TYPE_KEY, USAGE_TRACKING_TELEMETRY_KEY, USAGE_TRACKING_WORKLOAD_TAG_KEY,
 };
-use crate::llm::{CooldownConfig, FailoverProvider, RetryConfig, RetryProvider};
+use crate::llm::{
+    CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig, FailoverProvider,
+    ResponseCacheConfig, RetryConfig, RetryProvider,
+};
 use crate::secrets::SecretsStore;
 use crate::settings::{ProvidersSettings, RoutingMode, Settings};
 
@@ -1074,7 +1077,8 @@ impl LlmRuntimeManager {
         }
 
         if providers.len() == 1 {
-            let provider = providers.remove(0);
+            let provider =
+                Self::wrap_runtime_provider_with_reliability(providers.remove(0), snapshot);
             if let Ok(mut cache) = self.chain_provider_cache.write() {
                 cache.insert(chain_key, provider.clone());
             }
@@ -1095,16 +1099,7 @@ impl LlmRuntimeManager {
             })?,
         );
 
-        let provider = if rel.max_retries > 0 {
-            Arc::new(RetryProvider::new(
-                provider,
-                RetryConfig {
-                    max_retries: rel.max_retries,
-                },
-            )) as Arc<dyn LlmProvider>
-        } else {
-            provider
-        };
+        let provider = Self::wrap_runtime_provider_with_reliability(provider, snapshot);
 
         if let Ok(mut cache) = self.chain_provider_cache.write() {
             cache.insert(chain_key, provider.clone());
@@ -1128,6 +1123,33 @@ impl LlmRuntimeManager {
         } else {
             provider
         }
+    }
+
+    fn wrap_runtime_provider_with_reliability(
+        provider: Arc<dyn LlmProvider>,
+        snapshot: &LlmRuntimeSnapshot,
+    ) -> Arc<dyn LlmProvider> {
+        let rel = &snapshot.config.llm.reliability;
+        let mut wrapped = Self::wrap_runtime_provider_with_retry(provider, snapshot);
+
+        if let Some(threshold) = rel.circuit_breaker_threshold {
+            let cb_config = CircuitBreakerConfig {
+                failure_threshold: threshold,
+                recovery_timeout: std::time::Duration::from_secs(rel.circuit_breaker_recovery_secs),
+                ..CircuitBreakerConfig::default()
+            };
+            wrapped = Arc::new(CircuitBreakerProvider::new(wrapped, cb_config));
+        }
+
+        if rel.response_cache_enabled {
+            let rc_config = ResponseCacheConfig {
+                ttl: std::time::Duration::from_secs(rel.response_cache_ttl_secs),
+                max_entries: rel.response_cache_max_entries,
+            };
+            wrapped = Arc::new(CachedProvider::new(wrapped, rc_config));
+        }
+
+        wrapped
     }
 
     fn provider_for_provider_slot(
@@ -1960,7 +1982,7 @@ fn route_target_resolves_in_settings(settings: &ProvidersSettings, target: &str)
             if let Some((slug, _)) = other.split_once('/') {
                 provider_declared_for_routing(settings, slug)
             } else {
-                settings.primary.is_some() || !settings.enabled.is_empty()
+                false
             }
         }
     }

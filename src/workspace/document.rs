@@ -15,6 +15,10 @@ pub mod paths {
     pub const IDENTITY: &str = "IDENTITY.md";
     /// Core values and principles.
     pub const SOUL: &str = "SOUL.md";
+    /// Optional workspace-local soul overlay.
+    pub const SOUL_LOCAL: &str = "SOUL.local.md";
+    /// Archived legacy workspace soul after migration to the canonical home soul.
+    pub const SOUL_LEGACY: &str = "SOUL.legacy.md";
     /// Behavior instructions.
     pub const AGENTS: &str = "AGENTS.md";
     /// User context (name, preferences).
@@ -27,7 +31,7 @@ pub mod paths {
     pub const DAILY_DIR: &str = "daily/";
     /// Context directory (for identity-related docs).
     pub const CONTEXT_DIR: &str = "context/";
-    /// First-run identity ritual. Deleted by the agent after bootstrap is complete.
+    /// First-run identity ritual. Marked complete via `memory_delete`.
     pub const BOOTSTRAP: &str = "BOOTSTRAP.md";
     /// Startup hook — tasks to run silently on every agent boot.
     pub const BOOT: &str = "BOOT.md";
@@ -147,7 +151,7 @@ impl MemoryDocument {
     pub fn is_identity_document(&self) -> bool {
         matches!(
             self.path.as_str(),
-            paths::IDENTITY | paths::SOUL | paths::AGENTS | paths::USER
+            paths::IDENTITY | paths::SOUL | paths::SOUL_LOCAL | paths::AGENTS | paths::USER
         )
     }
 }
@@ -252,6 +256,9 @@ mod tests {
 
         let soul = MemoryDocument::new("user1", None, paths::SOUL);
         assert!(soul.is_identity_document());
+
+        let local_soul = MemoryDocument::new("user1", None, paths::SOUL_LOCAL);
+        assert!(local_soul.is_identity_document());
 
         let memory = MemoryDocument::new("user1", None, paths::MEMORY);
         assert!(!memory.is_identity_document());

@@ -74,26 +74,27 @@ fn experiment_store(state: &GatewayState) -> Result<&Arc<dyn Database>, (StatusC
     ))
 }
 
+fn status_to_sse_string<T: serde::Serialize>(status: &T) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(ToString::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 fn broadcast_campaign_update(
     state: &GatewayState,
     response: &experiments_api::ExperimentCampaignActionResponse,
 ) {
     state.sse.broadcast(SseEvent::ExperimentCampaignUpdated {
         campaign_id: response.campaign.id.to_string(),
-        status: serde_json::to_string(&response.campaign.status)
-            .unwrap_or_else(|_| "\"unknown\"".to_string())
-            .trim_matches('"')
-            .to_string(),
+        status: status_to_sse_string(&response.campaign.status),
         message: response.message.clone(),
     });
     if let Some(trial) = response.trial.as_ref() {
         state.sse.broadcast(SseEvent::ExperimentTrialUpdated {
             campaign_id: response.campaign.id.to_string(),
             trial_id: trial.id.to_string(),
-            status: serde_json::to_string(&trial.status)
-                .unwrap_or_else(|_| "\"unknown\"".to_string())
-                .trim_matches('"')
-                .to_string(),
+            status: status_to_sse_string(&trial.status),
             message: trial
                 .decision_reason
                 .clone()
@@ -412,10 +413,7 @@ pub(crate) async fn experiments_runner_validate_handler(
         .map_err(experiment_api_error)?;
     state.sse.broadcast(SseEvent::ExperimentRunnerUpdated {
         runner_id: response.runner.id.to_string(),
-        status: serde_json::to_string(&response.runner.status)
-            .unwrap_or_else(|_| "\"unknown\"".to_string())
-            .trim_matches('"')
-            .to_string(),
+        status: status_to_sse_string(&response.runner.status),
         message: response.message.clone(),
     });
     Ok(Json(response))

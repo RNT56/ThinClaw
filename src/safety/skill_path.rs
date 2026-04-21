@@ -120,15 +120,22 @@ impl SkillPathConfig {
             });
         }
 
-        // Check for symlinks
-        if !self.allow_symlinks && full_path.exists() {
-            let metadata = std::fs::symlink_metadata(&full_path);
-            if let Ok(meta) = metadata
-                && meta.file_type().is_symlink()
-            {
-                return Err(SkillPathError::SymlinkDetected {
-                    path: full_path.display().to_string(),
-                });
+        // Check for symlinks along every existing path component to reduce
+        // TOCTOU and parent symlink bypasses.
+        if !self.allow_symlinks {
+            let mut current = PathBuf::new();
+            for component in normalized.components() {
+                current.push(component);
+                if !current.starts_with(&base_normalized) {
+                    continue;
+                }
+                if let Ok(meta) = std::fs::symlink_metadata(&current)
+                    && meta.file_type().is_symlink()
+                {
+                    return Err(SkillPathError::SymlinkDetected {
+                        path: current.display().to_string(),
+                    });
+                }
             }
         }
 

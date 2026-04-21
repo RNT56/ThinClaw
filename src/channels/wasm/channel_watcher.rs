@@ -34,7 +34,7 @@ use crate::channels::manager::ChannelManager;
 use crate::channels::wasm::loader::WasmChannelLoader;
 use crate::channels::wasm::router::WasmChannelRouter;
 use crate::channels::wasm::{
-    RegisteredEndpoint, SharedWasmChannel, WasmChannelHostConfig, apply_channel_host_config,
+    RegisteredWebhookAuth, SharedWasmChannel, WasmChannelHostConfig, apply_channel_host_config,
     inject_channel_credentials_from_secrets,
 };
 use crate::secrets::SecretsStore;
@@ -403,24 +403,47 @@ impl ChannelWatcher {
             .map_err(|e| format!("load failed: {}", e))?;
 
         let secret_header = loaded.webhook_secret_header().map(str::to_string);
-        let secret_name = loaded.webhook_secret_name();
+        let signature_secret_name = loaded.webhook_secret_name();
+        let verify_token_secret_name = loaded.webhook_verify_token_secret_name();
+        let secret_validation = loaded.webhook_secret_validation();
+        let verify_token_param = loaded.webhook_verify_token_param().map(str::to_string);
         let channel_name = loaded.name().to_string();
         let channel_arc = Arc::new(loaded.channel);
 
-        let webhook_secret = match secrets_store {
+        let signature_secret = match secrets_store {
             Some(store) => store
-                .get_decrypted(user_id, &secret_name)
+                .get_decrypted(user_id, &signature_secret_name)
                 .await
                 .ok()
                 .map(|secret| secret.expose().to_string()),
             None => None,
         };
 
+        let verify_token_secret = match (verify_token_secret_name.as_ref(), secrets_store) {
+            (Some(secret_name), _) if *secret_name == signature_secret_name => {
+                signature_secret.clone()
+            }
+            (Some(secret_name), Some(store)) => store
+                .get_decrypted(user_id, secret_name)
+                .await
+                .ok()
+                .map(|secret| secret.expose().to_string()),
+            _ => None,
+        };
+
+        let webhook_auth = RegisteredWebhookAuth {
+            secret_header: secret_header.clone(),
+            secret_validation,
+            signature_secret: signature_secret.clone(),
+            verify_token_param,
+            verify_token_secret,
+        };
+
         let runtime_update_count = apply_channel_host_config(
             &channel_arc,
             &channel_name,
             host_config,
-            webhook_secret.as_deref(),
+            signature_secret.as_deref(),
         )
         .await;
         if runtime_update_count > 0 {
@@ -459,28 +482,22 @@ impl ChannelWatcher {
             }
         }
 
+        if let Err(error) = channel_arc.prime_on_start_config().await {
+            tracing::warn!(
+                channel = %channel_name,
+                error = %error,
+                "Failed to prime hot-loaded channel on_start config before registration"
+            );
+        }
+
         channel_manager
             .hot_add(Box::new(SharedWasmChannel::new(Arc::clone(&channel_arc))))
             .await
             .map_err(|e| format!("hot_add failed: {}", e))?;
 
         if let Some(router) = webhook_router {
-            let endpoints = {
-                let registered = channel_arc.endpoints().await;
-                if registered.is_empty() {
-                    vec![RegisteredEndpoint {
-                        channel_name: channel_name.clone(),
-                        path: format!("/webhook/{}", channel_name),
-                        methods: vec!["POST".to_string()],
-                        require_secret: false,
-                    }]
-                } else {
-                    registered
-                }
-            };
-            router
-                .register(channel_arc, endpoints, webhook_secret, secret_header)
-                .await;
+            let endpoints = channel_arc.endpoints().await;
+            router.register(channel_arc, endpoints, webhook_auth).await;
         }
 
         Ok(())

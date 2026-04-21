@@ -1700,27 +1700,75 @@ impl ConversationStore for LibSqlBackend {
         limit: i64,
         now: DateTime<Utc>,
     ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.claim_due_outcome_contracts_for_user("", limit, now)
+            .await
+    }
+
+    async fn claim_due_outcome_contracts_for_user(
+        &self,
+        user_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
         if limit <= 0 {
             return Ok(Vec::new());
         }
         let conn = self.connect().await?;
         let now_ts = fmt_ts(&now);
-        conn.execute(
-            r#"
-            UPDATE outcome_contracts
-            SET status = 'expired',
-                updated_at = ?1
-            WHERE status IN ('open', 'evaluating')
-              AND evaluated_at IS NULL
-              AND expires_at <= ?1
-            "#,
-            params![now_ts.clone()],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let scoped = !user_id.is_empty();
+        if scoped {
+            conn.execute(
+                r#"
+                UPDATE outcome_contracts
+                SET status = 'expired',
+                    updated_at = ?1
+                WHERE user_id = ?2
+                  AND status IN ('open', 'evaluating')
+                  AND evaluated_at IS NULL
+                  AND expires_at <= ?1
+                "#,
+                params![now_ts.clone(), user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        } else {
+            conn.execute(
+                r#"
+                UPDATE outcome_contracts
+                SET status = 'expired',
+                    updated_at = ?1
+                WHERE status IN ('open', 'evaluating')
+                  AND evaluated_at IS NULL
+                  AND expires_at <= ?1
+                "#,
+                params![now_ts.clone()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
 
-        let mut rows = conn
-            .query(
+        let mut rows = if scoped {
+            conn.query(
+                r#"
+                SELECT
+                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
+                    contract_type, status, summary, due_at, expires_at, final_verdict,
+                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    evaluated_at, created_at, updated_at
+                FROM outcome_contracts
+                WHERE user_id = ?2
+                  AND status = 'open'
+                  AND due_at <= ?1
+                  AND expires_at > ?1
+                ORDER BY due_at ASC, created_at ASC
+                LIMIT ?3
+                "#,
+                params![now_ts.clone(), user_id, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        } else {
+            conn.query(
                 r#"
                 SELECT
                     id, user_id, actor_id, channel, thread_id, source_kind, source_id,
@@ -1737,7 +1785,8 @@ impl ConversationStore for LibSqlBackend {
                 params![now_ts.clone(), limit],
             )
             .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
 
         let mut claimed = Vec::new();
         while let Some(row) = rows
@@ -1755,7 +1804,7 @@ impl ConversationStore for LibSqlBackend {
                         updated_at = ?2
                     WHERE id = ?1
                       AND status = 'open'
-                    "#,
+                "#,
                     params![contract.id.to_string(), now_ts.clone()],
                 )
                 .await
@@ -1890,8 +1939,9 @@ impl ConversationStore for LibSqlBackend {
                 r#"
                 SELECT DISTINCT user_id
                 FROM outcome_contracts
-                WHERE (status = 'open' AND due_at <= ?1 AND expires_at > ?1)
-                   OR status = 'evaluating'
+                WHERE status = 'open'
+                  AND due_at <= ?1
+                  AND expires_at > ?1
                 ORDER BY user_id ASC
                 "#,
                 params![now_ts],

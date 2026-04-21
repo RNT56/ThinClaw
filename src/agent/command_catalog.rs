@@ -166,6 +166,8 @@ pub fn tui_help_text() -> String {
 {}\n\n\
 {}\n\n\
 Local TUI:\n\
+  /back, /close          Close the most recent detail card\n\
+  /top, /bottom          Jump to oldest/newest activity\n\
   /cls                   Clear the visible log\n\
   /think                 Toggle thinking updates\n\
   /exit, /quit           Leave the TUI\n\
@@ -192,6 +194,9 @@ pub fn tui_forwarded_commands() -> &'static [&'static str] {
     &[
         "/undo",
         "/redo",
+        "/job",
+        "/cancel",
+        "/list",
         "/compress",
         "/compact",
         "/model",
@@ -200,8 +205,8 @@ pub fn tui_forwarded_commands() -> &'static [&'static str] {
         "/tools",
         "/context",
         "/ping",
-        "/thread new",
-        "/resume <id>",
+        "/thread",
+        "/resume",
         "/restart",
         "/rollback",
         "/identity",
@@ -218,6 +223,11 @@ pub fn tui_forwarded_commands() -> &'static [&'static str] {
 pub fn tui_autocomplete_commands() -> &'static [&'static str] {
     &[
         "/help",
+        "/back",
+        "/close",
+        "/dismiss",
+        "/top",
+        "/bottom",
         "/clear",
         "/new",
         "/reset",
@@ -239,6 +249,9 @@ pub fn tui_autocomplete_commands() -> &'static [&'static str] {
         "/resume",
         "/restart",
         "/ping",
+        "/job",
+        "/cancel",
+        "/list",
         "/rollback",
         "/identity",
         "/memory",

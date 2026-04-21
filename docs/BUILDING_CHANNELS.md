@@ -162,6 +162,23 @@ fn on_respond(response: AgentResponse) -> Result<(), String> {
 }
 ```
 
+The host now merges `OutgoingResponse.metadata` into the original inbound metadata
+before calling `on_respond()`. Response metadata wins on key conflicts.
+
+When the host needs to tunnel outbound attachments into a WASM channel, it also
+serializes `OutgoingResponse.attachments` into `response.metadata_json` under
+`response_attachments` using this envelope:
+
+```json
+[
+  {
+    "mime_type": "image/png",
+    "filename": "reply.png",
+    "data": "<base64>"
+  }
+]
+```
+
 ## Credential Injection
 
 **Never hardcode credentials!** Use placeholders that the host replaces:
@@ -235,7 +252,10 @@ Create `my-channel.capabilities.json`:
       },
       "webhook": {
         "secret_header": "X-Webhook-Secret",
-        "secret_name": "my_channel_webhook_secret"
+        "secret_name": "my_channel_webhook_secret",
+        "secret_validation": "equals",
+        "verify_token_param": "hub.verify_token",
+        "verify_token_secret_name": "my_channel_verify_token"
       }
     }
   },
@@ -244,6 +264,18 @@ Create `my-channel.capabilities.json`:
   }
 }
 ```
+
+### Webhook Validation Modes
+
+- `secret_validation: "equals"` compares the configured secret directly to the
+  provided header value. This is the default.
+- `secret_validation: "hmac_sha256_body"` treats the configured secret as an
+  HMAC key and validates the raw request body against the configured
+  `secret_header` value. Use this for providers like WhatsApp or GitHub.
+- `verify_token_param` enables GET/HEAD query-param verification for webhook
+  setup handshakes.
+- `verify_token_secret_name` lets GET/HEAD verification use a different secret
+  from POST signature validation.
 
 ## Building and Deploying
 

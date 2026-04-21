@@ -9,20 +9,41 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
-use super::{
-    ReadinessSummary, SetupError, SetupWizard, StepDescriptor, StepStatus, ValidationLevel,
-    WizardPhaseId, WizardPlan,
-};
-use crate::setup::prompts::tui_prompt_session_active;
+use super::{SetupError, SetupWizard, StepStatus, WizardPhaseId, WizardPlan, WizardStepId};
+use crate::branding::art::onboarding_brand_block;
+use crate::setup::prompts::{TuiPromptMessage, TuiPromptMessageTone, take_tui_prompt_messages};
 use crate::terminal_branding::resolve_cli_skin_name;
 use crate::tui::skin::CliSkin;
+
+struct CardSpec {
+    eyebrow: String,
+    title: String,
+    subtitle: Option<String>,
+    body_lines: Vec<String>,
+    activity: Vec<TuiPromptMessage>,
+    show_art: bool,
+    status: Option<StepStatus>,
+    primary_action: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct CardLayout {
+    card_area: Rect,
+    content_area: Rect,
+    footer_area: Rect,
+    total_content_height: u16,
+    max_scroll: u16,
+}
 
 pub(super) struct OnboardingTuiShell {
     plan: WizardPlan,
     active_phase: Option<WizardPhaseId>,
+    active_step_id: Option<WizardStepId>,
+    current_step: Option<(usize, usize)>,
     skin: CliSkin,
 }
 
@@ -31,105 +52,156 @@ impl OnboardingTuiShell {
         Self {
             plan,
             active_phase: None,
+            active_step_id: None,
+            current_step: None,
             skin: CliSkin::load(&resolve_cli_skin_name()),
         }
     }
 
-    pub(super) fn show_intro(&mut self, wizard: &SetupWizard) -> Result<(), SetupError> {
-        self.present_view(
-            wizard,
-            Some((
-                "Cockpit Overview",
-                "Progress is saved continuously while you configure.",
-            )),
-            &[
-                "Start with a setup profile, then work through each phase in order.",
-                "The right panel keeps a live launch-readiness view and highlights anything that still needs care.",
-                "Press Enter to begin, or Esc to leave onboarding for now.",
-            ],
-        )
-    }
-
-    pub(super) fn show_step(
-        &mut self,
-        wizard: &SetupWizard,
-        descriptor: &StepDescriptor,
-        current: usize,
-        total: usize,
-    ) -> Result<(), SetupError> {
-        self.active_phase = Some(descriptor.phase_id);
-        let title = format!("Step {current}/{total}: {}", descriptor.title);
-        let header = (title.as_str(), descriptor.why_this_matters);
-        let mut body = vec![descriptor.description];
-        if let Some(recommended) = descriptor.recommended {
-            body.push(recommended);
-        }
-        body.push("Press Enter to open this step.");
-        self.present_view(wizard, Some(header), &body)
-    }
-
-    pub(super) fn show_step_result(
-        &mut self,
-        wizard: &SetupWizard,
-        descriptor: &StepDescriptor,
-        status: StepStatus,
-    ) -> Result<(), SetupError> {
-        self.active_phase = Some(descriptor.phase_id);
-        let detail = match status {
-            StepStatus::Completed => "Completed and recorded.",
-            StepStatus::Skipped => "Skipped for this run.",
-            StepStatus::NeedsAttention => "Completed with follow-up work queued.",
-            StepStatus::InProgress => "Still in progress.",
-            StepStatus::Pending => "Still pending.",
-        };
-        self.present_view(
-            wizard,
-            Some((descriptor.title, detail)),
-            &["Press Enter to continue to the next step."],
-        )
-    }
-
     pub(super) fn show_completion(&mut self, wizard: &SetupWizard) -> Result<(), SetupError> {
-        self.present_view(
-            wizard,
-            Some((
-                "Launch Summary",
-                "ThinClaw will now continue into its normal bootstrap path.",
-            )),
-            &[
-                "Your readiness notes and follow-ups are saved in settings.",
-                "Press Enter to complete onboarding and continue startup.",
-            ],
-        )
+        self.refresh_skin(wizard);
+        self.active_phase = Some(WizardPhaseId::Finish);
+        self.active_step_id = Some(WizardStepId::Summary);
+        self.current_step = Some((self.plan.total_steps(), self.plan.total_steps()));
+
+        let continues = wizard.should_continue_to_runtime();
+
+        self.present_view(CardSpec {
+            eyebrow: "Launch summary".to_string(),
+            title: "Onboarding complete".to_string(),
+            subtitle: Some(wizard.runtime_handoff_summary()),
+            body_lines: self.completion_body(wizard),
+            activity: take_tui_prompt_messages(),
+            show_art: true,
+            status: Some(if wizard.followups.is_empty() {
+                StepStatus::Completed
+            } else {
+                StepStatus::NeedsAttention
+            }),
+            primary_action: if continues {
+                "Continue to startup"
+            } else {
+                "Finish setup"
+            },
+        })
     }
 
-    fn present_view(
-        &mut self,
-        wizard: &SetupWizard,
-        header: Option<(&str, &str)>,
-        body_lines: &[&str],
-    ) -> Result<(), SetupError> {
-        let shared_session = tui_prompt_session_active();
-        if !shared_session {
-            enable_raw_mode().map_err(SetupError::Io)?;
-            io::stdout()
-                .execute(EnterAlternateScreen)
-                .map_err(SetupError::Io)?;
+    fn completion_body(&self, wizard: &SetupWizard) -> Vec<String> {
+        let mut lines = vec![
+            if wizard.should_continue_to_runtime() {
+                "Configuration is saved and the bootstrap handoff is ready.".to_string()
+            } else {
+                "Configuration is saved and ThinClaw is ready for a manual launch later."
+                    .to_string()
+            },
+            format!("Runtime: {}", self.runtime_summary(wizard)),
+            format!("AI stack: {}", self.provider_summary(wizard)),
+            format!("Channels: {}", self.channel_summary(wizard)),
+        ];
+
+        if let Some(timezone) = wizard.settings.user_timezone.as_deref() {
+            lines.push(format!("Timezone: {timezone}"));
         }
+
+        lines.push("What next:".to_string());
+        lines.extend(wizard.what_next_commands());
+        lines.push(if wizard.should_continue_to_runtime() {
+            "Press Enter to continue into startup.".to_string()
+        } else {
+            "Press Enter to finish onboarding.".to_string()
+        });
+
+        if wizard.followups.is_empty() {
+            lines.push("Follow-ups: none queued.".to_string());
+        } else {
+            lines.push(format!(
+                "Follow-ups: {} item(s) queued for later review.",
+                wizard.followups.len()
+            ));
+        }
+
+        if let Some(item) = wizard
+            .validation_items()
+            .into_iter()
+            .find(|item| !matches!(item.level, super::ValidationLevel::Info))
+        {
+            lines.push(format!("Needs review: {} — {}", item.title, item.detail));
+        }
+        lines
+    }
+
+    fn refresh_skin(&mut self, wizard: &SetupWizard) {
+        let skin_name = if wizard.settings.agent.cli_skin.trim().is_empty() {
+            resolve_cli_skin_name()
+        } else {
+            wizard.settings.agent.cli_skin.clone()
+        };
+        self.skin = CliSkin::load(&skin_name);
+    }
+
+    fn runtime_summary(&self, wizard: &SetupWizard) -> String {
+        match wizard.settings.database_backend.as_deref() {
+            Some("libsql") => {
+                if let Some(path) = wizard.settings.libsql_path.as_deref() {
+                    format!("libSQL ({path})")
+                } else {
+                    "libSQL (default path)".to_string()
+                }
+            }
+            Some(other) => other.to_string(),
+            None if wizard.settings.database_url.is_some() => "PostgreSQL".to_string(),
+            None => "still needs review".to_string(),
+        }
+    }
+
+    fn provider_summary(&self, wizard: &SetupWizard) -> String {
+        let provider = wizard
+            .settings
+            .llm_backend
+            .as_deref()
+            .map(|value| match value {
+                "anthropic" => "Anthropic",
+                "openai" => "OpenAI",
+                "ollama" => "Ollama",
+                "openai_compatible" => "OpenAI-compatible",
+                other => other,
+            })
+            .unwrap_or("unconfigured");
+        let model = wizard
+            .settings
+            .selected_model
+            .as_deref()
+            .unwrap_or("model not selected");
+        format!("{provider} · {model}")
+    }
+
+    fn channel_summary(&self, wizard: &SetupWizard) -> String {
+        let mut channels = vec!["terminal".to_string()];
+        let configured = wizard.configured_channel_names();
+        if configured.is_empty() {
+            return "terminal only".to_string();
+        }
+        channels.extend(configured);
+        channels.join(", ")
+    }
+
+    fn present_view(&mut self, spec: CardSpec) -> Result<(), SetupError> {
+        enable_raw_mode().map_err(SetupError::Io)?;
+        io::stdout()
+            .execute(EnterAlternateScreen)
+            .map_err(SetupError::Io)?;
         let backend = CrosstermBackend::new(io::stdout());
         let mut terminal = Terminal::new(backend).map_err(SetupError::Io)?;
         terminal.hide_cursor().map_err(SetupError::Io)?;
 
-        let result = self.event_loop(&mut terminal, wizard, header, body_lines);
+        let result = self.event_loop(&mut terminal, &spec);
 
-        if !shared_session {
-            disable_raw_mode().map_err(SetupError::Io)?;
-            io::stdout()
-                .execute(LeaveAlternateScreen)
-                .map_err(SetupError::Io)?;
-            io::stdout().execute(cursor::Show).map_err(SetupError::Io)?;
-            terminal.show_cursor().map_err(SetupError::Io)?;
-        }
+        disable_raw_mode().map_err(SetupError::Io)?;
+        io::stdout()
+            .execute(LeaveAlternateScreen)
+            .map_err(SetupError::Io)?;
+        io::stdout().execute(cursor::Show).map_err(SetupError::Io)?;
+        terminal.show_cursor().map_err(SetupError::Io)?;
 
         result
     }
@@ -137,13 +209,19 @@ impl OnboardingTuiShell {
     fn event_loop(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-        wizard: &SetupWizard,
-        header: Option<(&str, &str)>,
-        body_lines: &[&str],
+        spec: &CardSpec,
     ) -> Result<(), SetupError> {
+        let mut scroll_offset = 0u16;
+
         loop {
+            let viewport = Rect::from(terminal.size().map_err(SetupError::Io)?);
+            let card_width = viewport.width.saturating_sub(8).clamp(60, 100);
+            let content = self.build_card_text(spec, card_width.saturating_sub(2));
+            let layout = self.card_layout(viewport, card_width, &content);
+            scroll_offset = scroll_offset.min(layout.max_scroll);
+
             terminal
-                .draw(|frame| self.render(frame, wizard, header, body_lines))
+                .draw(|frame| self.render(frame, spec, &content, layout, scroll_offset))
                 .map_err(SetupError::Io)?;
 
             if event::poll(Duration::from_millis(250)).map_err(SetupError::Io)?
@@ -155,6 +233,22 @@ impl OnboardingTuiShell {
                     (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                         return Err(SetupError::Cancelled);
                     }
+                    (_, KeyCode::Up) | (_, KeyCode::Char('k')) => {
+                        scroll_offset = scroll_offset.saturating_sub(1);
+                    }
+                    (_, KeyCode::Down) | (_, KeyCode::Char('j')) => {
+                        scroll_offset = scroll_offset.saturating_add(1).min(layout.max_scroll);
+                    }
+                    (_, KeyCode::PageUp) => {
+                        scroll_offset = scroll_offset.saturating_sub(layout.content_area.height);
+                    }
+                    (_, KeyCode::PageDown) => {
+                        scroll_offset = scroll_offset
+                            .saturating_add(layout.content_area.height)
+                            .min(layout.max_scroll);
+                    }
+                    (_, KeyCode::Home) => scroll_offset = 0,
+                    (_, KeyCode::End) => scroll_offset = layout.max_scroll,
                     _ => {}
                 }
             }
@@ -164,273 +258,391 @@ impl OnboardingTuiShell {
     fn render(
         &self,
         frame: &mut Frame,
-        wizard: &SetupWizard,
-        header: Option<(&str, &str)>,
-        body_lines: &[&str],
+        spec: &CardSpec,
+        content: &Text<'static>,
+        layout: CardLayout,
+        scroll_offset: u16,
     ) {
-        let outer = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(4),
-                Constraint::Min(12),
-                Constraint::Length(3),
-            ])
-            .margin(1)
-            .split(frame.area());
-
-        let columns = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(28),
-                Constraint::Percentage(42),
-                Constraint::Percentage(30),
-            ])
-            .split(outer[1]);
-
         frame.render_widget(Clear, frame.area());
-        self.render_header(frame, outer[0], header);
-        self.render_phases(frame, columns[0], wizard);
-        self.render_focus(frame, columns[1], body_lines);
-        self.render_summary(frame, columns[2], wizard);
-        self.render_footer(frame, outer[2]);
+        let border_style = self.border_style(spec);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(Span::styled(
+                format!(" {} ", spec.eyebrow),
+                self.skin.accent_style(),
+            ));
+        frame.render_widget(block, layout.card_area);
+        frame.render_widget(
+            Paragraph::new(content.clone())
+                .wrap(Wrap { trim: false })
+                .scroll((scroll_offset, 0))
+                .alignment(Alignment::Left),
+            layout.content_area,
+        );
+        frame.render_widget(
+            Paragraph::new(self.footer_text(
+                spec.primary_action,
+                scroll_offset,
+                layout.max_scroll,
+                layout.content_area.height,
+                layout.total_content_height,
+            ))
+            .alignment(Alignment::Left),
+            layout.footer_area,
+        );
     }
 
-    fn render_header(&self, frame: &mut Frame, area: Rect, header: Option<(&str, &str)>) {
-        let (title, subtitle) = header.unwrap_or(("ThinClaw Humanist Cockpit", ""));
-        let mut text = vec![Line::from(vec![
-            Span::styled("ThinClaw ", self.skin.accent_style()),
-            Span::styled(title, self.skin.title_style()),
-        ])];
-        if !subtitle.is_empty() {
-            text.push(Line::from(Span::styled(subtitle, self.skin.muted_style())));
+    fn border_style(&self, spec: &CardSpec) -> Style {
+        match spec.status {
+            Some(StepStatus::Completed) => self.skin.accent_style(),
+            Some(StepStatus::NeedsAttention) => self.skin.warn_style(),
+            Some(StepStatus::Skipped) => self.skin.border_style(),
+            _ => self.skin.border_style(),
         }
-        text.push(Line::from(vec![
-            Span::styled(
-                "Enter",
-                Style::default().fg(Color::Black).bg(self.skin.good).bold(),
-            ),
-            Span::raw(" continue "),
-            Span::styled(
-                "Esc",
-                Style::default().fg(Color::Black).bg(self.skin.warn).bold(),
-            ),
-            Span::raw(" leave "),
-            Span::styled(
-                "Ctrl+C",
-                Style::default().fg(Color::Black).bg(self.skin.bad).bold(),
-            ),
-            Span::raw(" abort"),
-        ]));
-        frame.render_widget(
-            Paragraph::new(text).alignment(Alignment::Left).block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(self.skin.border_soft_style()),
-            ),
-            area,
-        );
     }
 
-    fn render_phases(&self, frame: &mut Frame, area: Rect, wizard: &SetupWizard) {
-        let items: Vec<ListItem> = self
-            .plan
-            .phases
+    fn build_card_text(&self, spec: &CardSpec, width: u16) -> Text<'static> {
+        let mut lines = Vec::new();
+        let content_width = width.saturating_sub(2) as usize;
+
+        lines.push(Line::from(Span::styled(
+            format!("ThinClaw · {} · onboarding", self.skin.name),
+            self.skin.accent_soft_style(),
+        )));
+
+        if spec.show_art && ascii_art_fits(&self.skin, content_width) {
+            lines.push(Line::from(""));
+            if let Some(art) = onboarding_brand_block(&self.skin, content_width) {
+                lines.extend(art.to_ratatui_lines(&self.skin));
+            }
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            spec.title.clone(),
+            self.skin.body_style().bold(),
+        )));
+        if let Some(subtitle) = spec.subtitle.as_deref() {
+            lines.push(Line::from(Span::styled(
+                subtitle.to_string(),
+                self.skin.muted_style(),
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines.extend(self.summary_lines());
+        lines.push(self.progress_bar_line(content_width));
+        lines.push(Line::from(""));
+
+        for body_line in &spec.body_lines {
+            if body_line.starts_with("Recommended:") {
+                lines.push(Line::from(vec![
+                    Span::styled("› ", self.skin.accent_style()),
+                    Span::styled(body_line.clone(), self.skin.accent_style()),
+                ]));
+            } else if body_line.starts_with("Press ") {
+                lines.push(Line::from(vec![
+                    Span::styled("→ ", self.skin.muted_style()),
+                    Span::styled(body_line.clone(), self.skin.muted_style()),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("• ", self.skin.border_soft_style()),
+                    Span::styled(body_line.clone(), self.skin.body_style()),
+                ]));
+            }
+        }
+
+        let recent_activity: Vec<TuiPromptMessage> = spec
+            .activity
             .iter()
-            .map(|phase| {
-                let complete = phase.step_ids.iter().all(|step| {
-                    matches!(wizard.step_statuses.get(step), Some(StepStatus::Completed))
-                });
-                let is_active = self.active_phase == Some(phase.id);
-                let (symbol, style, badge, badge_color) = if complete {
-                    ("✓", self.skin.good_style(), "ready", self.skin.good)
-                } else if is_active {
-                    ("▶", self.skin.accent_style(), "live", self.skin.accent)
-                } else {
-                    (
-                        "•",
-                        self.skin.muted_style(),
-                        "queued",
-                        self.skin.border_soft,
-                    )
-                };
-                ListItem::new(vec![
-                    Line::from(vec![
-                        Span::styled(format!("{symbol} "), style),
-                        Span::styled(phase.title, style),
-                        Span::raw("  "),
-                        Span::styled(
-                            format!(" {badge} "),
-                            Style::default().fg(Color::Black).bg(badge_color).bold(),
-                        ),
-                    ]),
-                    Line::from(Span::styled(phase.description, self.skin.muted_style())),
-                ])
-            })
+            .filter(|message| !message.text.trim().is_empty())
+            .cloned()
             .collect();
+        if !recent_activity.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "Recent activity",
+                self.skin.body_style().bold(),
+            )));
+            for message in recent_activity.iter().rev().take(4).rev() {
+                lines.push(self.activity_line(message));
+            }
+        }
 
-        frame.render_widget(
-            List::new(items).block(
-                Block::default()
-                    .title(" Flight Plan ")
-                    .borders(Borders::ALL)
-                    .border_style(self.skin.border_style()),
-            ),
-            area,
-        );
+        Text::from(lines)
     }
 
-    fn render_focus(&self, frame: &mut Frame, area: Rect, body_lines: &[&str]) {
-        let lines: Vec<Line> = body_lines
-            .iter()
-            .enumerate()
-            .map(|(index, line)| {
-                if index == 0 {
-                    Line::from(vec![
-                        Span::styled("◆ ", self.skin.accent_style()),
-                        Span::styled(*line, self.skin.body_style().bold()),
-                    ])
-                } else {
-                    Line::from(vec![
-                        Span::styled("  ", Style::default()),
-                        Span::styled(*line, self.skin.muted_style()),
-                    ])
-                }
-            })
-            .collect();
-
-        frame.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-                Block::default()
-                    .title(" Mission Focus ")
-                    .borders(Borders::ALL)
-                    .border_style(self.skin.accent_style()),
-            ),
-            area,
-        );
+    fn summary_lines(&self) -> Vec<Line<'static>> {
+        vec![
+            self.meta_line("Phase", &self.phase_progress_label()),
+            self.meta_line("Step", &self.step_progress_label()),
+            self.meta_line("Skin", &self.skin.name),
+        ]
     }
 
-    fn render_summary(&self, frame: &mut Frame, area: Rect, wizard: &SetupWizard) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Min(8)])
-            .split(area);
+    fn progress_bar_line(&self, content_width: usize) -> Line<'static> {
+        let bar_width = content_width.clamp(18, 30);
+        let ratio = self.progress_ratio();
+        let filled = ((bar_width as f32) * ratio).round() as usize;
+        let empty = bar_width.saturating_sub(filled);
+        let percent = (ratio * 100.0).round() as usize;
 
-        self.render_readiness(frame, chunks[0], wizard.readiness_summary());
-
-        let validations = wizard.validation_items();
-        let items: Vec<ListItem> = validations
-            .iter()
-            .map(|item| {
-                let (color, level_label, symbol) = match item.level {
-                    ValidationLevel::Info => (self.skin.accent, "info", "i"),
-                    ValidationLevel::Warning => (self.skin.warn, "warn", "!"),
-                    ValidationLevel::Error => (self.skin.bad, "error", "x"),
-                };
-                ListItem::new(vec![
-                    Line::from(Span::styled(&item.title, Style::default().fg(color).bold())),
-                    Line::from(vec![
-                        Span::styled(
-                            format!(" {symbol} "),
-                            Style::default().fg(Color::Black).bg(color).bold(),
-                        ),
-                        Span::raw(" "),
-                        Span::styled(level_label, Style::default().fg(color).bold()),
-                    ]),
-                    Line::from(Span::styled(&item.detail, self.skin.muted_style())),
-                ])
-            })
-            .collect();
-
-        frame.render_widget(
-            List::new(items).block(
-                Block::default()
-                    .title(" Watchlist ")
-                    .borders(Borders::ALL)
-                    .border_style(self.skin.border_style()),
-            ),
-            chunks[1],
-        );
+        Line::from(vec![
+            Span::styled("Progress ", self.skin.muted_style()),
+            Span::styled("█".repeat(filled), self.skin.accent_style()),
+            Span::styled("░".repeat(empty), self.skin.border_soft_style()),
+            Span::raw(" "),
+            Span::styled(format!("{percent:>3}%"), self.skin.muted_style()),
+        ])
     }
 
-    fn render_readiness(&self, frame: &mut Frame, area: Rect, readiness: ReadinessSummary) {
-        let accent = if readiness.needs_attention > 0 || readiness.followups > 0 {
-            self.skin.warn
-        } else {
-            self.skin.good
+    fn activity_line(&self, message: &TuiPromptMessage) -> Line<'static> {
+        let (marker, style) = match message.tone {
+            TuiPromptMessageTone::Accent => ("› ", self.skin.accent_style()),
+            TuiPromptMessageTone::Info => ("• ", self.skin.body_style()),
+            TuiPromptMessageTone::Warning => ("! ", self.skin.warn_style()),
+            TuiPromptMessageTone::Error => ("× ", self.skin.bad_style()),
         };
-        let text = vec![
-            Line::from(Span::styled(
-                readiness.headline,
-                Style::default().fg(accent).bold(),
-            )),
-            Line::from(vec![
-                Span::styled(
-                    " ready ",
-                    Style::default().fg(Color::Black).bg(self.skin.good).bold(),
-                ),
-                Span::raw(" "),
-                Span::styled(readiness.ready_now.to_string(), self.skin.good_style()),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    " attention ",
-                    Style::default().fg(Color::Black).bg(self.skin.warn).bold(),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    readiness.needs_attention.to_string(),
-                    self.skin.warn_style(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    " follow-ups ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(self.skin.accent)
-                        .bold(),
-                ),
-                Span::raw(" "),
-                Span::styled(readiness.followups.to_string(), self.skin.accent_style()),
-            ]),
-        ];
-        frame.render_widget(
-            Paragraph::new(text).wrap(Wrap { trim: false }).block(
-                Block::default()
-                    .title(" Launch Readiness ")
-                    .borders(Borders::ALL)
-                    .border_style(self.skin.border_style()),
-            ),
-            area,
-        );
+        Line::from(vec![
+            Span::styled(marker, style),
+            Span::styled(message.text.clone(), style),
+        ])
     }
 
-    fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
+    fn footer_text(
+        &self,
+        primary_action: &str,
+        scroll_offset: u16,
+        max_scroll: u16,
+        visible_height: u16,
+        total_content_height: u16,
+    ) -> Text<'static> {
+        let mut lines = vec![Line::from(vec![
+            keycap("Enter", self.skin.title_style()),
+            Span::styled(format!(" {primary_action} "), self.skin.body_style()),
+            keycap("Esc", self.skin.title_style()),
+            Span::styled(" leave ", self.skin.body_style()),
+            keycap("Ctrl+C", self.skin.title_style()),
+            Span::styled(" abort", self.skin.body_style()),
+        ])];
+
+        if max_scroll > 0 {
+            let visible_from = scroll_offset.saturating_add(1).min(total_content_height);
+            let visible_to = scroll_offset
+                .saturating_add(visible_height)
+                .min(total_content_height);
+            lines.push(Line::from(vec![
+                Span::styled("Use ", self.skin.muted_style()),
+                keycap("↑/↓", self.skin.title_style()),
                 Span::styled(
-                    " Enter ",
-                    Style::default().fg(Color::Black).bg(self.skin.good).bold(),
+                    format!(
+                        " to scroll · showing {visible_from}-{visible_to} of {total_content_height}"
+                    ),
+                    self.skin.muted_style(),
                 ),
-                Span::raw(" continue "),
-                Span::styled(
-                    " Esc ",
-                    Style::default().fg(Color::Black).bg(self.skin.warn).bold(),
-                ),
-                Span::raw(" leave "),
-                Span::styled(
-                    " Ctrl+C ",
-                    Style::default().fg(Color::Black).bg(self.skin.bad).bold(),
-                ),
-                Span::raw(" force quit"),
-            ]))
-            .alignment(Alignment::Center)
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(self.skin.border_soft_style()),
-            ),
-            area,
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "Progress saves automatically.",
+                self.skin.muted_style(),
+            )));
+        }
+
+        Text::from(lines)
+    }
+
+    fn meta_line(&self, label: &str, value: &str) -> Line<'static> {
+        Line::from(vec![
+            Span::styled(format!("{label}: "), self.skin.accent_soft_style()),
+            Span::raw(" "),
+            Span::styled(value.to_string(), self.skin.body_style()),
+        ])
+    }
+
+    fn phase_progress_label(&self) -> String {
+        let total_phases = self.plan.phases.len();
+        match self
+            .active_phase
+            .and_then(|phase_id| self.plan.phase(phase_id))
+        {
+            Some(phase) => {
+                let index = self
+                    .plan
+                    .phase_index(phase.id)
+                    .map(|idx| idx + 1)
+                    .unwrap_or(1);
+                format!(
+                    "{index}/{total_phases} · {} · {} steps",
+                    phase.id.title(),
+                    phase.step_ids.len()
+                )
+            }
+            None => format!("{total_phases} phases"),
+        }
+    }
+
+    fn step_progress_label(&self) -> String {
+        match (
+            self.current_step,
+            self.active_phase
+                .and_then(|phase_id| self.plan.phase(phase_id)),
+            self.active_step_id,
+        ) {
+            (Some((current, total)), Some(phase), Some(step_id)) => {
+                let phase_index = phase
+                    .step_ids
+                    .iter()
+                    .position(|candidate| *candidate == step_id)
+                    .map(|idx| idx + 1)
+                    .unwrap_or(1);
+                format!(
+                    "{current}/{total} overall · {phase_index}/{} in phase",
+                    phase.step_ids.len()
+                )
+            }
+            _ => "Overview".to_string(),
+        }
+    }
+
+    fn progress_ratio(&self) -> f32 {
+        self.current_step
+            .map(|(current, total)| current as f32 / total.max(1) as f32)
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
+    }
+
+    fn card_layout(&self, area: Rect, card_width: u16, content: &Text<'static>) -> CardLayout {
+        let card_width = card_width.max(24).min(area.width);
+        let inner_width = card_width.saturating_sub(2).max(1);
+        let total_content_height = text_visual_height(content, inner_width as usize);
+        let footer_height = 2u16;
+        let max_card_height = area.height.saturating_sub(2).max(14);
+        let desired_card_height = total_content_height
+            .saturating_add(footer_height)
+            .saturating_add(2)
+            .clamp(14, max_card_height);
+        let card_area = centered_rect(area, card_width, desired_card_height);
+        let inner_area = Rect::new(
+            card_area.x.saturating_add(1),
+            card_area.y.saturating_add(1),
+            card_area.width.saturating_sub(2),
+            card_area.height.saturating_sub(2),
         );
+        let footer_height = footer_height
+            .min(inner_area.height.saturating_sub(1))
+            .max(1);
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(footer_height)])
+            .split(inner_area);
+        let content_area = sections[0];
+        let footer_area = sections[1];
+        let max_scroll = total_content_height.saturating_sub(content_area.height);
+
+        CardLayout {
+            card_area,
+            content_area,
+            footer_area,
+            total_content_height,
+            max_scroll,
+        }
+    }
+}
+
+fn keycap(label: &str, style: Style) -> Span<'static> {
+    Span::styled(format!(" {label} "), style)
+}
+
+fn centered_rect(area: Rect, desired_width: u16, desired_height: u16) -> Rect {
+    let width = desired_width.max(24).min(area.width);
+    let height = desired_height.max(8).min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width, height)
+}
+
+fn ascii_art_fits(skin: &CliSkin, width: usize) -> bool {
+    onboarding_brand_block(skin, width).is_some()
+}
+
+fn estimate_wrapped_height(text: &str, width: usize) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+
+    UnicodeWidthStr::width(text).max(1).div_ceil(width) as u16
+}
+
+fn text_visual_height(text: &Text<'_>, width: usize) -> u16 {
+    text.lines
+        .iter()
+        .map(|line| {
+            let plain = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            estimate_wrapped_height(&plain, width)
+        })
+        .sum::<u16>()
+        .max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::{OnboardingFollowupCategory, OnboardingFollowupStatus};
+    use crate::setup::wizard::FollowupDraft;
+
+    #[test]
+    fn test_completion_body_prioritizes_what_next_before_followups() {
+        let mut wizard = SetupWizard::new();
+        wizard.followups.push(FollowupDraft {
+            id: "runtime-check".to_string(),
+            title: "Verify runtime".to_string(),
+            category: OnboardingFollowupCategory::Runtime,
+            status: OnboardingFollowupStatus::Pending,
+            instructions: "Double-check runtime handoff.".to_string(),
+            action_hint: None,
+        });
+
+        let shell = OnboardingTuiShell::new(wizard.build_plan());
+        let lines = shell.completion_body(&wizard);
+        let what_next_index = lines
+            .iter()
+            .position(|line| line == "What next:")
+            .expect("what next section should be present");
+        let followups_index = lines
+            .iter()
+            .position(|line| line.starts_with("Follow-ups:"))
+            .expect("follow-up summary should be present");
+
+        assert!(what_next_index < followups_index);
+    }
+
+    #[test]
+    fn test_card_layout_reports_scroll_when_content_overflows() {
+        let wizard = SetupWizard::new();
+        let shell = OnboardingTuiShell::new(wizard.build_plan());
+        let spec = CardSpec {
+            eyebrow: "Launch summary".to_string(),
+            title: "Onboarding complete".to_string(),
+            subtitle: Some("ThinClaw will now continue into `thinclaw tui`.".to_string()),
+            body_lines: (0..40)
+                .map(|index| format!("Runtime note {index}: keep this content visible."))
+                .collect(),
+            activity: Vec::new(),
+            show_art: false,
+            status: Some(StepStatus::Completed),
+            primary_action: "Continue to startup",
+        };
+
+        let content = shell.build_card_text(&spec, 70);
+        let layout = shell.card_layout(Rect::new(0, 0, 80, 18), 72, &content);
+
+        assert!(layout.max_scroll > 0);
+        assert!(layout.total_content_height > layout.content_area.height);
     }
 }

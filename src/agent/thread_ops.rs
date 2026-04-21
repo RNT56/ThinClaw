@@ -18,10 +18,11 @@ use crate::agent::dispatcher::{AgenticLoopResult, check_auth_required, parse_aut
 use crate::agent::learning::{ImprovementClass, LearningEvent, LearningOrchestrator, RiskTier};
 use crate::agent::outcomes;
 use crate::agent::session::{
-    PendingApproval, PersistedSubagentState, Session, Thread, ThreadState,
+    PendingApproval, PendingAuthMode, PersistedSubagentState, Session, Thread, ThreadState,
 };
 use crate::agent::submission::SubmissionResult;
 use crate::agent::{load_thread_runtime, mutate_thread_runtime};
+use crate::channels::web::types::SseEvent;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::context::post_compaction::{
@@ -1459,10 +1460,16 @@ impl Agent {
         }
 
         // Start the turn and get messages
-        let hide_from_ui = message
+        let hide_user_input_from_ui = message
             .metadata
-            .get("hide_from_webui_chat")
+            .get("hide_user_input_from_webui_chat")
             .and_then(|value| value.as_bool())
+            .or_else(|| {
+                message
+                    .metadata
+                    .get("hide_from_webui_chat")
+                    .and_then(|value| value.as_bool())
+            })
             .unwrap_or(false);
         let mut turn_messages = {
             let mut sess = session.lock().await;
@@ -1470,7 +1477,7 @@ impl Agent {
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-            thread.start_turn_with_visibility(content, hide_from_ui);
+            thread.start_turn_with_visibility(content, hide_user_input_from_ui);
             thread.messages()
         };
 
@@ -1688,6 +1695,21 @@ impl Agent {
     ///
     /// This ensures the user message is durable even if the process crashes
     /// mid-response. Call this right after `thread.start_turn()`.
+    fn emit_conversation_sync_event(
+        &self,
+        thread_id: Uuid,
+        reason: &'static str,
+        channel: Option<&str>,
+    ) {
+        if let Some(ref sender) = self.deps.sse_sender {
+            let _ = sender.send(SseEvent::ConversationUpdated {
+                thread_id: thread_id.to_string(),
+                reason: reason.to_string(),
+                channel: channel.map(str::to_string),
+            });
+        }
+    }
+
     pub(super) async fn persist_user_message(
         &self,
         thread_id: Uuid,
@@ -1732,6 +1754,7 @@ impl Agent {
             None,
         )
         .await;
+        self.emit_conversation_sync_event(thread_id, "user_message", Some(&message.channel));
     }
 
     /// Persist the assistant response to the DB after the agentic loop completes.
@@ -1789,6 +1812,7 @@ impl Agent {
             )),
         )
         .await;
+        self.emit_conversation_sync_event(thread_id, "assistant_response", Some(&message.channel));
     }
 
     pub(super) async fn process_undo(
@@ -2331,21 +2355,20 @@ impl Agent {
                 }
             }
 
-            // If tool_auth returned awaiting_token, enter auth mode and
+            // If tool auth returned an auth-required state, enter auth mode when needed and
             // return instructions directly (skip agentic loop continuation).
-            if let Some((ext_name, instructions)) =
-                check_auth_required(&pending.tool_name, &tool_result)
-            {
+            if let Some(auth_request) = check_auth_required(&pending.tool_name, &tool_result) {
                 self.handle_auth_intercept(
                     &session,
                     thread_id,
                     message,
                     &tool_result,
-                    ext_name,
-                    instructions.clone(),
+                    auth_request.extension_name,
+                    auth_request.instructions.clone(),
+                    auth_request.auth_mode,
                 )
                 .await;
-                return Ok(SubmissionResult::response(instructions));
+                return Ok(SubmissionResult::response(auth_request.instructions));
             }
 
             // Add tool result to context
@@ -2625,19 +2648,19 @@ impl Agent {
 
                 // Auth detection — defer return until all results are recorded
                 if deferred_auth.is_none()
-                    && let Some((ext_name, instructions)) =
-                        check_auth_required(&tc.name, &deferred_result)
+                    && let Some(auth_request) = check_auth_required(&tc.name, &deferred_result)
                 {
                     self.handle_auth_intercept(
                         &session,
                         thread_id,
                         message,
                         &deferred_result,
-                        ext_name,
-                        instructions.clone(),
+                        auth_request.extension_name,
+                        auth_request.instructions.clone(),
+                        auth_request.auth_mode,
                     )
                     .await;
-                    deferred_auth = Some(instructions);
+                    deferred_auth = Some(auth_request.instructions);
                 }
 
                 let deferred_content = match deferred_result {
@@ -2858,13 +2881,14 @@ impl Agent {
         tool_result: &Result<String, Error>,
         ext_name: String,
         instructions: String,
+        auth_mode: PendingAuthMode,
     ) {
         let auth_data = parse_auth_result(tool_result);
         let thread_snapshot = {
             let mut sess = session.lock().await;
             let session_id = sess.id;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.enter_auth_mode(ext_name.clone());
+                thread.enter_auth_mode(ext_name.clone(), auth_mode);
                 thread.complete_turn(&instructions);
                 let turn_number = thread.turn_number();
                 // User message already persisted at turn start; save auth instructions
@@ -2895,6 +2919,16 @@ impl Agent {
                     instructions: Some(instructions.clone()),
                     auth_url: auth_data.auth_url,
                     setup_url: auth_data.setup_url,
+                    auth_mode: auth_data.auth_mode.unwrap_or_else(|| match auth_mode {
+                        PendingAuthMode::ManualToken => "manual_token".to_string(),
+                        PendingAuthMode::ExternalOAuth => "oauth".to_string(),
+                    }),
+                    auth_status: auth_data
+                        .auth_status
+                        .unwrap_or_else(|| "awaiting_token".to_string()),
+                    shared_auth_provider: auth_data.shared_auth_provider,
+                    missing_scopes: auth_data.missing_scopes,
+                    thread_id: Some(thread_id.to_string()),
                 },
                 &message.metadata,
             )
@@ -2964,6 +2998,11 @@ impl Agent {
                                     extension_name: pending.extension_name.clone(),
                                     success: true,
                                     message: msg.clone(),
+                                    auth_mode: Some("manual_token".to_string()),
+                                    auth_status: Some("authenticated".to_string()),
+                                    shared_auth_provider: result.shared_auth_provider.clone(),
+                                    missing_scopes: result.missing_scopes.clone(),
+                                    thread_id: Some(thread_id.to_string()),
                                 },
                                 &message.metadata,
                             )
@@ -2989,6 +3028,11 @@ impl Agent {
                                     extension_name: pending.extension_name.clone(),
                                     success: true,
                                     message: msg.clone(),
+                                    auth_mode: Some("manual_token".to_string()),
+                                    auth_status: Some("authenticated".to_string()),
+                                    shared_auth_provider: result.shared_auth_provider.clone(),
+                                    missing_scopes: result.missing_scopes.clone(),
+                                    thread_id: Some(thread_id.to_string()),
                                 },
                                 &message.metadata,
                             )
@@ -3002,7 +3046,7 @@ impl Agent {
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.enter_auth_mode(pending.extension_name.clone());
+                        thread.enter_auth_mode(pending.extension_name.clone(), pending.auth_mode);
                     }
                 }
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
@@ -3021,6 +3065,11 @@ impl Agent {
                             instructions: Some(msg.clone()),
                             auth_url: result.auth_url,
                             setup_url: result.setup_url,
+                            auth_mode: result.auth_mode.clone(),
+                            auth_status: result.auth_status.clone(),
+                            shared_auth_provider: result.shared_auth_provider.clone(),
+                            missing_scopes: result.missing_scopes.clone(),
+                            thread_id: Some(thread_id.to_string()),
                         },
                         &message.metadata,
                     )
@@ -3040,6 +3089,11 @@ impl Agent {
                             extension_name: pending.extension_name.clone(),
                             success: false,
                             message: msg.clone(),
+                            auth_mode: None,
+                            auth_status: None,
+                            shared_auth_provider: None,
+                            missing_scopes: Vec::new(),
+                            thread_id: Some(thread_id.to_string()),
                         },
                         &message.metadata,
                     )

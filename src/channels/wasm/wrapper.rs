@@ -840,6 +840,61 @@ impl WasmChannel {
         self.endpoints.read().await.clone()
     }
 
+    fn registered_endpoints_from_config(&self, config: &ChannelConfig) -> Vec<RegisteredEndpoint> {
+        let mut endpoints = Vec::new();
+
+        for endpoint in &config.http_endpoints {
+            if !self.capabilities.is_path_allowed(&endpoint.path) {
+                tracing::warn!(
+                    channel = %self.name,
+                    path = %endpoint.path,
+                    "HTTP endpoint path not allowed by capabilities"
+                );
+                continue;
+            }
+
+            endpoints.push(RegisteredEndpoint {
+                channel_name: self.name.clone(),
+                path: endpoint.path.clone(),
+                methods: endpoint.methods.clone(),
+                require_secret: endpoint.require_secret,
+            });
+        }
+
+        endpoints
+    }
+
+    async fn cache_channel_config(&self, config: &ChannelConfig) {
+        *self.channel_config.write().await = Some(config.clone());
+        *self.endpoints.write().await = self.registered_endpoints_from_config(config);
+    }
+
+    async fn ensure_on_start_config(
+        &self,
+        force_refresh: bool,
+    ) -> Result<ChannelConfig, WasmChannelError> {
+        if !force_refresh && let Some(existing) = self.channel_config.read().await.clone() {
+            return Ok(existing);
+        }
+
+        let config = self.call_on_start().await?;
+        self.cache_channel_config(&config).await;
+        Ok(config)
+    }
+
+    /// Prime and cache the on_start configuration without starting the channel.
+    ///
+    /// This lets the host register the actual webhook endpoints before the
+    /// HTTP server starts, while keeping `start()` idempotent.
+    pub async fn prime_on_start_config(&self) -> Result<ChannelConfig, WasmChannelError> {
+        self.ensure_on_start_config(false).await
+    }
+
+    /// Force a fresh on_start call and replace the cached config/endpoints.
+    pub async fn refresh_on_start_config(&self) -> Result<ChannelConfig, WasmChannelError> {
+        self.ensure_on_start_config(true).await
+    }
+
     /// Inject the workspace store as the reader into a capabilities clone.
     ///
     /// Ensures `workspace_read` capability is present with the store as its reader,
@@ -1342,11 +1397,12 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         // Prepare response data
         let message_id_str = message_id.to_string();
@@ -1406,8 +1462,12 @@ impl WasmChannel {
                     });
                 }
 
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                // Commit pending workspace writes to the persistent store
+                // so state mutations from on_respond survive restarts.
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
                 tracing::info!("on_respond WASM execution completed successfully");
                 Ok(((), host_state))
             })
@@ -1455,11 +1515,12 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         let wit_update = status_to_wit(status, metadata);
 
@@ -1478,6 +1539,13 @@ impl WasmChannel {
                 channel_iface
                     .call_on_status(&mut store, &wit_update)
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
+
+                let mut host_state =
+                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                // Commit pending workspace writes to the persistent store
+                // so state mutations from on_status survive restarts.
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
 
                 Ok(())
             })
@@ -1516,6 +1584,7 @@ impl WasmChannel {
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
         credentials: &RwLock<HashMap<String, String>>,
+        workspace_store: &Arc<ChannelWorkspaceStore>,
         pairing_store: Arc<PairingStore>,
         timeout: Duration,
         wit_update: wit_channel::StatusUpdate,
@@ -1526,9 +1595,10 @@ impl WasmChannel {
 
         let runtime = Arc::clone(runtime);
         let prepared = Arc::clone(prepared);
-        let capabilities = capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(capabilities, workspace_store);
         let credentials_snapshot = credentials.read().await.clone();
         let channel_name_owned = channel_name.to_string();
+        let workspace_store = Arc::clone(workspace_store);
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
@@ -1545,6 +1615,13 @@ impl WasmChannel {
                 channel_iface
                     .call_on_status(&mut store, &wit_update)
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
+
+                let mut host_state =
+                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                // Commit pending workspace writes to the persistent store for
+                // background typing/status callbacks.
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
 
                 Ok(())
             })
@@ -1626,6 +1703,7 @@ impl WasmChannel {
                 let prepared = Arc::clone(&self.prepared);
                 let capabilities = self.capabilities.clone();
                 let credentials = self.credentials.clone();
+                let workspace_store = self.workspace_store.clone();
                 let pairing_store = self.pairing_store.clone();
                 let callback_timeout = self.runtime.config().callback_timeout;
                 let wit_update = status_to_wit(&status, metadata);
@@ -1646,6 +1724,7 @@ impl WasmChannel {
                             &prepared,
                             &capabilities,
                             &credentials,
+                            &workspace_store,
                             pairing_store.clone(),
                             callback_timeout,
                             wit_update_clone,
@@ -2825,39 +2904,14 @@ impl Channel for WasmChannel {
         let (shutdown_tx, _shutdown_rx) = oneshot::channel();
         *self.shutdown_tx.write().await = Some(shutdown_tx);
 
-        // Call on_start to get configuration
-        let config = self
-            .call_on_start()
-            .await
-            .map_err(|e| ChannelError::StartupFailed {
-                name: self.name.clone(),
-                reason: e.to_string(),
-            })?;
-
-        // Store the config
-        *self.channel_config.write().await = Some(config.clone());
-
-        // Register HTTP endpoints
-        let mut endpoints = Vec::new();
-        for endpoint in &config.http_endpoints {
-            // Validate path is allowed
-            if !self.capabilities.is_path_allowed(&endpoint.path) {
-                tracing::warn!(
-                    channel = %self.name,
-                    path = %endpoint.path,
-                    "HTTP endpoint path not allowed by capabilities"
-                );
-                continue;
-            }
-
-            endpoints.push(RegisteredEndpoint {
-                channel_name: self.name.clone(),
-                path: endpoint.path.clone(),
-                methods: endpoint.methods.clone(),
-                require_secret: endpoint.require_secret,
-            });
-        }
-        *self.endpoints.write().await = endpoints;
+        // Call on_start to get configuration, unless we already primed it.
+        let config =
+            self.ensure_on_start_config(false)
+                .await
+                .map_err(|e| ChannelError::StartupFailed {
+                    name: self.name.clone(),
+                    reason: e.to_string(),
+                })?;
 
         // Start polling if configured
         if let Some(poll_config) = &config.poll
@@ -2918,11 +2972,12 @@ impl Channel for WasmChannel {
             }
         }
 
-        // Call WASM on_respond
-        // IMPORTANT: Use the ORIGINAL message's metadata, not the response's metadata.
-        // The original metadata contains channel-specific routing info (e.g., Telegram chat_id)
-        // that the WASM channel needs to send the reply to the correct destination.
-        let metadata_json = serde_json::to_string(&msg.metadata).unwrap_or_default();
+        // Merge original routing metadata with any response-specific overrides.
+        // Response metadata wins on conflicts, and outbound attachments are
+        // tunneled through `response_attachments` for WASM channels.
+        let metadata_json =
+            serde_json::to_string(&merged_response_metadata(&msg.metadata, &response))
+                .unwrap_or_default();
         self.call_on_respond(
             msg.id,
             &response.content,
@@ -3308,6 +3363,41 @@ impl Channel for WasmChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        if self.name == "whatsapp" {
+            let metadata = merged_response_metadata(&serde_json::Value::Null, &response);
+            let has_route = metadata
+                .get("phone_number_id")
+                .and_then(|value| value.as_str())
+                .is_some()
+                && metadata
+                    .get("recipient_phone")
+                    .and_then(|value| value.as_str())
+                    .is_some();
+
+            if has_route {
+                let metadata_json = serde_json::to_string(&metadata).unwrap_or_default();
+                return self
+                    .call_on_respond(
+                        uuid::Uuid::new_v4(),
+                        &response.content,
+                        response.thread_id.as_deref(),
+                        &metadata_json,
+                    )
+                    .await
+                    .map_err(|e| ChannelError::SendFailed {
+                        name: self.name.clone(),
+                        reason: format!("broadcast via on_respond: {}", e),
+                    });
+            }
+
+            tracing::warn!(
+                channel = %self.name,
+                user_id = %user_id,
+                "WASM broadcast: WhatsApp requires explicit route metadata"
+            );
+            return Ok(());
+        }
+
         // For WASM channels, broadcast routes through on_respond with a
         // synthetic metadata containing the user_id as the chat_id.
         // This works because on_respond just needs chat_id to know where
@@ -3335,13 +3425,15 @@ impl Channel for WasmChannel {
 
         // Build minimal metadata that on_respond can parse.
         // message_id=0 means "don't reply to a specific message".
-        let metadata = serde_json::json!({
+        let base_metadata = serde_json::json!({
             "chat_id": chat_id,
             "message_id": 0,
             "user_id": chat_id,
             "is_private": true,
         });
-        let metadata_json = serde_json::to_string(&metadata).unwrap_or_default();
+        let metadata_json =
+            serde_json::to_string(&merged_response_metadata(&base_metadata, &response))
+                .unwrap_or_default();
 
         tracing::info!(
             channel = %self.name,
@@ -3666,6 +3758,7 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             instructions,
             auth_url,
             setup_url,
+            ..
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::AuthRequired,
             message: {
@@ -3689,6 +3782,7 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             extension_name,
             success,
             message,
+            ..
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::AuthCompleted,
             message: format!(
@@ -3833,6 +3927,61 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+fn metadata_object(
+    value: &serde_json::Value,
+    fallback_key: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => map.clone(),
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert(fallback_key.to_string(), other.clone());
+            map
+        }
+    }
+}
+
+fn serialize_response_attachments(
+    attachments: &[crate::media::MediaContent],
+) -> Option<serde_json::Value> {
+    if attachments.is_empty() {
+        return None;
+    }
+
+    use base64::Engine;
+
+    Some(serde_json::Value::Array(
+        attachments
+            .iter()
+            .map(|attachment| {
+                serde_json::json!({
+                    "mime_type": attachment.mime_type,
+                    "filename": attachment.filename,
+                    "data": base64::engine::general_purpose::STANDARD.encode(&attachment.data),
+                })
+            })
+            .collect(),
+    ))
+}
+
+fn merged_response_metadata(
+    original_metadata: &serde_json::Value,
+    response: &OutgoingResponse,
+) -> serde_json::Value {
+    let mut merged = metadata_object(original_metadata, "original_metadata");
+
+    for (key, value) in metadata_object(&response.metadata, "response_metadata") {
+        merged.insert(key, value);
+    }
+
+    if let Some(serialized_attachments) = serialize_response_attachments(&response.attachments) {
+        merged.insert("response_attachments".to_string(), serialized_attachments);
+    }
+
+    serde_json::Value::Object(merged)
+}
+
 impl HttpResponse {
     /// Create an OK response.
     pub fn ok() -> Self {
@@ -3869,6 +4018,7 @@ impl HttpResponse {
 mod tests {
     use std::sync::Arc;
 
+    use super::merged_response_metadata;
     use crate::channels::Channel;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::runtime::{
@@ -4653,6 +4803,11 @@ mod tests {
                 instructions: Some("Paste your token".to_string()),
                 auth_url: Some("https://example.com/auth".to_string()),
                 setup_url: None,
+                auth_mode: "manual_token".to_string(),
+                auth_status: "awaiting_token".to_string(),
+                shared_auth_provider: None,
+                missing_scopes: Vec::new(),
+                thread_id: None,
             },
             &metadata,
         );
@@ -4800,6 +4955,11 @@ mod tests {
                 extension_name: "weather".to_string(),
                 success: true,
                 message: "Token saved".to_string(),
+                auth_mode: Some("manual_token".to_string()),
+                auth_status: Some("authenticated".to_string()),
+                shared_auth_provider: None,
+                missing_scopes: Vec::new(),
+                thread_id: None,
             },
             &metadata,
         );
@@ -4822,6 +4982,11 @@ mod tests {
                 extension_name: "weather".to_string(),
                 success: false,
                 message: "Invalid token".to_string(),
+                auth_mode: None,
+                auth_status: None,
+                shared_auth_provider: None,
+                missing_scopes: Vec::new(),
+                thread_id: None,
             },
             &metadata,
         );
@@ -5121,6 +5286,36 @@ mod tests {
         );
 
         assert!(reason.is_none());
+    }
+
+    #[test]
+    fn test_merged_response_metadata_overrides_and_includes_attachments() {
+        let original = serde_json::json!({
+            "chat_id": 42,
+            "message_id": "orig",
+            "keep": true,
+        });
+        let response = crate::channels::OutgoingResponse {
+            content: "hello".to_string(),
+            thread_id: None,
+            metadata: serde_json::json!({
+                "message_id": "override",
+                "extra": "value",
+            }),
+            attachments: vec![
+                crate::media::MediaContent::new(vec![1, 2, 3], "image/png")
+                    .with_filename("reply.png"),
+            ],
+        };
+
+        let merged = merged_response_metadata(&original, &response);
+
+        assert_eq!(merged["chat_id"], 42);
+        assert_eq!(merged["message_id"], "override");
+        assert_eq!(merged["extra"], "value");
+        assert_eq!(merged["response_attachments"][0]["mime_type"], "image/png");
+        assert_eq!(merged["response_attachments"][0]["filename"], "reply.png");
+        assert_eq!(merged["response_attachments"][0]["data"], "AQID");
     }
 
     /// Verify that WASM HTTP host functions work using a dedicated

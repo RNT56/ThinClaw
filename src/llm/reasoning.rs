@@ -14,7 +14,7 @@ use crate::llm::usage_tracking::mark_reasoning_request;
 use crate::llm::{
     ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
 };
-use crate::safety::SafetyLayer;
+use crate::safety::{SafetyLayer, sanitize_context_content};
 
 // Response cleaning and tag stripping
 pub use super::reasoning_tags::{
@@ -24,6 +24,24 @@ pub use super::reasoning_tags::{
 /// Token the agent returns when it has nothing to say (e.g. in group chats).
 /// The dispatcher should check for this and suppress the message.
 pub const SILENT_REPLY_TOKEN: &str = "NO_REPLY";
+
+fn fallback_home_soul_prompt() -> Option<String> {
+    let home_soul = crate::identity::soul_store::read_home_soul().ok()?;
+    if home_soul.trim().is_empty() {
+        return None;
+    }
+    let (cleaned, warnings) = sanitize_context_content(&home_soul);
+    for warning in warnings {
+        tracing::warn!(
+            pattern = %warning.pattern,
+            matched = %warning.matched,
+            "Suspicious home SOUL.md content detected during prompt assembly fallback"
+        );
+    }
+    Some(crate::identity::soul::render_canonical_prompt_block(
+        &cleaned,
+    ))
+}
 
 /// Check if a response is a silent reply (the agent has nothing to say).
 ///
@@ -641,8 +659,9 @@ impl Reasoning {
 
     /// Set a custom system prompt from workspace identity files.
     ///
-    /// This is typically loaded from workspace.system_prompt() which combines
-    /// AGENTS.md, SOUL.md, USER.md, and IDENTITY.md into a unified prompt.
+    /// This is typically loaded from workspace.system_prompt(), which combines
+    /// the canonical home soul, any explicit SOUL.local.md overlay, AGENTS.md,
+    /// USER.md, and IDENTITY.md into a unified prompt.
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         if !prompt.is_empty() {
             self.workspace_system_prompt = Some(prompt);
@@ -1637,6 +1656,11 @@ Respond with a JSON plan in this format:
                 Some(overlay) => format!("{id}\n\n---\n\n{overlay}"),
                 None => id.clone(),
             }
+        } else if let Some(home_soul) = fallback_home_soul_prompt() {
+            match &self.personality_overlay {
+                Some(overlay) => format!("{home_soul}\n\n---\n\n{overlay}"),
+                None => home_soul,
+            }
         } else if let Some(ref overlay) = self.personality_overlay {
             overlay.clone()
         } else {
@@ -1658,12 +1682,12 @@ Respond with a JSON plan in this format:
         );
         stack.push_section(
             "Memory",
-            "After meaningful interactions, proactively save important learnings to your daily log via `memory_write` (target: \"daily_log\").\nWrite decisions, preferences, facts learned, lessons, and anything worth remembering. Don't ask — just write it.\nFor identity/personality updates to SOUL.md, USER.md, or AGENTS.md, use `prompt_manage`.\nUse `memory_write` for MEMORY.md, daily logs, HEARTBEAT.md, and IDENTITY.md.",
+            "After meaningful interactions, proactively save important learnings to your daily log via `memory_write` (target: \"daily_log\").\nWrite decisions, preferences, facts learned, lessons, and anything worth remembering. Don't ask — just write it.\nFor identity/personality updates to SOUL.md, SOUL.local.md, USER.md, or AGENTS.md, use `prompt_manage`.\nUse `memory_write` for MEMORY.md, daily logs, HEARTBEAT.md, and IDENTITY.md.",
         );
         stack.push_section(
             "Safety",
             format!(
-                "- Don't exfiltrate private data. Ever.\n- Don't run destructive commands without asking.\n- Use `memory_write` for routine memory updates.\n- Use `prompt_manage` for SOUL.md / AGENTS.md / USER.md updates, and follow approval policy when required.\n- You have no independent goals beyond the user's request.{extensions_section}{workspace_section}{model_guidance_section}{channel_section}{runtime_section}{group_section}"
+                "- Don't exfiltrate private data. Ever.\n- Don't run destructive commands without asking.\n- Use `memory_write` for routine memory updates.\n- Use `prompt_manage` for SOUL.md / SOUL.local.md / AGENTS.md / USER.md updates, and follow approval policy when required.\n- You have no independent goals beyond the user's request.{extensions_section}{workspace_section}{model_guidance_section}{channel_section}{runtime_section}{group_section}"
             ),
         );
         stack.push_section("Project Context", identity);
@@ -1794,7 +1818,7 @@ Respond with a JSON plan in this format:
                     "discord" => "- **discord**: Discord bot (receives messages via gateway)".to_string(),
                     "slack" => "- **slack**: Slack bot (receives messages via events API)".to_string(),
                     "signal" => "- **signal**: Signal messenger (receives messages via signal-cli)".to_string(),
-                    "nostr" => "- **nostr**: Nostr protocol (NIP-04 encrypted DMs)".to_string(),
+                    "nostr" => "- **nostr**: Nostr owner DMs plus social actions (NIP-04 and Gift Wrap DMs)".to_string(),
                     "gateway" => "- **gateway**: Web UI chat interface".to_string(),
                     "repl" => "- **repl**: CLI/TUI terminal interface".to_string(),
                     "http" => "- **http**: HTTP webhook endpoint".to_string(),
@@ -2349,10 +2373,53 @@ mod tests {
         let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
 
         assert!(prompt.contains(
-            "For identity/personality updates to SOUL.md, USER.md, or AGENTS.md, use `prompt_manage`."
+            "For identity/personality updates to SOUL.md, SOUL.local.md, USER.md, or AGENTS.md, use `prompt_manage`."
         ));
-        assert!(prompt.contains("Use `prompt_manage` for SOUL.md / AGENTS.md / USER.md updates"));
+        assert!(prompt.contains(
+            "Use `prompt_manage` for SOUL.md / SOUL.local.md / AGENTS.md / USER.md updates"
+        ));
         assert!(!prompt.contains("For memory/identity writes (`memory_write`), just do it"));
+    }
+
+    #[test]
+    fn conversation_prompt_falls_back_to_home_soul_without_workspace_prompt() {
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let previous_home = std::env::var_os("THINCLAW_HOME");
+        unsafe {
+            std::env::set_var("THINCLAW_HOME", temp_home.path());
+        }
+        crate::identity::soul_store::write_home_soul(
+            &crate::identity::soul::compose_seeded_soul("balanced").expect("seeded soul"),
+        )
+        .expect("write home soul");
+
+        let reasoning = Reasoning::new(
+            Arc::new(StubLlm::new("done")),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        );
+
+        let prompt = reasoning.build_conversation_prompt(&ReasoningContext::new());
+        assert!(prompt.contains("## Soul"));
+        assert!(prompt.contains("Full canonical soul: `memory_read SOUL.md`"));
+
+        if let Some(previous_home) = previous_home {
+            unsafe {
+                std::env::set_var("THINCLAW_HOME", previous_home);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("THINCLAW_HOME");
+            }
+        }
     }
 
     #[test]

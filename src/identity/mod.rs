@@ -3,6 +3,9 @@
 //! This module provides a lightweight ingress-layer resolver that normalizes
 //! channel-native sender and conversation metadata into stable internal IDs.
 
+pub mod soul;
+pub mod soul_store;
+
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;

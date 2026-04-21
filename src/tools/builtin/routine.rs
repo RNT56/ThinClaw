@@ -169,6 +169,7 @@ impl Tool for RoutineCreateTool {
             "webhook" => Trigger::Webhook {
                 path: None,
                 secret: None,
+                allow_unsigned_webhook: false,
             },
             "manual" => Trigger::Manual,
             "system_event" => {

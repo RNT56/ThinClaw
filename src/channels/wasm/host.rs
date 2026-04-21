@@ -393,6 +393,8 @@ pub struct ChannelWorkspaceStore {
 }
 
 impl ChannelWorkspaceStore {
+    const MANAGED_PRIVATE_TOPICS_SUFFIX: &str = "/state/managed_private_topics";
+
     /// Create a new empty workspace store (in-memory only, no disk persistence).
     #[allow(dead_code)] // Used by tests in wrapper.rs and host.rs
     pub fn new() -> Self {
@@ -479,7 +481,18 @@ impl ChannelWorkspaceStore {
                     content_len = write.content.len(),
                     "Committing workspace write to channel store"
                 );
-                data.insert(write.path.clone(), write.content.clone());
+
+                if Self::is_managed_private_topics_path(&write.path) {
+                    let merged = data
+                        .get(&write.path)
+                        .map(|existing| {
+                            Self::merge_managed_private_topic_registry(existing, &write.content)
+                        })
+                        .unwrap_or_else(|| write.content.clone());
+                    data.insert(write.path.clone(), merged);
+                } else {
+                    data.insert(write.path.clone(), write.content.clone());
+                }
             }
 
             // Only clone for flush if persistence is configured
@@ -494,6 +507,42 @@ impl ChannelWorkspaceStore {
         // Flush to disk outside the data lock
         if let (Some(snapshot), Some(persist_path)) = (snapshot, &self.persist_path) {
             self.flush_if_changed(persist_path, &snapshot);
+        }
+    }
+
+    fn is_managed_private_topics_path(path: &str) -> bool {
+        path.ends_with(Self::MANAGED_PRIVATE_TOPICS_SUFFIX)
+    }
+
+    fn merge_managed_private_topic_registry(existing: &str, incoming: &str) -> String {
+        let existing_json = match serde_json::from_str::<serde_json::Value>(existing) {
+            Ok(value) => value,
+            Err(_) => return incoming.to_string(),
+        };
+        let incoming_json = match serde_json::from_str::<serde_json::Value>(incoming) {
+            Ok(value) => value,
+            Err(_) => return incoming.to_string(),
+        };
+
+        let mut merged = existing_json;
+        Self::merge_json_in_place(&mut merged, incoming_json);
+        serde_json::to_string(&merged).unwrap_or_else(|_| incoming.to_string())
+    }
+
+    fn merge_json_in_place(base: &mut serde_json::Value, incoming: serde_json::Value) {
+        match (base, incoming) {
+            (serde_json::Value::Object(base_map), serde_json::Value::Object(incoming_map)) => {
+                for (key, value) in incoming_map {
+                    if let Some(existing_value) = base_map.get_mut(&key) {
+                        Self::merge_json_in_place(existing_value, value);
+                    } else {
+                        base_map.insert(key, value);
+                    }
+                }
+            }
+            (slot, value) => {
+                *slot = value;
+            }
         }
     }
 
@@ -913,6 +962,75 @@ mod tests {
         assert_ne!(
             mtime_after_first, mtime_after_third,
             "Changed content should update the file"
+        );
+    }
+
+    #[test]
+    fn test_channel_workspace_store_merges_managed_private_topic_registry_updates() {
+        use crate::channels::wasm::host::{ChannelWorkspaceStore, PendingWorkspaceWrite};
+        use crate::tools::wasm::WorkspaceReader;
+
+        let store = ChannelWorkspaceStore::new();
+        let path = "channels/telegram/state/managed_private_topics".to_string();
+
+        store.commit_writes(&[PendingWorkspaceWrite {
+            path: path.clone(),
+            content: r#"{"chats":{"123":{"onboarding_thread_id":61419}}}"#.to_string(),
+        }]);
+
+        store.commit_writes(&[PendingWorkspaceWrite {
+            path: path.clone(),
+            content: r#"{"chats":{"123":{"general_thread_id":7}}}"#.to_string(),
+        }]);
+
+        let raw = store
+            .read(&path)
+            .expect("managed topic registry should be present");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).expect("managed topic registry should be valid JSON");
+
+        assert_eq!(
+            parsed["chats"]["123"]["onboarding_thread_id"],
+            serde_json::json!(61419)
+        );
+        assert_eq!(
+            parsed["chats"]["123"]["general_thread_id"],
+            serde_json::json!(7)
+        );
+    }
+
+    #[test]
+    fn test_channel_workspace_store_merge_preserves_explicit_null_override() {
+        use crate::channels::wasm::host::{ChannelWorkspaceStore, PendingWorkspaceWrite};
+        use crate::tools::wasm::WorkspaceReader;
+
+        let store = ChannelWorkspaceStore::new();
+        let path = "channels/telegram/state/managed_private_topics".to_string();
+
+        store.commit_writes(&[PendingWorkspaceWrite {
+            path: path.clone(),
+            content: r#"{"chats":{"123":{"onboarding_thread_id":61419,"general_thread_id":7}}}"#
+                .to_string(),
+        }]);
+
+        store.commit_writes(&[PendingWorkspaceWrite {
+            path: path.clone(),
+            content: r#"{"chats":{"123":{"general_thread_id":null}}}"#.to_string(),
+        }]);
+
+        let raw = store
+            .read(&path)
+            .expect("managed topic registry should be present");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).expect("managed topic registry should be valid JSON");
+
+        assert_eq!(
+            parsed["chats"]["123"]["onboarding_thread_id"],
+            serde_json::json!(61419)
+        );
+        assert_eq!(
+            parsed["chats"]["123"]["general_thread_id"],
+            serde_json::Value::Null
         );
     }
 }

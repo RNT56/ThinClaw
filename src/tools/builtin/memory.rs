@@ -38,7 +38,7 @@ const DELETE_PROTECTED_FILES: &[&str] = &[paths::IDENTITY];
 /// Files the agent may FULLY REWRITE (replace entire content, append: false).
 ///
 /// IDENTITY.md remains writable through memory_write because prompt_manage
-/// intentionally excludes it in V1.
+/// intentionally excludes it.
 const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] = &[paths::IDENTITY];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -594,7 +594,7 @@ impl Tool for MemoryWriteTool {
          Use for facts, decisions, preferences, or lessons to remember across sessions. \
          Targets: 'memory' (MEMORY.md, long-term facts), 'daily_log' (timestamped notes), \
          'heartbeat' (HEARTBEAT.md checklist), and 'IDENTITY.md'. \
-         For SOUL.md / AGENTS.md / USER.md use prompt_manage instead of memory_write. \
+         For SOUL.md / SOUL.local.md / AGENTS.md / USER.md use prompt_manage instead of memory_write. \
          or a custom path. In direct DMs, memory/user/profile writes default to the actor overlay; \
          prefix with 'shared:' to force the household root. \
          ALWAYS write well-structured markdown: use ## headers for sections, bullet points, \
@@ -662,8 +662,8 @@ impl Tool for MemoryWriteTool {
             if !append {
                 return Err(ToolError::NotAuthorized(format!(
                     "'{}' is append-only. Add an '## Update' section with your changes \
-                     instead of overwriting. To fully restructure SOUL.md / AGENTS.md / \
-                     USER.md, use those targets with append: false.",
+                     instead of overwriting. To fully restructure SOUL.md / SOUL.local.md / \
+                     AGENTS.md / USER.md, use prompt_manage instead.",
                     target,
                 )));
             }
@@ -681,8 +681,8 @@ impl Tool for MemoryWriteTool {
             return Ok(ToolOutput::success(output, start.elapsed()));
         }
 
-        // SOUL.md / AGENTS.md / USER.md must be mutated through prompt_manage.
-        if [paths::SOUL, paths::AGENTS, paths::USER]
+        // SOUL.md / SOUL.local.md / AGENTS.md / USER.md must be mutated through prompt_manage.
+        if [paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER]
             .iter()
             .any(|p| file_name.eq_ignore_ascii_case(p))
         {
@@ -852,11 +852,7 @@ impl Tool for MemoryReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file from the workspace memory (database-backed storage). \
-         Use this to read files shown by memory_tree. NOT for local filesystem files \
-         (use read_file for those). Works with identity files, heartbeat checklist, \
-         memory, daily logs, or any custom workspace path. \
-         Returns empty content (not an error) if the file does not exist yet."
+        "Read a durable ThinClaw memory file. `SOUL.md` reads the canonical home soul in THINCLAW_HOME; `SOUL.local.md` and other files read workspace memory. Returns empty content (not an error) if the file does not exist yet."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -895,6 +891,55 @@ impl Tool for MemoryReadTool {
         let workspace = workspace_for_ctx(&self.workspace, ctx);
 
         let path = require_str(&params, "path")?;
+
+        if path.eq_ignore_ascii_case(paths::SOUL) {
+            let content = match crate::identity::soul_store::read_home_soul() {
+                Ok(content) => content,
+                Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
+                    let output = serde_json::json!({
+                        "path": path,
+                        "content": "",
+                        "word_count": 0,
+                        "exists": false,
+                    });
+                    return Ok(ToolOutput::success(output, start.elapsed()));
+                }
+                Err(e) => return Err(ToolError::ExecutionFailed(format!("Read failed: {}", e))),
+            };
+
+            let total_lines = content.lines().count();
+            let sliced = if params.get("start_line").is_some() || params.get("num_lines").is_some()
+            {
+                let start_line = params
+                    .get("start_line")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1)
+                    .max(1) as usize;
+                let num_lines = params
+                    .get("num_lines")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize);
+                let lines: Vec<&str> = content.lines().collect();
+                let from = (start_line - 1).min(lines.len());
+                let to = match num_lines {
+                    Some(n) => (from + n).min(lines.len()),
+                    None => lines.len(),
+                };
+                lines[from..to].join("\n")
+            } else {
+                content.clone()
+            };
+
+            let output = serde_json::json!({
+                "path": path,
+                "content": sliced,
+                "word_count": sliced.split_whitespace().count(),
+                "total_lines": total_lines,
+                "updated_at": serde_json::Value::Null,
+                "exists": true,
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
 
         // Graceful degradation: missing file → empty content, not an error.
         // Matches openclaw memory_get: { text: "", path } on ENOENT.
@@ -1116,7 +1161,7 @@ impl Tool for MemoryDeleteTool {
     fn description(&self) -> &str {
         "Delete a file from workspace memory (database-backed storage). \
          Cannot delete IDENTITY.md (append to it instead). \
-         SOUL.md / AGENTS.md / USER.md can be fully rewritten with prompt_manage \
+         SOUL.md / SOUL.local.md / AGENTS.md / USER.md can be fully rewritten with prompt_manage \
          rather than deleted. \
          Primary use-case: memory_delete('BOOTSTRAP.md') after the identity ritual completes."
     }
@@ -1144,28 +1189,55 @@ impl Tool for MemoryDeleteTool {
 
         let path = require_str(&params, "path")?;
 
-        // Only IDENTITY.md is delete-protected.
-        // SOUL/AGENTS/USER should be restructured with prompt_manage instead.
+        // IDENTITY.md is delete-protected.
+        // SOUL/SOUL.local/AGENTS/USER should be restructured with prompt_manage instead.
         let normalized = path.trim_start_matches('/');
+        if [paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER]
+            .iter()
+            .any(|p| normalized.eq_ignore_ascii_case(p))
+        {
+            return Err(ToolError::NotAuthorized(format!(
+                "'{}' cannot be deleted. Use prompt_manage to rewrite or refine prompt-managed identity files.",
+                path
+            )));
+        }
+
         if DELETE_PROTECTED_FILES
             .iter()
             .any(|p| normalized.eq_ignore_ascii_case(p))
         {
             return Err(ToolError::NotAuthorized(format!(
                 "'{}' cannot be deleted. Use memory_write to edit identity content. \
-                 To restructure SOUL.md / AGENTS.md / USER.md entirely, use \
+                 To restructure SOUL.md / SOUL.local.md / AGENTS.md / USER.md entirely, use \
                  prompt_manage instead of deleting.",
                 path
             )));
         }
 
-        workspace
-            .delete(path)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Delete failed: {}", e)))?;
-
-        // If BOOTSTRAP.md was deleted, notify the bridge to update frontend state.
         let is_bootstrap = normalized.eq_ignore_ascii_case(crate::workspace::paths::BOOTSTRAP);
+        if is_bootstrap {
+            // Keep a non-empty completion sentinel so workspace seeding does not
+            // recreate BOOTSTRAP.md on next startup.
+            workspace
+                .write(
+                    crate::workspace::paths::BOOTSTRAP,
+                    "<!-- bootstrap completed -->",
+                )
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!(
+                        "Failed to finalize BOOTSTRAP.md completion: {}",
+                        e
+                    ))
+                })?;
+        } else {
+            workspace
+                .delete(path)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("Delete failed: {}", e)))?;
+        }
+
+        // If BOOTSTRAP.md was completed, notify the bridge to update frontend state.
         if is_bootstrap && let Some(ref tx) = self.sse_sender {
             let _ = tx.send(crate::channels::web::types::SseEvent::BootstrapCompleted);
             tracing::info!("[memory_delete] Emitted BootstrapCompleted SSE event");

@@ -247,14 +247,25 @@ async fn report_complete(
     Path(job_id): Path<Uuid>,
     Json(report): Json<CompletionReport>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let status = report
+        .status
+        .clone()
+        .unwrap_or_else(|| if report.success { "completed" } else { "error" }.to_string());
+
     if report.success {
         tracing::info!(
             job_id = %job_id,
+            status = %status,
+            session_id = ?report.session_id,
+            iterations = report.iterations,
             "Worker reported job complete"
         );
     } else {
         tracing::warn!(
             job_id = %job_id,
+            status = %status,
+            session_id = ?report.session_id,
+            iterations = report.iterations,
             message = ?report.message,
             "Worker reported job failure"
         );
@@ -262,8 +273,11 @@ async fn report_complete(
 
     // Store the result and clean up the container
     let result = crate::orchestrator::job_manager::CompletionResult {
+        status,
+        session_id: report.session_id.clone(),
         success: report.success,
         message: report.message.clone(),
+        iterations: report.iterations,
     };
     if let Err(e) = state.job_manager.complete_job(job_id, result).await {
         tracing::error!(job_id = %job_id, "Failed to complete job cleanup: {}", e);
@@ -300,6 +314,13 @@ async fn job_event_handler(
 
     // Convert to SSE event and broadcast
     let job_id_str = job_id.to_string();
+    let render_value = |value: Option<&serde_json::Value>| -> String {
+        match value {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Null) | None => String::new(),
+            Some(other) => serde_json::to_string(other).unwrap_or_default(),
+        }
+    };
     let sse_event = match payload.event_type.as_str() {
         "message" => SseEvent::JobMessage {
             job_id: job_id_str,
@@ -338,27 +359,59 @@ async fn job_event_handler(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string(),
-            output: payload
+            output: render_value(
+                payload
+                    .data
+                    .get("output_text")
+                    .or_else(|| payload.data.get("output"))
+                    .or_else(|| payload.data.get("output_json")),
+            ),
+            output_text: payload
                 .data
-                .get("output")
+                .get("output_text")
+                .or_else(|| payload.data.get("output"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+                .map(str::to_string),
+            output_json: payload.data.get("output_json").cloned().or_else(|| {
+                payload
+                    .data
+                    .get("output")
+                    .filter(|value| !value.is_string())
+                    .cloned()
+            }),
         },
-        "result" => SseEvent::JobResult {
-            job_id: job_id_str,
-            status: payload
+        "result" => {
+            let status = payload
                 .data
                 .get("status")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
-                .to_string(),
-            session_id: payload
+                .to_string();
+            let success = payload
                 .data
-                .get("session_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-        },
+                .get("success")
+                .and_then(|value| value.as_bool())
+                .or_else(|| match status.as_str() {
+                    "completed" | "success" => Some(true),
+                    "failed" | "error" => Some(false),
+                    _ => None,
+                });
+            SseEvent::JobResult {
+                job_id: job_id_str,
+                status,
+                session_id: payload
+                    .data
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                success,
+                message: payload
+                    .data
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            }
+        }
         _ => SseEvent::JobStatus {
             job_id: job_id_str,
             message: payload

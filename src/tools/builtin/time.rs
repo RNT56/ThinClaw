@@ -10,21 +10,45 @@ use crate::tools::tool::{Tool, ToolError, ToolMetadata, ToolOutput, ToolRouteInt
 /// Tool for getting current time and date operations.
 pub struct TimeTool;
 
+struct ResolvedTimezone {
+    tz: Tz,
+    label: String,
+}
+
 fn resolve_requested_timezone(
     params: &serde_json::Value,
     ctx: &JobContext,
-) -> Result<Tz, ToolError> {
+) -> Result<ResolvedTimezone, ToolError> {
     match params.get("timezone").and_then(|value| value.as_str()) {
-        Some(raw) => crate::timezone::parse_timezone(raw).ok_or_else(|| {
-            ToolError::InvalidParameters(format!(
-                "invalid timezone '{}'; use an IANA timezone like 'Europe/Berlin'",
-                raw
-            ))
-        }),
-        None => Ok(crate::timezone::resolve_effective_timezone(
-            Some(&ctx.user_id),
-            None,
-        )),
+        Some(raw)
+            if raw.eq_ignore_ascii_case("local")
+                || raw.eq_ignore_ascii_case("user")
+                || raw.eq_ignore_ascii_case("default") =>
+        {
+            let tz = crate::timezone::resolve_effective_timezone(Some(&ctx.user_id), None);
+            Ok(ResolvedTimezone {
+                tz,
+                label: tz.to_string(),
+            })
+        }
+        Some(raw) => {
+            let tz = crate::timezone::parse_timezone(raw).ok_or_else(|| {
+                ToolError::InvalidParameters(format!(
+                    "invalid timezone '{}'; use an IANA timezone like 'Europe/Berlin' or a fixed offset like 'GMT+1'",
+                    raw
+                ))
+            })?;
+            let label =
+                crate::timezone::normalize_timezone_label(raw).unwrap_or_else(|| tz.to_string());
+            Ok(ResolvedTimezone { tz, label })
+        }
+        None => {
+            let tz = crate::timezone::resolve_effective_timezone(Some(&ctx.user_id), None);
+            Ok(ResolvedTimezone {
+                tz,
+                label: tz.to_string(),
+            })
+        }
     }
 }
 
@@ -71,7 +95,7 @@ impl Tool for TimeTool {
                 },
                 "timezone": {
                     "type": "string",
-                    "description": "Optional IANA timezone for now/parse/format operations (defaults to the user's effective timezone)"
+                    "description": "Optional timezone for now/parse/format operations. Accepts IANA names like 'Europe/Berlin', fixed offsets like 'GMT+1', or 'local' to use the current effective timezone."
                 }
             },
             "required": ["operation"]
@@ -93,14 +117,14 @@ impl Tool for TimeTool {
 
         let result = match operation {
             "now" => {
-                let tz = resolve_requested_timezone(&params, ctx)?;
+                let resolved = resolve_requested_timezone(&params, ctx)?;
                 let now = Utc::now();
-                let local = now.with_timezone(&tz);
+                let local = now.with_timezone(&resolved.tz);
                 serde_json::json!({
                     "iso": now.to_rfc3339(),
                     "unix": now.timestamp(),
                     "unix_millis": now.timestamp_millis(),
-                    "timezone": tz.to_string(),
+                    "timezone": resolved.label,
                     "local_iso": local.to_rfc3339(),
                     "local_date": local.format("%Y-%m-%d").to_string(),
                     "local_time": local.format("%H:%M:%S").to_string()
@@ -108,16 +132,16 @@ impl Tool for TimeTool {
             }
             "parse" => {
                 let timestamp = require_str(&params, "timestamp")?;
-                let tz = resolve_requested_timezone(&params, ctx)?;
+                let resolved = resolve_requested_timezone(&params, ctx)?;
                 let dt = parse_rfc3339_timestamp(timestamp, "timestamp")?;
                 let utc = dt.with_timezone(&Utc);
-                let local = dt.with_timezone(&tz);
+                let local = dt.with_timezone(&resolved.tz);
 
                 serde_json::json!({
                     "iso": utc.to_rfc3339(),
                     "unix": utc.timestamp(),
                     "unix_millis": utc.timestamp_millis(),
-                    "timezone": tz.to_string(),
+                    "timezone": resolved.label,
                     "local_iso": local.to_rfc3339(),
                     "offset_seconds": dt.offset().local_minus_utc()
                 })
@@ -125,13 +149,13 @@ impl Tool for TimeTool {
             "format" => {
                 let timestamp = require_str(&params, "timestamp")?;
                 let format = require_str(&params, "format")?;
-                let tz = resolve_requested_timezone(&params, ctx)?;
+                let resolved = resolve_requested_timezone(&params, ctx)?;
                 let dt = parse_rfc3339_timestamp(timestamp, "timestamp")?;
-                let local = dt.with_timezone(&tz);
+                let local = dt.with_timezone(&resolved.tz);
 
                 serde_json::json!({
                     "formatted": local.format(format).to_string(),
-                    "timezone": tz.to_string(),
+                    "timezone": resolved.label,
                     "local_iso": local.to_rfc3339(),
                     "iso": dt.with_timezone(&Utc).to_rfc3339()
                 })
@@ -166,5 +190,30 @@ impl Tool for TimeTool {
 
     fn requires_sanitization(&self) -> bool {
         false // Internal tool, no external data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_requested_timezone_accepts_gmt_offset_aliases() {
+        let ctx = JobContext::with_user("time-test", "chat", "time test");
+        let resolved = resolve_requested_timezone(&serde_json::json!({"timezone": "GMT+1"}), &ctx)
+            .expect("GMT+1 should resolve");
+        assert_eq!(
+            resolved.tz,
+            "Etc/GMT-1".parse::<Tz>().expect("valid test timezone")
+        );
+        assert_eq!(resolved.label, "GMT+1");
+    }
+
+    #[test]
+    fn resolve_requested_timezone_accepts_local_alias() {
+        let ctx = JobContext::with_user("time-test", "chat", "time test");
+        let resolved = resolve_requested_timezone(&serde_json::json!({"timezone": "local"}), &ctx)
+            .expect("local should resolve");
+        assert!(!resolved.label.is_empty());
     }
 }

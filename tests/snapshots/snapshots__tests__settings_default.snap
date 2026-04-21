@@ -63,6 +63,8 @@ expression: settings
     "slack_allow_from": null,
     "nostr_enabled": false,
     "nostr_relays": null,
+    "nostr_owner_pubkey": null,
+    "nostr_social_dm_enabled": false,
     "nostr_allow_from": null,
     "gmail_enabled": false,
     "gmail_project_id": null,
@@ -149,11 +151,11 @@ expression: settings
     "thinking_enabled": false,
     "thinking_budget_tokens": 10000,
     "auto_approve_tools": false,
+    "allow_local_tools": false,
+    "subagent_transparency_level": "balanced",
     "main_tool_profile": "standard",
     "worker_tool_profile": "restricted",
     "subagent_tool_profile": "explicit_only",
-    "allow_local_tools": false,
-    "subagent_transparency_level": "balanced",
     "workspace_mode": null,
     "model_guidance_enabled": true,
     "cli_skin": "cockpit",
@@ -247,7 +249,7 @@ expression: settings
       "user_correction_threshold": 1
     },
     "prompt_mutation": {
-      "enabled": false
+      "enabled": true
     },
     "providers": {
       "active": "none",

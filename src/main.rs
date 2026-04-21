@@ -18,7 +18,7 @@ use thinclaw::{
     app::{AppBuilder, AppBuilderFlags},
     channels::{
         ChannelManager, DiscordChannel, GatewayChannel, HttpChannel, NostrChannel, ReplChannel,
-        SignalChannel, WebhookServer, WebhookServerConfig,
+        SignalChannel, TuiChannel, WebhookServer, WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
     },
@@ -37,7 +37,7 @@ use thinclaw::channels::IMessageChannel;
 use thinclaw::channels::{BlueBubblesChannel, BlueBubblesConfig};
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-use thinclaw::setup::{SetupConfig, SetupWizard};
+use thinclaw::setup::{SetupConfig, SetupWizard, UiMode};
 
 use main_helpers::*;
 
@@ -75,9 +75,58 @@ fn relaunch_current_process() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeEntryMode {
+    Default,
+    Cli,
+    Tui,
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn runtime_entry_mode_from_ui_mode(ui_mode: UiMode) -> RuntimeEntryMode {
+    match ui_mode {
+        UiMode::Tui => RuntimeEntryMode::Tui,
+        UiMode::Cli | UiMode::Auto => RuntimeEntryMode::Cli,
+    }
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn setup_config_for_onboard_command(
+    skip_auth: bool,
+    channels_only: bool,
+    guide_topic: Option<thinclaw::setup::GuideTopic>,
+    ui_mode: UiMode,
+) -> SetupConfig {
+    SetupConfig {
+        skip_auth,
+        channels_only,
+        guide_topic,
+        ui_mode,
+        pause_after_completion: false,
+    }
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn setup_config_for_startup_onboarding(runtime_entry_mode: RuntimeEntryMode) -> SetupConfig {
+    let ui_mode = match runtime_entry_mode {
+        RuntimeEntryMode::Tui => UiMode::Tui,
+        RuntimeEntryMode::Cli => UiMode::Cli,
+        RuntimeEntryMode::Default => UiMode::Auto,
+    };
+
+    SetupConfig {
+        ui_mode,
+        ..SetupConfig::default()
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let mut runtime_entry_mode = match cli.command {
+        Some(Command::Tui) => RuntimeEntryMode::Tui,
+        _ => RuntimeEntryMode::Default,
+    };
 
     // Handle non-agent commands first (they don't need full setup)
     match &cli.command {
@@ -211,6 +260,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Onboard {
             skip_auth,
             channels_only,
+            guide,
             ui,
         }) => {
             let _ = dotenvy::dotenv();
@@ -218,20 +268,22 @@ async fn main() -> anyhow::Result<()> {
 
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
-                let config = SetupConfig {
-                    skip_auth: *skip_auth,
-                    channels_only: *channels_only,
-                    ui_mode: *ui,
-                };
+                let config =
+                    setup_config_for_onboard_command(*skip_auth, *channels_only, *guide, *ui);
                 let mut wizard = SetupWizard::with_config(config);
                 wizard.run().await?;
+                if wizard.should_continue_to_runtime() {
+                    runtime_entry_mode = runtime_entry_mode_from_ui_mode(wizard.runtime_ui_mode());
+                } else {
+                    return Ok(());
+                }
             }
             #[cfg(not(any(feature = "postgres", feature = "libsql")))]
             {
-                let _ = (skip_auth, channels_only, ui);
+                let _ = (skip_auth, channels_only, guide, ui);
                 eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
+                return Ok(());
             }
-            return Ok(());
         }
         Some(Command::Agents(agent_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -300,7 +352,7 @@ async fn main() -> anyhow::Result<()> {
             init_cli_tracing(cli.debug);
             return thinclaw::cli::run_update_command(update_cmd.clone()).await;
         }
-        None | Some(Command::Run) => {
+        None | Some(Command::Run) | Some(Command::Tui) => {
             // Continue to run agent
         }
     }
@@ -319,8 +371,10 @@ async fn main() -> anyhow::Result<()> {
     {
         println!("Onboarding needed: {}", reason);
         println!();
-        let mut wizard = SetupWizard::new();
+        let mut wizard =
+            SetupWizard::with_config(setup_config_for_startup_onboarding(runtime_entry_mode));
         wizard.run().await?;
+        runtime_entry_mode = runtime_entry_mode_from_ui_mode(wizard.runtime_ui_mode());
     }
 
     // Load initial config from env + disk + optional TOML (before DB is available)
@@ -339,12 +393,18 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
 
+    let local_runtime_requested = match runtime_entry_mode {
+        RuntimeEntryMode::Cli => true,
+        RuntimeEntryMode::Tui => false,
+        RuntimeEntryMode::Default => config.channels.cli.enabled,
+    };
+
     #[cfg_attr(not(feature = "repl"), allow(unused_mut))]
     let mut quiet_startup_spinner = if should_show_quiet_startup_spinner(
         cli.should_run_agent(),
         cli.debug,
         cli.message.is_some(),
-        config.channels.cli.enabled,
+        local_runtime_requested,
         std::env::var_os("RUST_LOG").is_some(),
         std::io::stdin().is_terminal(),
         std::io::stdout().is_terminal(),
@@ -557,6 +617,20 @@ async fn main() -> anyhow::Result<()> {
 
     let channels = Arc::new(ChannelManager::new());
     let mut channel_names: Vec<String> = Vec::new();
+    let mut nostr_channel: Option<NostrChannel> = None;
+    let mut nostr_runtime = None;
+
+    if let Some(ref nostr_config) = config.channels.nostr {
+        match NostrChannel::new(nostr_config.clone()) {
+            Ok(channel) => {
+                nostr_runtime = Some(channel.runtime());
+                nostr_channel = Some(channel);
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "Failed to initialize Nostr runtime");
+            }
+        }
+    }
     let mut loaded_wasm_channel_names: Vec<String> = Vec::new();
     #[allow(clippy::type_complexity)]
     let mut wasm_channel_runtime_state: Option<(
@@ -567,24 +641,33 @@ async fn main() -> anyhow::Result<()> {
         std::path::PathBuf,
     )> = None;
 
-    // Create CLI channel
-    let repl_channel = if let Some(ref msg) = cli.message {
-        Some(ReplChannel::with_message(msg.clone()))
-    } else if config.channels.cli.enabled {
-        let repl = ReplChannel::new();
-        repl.suppress_banner();
-        Some(repl)
+    if let Some(ref msg) = cli.message {
+        channels
+            .add(Box::new(ReplChannel::with_message(msg.clone())))
+            .await;
+        tracing::info!("Single message mode");
     } else {
-        None
-    };
-
-    if let Some(repl) = repl_channel {
-        channels.add(Box::new(repl)).await;
-        if cli.message.is_some() {
-            tracing::info!("Single message mode");
-        } else {
-            channel_names.push("repl".to_string());
-            tracing::info!("REPL mode enabled");
+        match runtime_entry_mode {
+            RuntimeEntryMode::Tui => {
+                channels.add(Box::new(TuiChannel::new())).await;
+                channel_names.push("tui".to_string());
+                tracing::info!("Full-screen TUI mode enabled");
+            }
+            RuntimeEntryMode::Cli => {
+                let repl = ReplChannel::new();
+                repl.suppress_banner();
+                channels.add(Box::new(repl)).await;
+                channel_names.push("repl".to_string());
+                tracing::info!("REPL mode enabled");
+            }
+            RuntimeEntryMode::Default if config.channels.cli.enabled => {
+                let repl = ReplChannel::new();
+                repl.suppress_banner();
+                channels.add(Box::new(repl)).await;
+                channel_names.push("repl".to_string());
+                tracing::info!("REPL mode enabled");
+            }
+            RuntimeEntryMode::Default => {}
         }
     }
 
@@ -640,22 +723,22 @@ async fn main() -> anyhow::Result<()> {
 
     // Add Nostr channel if configured and not CLI-only mode.
     if !cli.cli_only
+        && let Some(nostr_channel) = nostr_channel.take()
         && let Some(ref nostr_config) = config.channels.nostr
     {
-        match NostrChannel::new(nostr_config.clone()) {
-            Ok(nostr_channel) => {
-                channel_names.push("nostr".to_string());
-                channels.add(Box::new(nostr_channel)).await;
-                tracing::info!(relays = nostr_config.relays.len(), "Nostr channel enabled");
-                if nostr_config.allow_from.is_empty() {
-                    tracing::info!(
-                        "Nostr channel allow_from is empty — accepting messages from all senders."
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to initialize Nostr channel");
-            }
+        channel_names.push("nostr".to_string());
+        channels.add(Box::new(nostr_channel)).await;
+        tracing::info!(
+            relays = nostr_config.relays.len(),
+            owner_pubkey = ?nostr_config.owner_pubkey,
+            control_ready = nostr_config.owner_pubkey.is_some(),
+            social_dm_enabled = nostr_config.social_dm_enabled,
+            "Nostr channel enabled"
+        );
+        if nostr_config.owner_pubkey.is_none() {
+            tracing::warn!(
+                "Nostr channel has no owner pubkey configured — inbound commands are denied until NOSTR_OWNER_PUBKEY is set"
+            );
         }
     }
 
@@ -848,8 +931,8 @@ async fn main() -> anyhow::Result<()> {
     let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
         .is_empty()
     {
-        let addr =
-            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        let addr = webhook_server_addr
+            .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 8080)));
         if addr.ip().is_unspecified() {
             tracing::warn!(
                 "Webhook server is binding to {} — it will be reachable from all network interfaces. \
@@ -919,6 +1002,15 @@ async fn main() -> anyhow::Result<()> {
             })
         },
     )));
+
+    if let Some(runtime) = nostr_runtime {
+        components
+            .tools
+            .register_sync(Arc::new(thinclaw::tools::builtin::NostrActionsTool::new(
+                runtime,
+            )));
+        tracing::info!("Registered nostr_actions tool");
+    }
 
     // NOTE: bootstrap_hooks() is already called inside AppBuilder::build_all()
     // (app.rs). Do NOT call it again here — that would double-register bundled
@@ -1026,14 +1118,17 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        let gateway_token_url = format!(
+            "http://{}:{}/?token={}",
+            gw_config.host,
+            gw_config.port,
+            gw.auth_token()
+        );
+        thinclaw::tui::set_runtime_gateway_url_override(Some(gateway_token_url.clone()));
+
         #[cfg(feature = "repl")]
         {
-            gateway_url = Some(format!(
-                "http://{}:{}/?token={}",
-                gw_config.host,
-                gw_config.port,
-                gw.auth_token()
-            ));
+            gateway_url = Some(gateway_token_url);
         }
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
@@ -1051,7 +1146,10 @@ async fn main() -> anyhow::Result<()> {
     // ── Boot screen ────────────────────────────────────────────────────
 
     #[cfg(feature = "repl")]
-    if config.channels.cli.enabled && cli.message.is_none() {
+    if local_runtime_requested
+        && runtime_entry_mode != RuntimeEntryMode::Tui
+        && cli.message.is_none()
+    {
         if let Some(mut spinner) = quiet_startup_spinner.take() {
             spinner.stop();
         }
@@ -1658,4 +1756,48 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(any(feature = "postgres", feature = "libsql"))]
+    #[test]
+    fn test_cli_guide_onboarding_keeps_runtime_handoff_enabled() {
+        let config = setup_config_for_onboard_command(
+            false,
+            false,
+            Some(thinclaw::setup::GuideTopic::Menu),
+            UiMode::Cli,
+        );
+
+        assert_eq!(config.guide_topic, Some(thinclaw::setup::GuideTopic::Menu));
+        assert!(!config.pause_after_completion);
+    }
+
+    #[cfg(any(feature = "postgres", feature = "libsql"))]
+    #[test]
+    fn test_startup_onboarding_preserves_explicit_tui_intent() {
+        let config = setup_config_for_startup_onboarding(RuntimeEntryMode::Tui);
+
+        assert_eq!(config.ui_mode, UiMode::Tui);
+    }
+
+    #[cfg(any(feature = "postgres", feature = "libsql"))]
+    #[test]
+    fn test_runtime_entry_mode_follows_resolved_wizard_ui() {
+        assert_eq!(
+            runtime_entry_mode_from_ui_mode(UiMode::Tui),
+            RuntimeEntryMode::Tui
+        );
+        assert_eq!(
+            runtime_entry_mode_from_ui_mode(UiMode::Cli),
+            RuntimeEntryMode::Cli
+        );
+        assert_eq!(
+            runtime_entry_mode_from_ui_mode(UiMode::Auto),
+            RuntimeEntryMode::Cli
+        );
+    }
 }

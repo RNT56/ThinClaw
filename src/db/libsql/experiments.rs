@@ -421,12 +421,58 @@ impl ExperimentStore for LibSqlBackend {
         }
     }
 
+    async fn get_experiment_campaign_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentCampaign>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT * FROM experiment_campaigns WHERE id = ?1 AND owner_user_id = ?2",
+                params![id.to_string(), owner_user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(Some(row_to_campaign(&row)?)),
+            None => Ok(None),
+        }
+    }
+
     async fn list_experiment_campaigns(&self) -> Result<Vec<ExperimentCampaign>, DatabaseError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT * FROM experiment_campaigns ORDER BY created_at DESC",
                 (),
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            items.push(row_to_campaign(&row)?);
+        }
+        Ok(items)
+    }
+
+    async fn list_experiment_campaigns_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentCampaign>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT * FROM experiment_campaigns WHERE owner_user_id = ?1 ORDER BY created_at DESC",
+                params![owner_user_id],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -593,6 +639,33 @@ impl ExperimentStore for LibSqlBackend {
         }
     }
 
+    async fn get_experiment_trial_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentTrial>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT t.* FROM experiment_trials t
+                INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
+                WHERE t.id = ?1 AND c.owner_user_id = ?2
+                "#,
+                params![id.to_string(), owner_user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        match rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            Some(row) => Ok(Some(row_to_trial(&row)?)),
+            None => Ok(None),
+        }
+    }
+
     async fn list_experiment_trials(
         &self,
         campaign_id: Uuid,
@@ -602,6 +675,35 @@ impl ExperimentStore for LibSqlBackend {
             .query(
                 "SELECT * FROM experiment_trials WHERE campaign_id = ?1 ORDER BY sequence ASC",
                 params![campaign_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            items.push(row_to_trial(&row)?);
+        }
+        Ok(items)
+    }
+
+    async fn list_experiment_trials_for_owner(
+        &self,
+        campaign_id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentTrial>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT t.* FROM experiment_trials t
+                INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
+                WHERE t.campaign_id = ?1 AND c.owner_user_id = ?2
+                ORDER BY t.sequence ASC
+                "#,
+                params![campaign_id.to_string(), owner_user_id],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -742,6 +844,36 @@ impl ExperimentStore for LibSqlBackend {
             .query(
                 "SELECT * FROM experiment_artifact_refs WHERE trial_id = ?1 ORDER BY created_at ASC",
                 params![trial_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            items.push(row_to_artifact(&row)?);
+        }
+        Ok(items)
+    }
+
+    async fn list_experiment_artifacts_for_owner(
+        &self,
+        trial_id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT a.* FROM experiment_artifact_refs a
+                INNER JOIN experiment_trials t ON t.id = a.trial_id
+                INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
+                WHERE a.trial_id = ?1 AND c.owner_user_id = ?2
+                ORDER BY a.created_at ASC
+                "#,
+                params![trial_id.to_string(), owner_user_id],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;

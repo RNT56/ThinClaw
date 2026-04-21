@@ -30,7 +30,7 @@ pub use prompts::{
     print_step, print_success, print_warning, secret_input, select_many, select_one,
 };
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-pub use wizard::{OnboardingProfile, SetupConfig, SetupWizard, UiMode};
+pub use wizard::{GuideTopic, OnboardingProfile, SetupConfig, SetupWizard, UiMode};
 
 /// Check if onboarding is needed and return the reason.
 ///

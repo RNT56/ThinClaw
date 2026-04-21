@@ -94,6 +94,10 @@ pub struct ProxyToolCompletionResponse {
 /// Completion result for the worker to report when done.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompletionReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub success: bool,
     pub message: Option<String>,
     pub iterations: u32,

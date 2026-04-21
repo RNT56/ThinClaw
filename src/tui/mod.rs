@@ -14,6 +14,7 @@ mod rendering;
 pub mod skin;
 
 use std::io;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use crossterm::ExecutableCommand;
@@ -28,6 +29,28 @@ use crate::channels::StatusUpdate;
 use crate::platform::shell_launcher;
 use crate::settings::Settings;
 use crate::tui::skin::CliSkin;
+
+static RUNTIME_GATEWAY_URL_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
+
+/// Set or clear a runtime-resolved Web UI URL override for the TUI startup card.
+///
+/// This is used by the host runtime to inject the live gateway URL that includes
+/// the effective auth token (which may be generated at startup and therefore not
+/// available in settings/env at render time).
+pub fn set_runtime_gateway_url_override(url: Option<String>) {
+    if let Ok(mut guard) = RUNTIME_GATEWAY_URL_OVERRIDE.write() {
+        *guard = url
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    }
+}
+
+fn runtime_gateway_url_override() -> Option<String> {
+    RUNTIME_GATEWAY_URL_OVERRIDE
+        .read()
+        .ok()
+        .and_then(|guard| guard.as_ref().cloned())
+}
 
 /// A message in the chat history for rendering.
 #[derive(Debug, Clone)]
@@ -113,6 +136,8 @@ pub struct TuiApp {
     incoming_rx: mpsc::Receiver<TuiUpdate>,
     /// Total lines in the rendered chat (for scroll bounds).
     total_chat_lines: u16,
+    /// Startup guidance shown in the first system card.
+    startup_message: String,
 }
 
 /// Events the TUI sends to the agent controller.
@@ -187,6 +212,7 @@ impl TuiApp {
             outgoing_tx,
             incoming_rx,
             total_chat_lines: 0,
+            startup_message: build_startup_message(&settings),
         }
     }
 
@@ -214,8 +240,7 @@ impl TuiApp {
     ) -> io::Result<()> {
         // Add welcome message
         self.messages.push(ChatMessage::System {
-            text: "ThinClaw cockpit online. Type /help for controls, or send a message to begin."
-                .to_string(),
+            text: self.startup_message.clone(),
         });
 
         loop {
@@ -533,14 +558,12 @@ impl TuiApp {
 
     async fn handle_slash_command(&mut self, cmd: &str) {
         let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-        let command = parts[0];
+        let command = parts[0].to_ascii_lowercase();
         let arg = parts.get(1).copied().unwrap_or("").trim();
 
-        match command {
+        match command.as_str() {
             "/help" => {
-                self.messages.push(ChatMessage::System {
-                    text: crate::agent::command_catalog::tui_help_text(),
-                });
+                self.push_system_note(crate::agent::command_catalog::tui_help_text());
             }
             "/clear" => {
                 self.messages.clear();
@@ -570,30 +593,35 @@ impl TuiApp {
             "/exit" | "/quit" => {
                 self.pending_exit = true;
             }
+            "/back" | "/close" | "/dismiss" => {
+                self.close_last_detail_card();
+            }
+            "/bottom" => {
+                self.scroll_offset = u16::MAX;
+                self.status_text = "Jumped to latest activity".to_string();
+            }
+            "/top" => {
+                self.scroll_offset = 0;
+                self.status_text = "Jumped to oldest activity".to_string();
+            }
             "/think" => {
                 self.show_thinking = !self.show_thinking;
-                self.messages.push(ChatMessage::System {
-                    text: format!(
-                        "Thinking display: {}",
-                        if self.show_thinking { "on" } else { "off" }
-                    ),
-                });
+                self.push_system_note(format!(
+                    "Thinking display: {}",
+                    if self.show_thinking { "on" } else { "off" }
+                ));
             }
             "/status" => {
-                self.messages.push(ChatMessage::System {
-                    text: format!(
-                        "Model: {} | Agent: {} | {}",
-                        self.model, self.agent_id, self.status_text
-                    ),
-                });
+                self.push_system_note(format!(
+                    "Model: {} | Agent: {} | {}",
+                    self.model, self.agent_id, self.status_text
+                ));
             }
             "/interrupt" => {
                 let _ = self.outgoing_tx.send(TuiEvent::Abort).await;
                 self.active_stream = None;
                 self.status_text = "Interrupted".to_string();
-                self.messages.push(ChatMessage::System {
-                    text: "Operation interrupted.".to_string(),
-                });
+                self.push_system_note("Operation interrupted.");
             }
             "/skin" => {
                 self.handle_skin_command(arg);
@@ -609,11 +637,13 @@ impl TuiApp {
                     .outgoing_tx
                     .send(TuiEvent::UserMessage(forwarded))
                     .await;
+                self.scroll_offset = u16::MAX;
+                self.status_text = format!("Running {command}...");
             }
             _ => {
-                self.messages.push(ChatMessage::System {
-                    text: format!("Unknown command: {command}. Type /help for available commands."),
-                });
+                self.push_system_note(format!(
+                    "Unknown command: {command}. Type /help for available commands."
+                ));
             }
         }
     }
@@ -627,6 +657,7 @@ impl TuiApp {
         self.messages.push(ChatMessage::System {
             text: format!("$ {cmd}"),
         });
+        self.scroll_offset = u16::MAX;
 
         match shell_launcher().tokio_command(cmd).output().await {
             Ok(output) => {
@@ -637,16 +668,19 @@ impl TuiApp {
 
                 if !truncated.is_empty() {
                     self.messages.push(ChatMessage::System { text: truncated });
+                    self.scroll_offset = u16::MAX;
                 }
 
                 self.messages.push(ChatMessage::System {
                     text: format!("exit {}", output.status.code().unwrap_or(-1)),
                 });
+                self.scroll_offset = u16::MAX;
             }
             Err(e) => {
                 self.messages.push(ChatMessage::System {
                     text: format!("Shell error: {e}"),
                 });
+                self.scroll_offset = u16::MAX;
             }
         }
     }
@@ -665,22 +699,19 @@ impl TuiApp {
 
     fn handle_skin_command(&mut self, arg: &str) {
         if arg.is_empty() || arg.eq_ignore_ascii_case("current") {
-            self.messages.push(ChatMessage::System {
-                text: format!(
-                    "Current skin: {}\nAvailable skins: {}",
-                    self.skin.name,
-                    CliSkin::available_names().join(", ")
-                ),
-            });
-            self.scroll_offset = u16::MAX;
+            self.push_system_note(format!(
+                "Current skin: {}\nAvailable skins: {}",
+                self.skin.name,
+                CliSkin::available_names().join(", ")
+            ));
             return;
         }
 
         if arg.eq_ignore_ascii_case("list") {
-            self.messages.push(ChatMessage::System {
-                text: format!("Available skins: {}", CliSkin::available_names().join(", ")),
-            });
-            self.scroll_offset = u16::MAX;
+            self.push_system_note(format!(
+                "Available skins: {}",
+                CliSkin::available_names().join(", ")
+            ));
             return;
         }
 
@@ -691,17 +722,103 @@ impl TuiApp {
         };
         self.skin = CliSkin::load(&requested);
         self.status_text = format!("Skin switched to {}", self.skin.name);
-        self.messages.push(ChatMessage::System {
-            text: format!(
-                "Skin switched to '{}'. Prompt symbol: {}",
-                self.skin.name,
-                self.skin.prompt_symbol()
-            ),
-        });
+        self.push_system_note(format!(
+            "Skin switched to '{}'. Prompt symbol: {}",
+            self.skin.name,
+            self.skin.prompt_symbol()
+        ));
+    }
+
+    fn push_system_note(&mut self, text: impl Into<String>) {
+        self.messages
+            .push(ChatMessage::System { text: text.into() });
         self.scroll_offset = u16::MAX;
     }
 
+    fn close_last_detail_card(&mut self) {
+        if self.active_stream.is_some() {
+            self.status_text = "Cannot close detail cards while a run is active".to_string();
+            return;
+        }
+
+        if let Some(index) = self
+            .messages
+            .iter()
+            .rposition(|message| !matches!(message, ChatMessage::User { .. }))
+        {
+            self.messages.remove(index);
+            self.scroll_offset = u16::MAX;
+            self.status_text = "Closed last detail card".to_string();
+        } else {
+            self.push_system_note("Nothing to close.");
+        }
+    }
+
     // Rendering methods are in tui/rendering.rs
+}
+
+fn build_startup_message(settings: &Settings) -> String {
+    let mut lines = vec![
+        "ThinClaw cockpit online. Type /help for controls, or send a message to begin.".to_string(),
+    ];
+    let access = runtime_access_lines(settings);
+    if !access.is_empty() {
+        lines.push(String::new());
+        lines.push("Access:".to_string());
+        lines.extend(access.into_iter().map(|line| format!("  {line}")));
+    }
+    lines.join("\n")
+}
+
+fn runtime_access_lines(settings: &Settings) -> Vec<String> {
+    let mut lines = Vec::new();
+    if gateway_enabled_from_env() {
+        let host = std::env::var("GATEWAY_HOST")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let port = std::env::var("GATEWAY_PORT")
+            .ok()
+            .and_then(|value| value.trim().parse::<u16>().ok())
+            .or(settings.channels.gateway_port)
+            .unwrap_or(3000);
+        let base_url = format!("http://{host}:{port}/");
+        if let Some(url) = runtime_gateway_url_override() {
+            lines.push(format!("Web UI: {url}"));
+        } else {
+            let gateway_token = std::env::var("GATEWAY_AUTH_TOKEN")
+                .ok()
+                .or_else(|| settings.channels.gateway_auth_token.clone())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            if let Some(token) = gateway_token {
+                lines.push(format!("Web UI: {base_url}?token={token}"));
+            } else {
+                lines.push(format!("Web UI: {base_url}"));
+            }
+        }
+    }
+
+    let tunnel_url = std::env::var("TUNNEL_URL")
+        .ok()
+        .or_else(|| settings.tunnel.public_url.clone())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if let Some(url) = tunnel_url {
+        lines.push(format!("Tunnel: {url}"));
+    }
+
+    lines
+}
+
+fn gateway_enabled_from_env() -> bool {
+    match std::env::var("GATEWAY_ENABLED") {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => true,
+    }
 }
 
 /// Convert a StatusUpdate to a TuiUpdate.
@@ -744,6 +861,7 @@ impl From<StatusUpdate> for TuiUpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::lock_env;
 
     #[test]
     fn test_stream_state_display() {
@@ -780,5 +898,129 @@ mod tests {
         let help = crate::agent::command_catalog::tui_help_text();
         assert!(help.contains("/help"));
         assert!(help.contains("Ctrl+C"));
+        assert!(help.contains("/back"));
+    }
+
+    #[tokio::test]
+    async fn test_help_command_scrolls_to_latest() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (_update_tx, update_rx) = mpsc::channel(4);
+        let mut app = TuiApp::new(tx, update_rx);
+        app.scroll_offset = 0;
+
+        app.handle_slash_command("/help").await;
+
+        assert_eq!(app.scroll_offset, u16::MAX);
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::System { text }) if text.contains("Agent cockpit controls")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_back_command_closes_last_detail_card() {
+        let (tx, _rx) = mpsc::channel(4);
+        let (_update_tx, update_rx) = mpsc::channel(4);
+        let mut app = TuiApp::new(tx, update_rx);
+        app.messages.push(ChatMessage::User {
+            text: "/context detail".to_string(),
+        });
+        app.messages.push(ChatMessage::Assistant {
+            text: "full context detail".to_string(),
+            model: Some("test-model".to_string()),
+        });
+
+        app.handle_slash_command("/back").await;
+
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::User { text }) if text == "/context detail"
+        ));
+        assert_eq!(app.status_text, "Closed last detail card");
+    }
+
+    #[test]
+    fn test_runtime_access_lines_include_webui_and_tunnel() {
+        let _guard = lock_env();
+        set_runtime_gateway_url_override(None);
+        unsafe {
+            std::env::set_var("GATEWAY_ENABLED", "true");
+            std::env::set_var("GATEWAY_HOST", "127.0.0.1");
+            std::env::set_var("GATEWAY_PORT", "3100");
+            std::env::set_var("GATEWAY_AUTH_TOKEN", "abc123");
+            std::env::set_var("TUNNEL_URL", "https://agent.example.com");
+        }
+        let settings = Settings::default();
+        let lines = runtime_access_lines(&settings);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Web UI: http://127.0.0.1:3100/?token=abc123")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Tunnel: https://agent.example.com")
+        );
+        unsafe {
+            std::env::remove_var("GATEWAY_ENABLED");
+            std::env::remove_var("GATEWAY_HOST");
+            std::env::remove_var("GATEWAY_PORT");
+            std::env::remove_var("GATEWAY_AUTH_TOKEN");
+            std::env::remove_var("TUNNEL_URL");
+        }
+        set_runtime_gateway_url_override(None);
+    }
+
+    #[test]
+    fn test_runtime_access_lines_hide_webui_when_gateway_disabled() {
+        let _guard = lock_env();
+        set_runtime_gateway_url_override(None);
+        unsafe {
+            std::env::set_var("GATEWAY_ENABLED", "false");
+            std::env::set_var("TUNNEL_URL", "https://agent.example.com");
+        }
+        let settings = Settings::default();
+        let lines = runtime_access_lines(&settings);
+        assert!(!lines.iter().any(|line| line.starts_with("Web UI:")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Tunnel: https://agent.example.com")
+        );
+        unsafe {
+            std::env::remove_var("GATEWAY_ENABLED");
+            std::env::remove_var("TUNNEL_URL");
+        }
+        set_runtime_gateway_url_override(None);
+    }
+
+    #[test]
+    fn test_runtime_access_lines_prefers_runtime_gateway_override() {
+        let _guard = lock_env();
+        unsafe {
+            std::env::set_var("GATEWAY_ENABLED", "true");
+            std::env::set_var("GATEWAY_HOST", "127.0.0.1");
+            std::env::set_var("GATEWAY_PORT", "3100");
+            std::env::set_var("GATEWAY_AUTH_TOKEN", "env-token");
+        }
+        set_runtime_gateway_url_override(Some(
+            "http://127.0.0.1:3100/?token=runtime-token".to_string(),
+        ));
+        let settings = Settings::default();
+        let lines = runtime_access_lines(&settings);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "Web UI: http://127.0.0.1:3100/?token=runtime-token")
+        );
+        assert!(!lines.iter().any(|line| line.contains("env-token")));
+        unsafe {
+            std::env::remove_var("GATEWAY_ENABLED");
+            std::env::remove_var("GATEWAY_HOST");
+            std::env::remove_var("GATEWAY_PORT");
+            std::env::remove_var("GATEWAY_AUTH_TOKEN");
+        }
+        set_runtime_gateway_url_override(None);
     }
 }

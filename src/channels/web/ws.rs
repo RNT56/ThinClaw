@@ -21,7 +21,9 @@ use uuid::Uuid;
 
 use crate::agent::submission::Submission;
 use crate::channels::IncomingMessage;
-use crate::channels::web::handlers::chat::clear_auth_mode_for_identity;
+use crate::channels::web::handlers::chat::{
+    active_thread_id_for_identity, clear_auth_mode_for_identity,
+};
 use crate::channels::web::identity_helpers::{
     GatewayRequestIdentity, sse_event_visible_to_identity,
 };
@@ -71,6 +73,7 @@ pub async fn handle_ws_connection(
     socket: WebSocket,
     state: Arc<GatewayState>,
     request_identity: GatewayRequestIdentity,
+    browser_origin: Option<String>,
 ) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
@@ -151,8 +154,14 @@ pub async fn handle_ws_connection(
                 let parsed: Result<WsClientMessage, _> = serde_json::from_str(&text);
                 match parsed {
                     Ok(client_msg) => {
-                        handle_client_message(client_msg, &state, &request_identity, &direct_tx)
-                            .await;
+                        handle_client_message(
+                            client_msg,
+                            &state,
+                            &request_identity,
+                            &direct_tx,
+                            browser_origin.as_deref(),
+                        )
+                        .await;
                     }
                     Err(e) => {
                         let _ = direct_tx
@@ -182,6 +191,7 @@ async fn handle_client_message(
     state: &GatewayState,
     request_identity: &GatewayRequestIdentity,
     direct_tx: &mpsc::Sender<WsServerMessage>,
+    browser_origin: Option<&str>,
 ) {
     match msg {
         WsClientMessage::Message { content, thread_id } => {
@@ -195,6 +205,12 @@ async fn handle_client_message(
                 incoming = incoming.with_metadata(serde_json::json!({
                     "thread_id": tid,
                     "actor_id": actor_id,
+                    "browser_origin": browser_origin,
+                }));
+            } else if browser_origin.is_some() {
+                incoming = incoming.with_metadata(serde_json::json!({
+                    "actor_id": actor_id,
+                    "browser_origin": browser_origin,
                 }));
             }
 
@@ -272,6 +288,12 @@ async fn handle_client_message(
                 msg = msg.with_metadata(serde_json::json!({
                     "thread_id": tid,
                     "actor_id": actor_id,
+                    "browser_origin": browser_origin,
+                }));
+            } else if browser_origin.is_some() {
+                msg = msg.with_metadata(serde_json::json!({
+                    "actor_id": actor_id,
+                    "browser_origin": browser_origin,
                 }));
             }
             let tx_guard = state.msg_tx.read().await;
@@ -284,8 +306,12 @@ async fn handle_client_message(
             token,
         } => {
             if let Some(ref ext_mgr) = state.extension_manager {
+                let thread_id = active_thread_id_for_identity(state, request_identity).await;
                 match ext_mgr.auth(&extension_name, Some(&token)).await {
-                    Ok(result) if result.status == "authenticated" => {
+                    Ok(result)
+                        if result.auth_status == "authenticated"
+                            || result.auth_status == "no_auth_required" =>
+                    {
                         let msg = match ext_mgr.activate(&extension_name).await {
                             Ok(r) => format!(
                                 "{} authenticated ({} tools loaded)",
@@ -303,6 +329,11 @@ async fn handle_client_message(
                                 extension_name,
                                 success: true,
                                 message: msg,
+                                auth_mode: Some(result.auth_mode),
+                                auth_status: Some(result.auth_status),
+                                shared_auth_provider: result.shared_auth_provider,
+                                missing_scopes: result.missing_scopes,
+                                thread_id,
                             }))
                             .await;
                     }
@@ -313,6 +344,11 @@ async fn handle_client_message(
                                 instructions: result.instructions,
                                 auth_url: result.auth_url,
                                 setup_url: result.setup_url,
+                                auth_mode: result.auth_mode,
+                                auth_status: result.auth_status,
+                                shared_auth_provider: result.shared_auth_provider,
+                                missing_scopes: result.missing_scopes,
+                                thread_id,
                             }))
                             .await;
                     }
@@ -524,7 +560,7 @@ mod tests {
         let state = make_test_state(None).await;
 
         let identity = test_request_identity("user1");
-        handle_client_message(WsClientMessage::Ping, &state, &identity, &direct_tx).await;
+        handle_client_message(WsClientMessage::Ping, &state, &identity, &direct_tx, None).await;
 
         let response = direct_rx.recv().await.unwrap();
         assert!(matches!(response, WsServerMessage::Pong));
@@ -546,6 +582,7 @@ mod tests {
             &state,
             &identity,
             &direct_tx,
+            Some("https://chat.example.com"),
         )
         .await;
 
@@ -554,6 +591,13 @@ mod tests {
         assert_eq!(incoming.thread_id.as_deref(), Some("t1"));
         assert_eq!(incoming.channel, "gateway");
         assert_eq!(incoming.user_id, "user1");
+        assert_eq!(
+            incoming
+                .metadata
+                .get("browser_origin")
+                .and_then(|value| value.as_str()),
+            Some("https://chat.example.com")
+        );
     }
 
     #[tokio::test]
@@ -571,6 +615,7 @@ mod tests {
             &state,
             &identity,
             &direct_tx,
+            None,
         )
         .await;
 
@@ -600,6 +645,7 @@ mod tests {
             &state,
             &identity,
             &direct_tx,
+            Some("https://chat.example.com"),
         )
         .await;
 
@@ -625,6 +671,7 @@ mod tests {
             &state,
             &identity,
             &direct_tx,
+            None,
         )
         .await;
 
@@ -652,6 +699,7 @@ mod tests {
             &state,
             &identity,
             &direct_tx,
+            None,
         )
         .await;
 

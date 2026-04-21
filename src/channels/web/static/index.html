@@ -39,37 +39,52 @@
   <div id="app">
       <!-- Tab Bar -->
       <div class="tab-bar">
-        <div class="web-brand-chip" id="web-brand-chip">
-          <span class="web-brand-chip-title">Agent</span>
-          <span class="web-brand-chip-meta" id="web-brand-chip-meta">cockpit · ›</span>
+        <div class="shell-header-main">
+          <div class="web-brand-chip" id="web-brand-chip">
+            <span class="web-brand-chip-title">Agent</span>
+            <span class="web-brand-chip-meta" id="web-brand-chip-meta">cockpit · ›</span>
+          </div>
+          <nav class="shell-primary-nav" id="shell-primary-nav" aria-label="Primary navigation"></nav>
         </div>
-        <button class="active" data-tab="chat"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Chat</button>
-      <button data-tab="memory"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/><path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/></svg> Memory &amp; Growth</button>
-      <button data-tab="jobs"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m15 12-8.373 8.373a1 1 0 1 1-1.414-1.414L13.586 10.586"/><path d="m18.293 14.707 1.414-1.414a1 1 0 0 0 0-1.414l-7.586-7.586a1 1 0 0 0-1.414 0l-1.414 1.414a1 1 0 0 0 0 1.414l7.586 7.586a1 1 0 0 0 1.414 0z"/></svg> Jobs</button>
-      <button data-tab="routines"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Routines</button>
-      <button data-tab="autonomy" id="autonomy-tab-button" style="display:none"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 3l7 4v5c0 5-3.5 8-7 9-3.5-1-7-4-7-9V7l7-4z"/><path d="M9.5 12.5 11 14l3.5-4"/></svg> Autonomy</button>
-      <button data-tab="extensions"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg> Extensions</button>
-      <button data-tab="skills"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg> Skills</button>
-      <button data-tab="research" id="research-tab-button" style="display:none"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M9 3h6"/><path d="M12 3v18"/><path d="m8 21 4-4 4 4"/><path d="M19 7H5"/><path d="m7 7 1.5 6.5a2 2 0 0 0 3 1.2L19 11"/></svg> Research</button>
-      <button data-tab="learning"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M4.22 4.22l2.12 2.12"/><path d="M17.66 17.66l2.12 2.12"/><path d="M3 12h3"/><path d="M18 12h3"/><path d="M4.22 19.78l2.12-2.12"/><path d="M17.66 6.34l2.12-2.12"/><circle cx="12" cy="12" r="4"/></svg> Learning Ledger</button>
-      <button data-tab="providers"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg> Providers</button>
-      <button data-tab="costs"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg> Costs</button>
-      <button data-tab="settings"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg> Settings</button>
-      <div class="spacer"></div>
-      <button class="status-logs-btn" data-tab="logs" title="Logs">Logs</button>
-      <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-        </svg>
-        <span id="tee-shield-label">TEE Verified</span>
-        <div class="tee-popover" id="tee-popover"></div>
+        <div class="shell-header-meta">
+          <button class="shell-mobile-nav-btn" id="shell-mobile-nav-btn" type="button" aria-expanded="false" aria-controls="shell-mobile-sheet" onclick="toggleShellMobileNav()">
+            <span class="shell-mobile-nav-kicker">Section</span>
+            <span class="shell-mobile-nav-label" id="shell-mobile-nav-label">Chat</span>
+          </button>
+          <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            <span id="tee-shield-label">TEE Verified</span>
+            <div class="tee-popover" id="tee-popover"></div>
+          </div>
+          <div class="status" id="gateway-status-trigger">
+            <div class="dot" id="sse-dot"></div>
+            <span id="sse-status">Connected</span>
+            <div class="gateway-popover" id="gateway-popover"></div>
+          </div>
+        </div>
+        <div class="shell-context-bar" id="shell-context-bar" hidden>
+          <div class="shell-context-copy">
+            <span class="shell-context-kicker">Section</span>
+            <span class="shell-context-label" id="shell-context-label">Workspace</span>
+          </div>
+          <nav class="shell-context-nav" id="shell-context-nav" aria-label="Section navigation"></nav>
+        </div>
       </div>
-      <div class="status" id="gateway-status-trigger">
-        <div class="dot" id="sse-dot"></div>
-        <span id="sse-status">Connected</span>
-        <div class="gateway-popover" id="gateway-popover"></div>
+      <div class="shell-mobile-sheet" id="shell-mobile-sheet" hidden>
+        <button class="shell-mobile-sheet-backdrop" type="button" aria-label="Close navigation menu" onclick="closeShellMobileNav()"></button>
+        <div class="shell-mobile-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="shell-mobile-sheet-title">
+          <div class="shell-mobile-sheet-header">
+            <div>
+              <div class="shell-mobile-sheet-kicker">Navigate</div>
+              <h2 id="shell-mobile-sheet-title">ThinClaw areas</h2>
+            </div>
+            <button class="shell-mobile-sheet-close" type="button" aria-label="Close navigation menu" onclick="closeShellMobileNav()">&times;</button>
+          </div>
+          <div class="shell-mobile-primary-nav" id="shell-mobile-primary-nav"></div>
+        </div>
       </div>
-    </div>
 
     <!-- Chat Tab -->
     <div class="tab-panel active" id="tab-chat">
@@ -819,15 +834,27 @@
               </div>
             </div>
             <div class="learning-feedback-form">
-              <input type="text" id="learning-feedback-target-type" placeholder="Target type, e.g. code_proposal">
-              <input type="text" id="learning-feedback-target-id" placeholder="Target ID">
-              <select id="learning-feedback-verdict">
-                <option value="helpful">Helpful</option>
-                <option value="harmful">Harmful</option>
-                <option value="review">Needs review</option>
-                <option value="dont_learn">Don't learn</option>
-              </select>
-              <input type="text" id="learning-feedback-note" placeholder="Optional note">
+              <label class="admin-field">
+                <span class="admin-field-label">Target type</span>
+                <input type="text" id="learning-feedback-target-type" placeholder="code_proposal">
+              </label>
+              <label class="admin-field">
+                <span class="admin-field-label">Target ID</span>
+                <input type="text" id="learning-feedback-target-id" placeholder="proposal-1234">
+              </label>
+              <label class="admin-field">
+                <span class="admin-field-label">Verdict</span>
+                <select id="learning-feedback-verdict">
+                  <option value="helpful">Helpful</option>
+                  <option value="harmful">Harmful</option>
+                  <option value="review">Needs review</option>
+                  <option value="dont_learn">Don't learn</option>
+                </select>
+              </label>
+              <label class="admin-field admin-field--wide">
+                <span class="admin-field-label">Note</span>
+                <input type="text" id="learning-feedback-note" placeholder="Optional operator note">
+              </label>
               <button class="btn-restart" onclick="submitLearningFeedback()">Submit Feedback</button>
             </div>
             <div class="ui-panel-table-wrap learning-table-wrap">
@@ -905,108 +932,120 @@
           </div>
         </div>
         <div class="extensions-shell ui-panel-stack">
-          <section class="ui-panel ui-panel-stack">
-            <div class="ui-panel-header ui-panel-header--divider">
-              <div class="ui-panel-copy">
-                <h3 class="ui-panel-title">Installed Extensions</h3>
-                <p class="ui-panel-desc">Review active integrations, authentication state, and setup progress for locally available extensions.</p>
-              </div>
-            </div>
-          <div class="extensions-list ui-resource-grid" id="extensions-list">
-            <div class="empty-state">Loading extensions...</div>
+          <div class="extensions-overview ui-panel-grid ui-panel-grid--cards" id="extensions-overview-cards"></div>
+          <div class="extensions-subnav" role="tablist" aria-label="Extension sections">
+            <button type="button" data-extensions-subtab="overview" class="active" aria-selected="true" onclick="switchExtensionsSubtab('overview')">Overview</button>
+            <button type="button" data-extensions-subtab="mcp" aria-selected="false" onclick="switchExtensionsSubtab('mcp')">MCP</button>
+            <button type="button" data-extensions-subtab="tools" aria-selected="false" onclick="switchExtensionsSubtab('tools')">Tool Registry</button>
           </div>
-          </section>
-          <section class="ui-panel ui-panel-stack" id="available-wasm-section">
-            <div class="ui-panel-header ui-panel-header--divider">
-              <div class="ui-panel-copy">
-                <h3 class="ui-panel-title">Available WASM Extensions</h3>
-                <p class="ui-panel-desc">Browse installable channels and tools from the bundled registry, then configure them after install when needed.</p>
-              </div>
+          <div class="extensions-panes">
+            <div class="extensions-pane active" data-extensions-pane="overview">
+              <section class="ui-panel ui-panel-stack" data-collapsible-panel="extensions-installed">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Installed Extensions</h3>
+                    <p class="ui-panel-desc">Review active integrations, authentication state, and setup progress for locally available extensions.</p>
+                  </div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="extensions-list">
+                  <div class="empty-state">Loading extensions...</div>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack" id="available-wasm-section" data-collapsible-panel="extensions-discover">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Available WASM Extensions</h3>
+                    <p class="ui-panel-desc">Browse installable channels and tools from the bundled registry, then configure them after install when needed.</p>
+                  </div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="available-wasm-list">
+                  <div class="empty-state">Loading...</div>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack extensions-install-panel" data-collapsible-panel="extensions-manual-install">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Install WASM Extension</h3>
+                    <p class="ui-panel-desc">Install from a bundle URL when you want to add a registry entry manually or test a custom build.</p>
+                  </div>
+                </div>
+                <div class="ext-install-form">
+                  <label class="admin-field">
+                    <span class="admin-field-label">Extension name</span>
+                    <input type="text" id="wasm-install-name" placeholder="thin-search">
+                  </label>
+                  <label class="admin-field admin-field--wide">
+                    <span class="admin-field-label">Bundle URL</span>
+                    <input type="text" id="wasm-install-url" placeholder="https://example.com/extension.tar.gz">
+                  </label>
+                  <button onclick="installWasmExtension()">Install</button>
+                </div>
+              </section>
             </div>
-            <div class="extensions-list ui-resource-grid" id="available-wasm-list">
-              <div class="empty-state">Loading...</div>
+            <div class="extensions-pane" data-extensions-pane="mcp">
+              <section class="ui-panel ui-panel-stack" data-collapsible-panel="extensions-mcp-servers">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">MCP Servers</h3>
+                    <p class="ui-panel-desc">Track installed MCP connectors and add custom remote servers for tools that live outside the local gateway.</p>
+                  </div>
+                  <div class="ui-panel-actions">
+                    <button class="btn-ext" type="button" onclick="openMcpConnectionModal()">
+                      <span aria-hidden="true">+</span> Connect MCP
+                    </button>
+                  </div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="mcp-servers-list">
+                  <div class="empty-state">Loading...</div>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack extensions-mcp-browser" data-collapsible-panel="extensions-mcp-browser">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">MCP Browser</h3>
+                    <p class="ui-panel-desc">Inspect server metadata, browse resources and prompts, and answer pending MCP sampling or form requests.</p>
+                  </div>
+                </div>
+                <div class="ext-install-form">
+                  <label class="admin-field admin-field--wide">
+                    <span class="admin-field-label">Active server</span>
+                    <select id="mcp-browser-server" onchange="onMcpBrowserServerChange()">
+                      <option value="">Select an MCP server</option>
+                    </select>
+                  </label>
+                  <button onclick="refreshMcpBrowser()">Refresh</button>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="mcp-interactions-list">
+                  <div class="empty-state">No pending MCP requests</div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="mcp-browser-summary"></div>
+                <div class="extensions-list ui-resource-grid" id="mcp-resources-list">
+                  <div class="empty-state">Select a server to browse resources</div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="mcp-resource-templates-list">
+                  <div class="empty-state">Select a server to browse resource templates</div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="mcp-prompts-list">
+                  <div class="empty-state">Select a server to browse prompts</div>
+                </div>
+                <div class="ui-panel ui-panel--subtle ui-panel--compact" id="mcp-detail-panel">
+                  <div class="empty-state">Select an MCP resource or prompt to inspect its contents.</div>
+                </div>
+              </section>
             </div>
-          </section>
-          <section class="ui-panel ui-panel-stack extensions-install-panel">
-            <div class="ui-panel-header ui-panel-header--divider">
-              <div class="ui-panel-copy">
-                <h3 class="ui-panel-title">Install WASM Extension</h3>
-                <p class="ui-panel-desc">Install from a bundle URL when you want to add a registry entry manually or test a custom build.</p>
-              </div>
+            <div class="extensions-pane" data-extensions-pane="tools">
+              <section class="ui-panel ui-panel-stack extensions-tools-panel" data-collapsible-panel="extensions-tools">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Registered Tools</h3>
+                    <p class="ui-panel-desc">Inspect ThinClaw core tools and remote MCP namespaces without re-listing the installed WASM tool cards from the overview pane.</p>
+                  </div>
+                </div>
+                <div class="extensions-tools-groups ui-panel-stack" id="extensions-tools-groups"></div>
+                <div class="empty-state ui-panel-empty" id="tools-empty" style="display:none">No core or MCP tools registered</div>
+              </section>
             </div>
-            <div class="ext-install-form">
-              <input type="text" id="wasm-install-name" placeholder="Extension name">
-              <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
-              <button onclick="installWasmExtension()">Install</button>
-            </div>
-          </section>
-          <section class="ui-panel ui-panel-stack">
-            <div class="ui-panel-header ui-panel-header--divider">
-              <div class="ui-panel-copy">
-                <h3 class="ui-panel-title">MCP Servers</h3>
-                <p class="ui-panel-desc">Track installed MCP connectors and add custom remote servers for tools that live outside the local gateway.</p>
-              </div>
-            </div>
-            <div class="extensions-list ui-resource-grid" id="mcp-servers-list">
-              <div class="empty-state">Loading...</div>
-            </div>
-            <div class="ui-panel ui-panel--subtle ui-panel--compact ui-panel-stack extensions-inline-panel">
-              <div class="ui-panel-copy">
-                <h4 class="ui-panel-title ui-panel-title--section">Add Custom MCP Server</h4>
-                <p class="ui-panel-desc">Register an HTTPS MCP endpoint directly when it is not already included in the available server list.</p>
-              </div>
-              <div class="ext-install-form">
-                <input type="text" id="mcp-install-name" placeholder="Server name">
-                <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
-                <button onclick="addMcpServer()">Add</button>
-              </div>
-            </div>
-          </section>
-          <section class="ui-panel ui-panel-stack extensions-mcp-browser">
-            <div class="ui-panel-header ui-panel-header--divider">
-              <div class="ui-panel-copy">
-                <h3 class="ui-panel-title">MCP Browser</h3>
-                <p class="ui-panel-desc">Inspect server metadata, browse resources and prompts, and answer pending MCP sampling or form requests.</p>
-              </div>
-            </div>
-            <div class="ext-install-form">
-              <select id="mcp-browser-server" onchange="onMcpBrowserServerChange()">
-                <option value="">Select an MCP server</option>
-              </select>
-              <button onclick="refreshMcpBrowser()">Refresh</button>
-            </div>
-            <div class="extensions-list ui-resource-grid" id="mcp-interactions-list">
-              <div class="empty-state">No pending MCP requests</div>
-            </div>
-            <div class="extensions-list ui-resource-grid" id="mcp-browser-summary"></div>
-            <div class="extensions-list ui-resource-grid" id="mcp-resources-list">
-              <div class="empty-state">Select a server to browse resources</div>
-            </div>
-            <div class="extensions-list ui-resource-grid" id="mcp-resource-templates-list">
-              <div class="empty-state">Select a server to browse resource templates</div>
-            </div>
-            <div class="extensions-list ui-resource-grid" id="mcp-prompts-list">
-              <div class="empty-state">Select a server to browse prompts</div>
-            </div>
-            <div class="ui-panel ui-panel--subtle ui-panel--compact" id="mcp-detail-panel">
-              <div class="empty-state">Select an MCP resource or prompt to inspect its contents.</div>
-            </div>
-          </section>
-          <section class="ui-panel ui-panel-stack extensions-tools-panel">
-            <div class="ui-panel-header ui-panel-header--divider">
-              <div class="ui-panel-copy">
-                <h3 class="ui-panel-title">Registered Tools</h3>
-                <p class="ui-panel-desc">See the current tool registry available to the agent after extensions and MCP servers are loaded.</p>
-              </div>
-            </div>
-            <div class="ui-panel-table-wrap">
-              <table class="tools-table ui-panel-table" id="tools-table">
-                <thead><tr><th>Name</th><th>Description</th></tr></thead>
-                <tbody id="tools-tbody"></tbody>
-              </table>
-            </div>
-            <div class="empty-state ui-panel-empty" id="tools-empty" style="display:none">No tools registered</div>
-          </section>
+          </div>
         </div>
       </div>
     </div>
@@ -1056,8 +1095,14 @@
               </div>
             </div>
             <div class="ext-install-form">
-              <input type="text" id="skill-install-name" placeholder="Skill name or slug">
-              <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)">
+              <label class="admin-field">
+                <span class="admin-field-label">Skill slug</span>
+                <input type="text" id="skill-install-name" placeholder="Skill name or slug">
+              </label>
+              <label class="admin-field admin-field--wide">
+                <span class="admin-field-label">Skill URL</span>
+                <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)">
+              </label>
               <button onclick="installSkillFromForm()">Install</button>
             </div>
           </section>

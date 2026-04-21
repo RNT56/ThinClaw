@@ -28,17 +28,102 @@ pub fn resolve_timezone(
     Tz::UTC
 }
 
-/// Parse a timezone string (IANA name) into a `Tz`.
-pub fn parse_timezone(s: &str) -> Option<Tz> {
-    s.parse::<Tz>().ok()
+fn parse_fixed_offset_alias(s: &str) -> Option<(Tz, String)> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut compact = trimmed.to_ascii_uppercase();
+    compact.retain(|ch| !ch.is_ascii_whitespace());
+
+    let (prefix, remainder) = compact
+        .strip_prefix("GMT")
+        .map(|rest| ("GMT", rest))
+        .or_else(|| compact.strip_prefix("UTC").map(|rest| ("UTC", rest)))?;
+
+    if remainder.is_empty() {
+        return Some((Tz::UTC, prefix.to_string()));
+    }
+
+    let sign = match remainder.chars().next()? {
+        '+' => '+',
+        '-' => '-',
+        _ => return None,
+    };
+    let digits = &remainder[1..];
+    if digits.is_empty() {
+        return None;
+    }
+
+    let (hours_str, minutes_str) = if let Some((hours, minutes)) = digits.split_once(':') {
+        (hours, Some(minutes))
+    } else if digits.len() == 4 {
+        (&digits[..2], Some(&digits[2..]))
+    } else if digits.len() == 3 {
+        (&digits[..1], Some(&digits[1..]))
+    } else {
+        (digits, None)
+    };
+
+    if hours_str.is_empty() || !hours_str.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+
+    let hours: u32 = hours_str.parse().ok()?;
+    let minutes: u32 = match minutes_str {
+        Some(minutes) if !minutes.is_empty() && minutes.chars().all(|ch| ch.is_ascii_digit()) => {
+            minutes.parse().ok()?
+        }
+        Some(_) => return None,
+        None => 0,
+    };
+
+    if hours > 14 || minutes >= 60 || (hours == 14 && minutes != 0) {
+        return None;
+    }
+
+    if hours == 0 && minutes == 0 {
+        return Some((Tz::UTC, prefix.to_string()));
+    }
+
+    if minutes != 0 {
+        return None;
+    }
+
+    // IANA `Etc/GMT` zones use the opposite sign convention from common UTC/GMT offsets.
+    let iana_name = match sign {
+        '+' => format!("Etc/GMT-{}", hours),
+        '-' => format!("Etc/GMT+{}", hours),
+        _ => unreachable!("validated sign above"),
+    };
+    let tz = iana_name.parse::<Tz>().ok()?;
+    Some((tz, format!("{prefix}{sign}{hours}")))
 }
 
-fn normalized_timezone_value(value: &str) -> Option<String> {
+/// Parse a timezone string (IANA name or common GMT/UTC offset alias) into a `Tz`.
+pub fn parse_timezone(s: &str) -> Option<Tz> {
+    s.parse::<Tz>()
+        .ok()
+        .or_else(|| parse_fixed_offset_alias(s).map(|(tz, _)| tz))
+}
+
+/// Normalize an accepted timezone input into a durable label.
+pub fn normalize_timezone_label(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.starts_with('_') {
         return None;
     }
+
+    if let Some((_, canonical)) = parse_fixed_offset_alias(trimmed) {
+        return Some(canonical);
+    }
+
     parse_timezone(trimmed).map(|tz| tz.to_string())
+}
+
+fn normalized_timezone_value(value: &str) -> Option<String> {
+    normalize_timezone_label(value)
 }
 
 fn markdown_timezone_value(content: &str) -> Option<&str> {
@@ -69,7 +154,8 @@ pub fn extract_markdown_timezone(content: &str) -> Option<String> {
     markdown_timezone_value(content).and_then(normalized_timezone_value)
 }
 
-/// Validate that a markdown `**Timezone:**` field is either blank or a valid IANA timezone.
+/// Validate that a markdown `**Timezone:**` field is either blank or a valid
+/// IANA timezone / common GMT/UTC offset alias.
 pub fn validate_markdown_timezone_field(content: &str) -> Result<(), String> {
     let Some(value) = markdown_timezone_value(content) else {
         return Ok(());
@@ -83,7 +169,7 @@ pub fn validate_markdown_timezone_field(content: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "invalid timezone '{}' in USER.md; use an IANA timezone like 'Europe/Berlin'",
+            "invalid timezone '{}' in USER.md; use an IANA timezone like 'Europe/Berlin' or a fixed offset like 'GMT+1'",
             value
         ))
     }
@@ -99,7 +185,7 @@ pub fn set_user_timezone_override(user_id: &str, timezone: Option<&str>) -> Resu
         Some(value) => {
             let normalized = normalized_timezone_value(value).ok_or_else(|| {
                 format!(
-                    "invalid timezone '{}'; use an IANA timezone like 'Europe/Berlin'",
+                    "invalid timezone '{}'; use an IANA timezone like 'Europe/Berlin' or a fixed offset like 'GMT+1'",
                     value
                 )
             })?;
@@ -254,7 +340,7 @@ pub async fn apply_user_timezone_change(
     let normalized = match timezone {
         Some(value) => Some(normalized_timezone_value(value).ok_or_else(|| {
             format!(
-                "invalid timezone '{}'; use an IANA timezone like 'Europe/Berlin'",
+                "invalid timezone '{}'; use an IANA timezone like 'Europe/Berlin' or a fixed offset like 'GMT+1'",
                 value
             )
         })?),
@@ -334,14 +420,37 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_gmt_offset_alias() {
+        assert_eq!(
+            parse_timezone("GMT+1"),
+            Some("Etc/GMT-1".parse::<Tz>().expect("valid test timezone"))
+        );
+        assert_eq!(
+            parse_timezone("UTC-5"),
+            Some("Etc/GMT+5".parse::<Tz>().expect("valid test timezone"))
+        );
+        assert_eq!(
+            parse_timezone("gmt +01:00"),
+            Some("Etc/GMT-1".parse::<Tz>().expect("valid test timezone"))
+        );
+    }
+
+    #[test]
     fn test_parse_invalid() {
         assert_eq!(parse_timezone("Fake/Zone"), None);
+        assert_eq!(parse_timezone("GMT+5:30"), None);
     }
 
     #[test]
     fn test_extract_markdown_timezone_valid() {
         let tz = extract_markdown_timezone("- **Timezone:** Europe/Berlin\n");
         assert_eq!(tz.as_deref(), Some("Europe/Berlin"));
+    }
+
+    #[test]
+    fn test_extract_markdown_timezone_accepts_gmt_offset() {
+        let tz = extract_markdown_timezone("- **Timezone:** GMT+1\n");
+        assert_eq!(tz.as_deref(), Some("GMT+1"));
     }
 
     #[test]
@@ -354,6 +463,12 @@ mod tests {
     fn test_validate_markdown_timezone_field_rejects_invalid() {
         let result = validate_markdown_timezone_field("- **Timezone:** Fake/Zone\n");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_markdown_timezone_field_accepts_gmt_offset() {
+        let result = validate_markdown_timezone_field("- **Timezone:** GMT+1\n");
+        assert!(result.is_ok());
     }
 
     #[test]

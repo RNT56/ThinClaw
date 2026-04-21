@@ -8,6 +8,7 @@ pub struct StatePaths {
     pub env_file: PathBuf,
     pub settings_file: PathBuf,
     pub config_file: PathBuf,
+    pub soul_file: PathBuf,
     pub gateway_pid_file: PathBuf,
     pub tools_dir: PathBuf,
     pub channels_dir: PathBuf,
@@ -27,6 +28,7 @@ impl StatePaths {
             env_file: home.join(".env"),
             settings_file: home.join("settings.json"),
             config_file: home.join("config.toml"),
+            soul_file: home.join("SOUL.md"),
             gateway_pid_file: home.join("gateway.pid"),
             tools_dir: home.join("tools"),
             channels_dir: home.join("channels"),
@@ -107,6 +109,7 @@ mod tests {
         let paths = state_paths();
         assert!(paths.logs_dir.starts_with(&paths.home));
         assert!(paths.gateway_pid_file.starts_with(&paths.home));
+        assert!(paths.soul_file.starts_with(&paths.home));
     }
 
     #[test]

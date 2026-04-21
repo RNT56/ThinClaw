@@ -151,35 +151,31 @@ async fn start_gateway(
         println!("  {}", branding.muted("Press Ctrl+C to stop."));
         println!();
 
-        // Set env vars so the agent picks them up.
-        // SAFETY: We are single-threaded at this point (before any agent tasks start).
-        unsafe {
-            std::env::set_var("GATEWAY_HOST", &gw_host);
-            std::env::set_var("GATEWAY_PORT", gw_port.to_string());
-            std::env::set_var("GATEWAY_ENABLED", "true");
-        }
+        let exe = std::env::current_exe()?;
+        let mut child = std::process::Command::new(&exe)
+            .arg("run")
+            .env("GATEWAY_ENABLED", "true")
+            .env("GATEWAY_HOST", &gw_host)
+            .env("GATEWAY_PORT", gw_port.to_string())
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()?;
 
         // Write PID file.
-        let pid = std::process::id();
+        let pid = child.id();
         if let Some(parent) = pid_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         std::fs::write(&pid_path, pid.to_string())?;
-
-        // The actual gateway runs as part of `thinclaw run`. In foreground mode,
-        // we tell the user to use `thinclaw run` with gateway enabled.
-        let command_text = if cfg!(target_os = "windows") {
-            format!(
-                "Run with gateway enabled:\n\n  $env:GATEWAY_ENABLED = \"true\"; $env:GATEWAY_HOST = \"{}\"; $env:GATEWAY_PORT = \"{}\"; thinclaw run\n",
-                gw_host, gw_port
-            )
-        } else {
-            format!(
-                "Run with gateway enabled:\n\n  GATEWAY_ENABLED=true GATEWAY_HOST={} GATEWAY_PORT={} thinclaw run\n",
-                gw_host, gw_port
-            )
-        };
-        println!("{}", branding.body(command_text));
+        println!(
+            "  {}",
+            branding.muted(format!("Gateway process running (PID {}).", pid))
+        );
+        let status = child.wait()?;
+        if !status.success() {
+            anyhow::bail!("Gateway process exited with status {}", status);
+        }
 
         // Clean up PID file.
         let _ = std::fs::remove_file(&pid_path);

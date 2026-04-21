@@ -1,92 +1,45 @@
-//! Nostr channel via NIP-04 encrypted DMs.
+//! Nostr owner-control channel.
 //!
-//! Connects to a set of Nostr relays and listens for NIP-04 encrypted
-//! direct messages addressed to the bot's public key. Replies are sent
-//! back as NIP-04 encrypted DMs.
-//!
-//! NIP-04 is the legacy DM protocol (kind 4). The newer NIP-17 (gift-wrapped
-//! DMs via NIP-59) requires the `nip59` feature which we don't enable.
-//! NIP-04 is widely supported and simpler to implement.
+//! This channel accepts command ingress only from one explicit owner pubkey over
+//! encrypted Nostr DMs. It uses a shared Nostr runtime so outbound DM sending
+//! and the `nostr_actions` tool share the same connection, key material, and
+//! protocol preferences.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use nostr_sdk::prelude::*;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::channels::nostr_runtime::{NostrDmProtocol, NostrRuntime, parse_public_key};
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::config::NostrConfig;
 use crate::error::ChannelError;
 
-/// Nostr channel using NIP-04 encrypted DMs.
 pub struct NostrChannel {
     config: NostrConfig,
-    client: Arc<RwLock<Option<Client>>>,
+    runtime: Arc<NostrRuntime>,
 }
 
 impl NostrChannel {
-    /// Create a new Nostr channel from configuration.
     pub fn new(config: NostrConfig) -> Result<Self, ChannelError> {
-        Ok(Self {
-            config,
-            client: Arc::new(RwLock::new(None)),
-        })
+        let runtime = Arc::new(NostrRuntime::new(&config)?);
+        Self::new_with_runtime(config, runtime)
     }
 
-    /// Parse the private key from hex or nsec bech32 format.
-    fn parse_keys(config: &NostrConfig) -> Result<Keys, ChannelError> {
-        use secrecy::ExposeSecret;
-        let key_str = config.private_key.expose_secret();
-
-        Keys::parse(key_str)
-            .map_err(|e| ChannelError::Configuration(format!("Invalid Nostr private key: {e}")))
+    pub fn new_with_runtime(
+        config: NostrConfig,
+        runtime: Arc<NostrRuntime>,
+    ) -> Result<Self, ChannelError> {
+        Ok(Self { config, runtime })
     }
 
-    /// Generate a deterministic thread ID from a public key.
+    pub fn runtime(&self) -> Arc<NostrRuntime> {
+        Arc::clone(&self.runtime)
+    }
+
     fn thread_id_from_pubkey(pubkey: &PublicKey) -> String {
         Uuid::new_v5(&Uuid::NAMESPACE_URL, pubkey.to_hex().as_bytes()).to_string()
-    }
-
-    /// Build and send a NIP-04 encrypted DM event.
-    async fn send_nip04_dm(
-        client: &Client,
-        keys: &Keys,
-        recipient: &PublicKey,
-        plaintext: &str,
-    ) -> Result<(), ChannelError> {
-        // Encrypt with NIP-04
-        let encrypted = nip04::encrypt(keys.secret_key(), recipient, plaintext).map_err(|e| {
-            ChannelError::SendFailed {
-                name: "nostr".to_string(),
-                reason: format!("NIP-04 encryption failed: {e}"),
-            }
-        })?;
-
-        // Build kind-4 event with encrypted content and "p" tag
-        let builder = EventBuilder::new(Kind::EncryptedDirectMessage, encrypted)
-            .tag(Tag::public_key(*recipient));
-
-        // Sign and send
-        let event =
-            client
-                .sign_event_builder(builder)
-                .await
-                .map_err(|e| ChannelError::SendFailed {
-                    name: "nostr".to_string(),
-                    reason: format!("Failed to sign event: {e}"),
-                })?;
-
-        client
-            .send_event(&event)
-            .await
-            .map_err(|e| ChannelError::SendFailed {
-                name: "nostr".to_string(),
-                reason: format!("Failed to send event: {e}"),
-            })?;
-
-        Ok(())
     }
 }
 
@@ -97,130 +50,98 @@ impl Channel for NostrChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
-        let keys = Self::parse_keys(&self.config)?;
-        let our_pubkey = keys.public_key();
-
-        let client = Client::new(keys.clone());
-
-        // Add relays
-        for relay_url in &self.config.relays {
-            if let Err(e) = client.add_relay(relay_url.as_str()).await {
-                tracing::warn!(relay = %relay_url, error = %e, "Failed to add Nostr relay");
-            }
-        }
-
-        // Connect to all relays
-        client.connect().await;
-
-        // Wait for at least one connection
-        client.wait_for_connection(Duration::from_secs(10)).await;
+        self.runtime.ensure_connected().await?;
 
         tracing::info!(
             relays = self.config.relays.len(),
-            pubkey = %our_pubkey.to_bech32().unwrap_or_else(|_| our_pubkey.to_hex()),
+            pubkey = %self.runtime.public_key_npub(),
+            owner_pubkey = ?self.runtime.owner_pubkey_npub(),
+            social_dm_enabled = self.runtime.social_dm_enabled(),
             "Nostr channel connected"
         );
 
-        // Subscribe to NIP-04 encrypted DMs addressed to us
-        // subscribe() takes a single Filter, not a Vec
-        let dm_filter = Filter::new()
-            .kind(Kind::EncryptedDirectMessage)
-            .pubkey(our_pubkey)
-            .since(Timestamp::now());
-
-        if let Err(e) = client.subscribe(dm_filter, None).await {
-            tracing::error!(error = %e, "Failed to subscribe to Nostr DMs");
+        for filter in self.runtime.control_filters() {
+            if let Err(err) = self.runtime.client().subscribe(filter, None).await {
+                tracing::error!(error = %err, "Failed to subscribe to Nostr control DMs");
+            }
         }
 
-        // Store client for respond()
-        *self.client.write().await = Some(client.clone());
-
         let (tx, rx) = tokio::sync::mpsc::channel(256);
-        let allow_from = self.config.allow_from.clone();
+        let runtime = Arc::clone(&self.runtime);
+        let owner_pubkey = runtime.owner_pubkey_hex();
 
-        // Spawn listener
         tokio::spawn(async move {
-            let result = client
+            let result = runtime
+                .client()
                 .handle_notifications(|notification| {
                     let tx = tx.clone();
-                    let keys = keys.clone();
-                    let allow_from = allow_from.clone();
+                    let runtime = Arc::clone(&runtime);
+                    let owner_pubkey = owner_pubkey.clone();
 
                     async move {
                         if let RelayPoolNotification::Event { event, .. } = notification {
-                            // Only handle NIP-04 encrypted DMs (kind 4)
-                            if event.kind != Kind::EncryptedDirectMessage {
+                            if !runtime.is_supported_dm_kind(event.kind) {
                                 return Ok(false);
                             }
 
-                            let sender_pubkey = event.pubkey;
-                            let sender_hex = sender_pubkey.to_hex();
+                            if !runtime.mark_control_event_seen(&event.id).await {
+                                return Ok(false);
+                            }
 
-                            // Check allowlist (empty = accept all, matching other channels)
-                            let allowed = if allow_from.is_empty() {
-                                true
-                            } else {
-                                let bech32 = sender_pubkey.to_bech32().unwrap_or_default();
-                                allow_from
-                                    .iter()
-                                    .any(|e| e == "*" || e == &sender_hex || e == &bech32)
+                            let inbound = match runtime.decrypt_inbound_dm(&event).await {
+                                Ok(Some(dm)) => dm,
+                                Ok(None) => return Ok(false),
+                                Err(err) => {
+                                    tracing::warn!(error = %err, "Nostr: failed to decode inbound DM");
+                                    return Ok(false);
+                                }
                             };
 
-                            if !allowed {
+                            if owner_pubkey.as_deref() != Some(inbound.sender_hex.as_str()) {
                                 tracing::debug!(
-                                    sender = %sender_hex,
-                                    "Nostr: sender not in allow_from, dropping"
+                                    sender = %inbound.sender_hex,
+                                    "Nostr: dropping DM from non-owner sender"
                                 );
                                 return Ok(false);
                             }
 
-                            // Decrypt NIP-04 message
-                            let secret_key = keys.secret_key();
-                            let plaintext =
-                                match nip04::decrypt(secret_key, &sender_pubkey, &event.content) {
-                                    Ok(text) => text,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            sender = %sender_hex,
-                                            error = %e,
-                                            "Nostr: failed to decrypt NIP-04 message"
-                                        );
-                                        return Ok(false);
-                                    }
-                                };
-
-                            if plaintext.is_empty() {
-                                return Ok(false);
+                            if let Err(err) = runtime
+                                .remember_protocol(&inbound.sender, inbound.protocol)
+                                .await
+                            {
+                                tracing::warn!(error = %err, "Nostr: failed to persist DM protocol preference");
                             }
-
-                            let thread_id = NostrChannel::thread_id_from_pubkey(&sender_pubkey);
 
                             let metadata = serde_json::json!({
-                                "nostr_pubkey": sender_hex,
-                                "nostr_event_id": event.id.to_hex(),
+                                "nostr_pubkey": inbound.sender_hex,
+                                "nostr_sender_npub": inbound.sender_npub,
+                                "nostr_dm_protocol": inbound.protocol.as_str(),
+                                "nostr_envelope_event_id": inbound.envelope_event_id,
+                                "nostr_event_id": inbound.dm_event_id,
                             });
 
-                            let msg = IncomingMessage::new("nostr", &sender_hex, plaintext)
-                                .with_thread(thread_id)
-                                .with_metadata(metadata)
-                                .with_user_name(
-                                    sender_pubkey
-                                        .to_bech32()
-                                        .unwrap_or_else(|_| sender_hex.clone()),
-                                );
+                            let message = IncomingMessage::new(
+                                "nostr",
+                                &inbound.sender_hex,
+                                inbound.content,
+                            )
+                            .with_thread(NostrChannel::thread_id_from_pubkey(&inbound.sender))
+                            .with_metadata(metadata)
+                            .with_user_name(inbound.sender_npub);
 
-                            if tx.send(msg).await.is_err() {
+                            if tx.send(message).await.is_err() {
                                 tracing::debug!("Nostr: message channel closed");
-                                return Ok(true); // Stop
+                                return Ok(true);
                             }
                         }
-                        Ok(false) // Continue
+
+                        Ok(false)
                     }
                 })
                 .await;
 
-            if let Err(e) = result {
-                tracing::error!(error = %e, "Nostr notification handler exited");
+            if let Err(err) = result {
+                tracing::error!(error = %err, "Nostr notification handler exited");
             }
         });
 
@@ -232,29 +153,26 @@ impl Channel for NostrChannel {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let client_guard = self.client.read().await;
-
-        let client = client_guard
-            .as_ref()
-            .ok_or_else(|| ChannelError::NotConnected("Nostr client not connected".to_string()))?;
-
-        // Get recipient pubkey from metadata
-        let recipient_hex = msg
+        let recipient = msg
             .metadata
             .get("nostr_pubkey")
-            .and_then(|v| v.as_str())
+            .and_then(|value| value.as_str())
             .unwrap_or(&msg.user_id);
-
         let recipient_pubkey =
-            PublicKey::from_hex(recipient_hex).map_err(|e| ChannelError::SendFailed {
+            parse_public_key(recipient).map_err(|message| ChannelError::SendFailed {
                 name: "nostr".to_string(),
-                reason: format!("Invalid recipient pubkey: {e}"),
+                reason: message,
             })?;
+        let protocol = msg
+            .metadata
+            .get("nostr_dm_protocol")
+            .and_then(|value| value.as_str())
+            .and_then(NostrDmProtocol::parse);
 
-        // We need keys to encrypt the reply
-        let keys = Self::parse_keys(&self.config)?;
-
-        Self::send_nip04_dm(client, &keys, &recipient_pubkey, &response.content).await
+        self.runtime
+            .send_reply(&recipient_pubkey, &response.content, protocol)
+            .await?;
+        Ok(())
     }
 
     async fn send_status(
@@ -262,14 +180,13 @@ impl Channel for NostrChannel {
         _status: StatusUpdate,
         _metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
-        // Nostr doesn't support typing indicators
         Ok(())
     }
 
     fn formatting_hints(&self) -> Option<String> {
         Some(
             "- Nostr clients often render plain text only. Keep formatting light.\n\
-- Prefer concise paragraphs and avoid tables or heavy markdown."
+- Use send_message(platform=\"nostr\") for DMs and nostr_actions for public posts or social interactions."
                 .to_string(),
         )
     }
@@ -279,52 +196,42 @@ impl Channel for NostrChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        // Validate recipient: must be a valid Nostr public key (hex or npub).
-        // Skip gracefully for non-pubkey identifiers like "default".
-        let recipient_pubkey = if let Ok(pk) = PublicKey::from_hex(user_id) {
-            pk
-        } else if let Ok(pk) = PublicKey::parse(user_id) {
-            pk
-        } else {
-            tracing::debug!(
-                recipient = user_id,
-                "Nostr: skipping broadcast — recipient is not a valid pubkey"
-            );
-            return Ok(());
-        };
+        let recipient = parse_public_key(user_id).map_err(|message| ChannelError::SendFailed {
+            name: "nostr".to_string(),
+            reason: message,
+        })?;
 
-        let client_guard = self.client.read().await;
-        let client = client_guard
-            .as_ref()
-            .ok_or_else(|| ChannelError::NotConnected("Nostr client not connected".to_string()))?;
-
-        let keys = Self::parse_keys(&self.config)?;
-        Self::send_nip04_dm(client, &keys, &recipient_pubkey, &response.content).await
+        self.runtime
+            .send_dm(&recipient, &response.content, None)
+            .await?;
+        Ok(())
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
-        let client = self.client.read().await;
-        match client.as_ref() {
-            Some(c) => {
-                let relays = c.relays().await;
-                if relays.is_empty() {
-                    return Err(ChannelError::NotConnected(
-                        "No Nostr relays connected".to_string(),
-                    ));
-                }
-                Ok(())
-            }
-            None => Err(ChannelError::NotConnected(
-                "Nostr client not initialized".to_string(),
-            )),
+        if self.runtime.connected_relay_count().await == 0 {
+            return Err(ChannelError::NotConnected(
+                "No Nostr relays connected".to_string(),
+            ));
         }
+        Ok(())
+    }
+
+    async fn diagnostics(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "public_key_hex": self.runtime.public_key_hex(),
+            "public_key_npub": self.runtime.public_key_npub(),
+            "owner_pubkey_hex": self.runtime.owner_pubkey_hex(),
+            "owner_pubkey_npub": self.runtime.owner_pubkey_npub(),
+            "relay_count": self.runtime.relay_count(),
+            "connected_relay_count": self.runtime.connected_relay_count().await,
+            "control_ready": self.runtime.owner_pubkey().is_some(),
+            "social_dm_enabled": self.runtime.social_dm_enabled(),
+        }))
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
-        if let Some(client) = self.client.write().await.take() {
-            client.shutdown().await;
-            tracing::info!("Nostr channel shut down");
-        }
+        self.runtime.shutdown().await;
+        tracing::info!("Nostr channel shut down");
         Ok(())
     }
 }
@@ -334,80 +241,40 @@ mod tests {
     use super::*;
     use secrecy::SecretString;
 
-    #[test]
-    fn test_thread_id_deterministic() {
-        let pubkey =
-            PublicKey::from_hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
-                .unwrap();
-        let id1 = NostrChannel::thread_id_from_pubkey(&pubkey);
-        let id2 = NostrChannel::thread_id_from_pubkey(&pubkey);
-        assert_eq!(id1, id2);
-        assert!(Uuid::parse_str(&id1).is_ok());
-    }
-
-    #[test]
-    fn test_name_is_nostr() {
-        let config = NostrConfig {
+    fn sample_config() -> NostrConfig {
+        NostrConfig {
             private_key: SecretString::from(
                 "0000000000000000000000000000000000000000000000000000000000000001",
             ),
             relays: vec!["wss://relay.example".into()],
+            owner_pubkey: None,
+            social_dm_enabled: false,
             allow_from: vec![],
-        };
-        let channel = NostrChannel::new(config).unwrap();
+        }
+    }
+
+    #[test]
+    fn thread_id_is_deterministic() {
+        let pubkey =
+            PublicKey::from_hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+                .unwrap();
+        assert_eq!(
+            NostrChannel::thread_id_from_pubkey(&pubkey),
+            NostrChannel::thread_id_from_pubkey(&pubkey)
+        );
+    }
+
+    #[test]
+    fn name_is_nostr() {
+        let channel = NostrChannel::new(sample_config()).unwrap();
         assert_eq!(channel.name(), "nostr");
     }
 
     #[test]
-    fn test_parse_keys_rejects_invalid_secret() {
-        let config = NostrConfig {
-            private_key: SecretString::from("not-a-secret"),
-            relays: vec![],
-            allow_from: vec![],
-        };
-        assert!(NostrChannel::parse_keys(&config).is_err());
-    }
-
-    #[test]
-    fn test_parse_keys_accepts_valid_hex_private_key() {
-        let config = NostrConfig {
-            private_key: SecretString::from(
-                "0000000000000000000000000000000000000000000000000000000000000001",
-            ),
-            relays: vec![],
-            allow_from: vec![],
-        };
-        assert!(NostrChannel::parse_keys(&config).is_ok());
-    }
-
-    #[test]
-    fn test_thread_id_for_different_pubkeys() {
-        let pubkey1 =
-            PublicKey::from_hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
-                .unwrap();
-        let pubkey2 =
-            PublicKey::from_hex("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81799")
-                .unwrap();
-        assert_ne!(
-            NostrChannel::thread_id_from_pubkey(&pubkey1),
-            NostrChannel::thread_id_from_pubkey(&pubkey2)
-        );
-    }
-
-    #[tokio::test]
-    async fn test_broadcast_skips_non_pubkey_recipients() {
-        let channel = NostrChannel::new(NostrConfig {
-            private_key: SecretString::from(
-                "0000000000000000000000000000000000000000000000000000000000000001",
-            ),
-            relays: vec![],
-            allow_from: vec![],
-        })
-        .unwrap();
-
-        let result = channel
-            .broadcast("default", OutgoingResponse::text("hello"))
-            .await;
-        assert!(result.is_ok());
+    fn runtime_is_shared() {
+        let config = sample_config();
+        let runtime = Arc::new(NostrRuntime::new(&config).unwrap());
+        let channel = NostrChannel::new_with_runtime(config, Arc::clone(&runtime)).unwrap();
+        assert_eq!(channel.runtime().public_key_hex(), runtime.public_key_hex());
     }
 }

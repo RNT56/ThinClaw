@@ -157,7 +157,37 @@ pub fn is_sender_allowed(sender: &str, allowed: &[String]) -> bool {
     if allowed.is_empty() {
         return true; // Empty = allow all
     }
-    allowed.iter().any(|a| sender.contains(a.as_str()))
+
+    let sender_norm = canonical_sender(sender);
+    allowed.iter().any(|entry| {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return false;
+        }
+        if entry == "*" {
+            return true;
+        }
+        let entry_norm = canonical_sender(entry);
+        if entry_norm.starts_with('@') {
+            // Allow domain-level rules like "@example.com".
+            return sender_norm.ends_with(&entry_norm);
+        }
+        sender_norm == entry_norm
+    })
+}
+
+fn canonical_sender(value: &str) -> String {
+    let trimmed = value.trim();
+    let core = if let (Some(start), Some(end)) = (trimmed.rfind('<'), trimmed.rfind('>')) {
+        if start < end {
+            &trimmed[start + 1..end]
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    core.trim().to_lowercase()
 }
 
 /// Simple JSON string extractor (avoids serde_json dependency for wiring layer).

@@ -1,6 +1,6 @@
 # ThinClaw Parity And ThinClaw-First Feature Matrix
 
-> **Last reconciled:** 2026-04-18 (docs + desktop autonomy reconciliation)
+> **Last reconciled:** 2026-04-20 (Wave 7 ownership + contract parity closure)
 
 This document tracks both feature parity against OpenClaw (TypeScript reference implementation) and ThinClaw-first capabilities that now extend well beyond parity. Use it both as a compatibility map and as a ledger of the newer Rust-native features we are actively adding.
 
@@ -74,7 +74,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | `doctor` diagnostics | ✅ | ✅ | `cli/doctor.rs` — DB, binary, LLM, and Tailscale checks |
 | Agent event broadcast | ✅ | ✅ | SSE broadcast manager + routine engine lifecycle events (Status, JobStarted, JobResult) |
 | Channel health monitor | ✅ | ✅ | `ChannelHealthMonitor`: periodic checks, failure tracking, auto-restart with cooldown |
-| Presence system | ✅ | ✅ | `PresenceTracker` with beacons, status, stale pruning ([`src/agent/presence.rs`](src/agent/presence.rs)) |
+| Presence system | ✅ | ❌ | Dedicated `PresenceTracker` module removed as stale/unwired; channel/runtime liveness is tracked through `ChannelHealthMonitor` + channel status surfaces |
 | Trusted-proxy auth mode | ✅ | ✅ | `TRUSTED_PROXY_HEADER` + `TRUSTED_PROXY_IPS` for reverse-proxy deployments |
 | APNs push pipeline | ✅ | ❌ | Wake disconnected iOS nodes via push |
 | Oversized payload guard | ✅ | ✅ | HTTP webhook 64KB body limit + Content-Length check + chat history cap (`max_context_messages` default 200) |
@@ -92,7 +92,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | HTTP webhook | ✅ | ✅ | - | axum with secret validation |
 | REPL (local shell) | ✅ | ✅ | - | Full local shell surface with slash commands, skins, `/rollback`, and `/personality` (`/vibe` alias); no longer just a testing stub |
 | WASM channels | ❌ | ✅ | - | ThinClaw innovation |
-| WhatsApp | ✅ | ✅ | - | WASM channel via Cloud API webhook — text, media (image/audio/video/document/sticker), reply threading, DM pairing, markdown→WhatsApp formatting, message chunking |
+| WhatsApp | ✅ | ✅ | - | WASM channel via Cloud API webhook — GET verify-token + POST HMAC validation, text/media/location/contacts/interactive/reaction inbound handling, outbound text + media replies, DM pairing, markdown→WhatsApp formatting, Unicode-safe chunking |
 | Telegram | ✅ | ✅ | - | WASM channel, DM pairing, caption, /start, bot_username, forum threading, sendMessage+editMessageText streaming (host-side, HTML formatted) |
 | Discord | ✅ | ✅ | - | Native Rust Gateway WS + REST ([`src/channels/discord.rs`](src/channels/discord.rs)) + WASM interactions channel (slash commands) |
 | Signal | ✅ | ✅ | - | signal-cli daemon, SSE listener, user/group allowlists, DM pairing |
@@ -110,7 +110,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | Voice Call | ✅ | ❌ | P3 | Twilio/Telnyx, stale call reaper, pre-cached greeting |
 | Gmail | ✅ | ✅ | - | `GmailChannel` (700+ LOC) — Pub/Sub pull + Gmail API read/reply + sender allowlist ([`src/channels/gmail.rs`](src/channels/gmail.rs)) |
 | Apple Mail | ❌ | ✅ | P3 | `AppleMailChannel` — Envelope Index polling, sender allowlist, unread-only, mark-as-read. Wizard onboarding + WebUI settings ([`src/channels/apple_mail.rs`](src/channels/apple_mail.rs)) |
-| Nostr | ✅ | ✅ | - | NIP-04 encrypted DM channel (`channels/nostr.rs`), broadcast() with pubkey validation, empty allowlist = accept all |
+| Nostr | ✅ | ✅ | ✅ | Owner-only encrypted DM control plus `nostr_actions` social tool, dual-stack NIP-04/Gift Wrap DM support, DM-only `send_message(platform="nostr")` |
 
 ### Telegram-Specific Features (since Feb 2025)
 
@@ -165,10 +165,10 @@ Slack remains a supported WASM Events API channel with webhook ingestion, thread
 | `run` (agent) | ✅ | ✅ | - | Default command |
 | `tool install/list/remove` | ✅ | ✅ | - | WASM tools |
 | `gateway start/stop` | ✅ | ✅ | P2 | `gateway.rs`: start (foreground/bg with PID), stop (SIGTERM), status (health+uptime) |
-| `onboard` (wizard) | ✅ | ✅ | - | Interactive setup with five onboarding lanes, including `Custom / Advanced`, plus Humanist Cockpit copy/readiness framing and shared CliSkin presentation across CLI and TUI |
+| `onboard` (wizard) | ✅ | ✅ | - | Interactive setup now exposes a Quick Setup vs Advanced Setup split in the onboarding TUI, keeps shared Humanist Cockpit readiness framing across CLI/TUI, and can continue directly into the matching local runtime |
 | `/skin` | ❌ | ✅ | - | Runtime local-client skin switching with built-in TOML skins (`cockpit`, `midnight`, `solar`, `athena`, `delphi`, `olympus`), ASCII art, and user overrides |
 | `/personality` | ❌ | ✅ | - | Session-scoped personality overlay command (`/personality`, `/personality <name>`, `/personality reset`) with `/vibe` retained as a compatibility alias |
-| `tui` | ✅ | ✅ | - | Ratatui TUI |
+| `tui` | ✅ | ✅ | - | Explicit full-screen runtime entrypoint (`thinclaw tui`) backed by the Ratatui local runtime |
 | `config` | ✅ | ✅ | - | Read/write config |
 | `channels` | ✅ | ✅ | P2 | `channels.rs`: list (env+WASM detection), info (per-channel details) |
 | `models` | ✅ | ✅ | - | `list`, `info`, `test`, and `verify` subcommands with live provider discovery/probing ([`src/cli/models.rs`](src/cli/models.rs)) |
@@ -205,6 +205,7 @@ Slack remains a supported WASM Events API channel with webhook ingestion, thread
 |---------|----------|----------|-------|
 | Pi agent runtime | ✅ | ➖ | ThinClaw uses custom runtime |
 | RPC-based execution | ✅ | ✅ | Orchestrator/worker pattern |
+| Worker completion + tool-result event schema | ✅ | ✅ | Canonical completion payload (`status`, `session_id`, `success`, `message`) and structured tool-result projection (`output_text`, `output_json`) are now preserved end-to-end for orchestrator/SSE consumers |
 | Multi-provider failover | ✅ | ✅ | `FailoverProvider` tries providers sequentially on retryable errors, applies per-provider cooldowns, leases individual credential entries (not just provider slots) with fill-first / round-robin / least-used / random selection strategies so multi-key backends can spread parallel traffic across keys, and participates in live OAuth credential refresh via watched auth-file sync + runtime reload ([`src/llm/failover.rs`](src/llm/failover.rs), [`src/llm/credential_sync.rs`](src/llm/credential_sync.rs), [`src/app.rs`](src/app.rs)) |
 | Per-sender sessions | ✅ | ✅ | Direct sessions are canonicalized by principal scope (cross-channel/device continuity); group scopes remain isolated |
 | Global sessions | ✅ | ✅ | Cross-channel shared context with LRU eviction ([`src/agent/global_session.rs`](src/agent/global_session.rs)) |
@@ -213,7 +214,7 @@ Slack remains a supported WASM Events API channel with webhook ingestion, thread
 | Closed-loop learning orchestrator | ❌ | ✅ | Event→evaluation→candidate loop with dedupe/cooldown, safe-mode thresholds, Tier A auto-apply, Tier C approval-gated code proposals ([`src/agent/learning.rs`](src/agent/learning.rs), [`src/agent/thread_ops.rs`](src/agent/thread_ops.rs)) |
 | Learning tool suite | ❌ | ✅ | `session_search` (FTS + optional cheap-model transcript summaries with fallback), `prompt_manage`, `skill_manage`, `learning_status`, `learning_history`, `learning_feedback`, `learning_proposal_review` ([`src/tools/builtin/memory.rs`](src/tools/builtin/memory.rs), [`src/agent/session_search.rs`](src/agent/session_search.rs), [`src/tools/builtin/learning_tools.rs`](src/tools/builtin/learning_tools.rs)) |
 | Learning API + audit UI | ❌ | ✅ | `/api/learning/*` endpoints + dedicated Web Learning tab with proposals, feedback, rollbacks, and provider health ([`src/api/learning.rs`](src/api/learning.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/index.html`](src/channels/web/static/index.html)) |
-| Optional research automation / experiments | ❌ | ✅ | Advanced opt-in `experiments.*` settings, `/api/experiments/*` gateway routes, CLI `thinclaw experiments ...`, routine action integration, Web Research tab, queued-campaign draining, autonomous planner/mutator/reviewer iteration, telemetry-derived opportunities, persisted target linking, normalized LLM-cost + runner-cost attribution, provider/budget detail in the Research WebUI, GPU Cloud setup cards, lease-scoped remote runner mode, local benchmark execution, and controller-managed RunPod/Vast/Lambda plus SSH/Slurm/Kubernetes launches are shipped, including a first-class Lambda launch form that builds `backend_config.launch_payload` server-side for turnkey controller launches ([`src/api/experiments.rs`](src/api/experiments.rs), [`src/experiments/mod.rs`](src/experiments/mod.rs), [`src/experiments/adapters.rs`](src/experiments/adapters.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/index.html`](src/channels/web/static/index.html), [`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
+| Optional research automation / experiments | ❌ | ✅ | Advanced opt-in `experiments.*` settings, `/api/experiments/*` gateway routes, CLI `thinclaw experiments ...`, routine action integration, Web Research tab, queued-campaign draining, autonomous planner/mutator/reviewer iteration, telemetry-derived opportunities, persisted target linking, normalized LLM-cost + runner-cost attribution, provider/budget detail in the Research WebUI, GPU Cloud setup cards, lease-scoped remote runner mode, local benchmark execution, and controller-managed RunPod/Vast/Lambda plus SSH/Slurm/Kubernetes launches are shipped, including a first-class Lambda launch form that builds `backend_config.launch_payload` server-side for turnkey controller launches; campaign, trial, and artifact reads are owner-scoped at the storage boundary ([`src/api/experiments.rs`](src/api/experiments.rs), [`src/experiments/mod.rs`](src/experiments/mod.rs), [`src/experiments/adapters.rs`](src/experiments/adapters.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs), [`src/channels/web/static/index.html`](src/channels/web/static/index.html), [`src/channels/web/static/app.js`](src/channels/web/static/app.js)) |
 | Optional external memory providers | ❌ | ✅ | Honcho + Zep adapters, local-first canonical memory, non-fatal provider fallback ([`src/agent/learning.rs`](src/agent/learning.rs)) |
 | Post-compaction read audit | ✅ | ✅ | `ReadAuditor` with scope-based rule scanning + token-budgeted appendix ([`src/context/read_audit.rs`](src/context/read_audit.rs)) |
 | Post-compaction context injection | ✅ | ✅ | Priority-based fragment assembly with token budgets ([`src/context/post_compaction.rs`](src/context/post_compaction.rs)) |
@@ -227,7 +228,7 @@ Slack remains a supported WASM Events API channel with webhook ingestion, thread
 | Model-specific prompt guidance | ❌ | ✅ | Model-family prompt guardrails (GPT/Gemini) injected into conversation system prompts, controlled by `agent.model_guidance_enabled` |
 | Block-level streaming | ✅ | ✅ | `StreamChunk::Text` + `StreamChunk::ReasoningDelta` via `complete_stream()` |
 | Tool-level streaming | ✅ | ✅ | `StreamChunk::ToolCall` + `StreamChunk::ToolCallDelta` via `complete_stream_with_tools()` |
-| Z.AI tool_stream | ✅ | ✅ | Full tool_stream protocol with delta accumulation ([`src/channels/tool_stream.rs`](src/channels/tool_stream.rs)) |
+| Z.AI tool_stream | ✅ | ❌ | Standalone `tool_stream` helper module was removed as stale/unwired; canonical tool streaming remains via `StreamChunk::ToolCall` / `ToolCallDelta` in provider and OpenAI-compat paths |
 | Plugin tools | ✅ | ✅ | WASM tools |
 | Tool policies (allow/deny) | ✅ | ✅ | |
 | Exec approvals (`/approve`) | ✅ | ✅ | TUI approval overlay |
@@ -316,10 +317,10 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | Configurable image resize dims | ✅ | ✅ | P2 | `with_max_dimensions()` — sets OpenAI `detail` level (high/low) based on image dims |
 | Multiple images per tool call | ✅ | ✅ | P2 | `format_multiple_for_llm()` — array of image content blocks |
 | Audio transcription | ✅ | ✅ | P2 | `AudioExtractor`: Whisper HTTP endpoint, multipart upload |
-| Video support | ✅ | ✅ | P3 | `VideoAnalyzer` ([`src/media/video.rs`](src/media/video.rs)) — ffprobe metadata, ffmpeg keyframe + audio extraction, graceful fallback |
+| Video support | ✅ | ✅ | P3 | `VideoAnalyzer` ([`src/media/video.rs`](src/media/video.rs)) — ffprobe metadata, ffmpeg keyframe + audio extraction, graceful fallback; canonical transcript field is `audio_transcript_path` with one-cycle deprecated alias `audio_transcript` |
 | PDF parsing | ✅ | ✅ | P2 | `PdfExtractor`: BT/ET text blocks, readable-sequence fallback |
 | MIME detection | ✅ | ✅ | P2 | `media/types.rs`: extension + magic bytes detection |
-| Media caching | ✅ | ✅ | P3 | Per-channel cache policies with eviction strategies ([`src/media/media_cache_config.rs`](src/media/media_cache_config.rs)) |
+| Media caching | ✅ | ✅ | P3 | SHA-keyed media cache with TTL + LRU eviction (`CacheConfig`/`MediaCache`) ([`src/media/cache.rs`](src/media/cache.rs)) |
 | Vision model integration | ✅ | ✅ | P2 | `ImageExtractor::format_for_llm()` — base64 data-URI for multimodal LLMs |
 | TTS (Edge TTS) | ✅ | ✅ | - | `TtsSynthesizer` with Edge TTS provider support |
 | TTS (OpenAI) | ✅ | ✅ | - | `tools/builtin/tts.rs` — OpenAI TTS tool |
@@ -331,7 +332,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | Discord media download | ❌ | ✅ | - | Native gateway `MESSAGE_CREATE` with `attachments[]` CDN download; size-limited to 20MB/file |
 | Signal media download | ❌ | ✅ | - | Typed `SignalAttachment` from signal-cli SSE, reads binary from local attachment store; size-limited |
 | iMessage media download | ❌ | ✅ | - | Queries `attachment` + `message_attachment_join` tables from chat.db, reads files from disk |
-| WhatsApp media download | ❌ | ✅ | - | 2-step Cloud API download (media URL → binary), supports image/audio/video/document/sticker |
+| WhatsApp media download | ❌ | ✅ | - | 2-step Cloud API download (media URL → binary), uses configured Graph API version, supports image/audio/video/document/sticker |
 | Slack media download | ❌ | ✅ | - | `SlackFile.url_private_download` with Bearer token auth, size-limited to 20MB |
 
 ### Owner: ThinClaw Agent
@@ -509,7 +510,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | Cron stagger controls | ✅ | ✅ | P3 | `StaggerConfig` + `CronGate` ([`src/agent/cron_stagger.rs`](src/agent/cron_stagger.rs)) |
 | Cron finished-run webhook | ✅ | ✅ | P3 | `FinishedRunPayload` + `notify_finished_run()` ([`src/agent/cron_stagger.rs`](src/agent/cron_stagger.rs)) |
 | Timezone support | ✅ | ✅ | - | Via cron expressions |
-| One-shot/recurring jobs | ✅ | ✅ | - | Manual + cron triggers |
+| One-shot/recurring jobs | ✅ | ✅ | - | Manual + cron triggers; unknown persisted mode values now surface explicitly as `unknown` with raw mode preserved for observability |
 | Actor-private routines/jobs | ❌ | ✅ | `actor_id` persistence, actor-scoped cron/tool lookups, actor-bound routine/job ownership checks, request-scoped gateway enforcement, in-channel job listing, pairing-linked delivery, and actor-private profile/routine writes are all wired end to end |
 | Channel health monitor | ✅ | ✅ | `ChannelHealthMonitor` wired into background tasks |
 | `beforeInbound` hook | ✅ | ✅ | P2 | |
@@ -666,7 +667,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | **Extension health monitor** | `ExtensionHealthMonitor` ([`src/extensions/ext_health_monitor.rs`](src/extensions/ext_health_monitor.rs)) | ✅ State badges (Running/Connecting/Degraded/Error) via Channel Status panel | ✅ Via `openclaw_channel_status_list` | ✅ End-to-end |
 | **Routine audit log** | `Database::list_routine_runs()` ([`src/db/mod.rs`](src/db/mod.rs)) | ✅ Tabular log with outcome badges, filter, routine selector | ✅ `tauri_commands::routine_audit_list()` queries DB | ✅ End-to-end |
 | **Multi-format session export** | `SessionExporter` ([`src/cli/session_export.rs`](src/cli/session_export.rs)) | ✅ `exportSession(key, format)` with backward compat | ✅ `openclaw_export_session` live (md/json/txt/csv/html) | ✅ End-to-end |
-| **Agent management store** | `AgentManagementStore` ([`src/agent/management_api.rs`](src/agent/management_api.rs)) | ✅ Multi-agent picker + API wrapper + extended `AgentProfile` type | ✅ `openclaw_agents_set_default` live (writes to config) | ✅ End-to-end |
+| **Agent management store** | `AgentRegistry` ([`src/agent/agent_registry.rs`](src/agent/agent_registry.rs)) | ✅ Multi-agent picker + API wrapper + extended `AgentProfile` type | ✅ `openclaw_agents_set_default` live (writes to config) | ✅ End-to-end |
 | **Gmail channel** | `GmailChannel` ([`src/channels/gmail.rs`](src/channels/gmail.rs), 700+ LOC) | ✅ Gmail card with real status + automated PKCE via `startGmailOAuth()` | ✅ `openclaw_gmail_status` + `openclaw_gmail_oauth_start` | ✅ End-to-end |
 | **Plugin manifest validator** | `ManifestValidator` ([`src/extensions/manifest_validator.rs`](src/extensions/manifest_validator.rs)) | ✅ Per-extension validate button with inline error/warning display | ✅ `tauri_commands::manifest_validate()` | ✅ End-to-end |
 | **Plugin lifecycle hooks** | `LifecycleHookRegistry` ([`src/extensions/lifecycle_hooks.rs`](src/extensions/lifecycle_hooks.rs)) | ✅ Timeline tab in Plugins page with color-coded events | ✅ `tauri_commands::plugin_lifecycle_list()` | ✅ End-to-end |
@@ -720,7 +721,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | ThinClaw Gap | Priority | Scrappy Impact When Shipped |
 |-------------|----------|----------------------------|
 | **Multimodal media pipeline** | ✅ Done | Telegram/channel → binary download → rig-core multimodal. Frontend rendering for images/PDFs/audio in chat bubbles |
-| **WhatsApp channel** | ✅ Done | Cloud API webhook — text, media, DM pairing, reply threading, formatting |
+| **WhatsApp channel** | ✅ Done | Cloud API webhook — verify-token + signed POST validation, text/media/location/contacts/interactive/reaction inbound support, outbound media replies, DM pairing, reply threading, formatting |
 | **APNs push pipeline** | Deferred | iOS push wake — needs Apple Developer cert infra |
 
 ### 19.2 Future Considerations
@@ -946,7 +947,7 @@ running inside Scrappy.
 **UI & Control**
 - ✅ Canvas system (A2UI) — `CanvasTool` + `CanvasStore` + canvas gateway routes ([`src/channels/canvas_gateway.rs`](src/channels/canvas_gateway.rs))
 - ✅ WebChat theme sync — `WebChatConfig` + `WebChatTheme` (Light/Dark/System), CSS class/variable generation ([`src/config/webchat.rs`](src/config/webchat.rs))
-- ✅ Agent management API — `AgentManagementStore` with CRUD, session_count, last_active_at, find_by_status ([`src/agent/management_api.rs`](src/agent/management_api.rs))
+- ✅ Agent management API — `AgentRegistry` with persistent CRUD and router integration ([`src/agent/agent_registry.rs`](src/agent/agent_registry.rs))
 - ✅ Config editing API — `Settings.set()/.get()/.list()/.reset()` with typed path-based access ([`src/settings.rs`](src/settings.rs))
 
 **Plugin System**
@@ -960,7 +961,7 @@ running inside Scrappy.
 
 ### P4 - Postponed
 - ❌ Slack channel (native implementation — currently WASM tool)
-- ✅ WhatsApp channel — WASM Cloud API channel (1449 LOC, [`channels-src/whatsapp/src/lib.rs`](channels-src/whatsapp/src/lib.rs)) with text/media/document/sticker, DM pairing, reply threading, markdown formatting, 3 tests
+- ✅ WhatsApp channel — WASM Cloud API channel ([`channels-src/whatsapp/src/lib.rs`](channels-src/whatsapp/src/lib.rs)) with signed webhooks, richer inbound normalization, outbound media send/upload, DM pairing, reply threading, markdown formatting, and 19 crate tests
 - ✅ iMessage channel — `IMessageChannel` (720 LOC, [`src/channels/imessage.rs`](src/channels/imessage.rs)) with chat.db polling + osascript sending, group chats, attachments, dedup, diagnostics, 23 tests
 - ❌ Other messaging platforms (LINE, Feishu/Lark, Google Chat, MS Teams, Twitch)
 
@@ -1201,7 +1202,7 @@ Source-present but not currently registered as built-in runtime tools: `slack_ac
 
 | Component | Source | Description |
 |-----------|--------|-------------|
-| Composable toolsets | [`toolset.rs`](src/tools/toolset.rs) | Named tool collections (web/dev/memory/safe/full/communication/automation/agents) with recursive includes + cycle detection |
+| Tool profile controls | Runtime settings + policy surfaces | Canonical tool-surface shaping now uses runtime tool profiles and policy evaluation; stale standalone `ToolsetRegistry` module was removed |
 | OSV malware scanner | [`osv_check.rs`](src/safety/osv_check.rs) | Package scanning via Google OSV API for MCP servers; MAL-* advisory detection, 1h cache, fail-open |
 | Intent display | [`intent_display.rs`](src/tools/intent_display.rs) | Human-readable intent hints and argument extraction for all tool calls |
 | Tool registry | [`registry.rs`](src/tools/registry.rs) | Protected-name enforcement, conditional registration, rate limiting |

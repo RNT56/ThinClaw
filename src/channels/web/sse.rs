@@ -106,43 +106,7 @@ impl SseManager {
             .filter_map(|result| result.ok())
             .map(|event| {
                 let data = serde_json::to_string(&event).unwrap_or_default();
-                let event_type = match &event {
-                    SseEvent::Response { .. } => "response",
-                    SseEvent::Thinking { .. } => "thinking",
-                    SseEvent::ReasoningContent { .. } => "reasoning_content",
-                    SseEvent::ToolStarted { .. } => "tool_started",
-                    SseEvent::ToolCompleted { .. } => "tool_completed",
-                    SseEvent::ToolResult { .. } => "tool_result",
-                    SseEvent::StreamChunk { .. } => "stream_chunk",
-                    SseEvent::Status { .. } => "status",
-                    SseEvent::SubagentSpawned { .. } => "subagent_spawned",
-                    SseEvent::SubagentProgress { .. } => "subagent_progress",
-                    SseEvent::SubagentCompleted { .. } => "subagent_completed",
-                    SseEvent::ApprovalNeeded { .. } => "approval_needed",
-                    SseEvent::AuthRequired { .. } => "auth_required",
-                    SseEvent::AuthCompleted { .. } => "auth_completed",
-                    SseEvent::Error { .. } => "error",
-                    SseEvent::JobStarted { .. } => "job_started",
-                    SseEvent::JobMessage { .. } => "job_message",
-                    SseEvent::JobToolUse { .. } => "job_tool_use",
-                    SseEvent::JobToolResult { .. } => "job_tool_result",
-                    SseEvent::JobStatus { .. } => "job_status",
-                    SseEvent::JobResult { .. } => "job_result",
-                    SseEvent::Heartbeat => "heartbeat",
-                    SseEvent::ExtensionStatus { .. } => "extension_status",
-                    SseEvent::ChannelStatusChange { .. } => "channel_status_change",
-                    SseEvent::RoutineLifecycle { .. } => "routine_lifecycle",
-                    SseEvent::CostAlert { .. } => "cost_alert",
-                    SseEvent::CanvasUpdate { .. } => "canvas_update",
-                    SseEvent::ExperimentOpportunityUpdated { .. } => {
-                        "experiment_opportunity_updated"
-                    }
-                    SseEvent::ExperimentCampaignUpdated { .. } => "experiment_campaign_updated",
-                    SseEvent::ExperimentTrialUpdated { .. } => "experiment_trial_updated",
-                    SseEvent::ExperimentRunnerUpdated { .. } => "experiment_runner_updated",
-                    SseEvent::BootstrapCompleted => "bootstrap_completed",
-                };
-                Ok(Event::default().event(event_type).data(data))
+                Ok(Event::default().event(event.event_type()).data(data))
             });
 
         // Wrap in a stream that decrements on drop

@@ -210,7 +210,10 @@ curl -X POST \
 
 - Use `GMAIL_ALLOWED_SENDERS` to restrict which email addresses can trigger the agent
 - An empty list means **all senders are allowed**
-- Filtering is case-insensitive substring matching (e.g., `@company.com` matches all company emails)
+- Matching is canonicalized and case-insensitive
+- Exact sender entries match one address (for example, `alice@company.com`)
+- Domain entries must start with `@` and match that domain (for example, `@company.com`)
+- `*` allows all senders
 
 ### Message Size Limits
 

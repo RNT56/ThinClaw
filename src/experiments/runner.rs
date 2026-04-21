@@ -22,6 +22,11 @@ pub async fn run_remote_runner(
     token: &str,
     workspace_root: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    if gateway_url.trim().is_empty() {
+        return Err(anyhow!(
+            "gateway_url must be non-empty for remote experiment runner leases"
+        ));
+    }
     let client = reqwest::Client::new();
     let job_url = lease_url(gateway_url, lease_id, "job");
     let credentials_url = lease_url(gateway_url, lease_id, "credentials");
@@ -235,6 +240,23 @@ pub async fn run_remote_runner(
         )
         .await
         .ok();
+        if let Some(log_path) = persisted_log_path.as_ref() {
+            let failure_log_artifact = ExperimentRunnerArtifactUpload {
+                kind: "run_log".to_string(),
+                uri_or_local_path: log_path.to_string_lossy().to_string(),
+                size_bytes: Some(
+                    tokio::fs::metadata(log_path)
+                        .await
+                        .map(|meta| meta.len())
+                        .unwrap_or_default(),
+                ),
+                fetchable: false,
+                metadata: serde_json::json!({ "failure": true }),
+            };
+            post_artifact(&client, gateway_url, lease_id, token, &failure_log_artifact)
+                .await
+                .ok();
+        }
         if !terminal_completion_attempted {
             let failure = ExperimentRunnerCompletion {
                 exit_code: Some(1),
@@ -248,6 +270,9 @@ pub async fn run_remote_runner(
                 artifact_manifest_json: serde_json::json!({
                     "error": error_text.clone(),
                     "stage": completion_stage,
+                    "log_path": persisted_log_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string()),
                 }),
             };
             let _ = client

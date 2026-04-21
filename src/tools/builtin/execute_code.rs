@@ -83,7 +83,7 @@ struct ToolRpcResponse {
     error: Option<String>,
 }
 
-const TOOL_RPC_HELPER_EXPORTS: &str = "call_tool, read_file, write_file, list_dir, search_files, memory_search, memory_read, memory_write, session_search, http_tool, browser_tool";
+const TOOL_RPC_HELPER_EXPORTS: &str = "call_tool, read_file, list_dir, search_files, memory_search, memory_read, memory_write, session_search, http_tool, browser_tool";
 
 trait ToolRpcLanguageAdapter: Sync {
     fn canonical_language(&self) -> &'static str;

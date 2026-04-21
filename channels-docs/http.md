@@ -27,8 +27,7 @@ Send a message to the agent:
 ```bash
 curl -X POST http://localhost:8080/webhook \
   -H "Content-Type: application/json" \
-  -H "X-Webhook-Secret: my-webhook-secret" \
-  -d '{"content": "Run the test suite"}'
+  -d '{"content":"Run the test suite","secret":"my-webhook-secret"}'
 ```
 
 ## Notes

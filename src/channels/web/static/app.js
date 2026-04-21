@@ -23,6 +23,8 @@ const SUBAGENT_SESSION_STORAGE_LIMIT = 96;
 let experimentsFeatureEnabled = false;
 let experimentsRefreshTimer = null;
 let autonomyFeatureAvailable = false;
+let currentSettingsSubtab = 'General';
+let settingsSearchQuery = '';
 const autonomyState = {
   status: null,
   rollouts: null,
@@ -48,6 +50,7 @@ const experimentsState = {
   lastLeaseCampaignId: null,
 };
 let currentResearchSubtab = 'overview';
+let currentExtensionsSubtab = 'overview';
 const mcpBrowserState = {
   servers: [],
   selectedServer: '',
@@ -58,6 +61,7 @@ const mcpBrowserState = {
 };
 
 const RESEARCH_SUBTABS = ['overview', 'opportunities', 'projects', 'runners', 'campaigns', 'gpu-clouds'];
+const EXTENSIONS_SUBTABS = ['overview', 'mcp', 'tools'];
 const PRESENTATION_SETTING_KEYS = new Set([
   'agent.cli_skin',
   'webchat_skin',
@@ -66,9 +70,79 @@ const PRESENTATION_SETTING_KEYS = new Set([
 ]);
 const SKINNED_TOOL_NAMES = ['shell', 'browser', 'memory', 'search_files', 'todo', 'subagent'];
 const WEBCHAT_BOOTSTRAP = readWebchatBootstrap();
-let currentResolvedSkin = WEBCHAT_BOOTSTRAP.resolvedSkin;
+let currentPresentationBootstrap = WEBCHAT_BOOTSTRAP;
+let currentResolvedSkin = normalizeSkinMeta(WEBCHAT_BOOTSTRAP.resolvedSkin);
 let currentAgentName = WEBCHAT_BOOTSTRAP.agentName || 'Agent';
-const AVAILABLE_SKINS = Array.isArray(WEBCHAT_BOOTSTRAP.availableSkins) ? WEBCHAT_BOOTSTRAP.availableSkins : [];
+let currentAvailableSkins = Array.isArray(WEBCHAT_BOOTSTRAP.availableSkins) ? WEBCHAT_BOOTSTRAP.availableSkins.slice() : [];
+let currentSkinCatalog = [];
+let shellMobileNavOpen = false;
+let configureModalFocusReturn = null;
+let mcpConnectionModalFocusReturn = null;
+
+const HASH_KEY_TAB = 'tab';
+const HASH_KEY_SETTINGS_SUBTAB = 'settingsSubtab';
+const HASH_KEY_SETTINGS_SEARCH = 'settingsSearch';
+const EXTENSIONS_PANEL_STORAGE_KEY = 'thinclaw_extensions_panel_state_v1';
+const PROVIDERS_UI_PREFS_STORAGE_KEY = 'thinclaw_providers_ui_prefs_v1';
+const PROVIDERS_UI_FILTER_SETTING_KEY = 'web.providers_filter';
+const PROVIDERS_UI_HIDDEN_SETTING_KEY = 'web.providers_hidden_slugs';
+
+const SHELL_SECTIONS = [
+  { id: 'chat', label: 'Chat', tabs: ['chat'], blurb: 'Active conversations and agent transcripts.' },
+  { id: 'workspace', label: 'Workspace', tabs: ['memory', 'jobs', 'routines', 'learning'], blurb: 'Memory, jobs, routines, and learning loops.' },
+  { id: 'studio', label: 'Studio', tabs: ['extensions', 'skills', 'research'], blurb: 'Extensions, skills, and research tooling.' },
+  { id: 'operations', label: 'Operations', tabs: ['providers', 'costs', 'logs', 'autonomy'], blurb: 'Runtime controls, costs, logs, and autonomy.' },
+  { id: 'settings', label: 'Settings', tabs: ['settings'], blurb: 'Presentation, agent, safety, and channel settings.' },
+];
+
+const SHELL_TAB_META = {
+  chat: { label: 'Chat' },
+  memory: { label: 'Memory' },
+  jobs: { label: 'Jobs' },
+  routines: { label: 'Routines' },
+  learning: { label: 'Learning' },
+  extensions: { label: 'Extensions' },
+  skills: { label: 'Skills' },
+  research: { label: 'Research', feature: 'research' },
+  providers: { label: 'Providers' },
+  costs: { label: 'Costs' },
+  logs: { label: 'Logs' },
+  autonomy: { label: 'Autonomy', feature: 'autonomy' },
+  settings: { label: 'Settings' },
+};
+
+function readJsonStorage(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : fallback;
+  } catch (_err) {
+    return fallback;
+  }
+}
+
+function writeJsonStorage(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (_err) {
+    // Ignore persistence failures and continue with in-memory state.
+  }
+}
+
+function normalizeProvidersUiPrefs(raw) {
+  const value = raw && typeof raw === 'object' ? raw : {};
+  const allowedFilters = new Set(['all', 'enabled', 'ready', 'attention', 'local', 'hidden']);
+  return {
+    filter: allowedFilters.has(value.filter) ? value.filter : 'all',
+    hiddenSlugs: Array.isArray(value.hiddenSlugs)
+      ? value.hiddenSlugs.map((slug) => String(slug || '').trim()).filter(Boolean)
+      : [],
+  };
+}
+
+let extensionsPanelState = readJsonStorage(EXTENSIONS_PANEL_STORAGE_KEY, {});
+let providersUiPrefs = normalizeProvidersUiPrefs(readJsonStorage(PROVIDERS_UI_PREFS_STORAGE_KEY, {}));
 
 function readWebchatBootstrap() {
   const el = document.getElementById('webchat-bootstrap');
@@ -81,7 +155,7 @@ function readWebchatBootstrap() {
       agentName: parsed.agentName || 'Agent',
       showBranding: parsed.showBranding !== false,
       availableSkins: Array.isArray(parsed.availableSkins) ? parsed.availableSkins : [],
-      resolvedSkin: parsed.resolvedSkin || fallbackWebchatBootstrap().resolvedSkin,
+      resolvedSkin: normalizeSkinMeta(parsed.resolvedSkin || fallbackWebchatBootstrap().resolvedSkin),
     };
   } catch (_err) {
     return fallbackWebchatBootstrap();
@@ -94,9 +168,12 @@ function fallbackWebchatBootstrap() {
     agentName: 'Agent',
     showBranding: true,
     availableSkins: [],
-    resolvedSkin: {
+    resolvedSkin: normalizeSkinMeta({
       name: 'cockpit',
+      source: 'cli',
       tagline: 'Humanist Cockpit for operators who like a calm command deck.',
+      logoArt: [],
+      heroArt: [],
       promptSymbol: '›',
       toolEmojis: {},
       chromeStyle: 'avionics',
@@ -104,17 +181,71 @@ function fallbackWebchatBootstrap() {
       messageShape: 'rounded',
       elevation: 'medium',
       cssVars: {},
-    },
+    }),
+  };
+}
+
+function normalizeSkinMeta(skin) {
+  const raw = skin && typeof skin === 'object' ? skin : {};
+  return {
+    name: raw.name || 'cockpit',
+    source: raw.source || 'cli',
+    tagline: raw.tagline || 'Humanist Cockpit for operators who like a calm command deck.',
+    logoArt: Array.isArray(raw.logoArt) ? raw.logoArt.slice() : [],
+    heroArt: Array.isArray(raw.heroArt) ? raw.heroArt.slice() : [],
+    promptSymbol: raw.promptSymbol || '›',
+    toolEmojis: raw.toolEmojis || {},
+    chromeStyle: raw.chromeStyle || 'avionics',
+    surfacePattern: raw.surfacePattern || 'grid',
+    messageShape: raw.messageShape || 'rounded',
+    elevation: raw.elevation || 'medium',
+    cssVars: raw.cssVars || {},
   };
 }
 
 function resolvedSkinMeta() {
-  return currentResolvedSkin || fallbackWebchatBootstrap().resolvedSkin;
+  return normalizeSkinMeta(currentResolvedSkin || fallbackWebchatBootstrap().resolvedSkin);
 }
 
-function currentToolEmoji(name) {
-  const toolEmojis = resolvedSkinMeta().toolEmojis || {};
-  return toolEmojis[name] || '';
+function ensureRuntimeThemeStyle() {
+  let style = document.getElementById('webchat-runtime-theme');
+  if (!style) {
+    style = document.createElement('style');
+    style.id = 'webchat-runtime-theme';
+    document.head.appendChild(style);
+  }
+  return style;
+}
+
+function applyPresentationPayload(presentation) {
+  if (!presentation || typeof presentation !== 'object') return;
+  const bootstrap = presentation.bootstrap || presentation;
+  currentPresentationBootstrap = bootstrap;
+  currentResolvedSkin = normalizeSkinMeta(bootstrap.resolvedSkin);
+  currentAgentName = bootstrap.agentName || currentAgentName || 'Agent';
+  currentAvailableSkins = Array.isArray(bootstrap.availableSkins) ? bootstrap.availableSkins.slice() : [];
+  currentSkinCatalog = Array.isArray(presentation.skinCatalog)
+    ? presentation.skinCatalog.map(normalizeSkinMeta)
+    : [];
+  if (typeof presentation.runtimeCss === 'string') {
+    ensureRuntimeThemeStyle().textContent = presentation.runtimeCss;
+  }
+  document.documentElement.setAttribute('data-webchat-theme', bootstrap.theme || 'system');
+  document.documentElement.setAttribute('data-show-branding', bootstrap.showBranding === false ? 'false' : 'true');
+  applySkinPresentation();
+  applyAgentPresentation();
+}
+
+function refreshPresentationState() {
+  return apiFetch('/api/webchat/presentation').then((presentation) => {
+    applyPresentationPayload(presentation);
+    if (currentTab === 'settings' && document.getElementById('settings-sections')) {
+      renderSettings();
+    }
+    renderShellNavigation();
+    updateResponsiveTableLabels();
+    return presentation;
+  });
 }
 
 function toolKindForName(name) {
@@ -122,23 +253,87 @@ function toolKindForName(name) {
 }
 
 function toolDisplayName(name) {
-  const label = String(name || 'tool');
-  const emoji = currentToolEmoji(label);
-  return emoji ? (emoji + ' ' + label) : label;
+  return String(name || 'tool');
+}
+
+function skinToolGlyphShape(toolName) {
+  switch (toolKindForName(toolName)) {
+    case 'shell':
+      return '<path d="M6 8l4 4-4 4"/><path d="M12 16h6"/>';
+    case 'browser':
+      return '<circle cx="12" cy="12" r="4"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2"/>';
+    case 'memory':
+      return '<path d="M7 6h10v12H7z"/><path d="M9 9h6M9 12h6M9 15h4"/>';
+    case 'search_files':
+      return '<path d="M8 6h6l3 3v9H8z"/><path d="M14 6v3h3"/><circle cx="10.5" cy="14.5" r="1.8"/><path d="m12 16 1.8 1.8"/>';
+    case 'todo':
+      return '<path d="M8 7h8M8 12h8M8 17h5"/><path d="m5 7 1 1 2-2"/><path d="m5 12 1 1 2-2"/>';
+    case 'subagent':
+      return '<path d="M12 4 18 7v5c0 3.5-2.4 6.1-6 8-3.6-1.9-6-4.5-6-8V7l6-3z"/><path d="M10 12h4M12 10v4"/>';
+    default:
+      return '<circle cx="12" cy="12" r="3.5"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2"/>';
+  }
+}
+
+function skinToolGlyphFrame(chromeStyle) {
+  switch (chromeStyle) {
+    case 'observatory':
+      return '<circle class="skin-tool-glyph-frame" cx="12" cy="12" r="8.5"/><circle class="skin-tool-glyph-detail" cx="12" cy="12" r="10.5"/>';
+    case 'archive':
+      return '<path class="skin-tool-glyph-frame" d="M7 4.5h7l3 3V19.5H7z"/><path class="skin-tool-glyph-detail" d="M14 4.5v3h3"/>';
+    case 'marble':
+      return '<path class="skin-tool-glyph-frame" d="M8 4.5h8l2 4V18.5H6V8.5z"/><path class="skin-tool-glyph-detail" d="M9 7.5h6"/>';
+    case 'oracle':
+      return '<path class="skin-tool-glyph-frame" d="M12 4 19 12 12 20 5 12Z"/><path class="skin-tool-glyph-detail" d="M12 6.5 17.5 12 12 17.5 6.5 12Z"/>';
+    case 'aerial':
+      return '<rect class="skin-tool-glyph-frame" x="4.5" y="6" width="15" height="12" rx="6"/><path class="skin-tool-glyph-detail" d="M8 9.5h8"/>';
+    case 'avionics':
+    default:
+      return '<rect class="skin-tool-glyph-frame" x="4.5" y="4.5" width="15" height="15" rx="3"/><path class="skin-tool-glyph-detail" d="M8 4.5v3M16 4.5v3M4.5 8h3M16.5 8h3"/>';
+  }
+}
+
+function renderSkinToolGlyph(toolName, options) {
+  const opts = options || {};
+  const chromeStyle = opts.chromeStyle || resolvedSkinMeta().chromeStyle || 'avionics';
+  const extraClass = opts.className ? ' ' + opts.className : '';
+  return '<svg class="skin-tool-glyph skin-tool-glyph--' + escapeHtml(chromeStyle) + extraClass + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + skinToolGlyphFrame(chromeStyle)
+    + '<g class="skin-tool-glyph-symbol">' + skinToolGlyphShape(toolName) + '</g>'
+    + '</svg>';
 }
 
 function toolIconMarkup(name, state) {
-  const emoji = currentToolEmoji(name);
-  if (emoji) {
-    return '<span class="activity-tool-emoji">' + escapeHtml(emoji) + '</span>';
-  }
   if (state === 'success') {
     return '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><polyline points="20 6 9 17 4 12"/></svg>';
   }
   if (state === 'fail') {
     return '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   }
-  return '<div class="spinner"></div>';
+  if (state === 'running') {
+    return '<div class="spinner"></div>';
+  }
+  return renderSkinToolGlyph(name);
+}
+
+function renderPresentationToolChips(skin, options) {
+  const opts = options || {};
+  const chromeStyle = skin?.chromeStyle || resolvedSkinMeta().chromeStyle || 'avionics';
+  const tools = Object.keys(skin?.toolEmojis || {})
+    .filter((toolName) => SKINNED_TOOL_NAMES.includes(toolName));
+  const orderedTools = (tools.length ? tools : SKINNED_TOOL_NAMES).slice(0, opts.limit || 6);
+  if (!orderedTools.length) {
+    return '<span class="presentation-tool-chip presentation-tool-chip--empty">No custom tool accents yet</span>';
+  }
+  return orderedTools.map((toolName) =>
+    '<span class="presentation-tool-chip">'
+      + renderSkinToolGlyph(toolName, {
+        chromeStyle: chromeStyle,
+        className: 'skin-tool-glyph--compact',
+      })
+      + '<span>' + escapeHtml(toolDisplayName(toolName)) + '</span>'
+    + '</span>'
+  ).join('');
 }
 
 function personalityCopy(key, data) {
@@ -165,6 +360,8 @@ function applySkinPresentation() {
   if (promptChip) promptChip.textContent = skin.promptSymbol || '›';
   const branding = document.getElementById('webchat-branding');
   if (branding) branding.textContent = 'Powered by ThinClaw · ' + skin.name;
+  const body = document.body;
+  if (body) body.setAttribute('data-shell-section', sectionForTab(currentTab));
   document.documentElement.setAttribute('data-skin-name', skin.name || 'cockpit');
   document.documentElement.setAttribute('data-chrome-style', skin.chromeStyle || 'avionics');
   document.documentElement.setAttribute('data-surface-pattern', skin.surfacePattern || 'grid');
@@ -399,30 +596,13 @@ function authenticate() {
   apiFetch('/api/chat/threads')
     .then(() => {
       sessionStorage.setItem('thinclaw_token', token);
-      document.getElementById('auth-screen').style.display = 'none';
-      document.getElementById('app').style.display = 'flex';
-      // Strip token and log_level from URL so they're not visible in the address bar
       const cleaned = new URL(window.location);
       const urlLogLevel = cleaned.searchParams.get('log_level');
       cleaned.searchParams.delete('token');
       cleaned.searchParams.delete('log_level');
-      window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
-      connectSSE();
-      connectLogSSE();
-      startGatewayStatusPolling();
-      checkTeeStatus();
-      loadOptionalFeatureFlags();
-      loadAutonomyAvailability();
-      loadThreads();
-      loadMemoryTree();
-      loadJobs();
-      startMcpInteractionPolling();
-      // Apply URL log_level param if present, otherwise just sync the dropdown
-      if (urlLogLevel) {
-        setServerLogLevel(urlLogLevel);
-      } else {
-        loadServerLogLevel();
-      }
+      return refreshPresentationState()
+        .catch(() => null)
+        .then(() => startAuthenticatedSession(urlLogLevel, cleaned));
     })
     .catch(() => {
       btn.disabled = false;
@@ -439,6 +619,32 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') authenticate();
 });
 
+function startAuthenticatedSession(urlLogLevel, cleanedUrl) {
+  restoreHashState();
+  document.getElementById('auth-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  const cleaned = cleanedUrl instanceof URL ? cleanedUrl : new URL(window.location);
+  window.history.replaceState({}, '', cleaned.pathname + cleaned.search + cleaned.hash);
+  renderShellNavigation();
+  connectSSE();
+  connectLogSSE();
+  startGatewayStatusPolling();
+  checkTeeStatus();
+  loadThreads();
+  startMcpInteractionPolling();
+  Promise.all([
+    loadOptionalFeatureFlags(),
+    loadAutonomyAvailability(),
+  ]).catch(() => null).finally(() => {
+    switchTab(currentTab || 'chat', { updateHash: false });
+    if (urlLogLevel) {
+      setServerLogLevel(urlLogLevel);
+    } else {
+      loadServerLogLevel();
+    }
+  });
+}
+
 // Auto-authenticate from URL param or saved session
 (function autoAuth() {
   const params = new URLSearchParams(window.location.search);
@@ -451,10 +657,6 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
   const saved = sessionStorage.getItem('thinclaw_token');
   if (saved) {
     document.getElementById('token-input').value = saved;
-    // Hide auth screen immediately to prevent flash, authenticate() will
-    // restore it if the token turns out to be invalid.
-    document.getElementById('auth-screen').style.display = 'none';
-    document.getElementById('app').style.display = 'flex';
     authenticate();
   }
 })();
@@ -512,26 +714,24 @@ function boolSettingValue(value, fallback) {
 
 function applyResearchVisibility(enabled) {
   experimentsFeatureEnabled = !!enabled;
-  const button = document.getElementById('research-tab-button');
   const panel = document.getElementById('tab-research');
   const note = document.getElementById('research-disabled-note');
-  if (button) button.style.display = experimentsFeatureEnabled ? '' : 'none';
   if (panel) panel.dataset.enabled = experimentsFeatureEnabled ? 'true' : 'false';
   if (note) note.style.display = experimentsFeatureEnabled ? 'none' : 'block';
   if (!experimentsFeatureEnabled && currentTab === 'research') {
     switchTab('chat');
   }
+  renderShellNavigation();
 }
 
 function setAutonomyVisibility(enabled) {
   autonomyFeatureAvailable = !!enabled;
-  const button = document.getElementById('autonomy-tab-button');
   const panel = document.getElementById('tab-autonomy');
-  if (button) button.style.display = autonomyFeatureAvailable ? '' : 'none';
   if (panel) panel.dataset.enabled = autonomyFeatureAvailable ? 'true' : 'false';
   if (!autonomyFeatureAvailable && currentTab === 'autonomy') {
     switchTab('chat');
   }
+  renderShellNavigation();
 }
 
 function loadAutonomyAvailability() {
@@ -565,7 +765,7 @@ function applyOptionalFeatureFlagsFromCache() {
 }
 
 function loadOptionalFeatureFlags() {
-  apiFetch('/api/settings')
+  return apiFetch('/api/settings')
     .then((data) => applyOptionalFeatureFlagsFromRows(data.settings || []))
     .catch(() => applyResearchVisibility(false));
 }
@@ -604,14 +804,16 @@ function connectSSE() {
 
   eventSource.addEventListener('response', (e) => {
     const data = JSON.parse(e.data);
+    // Always refresh thread metadata. This prevents startup/background
+    // assistant replies from getting "stuck" until a manual reload if the
+    // event lands before the assistant thread has been selected locally.
+    loadThreads();
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
     upsertAssistantMessage(data.content, { timestamp: new Date().toISOString() });
     settleLiveTurnCard();
     setStatus('');
     enableChatInput();
-    // Refresh thread list so new titles appear after first message
-    loadThreads();
   });
 
   eventSource.addEventListener('thinking', (e) => {
@@ -675,6 +877,16 @@ function connectSSE() {
     }
   });
 
+  eventSource.addEventListener('conversation_updated', (e) => {
+    const data = JSON.parse(e.data);
+    handleConversationSyncEvent(data, 'conversation_updated');
+  });
+
+  eventSource.addEventListener('conversation_deleted', (e) => {
+    const data = JSON.parse(e.data);
+    handleConversationSyncEvent(data, 'conversation_deleted');
+  });
+
   eventSource.addEventListener('job_started', (e) => {
     const data = JSON.parse(e.data);
     showJobCard(data);
@@ -688,13 +900,15 @@ function connectSSE() {
 
   eventSource.addEventListener('auth_required', (e) => {
     const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
     showAuthCard(data);
   });
 
   eventSource.addEventListener('auth_completed', (e) => {
     const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
     removeAuthCard(data.extension_name);
-    showToast(data.message, 'success');
+    showToast(data.message, data.success === false ? 'error' : 'success');
     enableChatInput();
   });
 
@@ -772,6 +986,24 @@ function isCurrentThread(threadId) {
   if (!threadId) return true;
   if (!currentThreadId) return true;
   return threadId === currentThreadId;
+}
+
+function shouldReloadHistoryForConversationSync(data, eventType) {
+  if (!data || !data.thread_id) return false;
+  if (currentThreadId !== data.thread_id) return false;
+  if (eventType === 'conversation_deleted') return false;
+  if (data.reason === 'assistant_response') return data.channel !== 'gateway';
+  if (data.reason === 'user_message') return data.channel !== 'gateway' || !_liveTurnCard;
+  return false;
+}
+
+function handleConversationSyncEvent(data, eventType) {
+  const shouldReloadHistory = shouldReloadHistoryForConversationSync(data, eventType);
+  loadThreads();
+  if (shouldReloadHistory) {
+    finalizeActivityGroup();
+    loadHistory();
+  }
 }
 
 // --- Temporal Subagent Subsessions ---
@@ -1573,11 +1805,17 @@ function appendToLastAssistant(chunk, timestamp) {
 }
 
 function createTurnCardFromHistory(turn) {
+  const hasVisibleUserInput = !turn.hide_user_input && !!turn.user_input;
+  const hasAssistantResponse = !!turn.response;
+  if (!hasVisibleUserInput && !hasAssistantResponse) return null;
+
   const card = createTurnCard({ live: false });
-  appendMessageToTurn(card, 'user', turn.user_input, { timestamp: turn.started_at });
-  if (turn.response) {
+  if (hasVisibleUserInput) {
+    appendMessageToTurn(card, 'user', turn.user_input, { timestamp: turn.started_at });
+  }
+  if (hasAssistantResponse) {
     appendMessageToTurn(card, 'assistant', turn.response, { timestamp: turn.completed_at || turn.started_at });
-  } else {
+  } else if (hasVisibleUserInput) {
     card.classList.add('incomplete');
   }
   return card;
@@ -2066,13 +2304,23 @@ function showAuthCard(data) {
     card.appendChild(instr);
   }
 
+  if (data.missing_scopes && data.missing_scopes.length) {
+    const scopes = document.createElement('div');
+    scopes.className = 'auth-instructions';
+    scopes.textContent = 'Additional access needed: ' + data.missing_scopes.join(', ');
+    card.appendChild(scopes);
+  }
+
   const links = document.createElement('div');
   links.className = 'auth-links';
+  let oauthBtn = null;
 
   if (data.auth_url) {
-    const oauthBtn = document.createElement('button');
+    oauthBtn = document.createElement('button');
     oauthBtn.className = 'auth-oauth';
-    oauthBtn.textContent = 'Authenticate with ' + data.extension_name;
+    oauthBtn.textContent = (data.auth_status === 'needs_reauth' || data.auth_status === 'insufficient_scope')
+      ? 'Reconnect ' + (data.shared_auth_provider || data.extension_name)
+      : 'Connect ' + (data.shared_auth_provider || data.extension_name);
     oauthBtn.addEventListener('click', () => {
       window.open(data.auth_url, '_blank', 'width=600,height=700');
     });
@@ -2091,18 +2339,20 @@ function showAuthCard(data) {
     card.appendChild(links);
   }
 
-  // Token input
-  const tokenRow = document.createElement('div');
-  tokenRow.className = 'auth-token-input';
+  let tokenInput = null;
+  if (data.auth_mode === 'manual_token' || (!data.auth_mode && !data.auth_url)) {
+    const tokenRow = document.createElement('div');
+    tokenRow.className = 'auth-token-input';
 
-  const tokenInput = document.createElement('input');
-  tokenInput.type = 'password';
-  tokenInput.placeholder = 'Paste your API key or token';
-  tokenInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
-  });
-  tokenRow.appendChild(tokenInput);
-  card.appendChild(tokenRow);
+    tokenInput = document.createElement('input');
+    tokenInput.type = 'password';
+    tokenInput.placeholder = 'Paste your API key or token';
+    tokenInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
+    });
+    tokenRow.appendChild(tokenInput);
+    card.appendChild(tokenRow);
+  }
 
   // Error display (hidden initially)
   const errorEl = document.createElement('div');
@@ -2117,20 +2367,28 @@ function showAuthCard(data) {
   const submitBtn = document.createElement('button');
   submitBtn.className = 'auth-submit';
   submitBtn.textContent = 'Submit';
-  submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput.value));
+  submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput ? tokenInput.value : ''));
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'auth-cancel';
   cancelBtn.textContent = 'Cancel';
   cancelBtn.addEventListener('click', () => cancelAuth(data.extension_name));
 
-  actions.appendChild(submitBtn);
+  if (tokenInput) {
+    actions.appendChild(submitBtn);
+  }
   actions.appendChild(cancelBtn);
   card.appendChild(actions);
 
   container.appendChild(card);
   finishChatMutation(shouldPinChatToLatest(), { forceScroll: true });
-  tokenInput.focus();
+  if (tokenInput) {
+    tokenInput.focus();
+  } else if (oauthBtn) {
+    oauthBtn.focus();
+  } else {
+    cancelBtn.focus();
+  }
 }
 
 function removeAuthCard(extensionName) {
@@ -2215,7 +2473,8 @@ function loadHistory(before) {
         showChatEmptyState(emptyMessage);
       } else {
         for (const turn of data.turns) {
-          container.appendChild(createTurnCardFromHistory(turn));
+          const card = createTurnCardFromHistory(turn);
+          if (card) container.appendChild(card);
         }
       }
       syncChatComposerMetrics();
@@ -2225,7 +2484,8 @@ function loadHistory(before) {
       const savedHeight = container.scrollHeight;
       const fragment = document.createDocumentFragment();
       for (const turn of data.turns) {
-        fragment.appendChild(createTurnCardFromHistory(turn));
+        const card = createTurnCardFromHistory(turn);
+        if (card) fragment.appendChild(card);
       }
       container.insertBefore(fragment, container.firstChild);
       // Restore scroll position so the user doesn't jump
@@ -2382,8 +2642,30 @@ function deleteThread(threadId, threadName) {
 
 function toggleThreadSidebar() {
   const sidebar = document.getElementById('thread-sidebar');
-  sidebar.classList.toggle('collapsed');
+  const mobile = window.matchMedia('(max-width: 768px)').matches;
   const btn = document.getElementById('thread-toggle-btn');
+  if (mobile) {
+    const expanded = !sidebar.classList.contains('expanded-mobile');
+    sidebar.classList.toggle('expanded-mobile', expanded);
+    sidebar.classList.toggle('collapsed', !expanded);
+    if (btn) btn.innerHTML = expanded ? '&times;' : '&raquo;';
+    return;
+  }
+  sidebar.classList.remove('expanded-mobile');
+  sidebar.classList.toggle('collapsed');
+  if (btn) btn.innerHTML = sidebar.classList.contains('collapsed') ? '&raquo;' : '&laquo;';
+}
+
+function syncThreadSidebarToggleState() {
+  const sidebar = document.getElementById('thread-sidebar');
+  const btn = document.getElementById('thread-toggle-btn');
+  if (!sidebar || !btn) return;
+  if (window.matchMedia('(max-width: 768px)').matches) {
+    if (!sidebar.classList.contains('expanded-mobile')) sidebar.classList.add('collapsed');
+    btn.innerHTML = sidebar.classList.contains('expanded-mobile') ? '&times;' : '&raquo;';
+    return;
+  }
+  sidebar.classList.remove('expanded-mobile');
   btn.innerHTML = sidebar.classList.contains('collapsed') ? '&raquo;' : '&laquo;';
 }
 
@@ -2396,7 +2678,11 @@ chatInput.addEventListener('keydown', (e) => {
   }
 });
 chatInput.addEventListener('input', () => autoResizeTextarea(chatInput));
-window.addEventListener('resize', syncChatComposerMetrics);
+window.addEventListener('resize', () => {
+  syncChatComposerMetrics();
+  syncThreadSidebarToggleState();
+  closeShellMobileNav({ keepFocus: true });
+});
 
 // Disable send until a thread is selected (loadThreads will enable it)
 chatInput.disabled = true;
@@ -2406,6 +2692,7 @@ document.getElementById('chat-jump-latest').addEventListener('click', () => {
 });
 syncChatComposerMetrics();
 updateChatJumpLatestButton();
+syncThreadSidebarToggleState();
 
 // Infinite scroll: load older messages when scrolled near the top
 document.getElementById('chat-messages').addEventListener('scroll', function () {
@@ -2428,55 +2715,228 @@ function autoResizeTextarea(el) {
   syncChatComposerMetrics();
 }
 
+function updateResponsiveTableLabels(root) {
+  const scope = root && typeof root.querySelectorAll === 'function' ? root : document;
+  scope.querySelectorAll('table').forEach((table) => {
+    const headerCells = Array.from(table.querySelectorAll('thead th'));
+    if (!headerCells.length) return;
+    const labels = headerCells.map((cell) => (cell.textContent || '').trim());
+    table.querySelectorAll('tbody tr').forEach((row) => {
+      Array.from(row.children).forEach((cell, index) => {
+        if (cell && cell.nodeType === 1) {
+          cell.setAttribute('data-label', labels[index] || '');
+        }
+      });
+    });
+  });
+}
+
+const responsiveTableObserver = new MutationObserver(() => {
+  updateResponsiveTableLabels();
+});
+responsiveTableObserver.observe(document.body, { childList: true, subtree: true });
+updateResponsiveTableLabels();
+
 // --- Tabs ---
 
-document.querySelectorAll('.tab-bar button[data-tab]').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    const tab = btn.getAttribute('data-tab');
-    switchTab(tab);
-  });
+function readHashState() {
+  const raw = (window.location.hash || '').replace(/^#/, '');
+  const params = new URLSearchParams(raw);
+  return {
+    tab: params.get(HASH_KEY_TAB) || '',
+    settingsSubtab: params.get(HASH_KEY_SETTINGS_SUBTAB) || '',
+    settingsSearch: params.get(HASH_KEY_SETTINGS_SEARCH) || '',
+  };
+}
+
+function writeHashState(nextState) {
+  const current = readHashState();
+  const merged = Object.assign({}, current, nextState || {});
+  const params = new URLSearchParams();
+  if (merged.tab) params.set(HASH_KEY_TAB, merged.tab);
+  if (merged.settingsSubtab) params.set(HASH_KEY_SETTINGS_SUBTAB, merged.settingsSubtab);
+  if (merged.settingsSearch) params.set(HASH_KEY_SETTINGS_SEARCH, merged.settingsSearch);
+  const nextHash = params.toString();
+  const url = window.location.pathname + window.location.search + (nextHash ? '#' + nextHash : '');
+  window.history.replaceState({}, '', url);
+}
+
+function restoreHashState() {
+  const state = readHashState();
+  currentTab = state.tab || 'chat';
+  currentSettingsSubtab = state.settingsSubtab || 'General';
+  settingsSearchQuery = state.settingsSearch || '';
+}
+
+function sectionForTab(tab) {
+  const found = SHELL_SECTIONS.find((section) => section.tabs.indexOf(tab) !== -1);
+  return found ? found.id : 'chat';
+}
+
+function sectionMeta(sectionId) {
+  return SHELL_SECTIONS.find((section) => section.id === sectionId) || SHELL_SECTIONS[0];
+}
+
+function isTabAvailable(tab) {
+  const meta = SHELL_TAB_META[tab] || {};
+  if (meta.feature === 'research' && !experimentsFeatureEnabled) return false;
+  if (meta.feature === 'autonomy' && !autonomyFeatureAvailable) return false;
+  return !!document.getElementById('tab-' + tab);
+}
+
+function availableTabsForSection(sectionId) {
+  return (sectionMeta(sectionId).tabs || []).filter(isTabAvailable);
+}
+
+function resolveTabForSection(sectionId) {
+  const tabs = availableTabsForSection(sectionId);
+  if (!tabs.length) return 'chat';
+  if (sectionForTab(currentTab) === sectionId && tabs.indexOf(currentTab) !== -1) return currentTab;
+  return tabs[0];
+}
+
+function resolveAvailableTab(tab) {
+  if (tab && isTabAvailable(tab)) return tab;
+  return resolveTabForSection(sectionForTab(tab || 'chat'));
+}
+
+function renderShellNavigation() {
+  const primaryNav = document.getElementById('shell-primary-nav');
+  const mobileNav = document.getElementById('shell-mobile-primary-nav');
+  const contextNav = document.getElementById('shell-context-nav');
+  const contextBar = document.getElementById('shell-context-bar');
+  const contextLabel = document.getElementById('shell-context-label');
+  const mobileLabel = document.getElementById('shell-mobile-nav-label');
+  const activeSectionId = sectionForTab(currentTab);
+  const activeSection = sectionMeta(activeSectionId);
+  const contextTabs = availableTabsForSection(activeSectionId);
+  const renderPrimaryButtons = function(container, mobile) {
+    if (!container) return;
+    container.innerHTML = '';
+    SHELL_SECTIONS.forEach((section) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = mobile ? 'shell-mobile-primary-item' : 'shell-primary-tab';
+      if (section.id === activeSectionId) button.classList.add('active');
+      button.innerHTML = mobile
+        ? '<span class="shell-mobile-primary-label">' + escapeHtml(section.label) + '</span><span class="shell-mobile-primary-blurb">' + escapeHtml(section.blurb) + '</span>'
+        : escapeHtml(section.label);
+      button.addEventListener('click', () => {
+        switchTab(resolveTabForSection(section.id));
+        closeShellMobileNav({ keepFocus: false });
+      });
+      container.appendChild(button);
+    });
+  };
+
+  renderPrimaryButtons(primaryNav, false);
+  renderPrimaryButtons(mobileNav, true);
+
+  if (mobileLabel) mobileLabel.textContent = activeSection.label;
+  if (contextLabel) contextLabel.textContent = activeSection.label;
+
+  if (contextBar) contextBar.hidden = contextTabs.length <= 1 || activeSectionId === 'chat' || activeSectionId === 'settings';
+  if (contextNav) {
+    contextNav.innerHTML = '';
+    contextTabs.forEach((tab) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'shell-context-tab' + (tab === currentTab ? ' active' : '');
+      button.textContent = (SHELL_TAB_META[tab] && SHELL_TAB_META[tab].label) || tab;
+      button.addEventListener('click', () => switchTab(tab));
+      contextNav.appendChild(button);
+    });
+  }
+  document.body.setAttribute('data-shell-section', activeSectionId);
+}
+
+function toggleShellMobileNav() {
+  if (shellMobileNavOpen) {
+    closeShellMobileNav({ keepFocus: false });
+  } else {
+    openShellMobileNav();
+  }
+}
+
+function openShellMobileNav() {
+  const sheet = document.getElementById('shell-mobile-sheet');
+  const trigger = document.getElementById('shell-mobile-nav-btn');
+  if (!sheet || shellMobileNavOpen) return;
+  shellMobileNavOpen = true;
+  sheet.hidden = false;
+  if (trigger) trigger.setAttribute('aria-expanded', 'true');
+}
+
+function closeShellMobileNav(options) {
+  const opts = options || {};
+  const sheet = document.getElementById('shell-mobile-sheet');
+  const trigger = document.getElementById('shell-mobile-nav-btn');
+  if (!sheet) return;
+  shellMobileNavOpen = false;
+  sheet.hidden = true;
+  if (trigger) {
+    trigger.setAttribute('aria-expanded', 'false');
+    if (!opts.keepFocus) trigger.focus();
+  }
+}
+
+window.addEventListener('hashchange', () => {
+  const state = readHashState();
+  const nextTab = resolveAvailableTab(state.tab || 'chat');
+  currentSettingsSubtab = state.settingsSubtab || currentSettingsSubtab || 'General';
+  settingsSearchQuery = state.settingsSearch || '';
+  if (nextTab !== currentTab) {
+    switchTab(nextTab, { updateHash: false });
+  } else if (currentTab === 'settings') {
+    renderSettings();
+  }
 });
 
-function switchTab(tab) {
+function switchTab(tab, options) {
+  const opts = options || {};
   if (tab === 'research' && !experimentsFeatureEnabled) {
     showToast('Enable experiments in Settings → Advanced → Experiments to use Research.', 'error');
     tab = 'chat';
   }
-  currentTab = tab;
-  document.querySelectorAll('.tab-bar button[data-tab]').forEach((b) => {
-    b.classList.toggle('active', b.getAttribute('data-tab') === tab);
-  });
+  if (tab === 'autonomy' && !autonomyFeatureAvailable) {
+    tab = 'chat';
+  }
+  currentTab = resolveAvailableTab(tab);
   document.querySelectorAll('.tab-panel').forEach((p) => {
-    p.classList.toggle('active', p.id === 'tab-' + tab);
+    p.classList.toggle('active', p.id === 'tab-' + currentTab);
   });
+  renderShellNavigation();
+  if (opts.updateHash !== false) writeHashState({ tab: currentTab });
+  closeShellMobileNav({ keepFocus: true });
 
-  if (tab === 'memory') loadMemoryTree();
-  if (tab === 'jobs') loadJobs();
-  if (tab === 'routines') loadRoutines();
-  if (tab === 'autonomy') loadAutonomyDashboard();
-  if (tab === 'research') {
+  if (currentTab === 'memory') loadMemoryTree();
+  if (currentTab === 'jobs') loadJobs();
+  if (currentTab === 'routines') loadRoutines();
+  if (currentTab === 'autonomy') loadAutonomyDashboard();
+  if (currentTab === 'research') {
     loadExperiments();
     switchResearchSubtab(currentResearchSubtab || 'overview', { render: false });
   }
-  if (tab === 'learning') loadLearning();
-  if (tab === 'logs') applyLogFilters();
-  if (tab === 'extensions') {
+  if (currentTab === 'learning') loadLearning();
+  if (currentTab === 'logs') applyLogFilters();
+  if (currentTab === 'extensions') {
     loadExtensions();
     startPairingPoll();
   } else {
     stopPairingPoll();
   }
-  if (tab === 'skills') loadSkills();
-  if (tab === 'providers') loadProviders();
-  if (tab === 'costs') { loadCostDashboard(); startCostAutoRefresh(); } else { stopCostAutoRefresh(); }
-  if (tab === 'settings') loadSettings();
-  if (tab === 'chat') {
+  if (currentTab === 'skills') loadSkills();
+  if (currentTab === 'providers') loadProviders();
+  if (currentTab === 'costs') { loadCostDashboard(); startCostAutoRefresh(); } else { stopCostAutoRefresh(); }
+  if (currentTab === 'settings') loadSettings();
+  if (currentTab === 'chat') {
     requestAnimationFrame(() => {
       syncChatComposerMetrics();
       scrollChatToLatest({ force: true });
     });
   }
   updateChatJumpLatestButton();
+  updateResponsiveTableLabels();
 }
 
 // --- Memory (filesystem tree) ---
@@ -2854,14 +3314,241 @@ function loadServerLogLevel() {
 
 // --- Extensions ---
 
+function syncExtensionsSubtabButtons() {
+  const active = currentExtensionsSubtab || 'overview';
+  document.querySelectorAll('[data-extensions-subtab]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.extensionsSubtab === active);
+    button.setAttribute('aria-selected', button.dataset.extensionsSubtab === active ? 'true' : 'false');
+  });
+  document.querySelectorAll('[data-extensions-pane]').forEach((pane) => {
+    pane.classList.toggle('active', pane.dataset.extensionsPane === active);
+  });
+}
+
+function switchExtensionsSubtab(subtab) {
+  currentExtensionsSubtab = EXTENSIONS_SUBTABS.includes(subtab) ? subtab : 'overview';
+  syncExtensionsSubtabButtons();
+}
+
+function extensionsPanelIsOpen(panelId) {
+  return extensionsPanelState[panelId] !== false;
+}
+
+function setExtensionsPanelOpen(panelId, open) {
+  extensionsPanelState[panelId] = !!open;
+  writeJsonStorage(EXTENSIONS_PANEL_STORAGE_KEY, extensionsPanelState);
+}
+
+function applyCollapsiblePanelState(panel, open) {
+  if (!panel) return;
+  panel.classList.toggle('ui-panel-collapsed', !open);
+  const trigger = panel.querySelector('.ui-collapsible-trigger');
+  if (trigger) {
+    trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    trigger.innerHTML = open ? '&#8722;' : '&#43;';
+  }
+}
+
+function initializeExtensionsPanels() {
+  document.querySelectorAll('#tab-extensions [data-collapsible-panel]').forEach((panel) => {
+    const panelId = panel.getAttribute('data-collapsible-panel');
+    const header = panel.querySelector(':scope > .ui-panel-header');
+    if (!panelId || !header) return;
+    let actions = header.querySelector('.ui-panel-actions');
+    if (!actions) {
+      actions = document.createElement('div');
+      actions.className = 'ui-panel-actions';
+      header.appendChild(actions);
+    }
+    let trigger = header.querySelector('.ui-collapsible-trigger');
+    if (!trigger) {
+      trigger = document.createElement('button');
+      trigger.type = 'button';
+      trigger.className = 'ui-collapsible-trigger';
+      trigger.title = 'Collapse section';
+      trigger.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const nextOpen = panel.classList.contains('ui-panel-collapsed');
+        setExtensionsPanelOpen(panelId, nextOpen);
+        applyCollapsiblePanelState(panel, nextOpen);
+      });
+      actions.appendChild(trigger);
+    }
+    applyCollapsiblePanelState(panel, extensionsPanelIsOpen(panelId));
+  });
+}
+
+function renderExtensionsOverview(extData, registryData, mcpServerData, interactionData, toolData) {
+  const container = document.getElementById('extensions-overview-cards');
+  if (!container) return;
+  const installedExtensions = extData.extensions || [];
+  const installedCount = installedExtensions.length;
+  const activeCount = installedExtensions.filter((ext) => !!ext.active).length;
+  const mcpServers = mcpServerData.servers || [];
+  const activeMcpCount = mcpServers.filter((server) => !!server.active).length;
+  const pendingInteractions = (interactionData.interactions || []).length;
+  const toolCount = (toolData.tools || []).length;
+  const discoverCount = (registryData.entries || []).filter((entry) => entry.kind !== 'mcp_server' && !entry.installed).length;
+
+  const cards = [
+    {
+      title: 'Installed',
+      value: String(installedCount),
+      meta: activeCount ? (activeCount + ' active now') : 'No active integrations yet',
+    },
+    {
+      title: 'Discover',
+      value: String(discoverCount),
+      meta: discoverCount ? 'Additional registry entries ready' : 'Registry is already fully installed',
+    },
+    {
+      title: 'MCP',
+      value: String(activeMcpCount),
+      meta: pendingInteractions ? (pendingInteractions + ' pending interaction' + (pendingInteractions === 1 ? '' : 's')) : 'No pending MCP requests',
+    },
+    {
+      title: 'Tools',
+      value: String(toolCount),
+      meta: 'Current tool surface available to the agent',
+    },
+  ];
+
+  container.innerHTML = cards.map((card) =>
+    '<section class="ui-panel ui-panel--compact ui-panel--feature extensions-overview-card">'
+      + '<div class="extensions-overview-kicker">' + escapeHtml(card.title) + '</div>'
+      + '<div class="extensions-overview-value">' + escapeHtml(card.value) + '</div>'
+      + '<div class="extensions-overview-meta">' + escapeHtml(card.meta) + '</div>'
+    + '</section>'
+  ).join('');
+}
+
+function renderMcpEmptyState() {
+  const mcpList = document.getElementById('mcp-servers-list');
+  if (!mcpList) return;
+  mcpList.innerHTML =
+    '<div class="ui-panel ui-panel--feature ui-panel--compact extensions-empty-card">'
+      + '<div class="ui-panel-copy">'
+        + '<h4 class="ui-panel-title ui-panel-title--section">No MCP servers connected</h4>'
+        + '<p class="ui-panel-desc">Connect a remote MCP endpoint to browse resources, prompts, and custom tool namespaces from the Extensions workspace.</p>'
+      + '</div>'
+      + '<div class="ui-resource-actions"><button class="btn-ext" type="button" onclick="openMcpConnectionModal()"><span aria-hidden="true">+</span> Connect MCP</button></div>'
+    + '</div>';
+}
+
+function inferRegisteredToolSource(toolName, extensions, servers) {
+  const installedExtensions = Array.isArray(extensions) ? extensions : [];
+  const mcpServers = Array.isArray(servers) ? servers : [];
+
+  for (const extension of installedExtensions) {
+    if (Array.isArray(extension.tools) && extension.tools.includes(toolName)) {
+      return {
+        origin: 'extension',
+        groupKey: 'extension:' + extension.name,
+        groupLabel: extension.name,
+        badge: extension.kind || 'extension',
+        note: extension.active ? 'Installed extension' : 'Installed but inactive',
+      };
+    }
+  }
+
+  for (const server of mcpServers) {
+    const namespace = String(server.tool_namespace || '').trim();
+    if (namespace && toolName.indexOf(namespace + '__') === 0) {
+      return {
+        origin: 'mcp',
+        groupKey: 'mcp:' + server.name,
+        groupLabel: server.display_name || server.name,
+        badge: 'mcp',
+        note: (server.transport || 'mcp') + (server.active ? ' · active' : ''),
+      };
+    }
+  }
+
+  return {
+    origin: 'core',
+    groupKey: 'builtin',
+    groupLabel: 'ThinClaw core',
+    badge: 'core',
+    note: 'Built-in runtime tool',
+  };
+}
+
+function renderRegisteredTools(tools, extensions, servers) {
+  const container = document.getElementById('extensions-tools-groups');
+  const empty = document.getElementById('tools-empty');
+  if (!container || !empty) return;
+  const entries = Array.isArray(tools) ? tools : [];
+  if (!entries.length) {
+    container.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  const groups = new Map();
+  entries.forEach((tool) => {
+    const source = inferRegisteredToolSource(tool.name, extensions, servers);
+    if (source.origin === 'extension') return;
+    if (!groups.has(source.groupKey)) {
+      groups.set(source.groupKey, {
+        label: source.groupLabel,
+        badge: source.badge,
+        note: source.note,
+        tools: [],
+      });
+    }
+    groups.get(source.groupKey).tools.push(tool);
+  });
+
+  const orderedGroups = Array.from(groups.values()).sort((a, b) => {
+    if (a.badge === 'core') return -1;
+    if (b.badge === 'core') return 1;
+    return a.label.localeCompare(b.label);
+  });
+
+  if (!orderedGroups.length) {
+    container.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  container.innerHTML = orderedGroups.map((group) => {
+    const toolCards = group.tools
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((tool) =>
+        '<article class="ui-panel ui-panel--subtle ui-panel--compact extensions-tool-card">'
+          + '<div class="extensions-tool-card-head">'
+            + '<span class="extensions-tool-card-icon">' + renderSkinToolGlyph(tool.name, { className: 'skin-tool-glyph--compact' }) + '</span>'
+            + '<div class="extensions-tool-card-copy">'
+              + '<strong>' + escapeHtml(toolDisplayName(tool.name)) + '</strong>'
+              + '<span class="extensions-tool-card-note">' + escapeHtml(group.note) + '</span>'
+            + '</div>'
+          + '</div>'
+          + '<p class="extensions-tool-card-desc">' + escapeHtml(tool.description || 'No tool description provided.') + '</p>'
+        + '</article>'
+      ).join('');
+    return '<section class="extensions-tool-group">'
+      + '<div class="extensions-tool-group-head">'
+        + '<div>'
+          + '<h4 class="ui-panel-title ui-panel-title--section">' + escapeHtml(group.label) + '</h4>'
+          + '<p class="ui-panel-desc">' + escapeHtml(group.note) + '</p>'
+        + '</div>'
+        + '<span class="ext-kind kind-' + escapeHtml(group.badge) + '">' + escapeHtml(group.badge) + '</span>'
+      + '</div>'
+      + '<div class="extensions-tool-grid">' + toolCards + '</div>'
+    + '</section>';
+  }).join('');
+  empty.style.display = 'none';
+}
+
 function loadExtensions() {
   const extList = document.getElementById('extensions-list');
   const wasmList = document.getElementById('available-wasm-list');
   const mcpList = document.getElementById('mcp-servers-list');
-  const toolsTbody = document.getElementById('tools-tbody');
-  const toolsEmpty = document.getElementById('tools-empty');
 
-  // Fetch all MCP and extension surfaces in parallel
+  initializeExtensionsPanels();
+  syncExtensionsSubtabButtons();
+
   Promise.all([
     apiFetch('/api/extensions').catch(() => ({ extensions: [] })),
     apiFetch('/api/extensions/tools').catch(() => ({ tools: [] })),
@@ -2873,7 +3560,8 @@ function loadExtensions() {
       return [server.name, server];
     }));
 
-    // Render installed extensions
+    renderExtensionsOverview(extData, registryData, mcpServerData, interactionData, toolData);
+
     if (extData.extensions.length === 0) {
       extList.innerHTML = '<div class="empty-state">No extensions installed</div>';
     } else {
@@ -2883,11 +3571,9 @@ function loadExtensions() {
       }
     }
 
-    // Split registry entries by kind
     var wasmEntries = registryData.entries.filter(function(e) { return e.kind !== 'mcp_server' && !e.installed; });
     var mcpEntries = registryData.entries.filter(function(e) { return e.kind === 'mcp_server'; });
 
-    // Available WASM extensions
     if (wasmEntries.length === 0) {
       wasmList.innerHTML = '<div class="empty-state">No additional WASM extensions available</div>';
     } else {
@@ -2897,7 +3583,6 @@ function loadExtensions() {
       }
     }
 
-    // MCP servers (show configured + registry entries)
     var mcpCardNames = new Set();
     var mcpCards = [];
     mcpEntries.forEach(function(entry) {
@@ -2913,22 +3598,13 @@ function loadExtensions() {
     });
 
     if (mcpCards.length === 0) {
-      mcpList.innerHTML = '<div class="empty-state">No MCP servers available</div>';
+      renderMcpEmptyState();
     } else {
       mcpList.innerHTML = '';
       mcpCards.forEach(function(card) { mcpList.appendChild(card); });
     }
 
-    // Render tools
-    if (toolData.tools.length === 0) {
-      toolsTbody.innerHTML = '';
-      toolsEmpty.style.display = 'block';
-    } else {
-      toolsEmpty.style.display = 'none';
-      toolsTbody.innerHTML = toolData.tools.map((t) =>
-        '<tr><td>' + escapeHtml(t.name) + '</td><td>' + escapeHtml(t.description) + '</td></tr>'
-      ).join('');
-    }
+    renderRegisteredTools(toolData.tools || [], extData.extensions || [], mcpServerData.servers || []);
 
     mcpBrowserState.servers = mcpServerData.servers || [];
     mcpBrowserState.interactions = interactionData.interactions || [];
@@ -2942,8 +3618,73 @@ function loadExtensions() {
       renderMcpResourceCards([]);
       renderMcpTemplateCards([]);
       renderMcpPromptCards([]);
+      renderMcpDetailEmpty();
     }
   });
+}
+
+function openMcpConnectionModal() {
+  closeMcpConnectionModal();
+  mcpConnectionModalFocusReturn = document.activeElement;
+
+  const dialog = document.createElement('dialog');
+  dialog.className = 'configure-dialog mcp-connect-dialog';
+  dialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    closeMcpConnectionModal();
+  });
+  dialog.addEventListener('click', (event) => {
+    const rect = dialog.getBoundingClientRect();
+    const clickedBackdrop = event.clientY < rect.top || event.clientY > rect.bottom || event.clientX < rect.left || event.clientX > rect.right;
+    if (clickedBackdrop) closeMcpConnectionModal();
+  });
+
+  const modal = document.createElement('div');
+  modal.className = 'configure-modal';
+  modal.innerHTML =
+    '<h3 id="mcp-connect-title">Connect MCP Server</h3>'
+    + '<div class="configure-form">'
+      + '<label class="configure-field"><span>Server name</span><input type="text" id="mcp-connect-name" placeholder="internal-mcp"></label>'
+      + '<label class="configure-field"><span>Server URL</span><input type="text" id="mcp-connect-url" placeholder="https://mcp.example.com/"></label>'
+    + '</div>'
+    + '<div class="configure-actions">'
+      + '<button class="btn-ext activate" type="button" id="mcp-connect-submit">Connect</button>'
+      + '<button class="btn-ext remove" type="button" id="mcp-connect-cancel">Cancel</button>'
+    + '</div>';
+
+  dialog.setAttribute('aria-labelledby', 'mcp-connect-title');
+  dialog.appendChild(modal);
+  document.body.appendChild(dialog);
+
+  modal.querySelector('#mcp-connect-submit').addEventListener('click', () => {
+    addMcpServer({
+      name: modal.querySelector('#mcp-connect-name').value,
+      url: modal.querySelector('#mcp-connect-url').value,
+      closeOnSuccess: true,
+    });
+  });
+  modal.querySelector('#mcp-connect-cancel').addEventListener('click', closeMcpConnectionModal);
+
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute('open', 'open');
+  }
+
+  const nameInput = modal.querySelector('#mcp-connect-name');
+  if (nameInput) nameInput.focus();
+}
+
+function closeMcpConnectionModal() {
+  const existing = document.querySelector('.mcp-connect-dialog');
+  if (existing) {
+    if (typeof existing.close === 'function' && existing.open) existing.close();
+    existing.remove();
+  }
+  if (mcpConnectionModalFocusReturn && typeof mcpConnectionModalFocusReturn.focus === 'function') {
+    mcpConnectionModalFocusReturn.focus();
+  }
+  mcpConnectionModalFocusReturn = null;
 }
 
 function renderAvailableExtensionCard(entry) {
@@ -3808,7 +4549,13 @@ function renderExtensionCard(ext) {
     if (!ext.active) {
       const activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
+      if (ext.auth_mode === 'oauth' && (ext.auth_status === 'needs_reauth' || ext.auth_status === 'insufficient_scope')) {
+        activateBtn.textContent = 'Reconnect';
+      } else if (ext.auth_mode === 'oauth' && ext.auth_status !== 'authenticated' && ext.auth_status !== 'no_auth_required') {
+        activateBtn.textContent = 'Connect';
+      } else {
+        activateBtn.textContent = 'Activate';
+      }
       activateBtn.addEventListener('click', () => activateExtension(ext.name));
       actions.appendChild(activateBtn);
     } else {
@@ -3818,7 +4565,7 @@ function renderExtensionCard(ext) {
       actions.appendChild(activeLabel);
     }
 
-    if (ext.needs_setup) {
+    if (ext.auth_mode !== 'oauth' && ext.needs_setup) {
       const configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
       configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
@@ -3858,8 +4605,10 @@ function activateExtension(name) {
       if (res.auth_url) {
         showToast('Opening authentication for ' + name, 'info');
         window.open(res.auth_url, '_blank');
-      } else if (res.awaiting_token) {
+      } else if (res.auth_mode === 'manual_token' || res.awaiting_token) {
         showConfigureModal(name);
+      } else if (res.instructions) {
+        showToast(res.instructions, 'info');
       } else {
         showToast('Activate failed: ' + res.message, 'error');
       }
@@ -3954,29 +4703,48 @@ function removeExtension(name) {
 function showConfigureModal(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
     .then((setup) => {
-      if (!setup.secrets || setup.secrets.length === 0) {
-        showToast('No configuration needed for ' + name, 'info');
+      if (setup.mode === 'oauth') {
+        if (setup.auth_url) {
+          showToast('Opening authentication for ' + name, 'info');
+          window.open(setup.auth_url, '_blank');
+        } else {
+          showToast(setup.instructions || ('Browser authentication is not available for ' + name), 'info');
+        }
         return;
       }
-      renderConfigureModal(name, setup.secrets);
+      if (!setup.fields || setup.fields.length === 0) {
+        showToast(setup.instructions || ('No configuration needed for ' + name), 'info');
+        return;
+      }
+      renderConfigureModal(name, setup.fields);
     })
     .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
 }
 
 function renderConfigureModal(name, secrets) {
   closeConfigureModal();
-  const overlay = document.createElement('div');
-  overlay.className = 'configure-overlay';
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) closeConfigureModal();
+  configureModalFocusReturn = document.activeElement;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'configure-dialog';
+  dialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    closeConfigureModal();
+  });
+  dialog.addEventListener('click', (event) => {
+    const rect = dialog.getBoundingClientRect();
+    const clickedBackdrop = event.clientY < rect.top || event.clientY > rect.bottom || event.clientX < rect.left || event.clientX > rect.right;
+    if (clickedBackdrop) closeConfigureModal();
   });
 
   const modal = document.createElement('div');
   modal.className = 'configure-modal';
+  modal.setAttribute('role', 'document');
 
   const header = document.createElement('h3');
+  header.id = 'configure-modal-title';
   header.textContent = 'Configure ' + name;
   modal.appendChild(header);
+  dialog.setAttribute('aria-labelledby', header.id);
 
   const form = document.createElement('div');
   form.className = 'configure-form';
@@ -4044,8 +4812,14 @@ function renderConfigureModal(name, secrets) {
   actions.appendChild(cancelBtn);
 
   modal.appendChild(actions);
-  overlay.appendChild(modal);
-  document.body.appendChild(overlay);
+  dialog.appendChild(modal);
+  document.body.appendChild(dialog);
+
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute('open', 'open');
+  }
 
   if (fields.length > 0) fields[0].input.focus();
 }
@@ -4090,8 +4864,15 @@ function submitConfigureModal(name, fields) {
 }
 
 function closeConfigureModal() {
-  const existing = document.querySelector('.configure-overlay');
-  if (existing) existing.remove();
+  const existing = document.querySelector('.configure-dialog, .configure-overlay');
+  if (existing) {
+    if (typeof existing.close === 'function' && existing.open) existing.close();
+    existing.remove();
+  }
+  if (configureModalFocusReturn && typeof configureModalFocusReturn.focus === 'function') {
+    configureModalFocusReturn.focus();
+  }
+  configureModalFocusReturn = null;
 }
 
 // --- Pairing ---
@@ -7741,6 +8522,7 @@ function shortModelName(model) {
 
 function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
+    gatewayStatusCache = data;
     var popover = document.getElementById('gateway-popover');
     var html = '';
 
@@ -7779,6 +8561,25 @@ function fetchGatewayStatus() {
           + '<span>out: ' + formatTokenCount(m.output_tokens) + '</span>'
           + '</div>';
       }
+    }
+
+    var nostr = data.channel_setup && data.channel_setup.nostr ? data.channel_setup.nostr : null;
+    if (nostr && (nostr.enabled || nostr.configured || nostr.needs_private_key || nostr.public_key_npub)) {
+      var relaySummary = '-';
+      if (nostr.relay_count != null && nostr.connected_relay_count != null) {
+        relaySummary = nostr.connected_relay_count + '/' + nostr.relay_count;
+      } else if (nostr.relay_count != null) {
+        relaySummary = String(nostr.relay_count);
+      }
+      var nostrState = nostr.control_ready
+        ? 'Owner DM control ready'
+        : (nostr.tool_ready ? 'Social actions ready; owner pubkey still needed for control' : (nostr.needs_private_key ? 'Private key required' : 'Configured'));
+      html += '<div class="gw-divider"></div>';
+      html += '<div class="gw-section-label">Nostr</div>';
+      html += '<div class="gw-stat"><span>Status</span><span>' + escapeHtml(nostrState) + '</span></div>';
+      html += '<div class="gw-stat"><span>Identity</span><span>' + escapeHtml(nostr.public_key_npub || nostr.public_key_hex || '-') + '</span></div>';
+      html += '<div class="gw-stat"><span>Owner</span><span>' + escapeHtml(nostr.owner_pubkey_npub || nostr.owner_pubkey_hex || '-') + '</span></div>';
+      html += '<div class="gw-stat"><span>Relays</span><span>' + escapeHtml(relaySummary) + '</span></div>';
     }
 
     popover.innerHTML = html;
@@ -8331,13 +9132,22 @@ function installWasmExtension() {
   });
 }
 
-function addMcpServer() {
-  var name = document.getElementById('mcp-install-name').value.trim();
+function addMcpServer(options) {
+  var opts = options || {};
+  var name = String(opts.name != null ? opts.name : '').trim();
+  if (!name) {
+    var nameInput = document.getElementById('mcp-install-name');
+    name = nameInput ? nameInput.value.trim() : '';
+  }
   if (!name) {
     showToast('Server name is required', 'error');
     return;
   }
-  var url = document.getElementById('mcp-install-url').value.trim();
+  var url = String(opts.url != null ? opts.url : '').trim();
+  if (!url) {
+    var urlInput = document.getElementById('mcp-install-url');
+    url = urlInput ? urlInput.value.trim() : '';
+  }
   if (!url) {
     showToast('MCP server URL is required', 'error');
     return;
@@ -8349,8 +9159,11 @@ function addMcpServer() {
   }).then(function(res) {
     if (res.success) {
       showToast('Added MCP server ' + name, 'success');
-      document.getElementById('mcp-install-name').value = '';
-      document.getElementById('mcp-install-url').value = '';
+      var inlineNameInput = document.getElementById('mcp-install-name');
+      var inlineUrlInput = document.getElementById('mcp-install-url');
+      if (inlineNameInput) inlineNameInput.value = '';
+      if (inlineUrlInput) inlineUrlInput.value = '';
+      if (opts.closeOnSuccess) closeMcpConnectionModal();
       loadExtensions();
     } else {
       showToast('Failed to add MCP server: ' + (res.message || 'unknown error'), 'error');
@@ -8827,7 +9640,11 @@ document.addEventListener('keydown', (e) => {
 
   // Escape: close job detail or blur input
   if (e.key === 'Escape') {
-    if (currentJobId) {
+    if (shellMobileNavOpen) {
+      closeShellMobileNav({ keepFocus: false });
+    } else if (document.querySelector('.configure-dialog')) {
+      closeConfigureModal();
+    } else if (currentJobId) {
       closeJobDetail();
     } else if (inInput) {
       e.target.blur();
@@ -9000,7 +9817,7 @@ const SETTINGS_SCHEMA = {
     fields: [
       { key: 'agent.name', label: 'Agent name', type: 'text', desc: 'How the agent identifies itself' },
       { key: 'user_timezone', label: 'User timezone', type: 'text', desc: 'IANA timezone used for schedules and daily context (for example Europe/Berlin or America/New_York)', nullable: true },
-      { key: 'agent.personality_pack', label: 'Personality pack', type: 'select', options: [{value: 'balanced', label: 'balanced'}, {value: 'professional', label: 'professional'}, {value: 'creative_partner', label: 'creative_partner'}, {value: 'research_assistant', label: 'research_assistant'}, {value: 'mentor', label: 'mentor'}, {value: 'minimal', label: 'minimal'}], desc: 'Default personality pack for new workspace identity and cross-surface copy' },
+      { key: 'agent.personality_pack', label: 'Personality pack', type: 'select', options: [{value: 'balanced', label: 'balanced'}, {value: 'professional', label: 'professional'}, {value: 'creative_partner', label: 'creative_partner'}, {value: 'research_assistant', label: 'research_assistant'}, {value: 'mentor', label: 'mentor'}, {value: 'minimal', label: 'minimal'}], desc: 'Initial seed pack for the canonical home soul and cross-surface copy' },
       { key: 'agent.max_parallel_jobs', label: 'Max parallel jobs', type: 'number', desc: 'Concurrent job limit', min: 1, max: 20 },
       { key: 'agent.job_timeout_secs', label: 'Job timeout (seconds)', type: 'number', desc: 'Max time before a job is killed', min: 60 },
       { key: 'agent.max_tool_iterations', label: 'Max tool iterations', type: 'number', desc: 'Agentic loop iteration cap', min: 1, max: 200 },
@@ -9063,9 +9880,10 @@ const SETTINGS_SCHEMA = {
   'Channels — Nostr': {
     icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/></svg>',
     fields: [
-      { key: 'channels.nostr_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Nostr channel' },
+      { key: 'channels.nostr_enabled', label: 'Enabled', type: 'bool', desc: 'Enable the Nostr runtime for owner DMs and social actions' },
       { key: 'channels.nostr_relays', label: 'Relays', type: 'text', desc: 'Comma-separated relay URLs (wss://...)', nullable: true },
-      { key: 'channels.nostr_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated pubkeys (hex/npub) or * (empty = all)', nullable: true },
+      { key: 'channels.nostr_owner_pubkey', label: 'Owner pubkey', type: 'text', desc: 'Only this pubkey may control the agent over encrypted Nostr DMs', nullable: true },
+      { key: 'channels.nostr_social_dm_enabled', label: 'Social DM reads', type: 'bool', desc: 'Allow non-owner DMs to be readable via nostr_actions only' },
     ]
   },
   'Channels — iMessage': {
@@ -9128,7 +9946,7 @@ const SETTINGS_SCHEMA = {
       { key: 'routines_enabled', label: 'Routines enabled', type: 'bool', desc: 'Enable the cron-based routine system' },
       { key: 'skills_enabled', label: 'Skills enabled', type: 'bool', desc: 'Enable the skills system' },
       { key: 'claude_code_enabled', label: 'Claude Code sandbox', type: 'bool', desc: 'Enable Claude Code as a tool' },
-      { key: 'claude_code_model', label: 'Claude Code model', type: 'text', desc: 'Model for Claude Code containers (e.g. "sonnet", "opus", "claude-sonnet-4-20250514")', nullable: true },
+      { key: 'claude_code_model', label: 'Claude Code model', type: 'text', desc: 'Model for Claude Code containers (e.g. "claude-sonnet-4-6", "claude-opus-4-5")', nullable: true },
       { key: 'claude_code_max_turns', label: 'Claude Code max turns', type: 'number', desc: 'Maximum agentic turns per Claude Code job', min: 1, nullable: true },
       { key: 'codex_code_enabled', label: 'Codex sandbox', type: 'bool', desc: 'Enable Codex CLI as a container coding agent' },
       { key: 'codex_code_model', label: 'Codex model', type: 'text', desc: 'Model for Codex containers (e.g. "gpt-5.3-codex")', nullable: true },
@@ -9162,7 +9980,14 @@ const SENSITIVE_KEYS = new Set([
   'channels.slack_bot_token',
   'channels.slack_app_token',
   'channels.gateway_auth_token',
+  'channels.nostr_private_key',
   'channels.bluebubbles_password',
+]);
+
+const HIDDEN_SETTINGS_KEYS = new Set([
+  PROVIDERS_UI_FILTER_SETTING_KEY,
+  PROVIDERS_UI_HIDDEN_SETTING_KEY,
+  'channels.nostr_allow_from',
 ]);
 
 // --- Provider Vault ---
@@ -9175,6 +10000,125 @@ let modelChoiceDismissListenerBound = false;
 let providerRoutingSaveInFlight = null;
 let providerRoutingSavePendingRequest = null;
 let activeRoutingPoolDrag = null;
+let providerVaultEntries = [];
+const PROVIDER_INFRASTRUCTURE_SLUGS = ['llama_cpp', 'openai_compatible'];
+
+function persistProvidersUiPrefs() {
+  providersUiPrefs = normalizeProvidersUiPrefs(providersUiPrefs);
+  writeJsonStorage(PROVIDERS_UI_PREFS_STORAGE_KEY, providersUiPrefs);
+  persistProvidersUiPrefsToServer().catch((err) => {
+    console.warn('Failed to persist provider UI preferences:', err);
+  });
+}
+
+function writeSettingValueSilently(key, value) {
+  if (!token) return Promise.resolve();
+  const headers = { 'Authorization': 'Bearer ' + token };
+  if (value === null) {
+    return fetch('/api/settings/' + encodeURIComponent(key), { method: 'DELETE', headers })
+      .then((res) => {
+        if (!res.ok && res.status !== 404) throw new Error(res.status + ' ' + res.statusText);
+      });
+  }
+  headers['Content-Type'] = 'application/json';
+  return fetch('/api/settings/' + encodeURIComponent(key), {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ value: value }),
+  }).then((res) => {
+    if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+  });
+}
+
+function persistProvidersUiPrefsToServer() {
+  const normalized = normalizeProvidersUiPrefs(providersUiPrefs);
+  const updatedAt = new Date().toISOString();
+  const filterValue = normalized.filter === 'all' ? null : normalized.filter;
+  const hiddenValue = normalized.hiddenSlugs.length ? normalized.hiddenSlugs : null;
+  return Promise.all([
+    writeSettingValueSilently(PROVIDERS_UI_FILTER_SETTING_KEY, filterValue),
+    writeSettingValueSilently(PROVIDERS_UI_HIDDEN_SETTING_KEY, hiddenValue),
+  ]).then(() => {
+    if (filterValue === null) delete settingsCache[PROVIDERS_UI_FILTER_SETTING_KEY];
+    else settingsCache[PROVIDERS_UI_FILTER_SETTING_KEY] = { value: filterValue, updated_at: updatedAt };
+    if (hiddenValue === null) delete settingsCache[PROVIDERS_UI_HIDDEN_SETTING_KEY];
+    else settingsCache[PROVIDERS_UI_HIDDEN_SETTING_KEY] = { value: hiddenValue.slice(), updated_at: updatedAt };
+  });
+}
+
+function fetchOptionalSettingValue(key) {
+  if (!token) return Promise.resolve(undefined);
+  return fetch('/api/settings/' + encodeURIComponent(key), {
+    headers: { 'Authorization': 'Bearer ' + token },
+  }).then((res) => {
+    if (res.status === 404) return undefined;
+    if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+    return res.json().then((payload) => payload.value);
+  });
+}
+
+function loadProvidersUiPrefs() {
+  const fallback = normalizeProvidersUiPrefs(readJsonStorage(PROVIDERS_UI_PREFS_STORAGE_KEY, providersUiPrefs));
+  if (!token) {
+    providersUiPrefs = fallback;
+    return Promise.resolve(providersUiPrefs);
+  }
+  return Promise.all([
+    fetchOptionalSettingValue(PROVIDERS_UI_FILTER_SETTING_KEY),
+    fetchOptionalSettingValue(PROVIDERS_UI_HIDDEN_SETTING_KEY),
+  ]).then(([filterValue, hiddenValue]) => {
+    const hasServerValues = filterValue !== undefined || hiddenValue !== undefined;
+    providersUiPrefs = hasServerValues
+      ? normalizeProvidersUiPrefs({ filter: filterValue, hiddenSlugs: hiddenValue })
+      : fallback;
+    if (filterValue !== undefined) {
+      settingsCache[PROVIDERS_UI_FILTER_SETTING_KEY] = { value: filterValue, updated_at: new Date().toISOString() };
+    }
+    if (hiddenValue !== undefined) {
+      settingsCache[PROVIDERS_UI_HIDDEN_SETTING_KEY] = { value: hiddenValue, updated_at: new Date().toISOString() };
+    }
+    writeJsonStorage(PROVIDERS_UI_PREFS_STORAGE_KEY, providersUiPrefs);
+    return providersUiPrefs;
+  }).catch((err) => {
+    console.warn('Failed to load provider UI preferences:', err);
+    providersUiPrefs = fallback;
+    return providersUiPrefs;
+  });
+}
+
+function isProviderInfrastructureSlug(slug) {
+  return PROVIDER_INFRASTRUCTURE_SLUGS.includes(String(slug || ''));
+}
+
+function providerHiddenByUser(slug) {
+  return providersUiPrefs.hiddenSlugs.includes(String(slug || ''));
+}
+
+function providerMatchesFastFilter(provider, filterName) {
+  const filter = filterName || providersUiPrefs.filter || 'all';
+  if (filter === 'hidden') return providerHiddenByUser(provider.slug);
+  if (providerHiddenByUser(provider.slug)) return false;
+  if (filter === 'enabled') return !!provider.enabled;
+  if (filter === 'ready') return providerCredentialReady(provider);
+  if (filter === 'attention') return !providerCredentialReady(provider);
+  if (filter === 'local') return provider.auth_kind === 'local';
+  return true;
+}
+
+function setProvidersFastFilter(filterName) {
+  providersUiPrefs.filter = filterName;
+  persistProvidersUiPrefs();
+  if (currentTab === 'providers') loadProviders();
+}
+
+function setProviderVisibility(slug, visible) {
+  const target = String(slug || '');
+  const hidden = new Set(providersUiPrefs.hiddenSlugs);
+  if (visible) hidden.delete(target);
+  else hidden.add(target);
+  providersUiPrefs.hiddenSlugs = Array.from(hidden).sort();
+  persistProvidersUiPrefs();
+}
 
 function waitForProviderRoutingSaves() {
   if (!providerRoutingSaveInFlight) return Promise.resolve();
@@ -9209,9 +10153,10 @@ function loadProviders() {
   container.innerHTML = '<div class="settings-loading">Loading providers...</div>';
   const runLoad = () => {
     Promise.all([
+      loadProvidersUiPrefs(),
       apiFetch('/api/providers'),
       apiFetch('/api/providers/config'),
-    ]).then(([providersData, configData]) => {
+    ]).then(([_prefs, providersData, configData]) => {
       providerRoutingConfig = applyPersistedProvidersConfig(configData);
       providerModelsCache.clear();
       providerModelsInflight.clear();
@@ -9231,9 +10176,117 @@ function loadProviderVault() {
   loadProviders();
 }
 
+function renderProvidersFilterToolbar(providers) {
+  const providerList = (providers || []).filter((provider) => !isProviderInfrastructureSlug(provider.slug));
+  const hiddenCount = providerList.filter((provider) => providerHiddenByUser(provider.slug)).length;
+  const filters = [
+    { id: 'all', label: 'All', count: providerList.filter((provider) => !providerHiddenByUser(provider.slug)).length },
+    { id: 'enabled', label: 'Enabled', count: providerList.filter((provider) => !providerHiddenByUser(provider.slug) && provider.enabled).length },
+    { id: 'ready', label: 'Ready', count: providerList.filter((provider) => !providerHiddenByUser(provider.slug) && providerCredentialReady(provider)).length },
+    { id: 'attention', label: 'Attention', count: providerList.filter((provider) => !providerHiddenByUser(provider.slug) && !providerCredentialReady(provider)).length },
+    { id: 'local', label: 'Local', count: providerList.filter((provider) => !providerHiddenByUser(provider.slug) && provider.auth_kind === 'local').length },
+    { id: 'hidden', label: 'Hidden', count: hiddenCount },
+  ];
+
+  let html = '<section class="ui-panel ui-panel--subtle ui-panel--compact providers-filter-toolbar">';
+  html += '<div class="providers-filter-copy"><div class="providers-filter-kicker">View</div><p class="providers-filter-desc">Keep the vault focused on the providers you actively compare, while preserving quick access to the rest.</p></div>';
+  html += '<div class="providers-filter-controls">';
+  html += '<div class="providers-filter-chip-row">';
+  filters.forEach((filter) => {
+    html += '<button type="button" class="providers-filter-chip' + (providersUiPrefs.filter === filter.id ? ' active' : '') + '" onclick="setProvidersFastFilter(\'' + escapeHtml(filter.id) + '\')">'
+      + escapeHtml(filter.label) + ' <span>' + escapeHtml(String(filter.count)) + '</span></button>';
+  });
+  html += '</div>';
+  html += '<div class="providers-filter-actions">';
+  html += '<button type="button" class="btn-ext" onclick="openProviderVisibilityModal()">Customize visible providers</button>';
+  if (providersUiPrefs.filter !== 'all' || hiddenCount > 0) {
+    html += '<button type="button" class="btn-ext" onclick="resetProviderVisibilityPreferences()">Reset filters</button>';
+  }
+  html += '</div></div></section>';
+  return html;
+}
+
+function openProviderVisibilityModal() {
+  closeProviderVisibilityModal();
+  const providers = providerVaultEntries.filter((provider) => !isProviderInfrastructureSlug(provider.slug));
+  const dialog = document.createElement('dialog');
+  dialog.className = 'configure-dialog providers-visibility-dialog';
+  dialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    closeProviderVisibilityModal();
+  });
+  dialog.addEventListener('click', (event) => {
+    const rect = dialog.getBoundingClientRect();
+    const clickedBackdrop = event.clientY < rect.top || event.clientY > rect.bottom || event.clientX < rect.left || event.clientX > rect.right;
+    if (clickedBackdrop) closeProviderVisibilityModal();
+  });
+
+  const modal = document.createElement('div');
+  modal.className = 'configure-modal providers-visibility-modal';
+  modal.innerHTML =
+    '<h3 id="providers-visibility-title">Visible providers</h3>'
+    + '<p class="ui-panel-desc">Hide providers you do not actively compare. Hidden providers remain recoverable through the Hidden filter and this dialog.</p>'
+    + '<div class="providers-visibility-list">'
+    + providers.map((provider) =>
+      '<label class="providers-visibility-item"><input type="checkbox" data-provider-visibility="' + escapeHtml(provider.slug) + '"' + (providerHiddenByUser(provider.slug) ? '' : ' checked') + '><span>' + escapeHtml(provider.display_name) + '</span></label>'
+    ).join('')
+    + '</div>'
+    + '<div class="configure-actions">'
+      + '<button class="btn-ext activate" type="button" id="providers-visibility-save">Save</button>'
+      + '<button class="btn-ext" type="button" id="providers-visibility-show-all">Show all</button>'
+      + '<button class="btn-ext remove" type="button" id="providers-visibility-cancel">Cancel</button>'
+    + '</div>';
+  dialog.setAttribute('aria-labelledby', 'providers-visibility-title');
+  dialog.appendChild(modal);
+  document.body.appendChild(dialog);
+
+  modal.querySelector('#providers-visibility-save').addEventListener('click', () => {
+    const hiddenSlugs = [];
+    modal.querySelectorAll('[data-provider-visibility]').forEach((input) => {
+      if (!input.checked) hiddenSlugs.push(input.getAttribute('data-provider-visibility'));
+    });
+    providersUiPrefs.hiddenSlugs = hiddenSlugs.sort();
+    persistProvidersUiPrefs();
+    closeProviderVisibilityModal();
+    if (currentTab === 'providers') loadProviders();
+  });
+  modal.querySelector('#providers-visibility-show-all').addEventListener('click', () => {
+    providersUiPrefs.hiddenSlugs = [];
+    providersUiPrefs.filter = providersUiPrefs.filter === 'hidden' ? 'all' : providersUiPrefs.filter;
+    persistProvidersUiPrefs();
+    closeProviderVisibilityModal();
+    if (currentTab === 'providers') loadProviders();
+  });
+  modal.querySelector('#providers-visibility-cancel').addEventListener('click', closeProviderVisibilityModal);
+
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute('open', 'open');
+  }
+
+  const firstInput = modal.querySelector('[data-provider-visibility]');
+  if (firstInput) firstInput.focus();
+}
+
+function closeProviderVisibilityModal() {
+  const existing = document.querySelector('.providers-visibility-dialog');
+  if (existing) {
+    if (typeof existing.close === 'function' && existing.open) existing.close();
+    existing.remove();
+  }
+}
+
+function resetProviderVisibilityPreferences() {
+  providersUiPrefs = normalizeProvidersUiPrefs({ filter: 'all', hiddenSlugs: [] });
+  persistProvidersUiPrefs();
+  if (currentTab === 'providers') loadProviders();
+}
+
 function renderProvidersWorkspace(providers, config) {
   const container = document.getElementById('providers-content');
   const mergedProviders = mergeProviderEntries(providers, config.providers || []);
+  providerVaultEntries = mergedProviders.slice();
 
   let html = '<section class="ui-panel ui-panel-stack providers-workspace-shell">';
   html += '<div class="ui-panel-header ui-panel-header--divider providers-shell-header"><div class="ui-panel-copy"><h3 class="ui-panel-title ui-panel-title--lg">Providers & Routing</h3><p class="ui-panel-desc">Add provider credentials and models, then choose a routing strategy to distribute work across providers.</p></div><div class="ui-panel-actions"><button id="providers-open-research" class="btn-vault-save providers-shell-save providers-shell-secondary">Research GPU Clouds</button><button id="providers-routing-save" class="btn-vault-save providers-shell-save">Save Changes</button></div></div>';
@@ -9242,6 +10295,7 @@ function renderProvidersWorkspace(providers, config) {
   } else if (config.runtime_revision) {
     html += '<div class="ui-inline-alert">Live runtime revision ' + escapeHtml(String(config.runtime_revision)) + ' is active.</div>';
   }
+  html += renderProvidersFilterToolbar(mergedProviders);
   html += renderProvidersSection(mergedProviders, config);
   html += renderRoutingSection(config, mergedProviders);
   html += '</section>';
@@ -9273,17 +10327,39 @@ function mergeProviderEntries(vaultProviders, configProviders) {
 }
 
 function renderProvidersSection(providers, config) {
-  // Filter out infrastructure providers — they are configured in Connection Settings
-  const HIDDEN_SLUGS = ['llama_cpp', 'openai_compatible'];
-  const visibleProviders = providers.filter(p => !HIDDEN_SLUGS.includes(p.slug));
+  const providerList = providers.filter((provider) => !isProviderInfrastructureSlug(provider.slug));
+  const visibleProviders = providerList.filter((provider) => providerMatchesFastFilter(provider, providersUiPrefs.filter));
+  const hiddenCount = providerList.filter((provider) => providerHiddenByUser(provider.slug)).length;
 
   let html = '<div class="routing-section-block ui-panel-stack">';
   html += '<div class="ui-panel-header routing-subheader"><div class="ui-panel-copy"><h4 class="ui-panel-title ui-panel-title--section">Providers</h4><p class="ui-panel-desc">Enable providers, save API credentials, and pick models for each slot.</p></div></div>';
-  html += '<div class="providers-editor-grid ui-panel-grid ui-panel-grid--cards">';
-  for (const provider of visibleProviders) {
-    html += renderProviderEditorCard(provider);
+  if (!visibleProviders.length) {
+    html += '<div class="empty-state ui-panel-empty providers-empty-state">';
+    if (providersUiPrefs.filter === 'hidden') {
+      html += 'No hidden providers right now.';
+    } else if (hiddenCount > 0) {
+      html += 'No providers match this filter. Try another view or restore hidden providers.';
+    } else {
+      html += 'No providers match this filter yet.';
+    }
+    if (providersUiPrefs.filter !== 'all' || hiddenCount > 0) {
+      html += '<div class="providers-empty-actions">';
+      if (providersUiPrefs.filter !== 'all') {
+        html += '<button type="button" class="btn-ext" onclick="setProvidersFastFilter(\'all\')">Show all providers</button>';
+      }
+      if (hiddenCount > 0) {
+        html += '<button type="button" class="btn-ext" onclick="openProviderVisibilityModal()">Restore hidden providers</button>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  } else {
+    html += '<div class="providers-editor-grid ui-panel-grid ui-panel-grid--cards">';
+    for (const provider of visibleProviders) {
+      html += renderProviderEditorCard(provider);
+    }
+    html += '</div>';
   }
-  html += '</div>';
 
   // Connection settings — collapsible, lives under Providers where it belongs
   html += '<details class="connection-settings-details">';
@@ -11501,17 +12577,22 @@ function htmlToElement(html) {
 }
 
 let settingsCache = {}; // key -> { value, updated_at }
+let gatewayStatusCache = null;
 
 function loadSettings() {
   const container = document.getElementById('settings-sections');
   container.innerHTML = '<div class="settings-loading">Loading settings...</div>';
 
-  apiFetch('/api/settings').then((data) => {
+  Promise.all([
+    apiFetch('/api/settings'),
+    apiFetch('/api/gateway/status').catch(() => null),
+  ]).then(([data, gatewayStatus]) => {
     settingsCache = {};
     for (const s of (data.settings || [])) {
-      if (SENSITIVE_KEYS.has(s.key)) continue;
+      if (SENSITIVE_KEYS.has(s.key) || HIDDEN_SETTINGS_KEYS.has(s.key)) continue;
       settingsCache[s.key] = { value: s.value, updated_at: s.updated_at };
     }
+    gatewayStatusCache = gatewayStatus;
     applyOptionalFeatureFlagsFromCache();
     renderSettings();
   }).catch((err) => {
@@ -11531,6 +12612,7 @@ function renderSettings() {
   searchInput.id = 'settings-search';
   searchInput.className = 'settings-search-input';
   searchInput.placeholder = 'Search settings...';
+  searchInput.value = settingsSearchQuery;
   searchInput.addEventListener('input', () => filterSettings(searchInput.value));
   searchWrap.appendChild(searchInput);
   container.appendChild(searchWrap);
@@ -11544,22 +12626,21 @@ function renderSettings() {
 
   const subtabBar = document.createElement('div');
   subtabBar.className = 'settings-subtab-bar';
-  let firstTab = true;
+  if (!subtabGroups[currentSettingsSubtab]) currentSettingsSubtab = 'General';
   for (const tabName of Object.keys(subtabGroups)) {
     const btn = document.createElement('button');
-    btn.className = 'settings-subtab' + (firstTab ? ' active' : '');
+    btn.className = 'settings-subtab' + (currentSettingsSubtab === tabName ? ' active' : '');
     btn.textContent = tabName;
     btn.dataset.tab = tabName;
     btn.addEventListener('click', () => switchSettingsSubtab(tabName));
     subtabBar.appendChild(btn);
-    firstTab = false;
   }
   container.appendChild(subtabBar);
 
   // --- Render sections into panes ---
   for (const [tabName, sectionNames] of Object.entries(subtabGroups)) {
     const pane = document.createElement('div');
-    pane.className = 'settings-pane' + (tabName === 'General' ? ' active' : '');
+    pane.className = 'settings-pane' + (tabName === currentSettingsSubtab ? ' active' : '');
     pane.dataset.tab = tabName;
 
     const sectionsToRender = tabName === 'Advanced'
@@ -11576,7 +12657,7 @@ function renderSettings() {
 
     // "Other" settings go into Advanced tab
     if (tabName === 'Advanced') {
-      const otherKeys = Object.keys(settingsCache).filter(k => !SCHEMA_KEYS.has(k) && !SENSITIVE_KEYS.has(k)).sort();
+      const otherKeys = Object.keys(settingsCache).filter(k => !SCHEMA_KEYS.has(k) && !SENSITIVE_KEYS.has(k) && !HIDDEN_SETTINGS_KEYS.has(k)).sort();
       if (otherKeys.length > 0) {
         const otherSection = {
           icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg>',
@@ -11592,6 +12673,12 @@ function renderSettings() {
     }
 
     container.appendChild(pane);
+  }
+
+  if (settingsSearchQuery) {
+    filterSettings(settingsSearchQuery);
+  } else {
+    switchSettingsSubtab(currentSettingsSubtab, { updateHash: false });
   }
 }
 
@@ -11631,47 +12718,309 @@ function renderSettingsSection(sectionName, section, startOpen) {
   const body = document.createElement('div');
   body.className = 'settings-section-body';
 
-  const grid = document.createElement('div');
-  grid.className = 'settings-grid';
+  if (sectionName === 'Presentation') {
+    body.appendChild(renderPresentationStudio(section));
+  } else {
+    const grid = document.createElement('div');
+    grid.className = 'settings-grid';
 
-  for (const field of section.fields) {
-    grid.appendChild(renderSettingField(field));
+    for (const field of section.fields) {
+      grid.appendChild(renderSettingField(field));
+    }
+
+    body.appendChild(grid);
+    if (sectionName === 'Channels — Nostr') {
+      body.appendChild(renderNostrSettingsPanel());
+    }
   }
-
-  body.appendChild(grid);
   sectionEl.appendChild(body);
 
   return sectionEl;
 }
 
-function switchSettingsSubtab(tabName) {
+function currentNostrSetupStatus() {
+  return gatewayStatusCache && gatewayStatusCache.channel_setup && gatewayStatusCache.channel_setup.nostr
+    ? gatewayStatusCache.channel_setup.nostr
+    : null;
+}
+
+function buildNostrStatusSummary(status) {
+  if (!status) return 'Gateway status unavailable';
+  if (status.invalid_private_key) return 'Saved key is invalid and must be replaced';
+  if (status.control_ready) return 'Owner DM control and social actions are ready';
+  if (status.tool_ready) return 'Social actions are ready; owner DM control still needs an owner pubkey';
+  if (status.needs_private_key) return 'Save a private key to enable Nostr';
+  if (status.enabled) return 'Nostr is enabled but not fully configured yet';
+  return 'Nostr is disabled';
+}
+
+function buildNostrRelaySummary(status) {
+  if (!status) return 'Unknown';
+  if (status.relay_count != null && status.connected_relay_count != null) {
+    return status.connected_relay_count + ' connected / ' + status.relay_count + ' configured';
+  }
+  if (status.relay_count != null) {
+    return status.relay_count + ' configured';
+  }
+  return 'Not configured';
+}
+
+function renderSettingsInfoRow(labelText, descText, valueText) {
+  const row = document.createElement('div');
+  row.className = 'setting-row';
+
+  const labelWrap = document.createElement('div');
+  labelWrap.className = 'setting-label-wrap';
+  labelWrap.innerHTML =
+    '<label class="setting-label">' + escapeHtml(labelText) + '</label>'
+    + '<span class="setting-desc">' + escapeHtml(descText) + '</span>';
+  row.appendChild(labelWrap);
+
+  const controlWrap = document.createElement('div');
+  controlWrap.className = 'setting-control';
+  const value = document.createElement('div');
+  value.className = 'ui-resource-note';
+  value.textContent = valueText;
+  controlWrap.appendChild(value);
+  row.appendChild(controlWrap);
+
+  return row;
+}
+
+function renderNostrSecretControl(status) {
+  const row = document.createElement('div');
+  row.className = 'setting-row';
+  row.id = 'setting-channels-nostr-private-key';
+
+  const labelWrap = document.createElement('div');
+  labelWrap.className = 'setting-label-wrap';
+  labelWrap.innerHTML =
+    '<label class="setting-label">Private key</label>'
+    + '<span class="setting-desc">Stored in the secrets store. This key is never written through the general settings API.</span>';
+  row.appendChild(labelWrap);
+
+  const controlWrap = document.createElement('div');
+  controlWrap.className = 'setting-control';
+
+  const input = document.createElement('input');
+  input.type = 'password';
+  input.id = 'nostr-private-key-input';
+  input.className = 'setting-input';
+  input.placeholder = status && (status.public_key_npub || status.public_key_hex)
+    ? 'Saved already — enter a new nsec or hex key to replace it'
+    : 'nsec or hex private key';
+  controlWrap.appendChild(input);
+
+  const statusNote = document.createElement('div');
+  statusNote.className = 'setting-desc';
+  statusNote.style.marginTop = '0.5rem';
+  statusNote.textContent = status && (status.public_key_npub || status.public_key_hex)
+    ? ('Saved for ' + (status.public_key_npub || status.public_key_hex))
+    : 'No Nostr private key is currently saved for this user.';
+  controlWrap.appendChild(statusNote);
+
+  const actions = document.createElement('div');
+  actions.className = 'ui-resource-actions';
+  actions.style.marginTop = '0.75rem';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'btn-restart';
+  saveBtn.textContent = 'Save key';
+  saveBtn.addEventListener('click', saveNostrPrivateKey);
+  actions.appendChild(saveBtn);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'btn-cancel';
+  removeBtn.textContent = 'Remove key';
+  removeBtn.disabled = !(status && (status.public_key_npub || status.public_key_hex));
+  removeBtn.addEventListener('click', removeNostrPrivateKey);
+  actions.appendChild(removeBtn);
+
+  controlWrap.appendChild(actions);
+  row.appendChild(controlWrap);
+  return row;
+}
+
+function renderNostrSettingsPanel() {
+  const status = currentNostrSetupStatus();
+  const panel = document.createElement('div');
+  panel.className = 'settings-grid';
+  panel.style.marginTop = '1rem';
+
+  panel.appendChild(renderSettingsInfoRow(
+    'Runtime status',
+    'Shows whether outbound social actions are ready and whether owner DM control is actually live.',
+    buildNostrStatusSummary(status)
+  ));
+  panel.appendChild(renderSettingsInfoRow(
+    'Bot identity',
+    'Derived from the saved private key.',
+    status ? (status.public_key_npub || status.public_key_hex || 'Unavailable') : 'Unavailable'
+  ));
+  panel.appendChild(renderSettingsInfoRow(
+    'Owner control',
+    'Only this pubkey may send executable commands over encrypted Nostr DMs.',
+    status ? (status.owner_pubkey_npub || status.owner_pubkey_hex || 'Not configured') : 'Unknown'
+  ));
+  panel.appendChild(renderSettingsInfoRow(
+    'Relays',
+    'Configured versus currently connected relays for the live Nostr runtime.',
+    buildNostrRelaySummary(status)
+  ));
+  panel.appendChild(renderNostrSecretControl(status));
+
+  return panel;
+}
+
+function renderPresentationStudio(section) {
+  const shell = document.createElement('div');
+  shell.className = 'presentation-studio';
+
+  const preview = document.createElement('section');
+  preview.className = 'presentation-preview-card';
+  preview.setAttribute('data-skin-card', 'preview');
+  const skin = resolvedSkinMeta();
+  const sourceLabel = skin.source === 'webchat' ? 'WebUI override' : 'Following CLI skin';
+  preview.innerHTML =
+    '<div class="presentation-preview-head">'
+      + '<div>'
+        + '<span class="presentation-preview-kicker">Skin Studio</span>'
+        + '<h4>' + escapeHtml(skin.name) + '</h4>'
+        + '<p>' + escapeHtml(skin.tagline || 'Secure personal agent') + '</p>'
+      + '</div>'
+      + '<div class="presentation-preview-meta">'
+        + '<span class="presentation-source-pill">' + escapeHtml(sourceLabel) + '</span>'
+        + '<span class="presentation-prompt-pill">' + escapeHtml(skin.promptSymbol || '›') + '</span>'
+      + '</div>'
+    + '</div>'
+    + '<div class="presentation-art-preview">'
+      + '<pre class="presentation-ascii-preview" aria-label="Wordmark preview of the active skin">' + escapeHtml((skin.logoArt || []).join('\n') || 'No wordmark preview available.') + '</pre>'
+      + '<pre class="presentation-ascii-preview presentation-ascii-preview--hero" aria-label="Hero art preview of the active skin">' + escapeHtml((skin.heroArt || []).join('\n') || 'No hero art defined for this skin.') + '</pre>'
+    + '</div>'
+    + '<div class="presentation-tool-row">' + renderPresentationToolChips(skin, { limit: 6 }) + '</div>';
+  shell.appendChild(preview);
+
+  const controls = document.createElement('div');
+  controls.className = 'presentation-control-grid settings-grid';
+  const appendStudioField = (key) => {
+    const field = section.fields.find((entry) => entry.key === key);
+    if (field) controls.appendChild(renderSettingField(field));
+  };
+  appendStudioField('agent.cli_skin');
+  controls.appendChild(renderPresentationFollowField());
+  appendStudioField('webchat_theme');
+  appendStudioField('webchat_show_branding');
+  shell.appendChild(controls);
+
+  const gallery = document.createElement('section');
+  gallery.className = 'presentation-gallery';
+  const intro = document.createElement('div');
+  intro.className = 'presentation-gallery-copy';
+  intro.innerHTML = '<h4>Available skins</h4><p>Choose a dedicated WebUI personality or keep the Web interface following the shared CLI skin.</p>';
+  gallery.appendChild(intro);
+
+  const cardGrid = document.createElement('div');
+  cardGrid.className = 'presentation-card-grid';
+  currentSkinCatalog.forEach((entry) => {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'presentation-skin-card';
+    card.setAttribute('data-skin-card', 'catalog');
+    if (entry.name === skin.name) card.classList.add('active');
+    if (settingsCache['webchat_skin']?.value === entry.name) card.classList.add('is-override');
+    card.style.setProperty('--skin-card-accent', entry.cssVars?.accent || '#34d399');
+    card.style.setProperty('--skin-card-border', entry.cssVars?.borderStrong || 'rgba(255,255,255,0.18)');
+    card.style.setProperty('--skin-card-glow', entry.cssVars?.featureGlow || 'none');
+    card.innerHTML =
+      '<span class="presentation-skin-card-top">'
+        + '<span class="presentation-skin-card-name">' + escapeHtml(entry.name) + '</span>'
+        + '<span class="presentation-skin-card-shape">' + escapeHtml(entry.messageShape || 'rounded') + '</span>'
+      + '</span>'
+      + '<span class="presentation-skin-card-body">'
+        + '<span class="presentation-skin-card-tagline">' + escapeHtml(entry.tagline || 'Shared ThinClaw skin') + '</span>'
+        + '<span class="presentation-skin-card-meta">' + escapeHtml((entry.chromeStyle || 'avionics') + ' · ' + (entry.surfacePattern || 'grid') + ' · ' + (entry.elevation || 'medium')) + '</span>'
+        + '<span class="presentation-skin-card-tools">' + renderPresentationToolChips(entry, { limit: 3 }) + '</span>'
+      + '</span>';
+    card.addEventListener('click', () => saveSetting('webchat_skin', entry.name));
+    cardGrid.appendChild(card);
+  });
+  if (!currentSkinCatalog.length) {
+    cardGrid.innerHTML = '<div class="empty-state">No skin catalog loaded yet.</div>';
+  }
+  gallery.appendChild(cardGrid);
+  shell.appendChild(gallery);
+
+  return shell;
+}
+
+function renderPresentationFollowField() {
+  const row = document.createElement('div');
+  row.className = 'setting-row setting-row--feature';
+  row.id = 'setting-webchat-follow-cli';
+
+  const labelWrap = document.createElement('div');
+  labelWrap.className = 'setting-label-wrap';
+  labelWrap.innerHTML =
+    '<label class="setting-label">Follow CLI skin</label>'
+    + '<span class="setting-desc">When enabled, the WebUI instantly adopts the shared CLI skin and any future CLI skin changes.</span>';
+  row.appendChild(labelWrap);
+
+  const controlWrap = document.createElement('div');
+  controlWrap.className = 'setting-control';
+  const toggle = document.createElement('label');
+  toggle.className = 'toggle-switch';
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.checked = settingsCache['webchat_skin']?.value == null;
+  input.addEventListener('change', () => {
+    if (input.checked) {
+      saveSetting('webchat_skin', null);
+    } else {
+      saveSetting('webchat_skin', resolvedSkinMeta().name || settingsCache['agent.cli_skin']?.value || 'cockpit');
+    }
+  });
+  const slider = document.createElement('span');
+  slider.className = 'toggle-slider';
+  toggle.appendChild(input);
+  toggle.appendChild(slider);
+  controlWrap.appendChild(toggle);
+  row.appendChild(controlWrap);
+  return row;
+}
+
+function switchSettingsSubtab(tabName, options) {
+  const opts = options || {};
+  currentSettingsSubtab = tabName || 'General';
   document.querySelectorAll('.settings-subtab').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.tab === tabName);
+    btn.classList.toggle('active', btn.dataset.tab === currentSettingsSubtab);
   });
   document.querySelectorAll('.settings-pane').forEach(pane => {
-    pane.classList.toggle('active', pane.dataset.tab === tabName);
+    pane.classList.toggle('active', pane.dataset.tab === currentSettingsSubtab);
   });
+  if (currentTab === 'settings' && opts.updateHash !== false) {
+    writeHashState({ settingsSubtab: currentSettingsSubtab });
+  }
 }
 
 function filterSettings(query) {
-  const q = query.toLowerCase().trim();
+  const q = (query || '').toLowerCase().trim();
   const panes = document.querySelectorAll('.settings-pane');
+  settingsSearchQuery = q;
+  if (currentTab === 'settings') {
+    writeHashState({ settingsSearch: settingsSearchQuery });
+  }
 
   if (!q) {
-    // Reset: show active tab, un-hide all
     panes.forEach(pane => {
       pane.querySelectorAll('.settings-section').forEach(sec => sec.style.display = '');
       pane.querySelectorAll('.setting-row').forEach(row => row.style.display = '');
     });
-    // Restore active tab
-    document.querySelectorAll('.settings-subtab').forEach(btn => {
-      const tabName = btn.dataset.tab;
-      btn.classList.toggle('active', tabName === (document.querySelector('.settings-subtab.active')?.dataset.tab || 'General'));
-    });
+    switchSettingsSubtab(currentSettingsSubtab, { updateHash: false });
     return;
   }
 
-  // Show ALL panes during search, hide non-matching rows
   panes.forEach(pane => {
     pane.classList.add('active');
     pane.querySelectorAll('.settings-section').forEach(sec => {
@@ -11693,7 +13042,6 @@ function filterSettings(query) {
     });
   });
 
-  // Dim subtab buttons during search
   document.querySelectorAll('.settings-subtab').forEach(btn => btn.classList.remove('active'));
 }
 
@@ -11821,7 +13169,7 @@ function resolveSettingOptions(field, currentValue) {
 }
 
 function buildSkinSettingOptions(field, currentValue) {
-  const skinNames = new Set(AVAILABLE_SKINS);
+  const skinNames = new Set(currentAvailableSkins);
   if (currentValue != null && currentValue !== '') skinNames.add(String(currentValue));
   const resolvedName = resolvedSkinMeta().name;
   if (resolvedName) skinNames.add(String(resolvedName));
@@ -11839,6 +13187,53 @@ function buildSkinSettingOptions(field, currentValue) {
   return options;
 }
 
+function saveNostrPrivateKey() {
+  const input = document.getElementById('nostr-private-key-input');
+  if (!input || !input.value.trim()) {
+    showToast('Enter a Nostr private key first.', 'error');
+    return;
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  fetch('/api/nostr/key', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ private_key: input.value.trim() }),
+  }).then(async (response) => {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || ('HTTP ' + response.status));
+    return data;
+  }).then((data) => {
+    input.value = '';
+    var identity = data.public_key_npub || data.public_key_hex || '';
+    showToast((data.message || 'Nostr private key saved') + (identity ? (' (' + identity + ')') : ''), 'success');
+    loadSettings();
+  }).catch((error) => {
+    showToast('Failed to save Nostr key: ' + error.message, 'error');
+  });
+}
+
+function removeNostrPrivateKey() {
+  const status = currentNostrSetupStatus();
+  const identity = status ? (status.public_key_npub || status.public_key_hex || 'this Nostr identity') : 'this Nostr identity';
+  if (!confirm('Remove the saved Nostr private key for ' + identity + '?')) return;
+  const headers = {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  fetch('/api/nostr/key', {
+    method: 'DELETE',
+    headers,
+  }).then(async (response) => {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || ('HTTP ' + response.status));
+    return data;
+  }).then((data) => {
+    showToast(data.message || 'Nostr private key removed', 'success');
+    loadSettings();
+  }).catch((error) => {
+    showToast('Failed to remove Nostr key: ' + error.message, 'error');
+  });
+}
+
 function saveSetting(key, value) {
   if (SENSITIVE_KEYS.has(key)) {
     showToast('This setting is managed via the secrets store, not the Settings UI.', 'error');
@@ -11854,14 +13249,16 @@ function saveSetting(key, value) {
         if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
         delete settingsCache[key];
         if (key === 'agent.name') {
-          currentAgentName = WEBCHAT_BOOTSTRAP.agentName || 'Agent';
+          currentAgentName = currentPresentationBootstrap.agentName || WEBCHAT_BOOTSTRAP.agentName || 'Agent';
           applyAgentPresentation();
           renderThreadSidebar();
         }
         if (key.indexOf('experiments.') === 0) applyOptionalFeatureFlagsFromCache();
         showToast('Reset ' + key + ' to default', 'success');
         if (PRESENTATION_SETTING_KEYS.has(key)) {
-          window.setTimeout(() => window.location.reload(), 180);
+          refreshPresentationState().catch(() => {});
+        } else if (currentTab === 'settings') {
+          renderSettings();
         }
       })
       .catch((err) => showToast('Failed: ' + err.message, 'error'));
@@ -11875,14 +13272,16 @@ function saveSetting(key, value) {
       if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
       settingsCache[key] = { value: value, updated_at: new Date().toISOString() };
       if (key === 'agent.name') {
-        currentAgentName = String(value || WEBCHAT_BOOTSTRAP.agentName || 'Agent');
+        currentAgentName = String(value || currentPresentationBootstrap.agentName || WEBCHAT_BOOTSTRAP.agentName || 'Agent');
         applyAgentPresentation();
         renderThreadSidebar();
       }
       if (key.indexOf('experiments.') === 0) applyOptionalFeatureFlagsFromCache();
       showToast('Saved ' + key, 'success');
       if (PRESENTATION_SETTING_KEYS.has(key)) {
-        window.setTimeout(() => window.location.reload(), 180);
+        refreshPresentationState().catch(() => {});
+      } else if (currentTab === 'settings') {
+        renderSettings();
       }
     }).catch((err) => showToast('Failed: ' + err.message, 'error'));
   }

@@ -17,7 +17,8 @@ use crate::tools::tool::{
 };
 use crate::workspace::paths as ws_paths;
 
-/// Well-known workspace filenames that must go through memory_write, not write_file.
+/// Well-known workspace filenames that must go through memory_write or
+/// prompt_manage, not write_file.
 ///
 /// If the LLM tries to write one of these via the filesystem tool we reject
 /// immediately and point it at the correct tool.
@@ -26,13 +27,14 @@ const WORKSPACE_FILES: &[&str] = &[
     ws_paths::MEMORY,
     ws_paths::IDENTITY,
     ws_paths::SOUL,
+    ws_paths::SOUL_LOCAL,
     ws_paths::AGENTS,
     ws_paths::USER,
     ws_paths::README,
 ];
 
 /// Check whether `path` resolves to a workspace file that should be written
-/// through `memory_write` instead of `write_file`.
+/// through workspace memory tools instead of `write_file`.
 ///
 /// Only blocks files that live directly in the workspace root. Files inside
 /// project subdirectories (e.g. `clawi-site/README.md`) are safe to write
@@ -341,7 +343,7 @@ impl Tool for WriteFileTool {
 
     fn description(&self) -> &str {
         "Write content to a file on the LOCAL FILESYSTEM. NOT for workspace memory \
-         (use memory_write for that). Creates the file if it doesn't exist, overwrites if it does. \
+         (use memory_write or prompt_manage for that). Creates the file if it doesn't exist, overwrites if it does. \
          Parent directories are created automatically. Use apply_patch for targeted edits."
     }
 
@@ -371,10 +373,26 @@ impl Tool for WriteFileTool {
 
         // Reject workspace paths: these live in the database, not on disk.
         if is_workspace_path(path_str) {
+            let normalized = std::path::Path::new(path_str)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path_str);
+            let guidance = if [
+                ws_paths::SOUL,
+                ws_paths::SOUL_LOCAL,
+                ws_paths::AGENTS,
+                ws_paths::USER,
+            ]
+            .iter()
+            .any(|candidate| normalized.eq_ignore_ascii_case(candidate))
+            {
+                "Use the prompt_manage tool instead of write_file."
+            } else {
+                "Use the memory_write tool instead of write_file. For HEARTBEAT.md use target='heartbeat', for MEMORY.md use target='memory'."
+            };
             return Err(ToolError::InvalidParameters(format!(
-                "'{}' is a workspace memory file. Use the memory_write tool instead of write_file. \
-                 For HEARTBEAT.md use target='heartbeat', for MEMORY.md use target='memory'.",
-                path_str
+                "'{}' is a workspace memory file. {}",
+                path_str, guidance
             )));
         }
 
@@ -1194,6 +1212,7 @@ mod tests {
             "MEMORY.md",
             "IDENTITY.md",
             "SOUL.md",
+            "SOUL.local.md",
             "AGENTS.md",
             "USER.md",
             "README.md",
@@ -1212,9 +1231,17 @@ mod tests {
                 .unwrap_err();
 
             let msg = err.to_string();
+            let expects_prompt_manage = matches!(
+                *filename,
+                "SOUL.md" | "SOUL.local.md" | "AGENTS.md" | "USER.md"
+            );
             assert!(
-                msg.contains("memory_write"),
-                "Rejection for {} should mention memory_write, got: {}",
+                if expects_prompt_manage {
+                    msg.contains("prompt_manage")
+                } else {
+                    msg.contains("memory_write")
+                },
+                "Rejection for {} should mention the correct workspace tool, got: {}",
                 filename,
                 msg
             );

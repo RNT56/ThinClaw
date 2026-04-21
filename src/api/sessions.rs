@@ -87,7 +87,7 @@ pub async fn list_threads(
         .map(|t| ThreadInfo {
             id: t.id,
             state: format!("{:?}", t.state),
-            turn_count: t.turns.iter().filter(|turn| !turn.hidden_from_ui).count(),
+            turn_count: t.turns.len(),
             created_at: t.created_at.to_rfc3339(),
             updated_at: t.updated_at.to_rfc3339(),
             title: None,
@@ -172,10 +172,14 @@ pub async fn get_history(
         let turns: Vec<TurnInfo> = thread
             .turns
             .iter()
-            .filter(|t| !t.hidden_from_ui)
             .map(|t| TurnInfo {
                 turn_number: t.turn_number,
-                user_input: t.user_input.clone(),
+                user_input: if t.hide_user_input_from_ui {
+                    String::new()
+                } else {
+                    t.user_input.clone()
+                },
+                hide_user_input: t.hide_user_input_from_ui,
                 response: t.response.clone(),
                 state: format!("{:?}", t.state),
                 started_at: t.started_at.to_rfc3339(),
@@ -241,11 +245,7 @@ pub async fn create_thread(
     let info = ThreadInfo {
         id: thread.id,
         state: format!("{:?}", thread.state),
-        turn_count: thread
-            .turns
-            .iter()
-            .filter(|turn| !turn.hidden_from_ui)
-            .count(),
+        turn_count: thread.turns.len(),
         created_at: thread.created_at.to_rfc3339(),
         updated_at: thread.updated_at.to_rfc3339(),
         title: None,

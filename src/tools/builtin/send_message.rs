@@ -65,8 +65,9 @@ impl Tool for SendMessageTool {
 
     fn description(&self) -> &str {
         "Send a message to a user on any connected platform. \
-         Specify the platform (telegram, discord, slack, email) and recipient. \
+         Specify the platform (telegram, discord, slack, email, or nostr) and recipient. \
          The message will be delivered through the gateway. \
+         For Nostr, this tool sends encrypted DMs only; use nostr_actions for public posting or social interaction. \
          For platform-specific features (reactions, polls, etc.), use the \
          dedicated platform action tools instead."
     }
@@ -82,7 +83,7 @@ impl Tool for SendMessageTool {
                 },
                 "recipient": {
                     "type": "string",
-                    "description": "Recipient identifier (chat_id, channel_id, email address, etc.)"
+                    "description": "Recipient identifier (chat_id, channel_id, email address, Nostr pubkey, etc.)"
                 },
                 "text": {
                     "type": "string",

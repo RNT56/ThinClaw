@@ -50,6 +50,8 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (onboard)
 _arguments "${_arguments_options[@]}" : \
+'--guide=[Revisit guided settings by topic. Use without a value to open the topic menu]::GUIDE:(menu ai channels agent tools automation runtime)' \
+'--ui=[Onboarding interface mode]:UI:(auto cli tui)' \
 '-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
 '--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
 '-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \

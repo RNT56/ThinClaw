@@ -2004,14 +2004,17 @@ impl Agent {
                                 // Check for auth awaiting — defer the return
                                 // until all results are recorded.
                                 if deferred_auth.is_none()
-                                    && let Some((ext_name, instructions)) =
+                                    && let Some(auth_request) =
                                         check_auth_required(&tc.name, &tool_result)
                                 {
                                     let auth_data = parse_auth_result(&tool_result);
                                     {
                                         let mut sess = session.lock().await;
                                         if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                                            thread.enter_auth_mode(ext_name.clone());
+                                            thread.enter_auth_mode(
+                                                auth_request.extension_name.clone(),
+                                                auth_request.auth_mode,
+                                            );
                                         }
                                     }
                                     let _ = self
@@ -2019,15 +2022,27 @@ impl Agent {
                                         .send_status(
                                             &message.channel,
                                             StatusUpdate::AuthRequired {
-                                                extension_name: ext_name,
-                                                instructions: Some(instructions.clone()),
+                                                extension_name: auth_request.extension_name,
+                                                instructions: Some(auth_request.instructions.clone()),
                                                 auth_url: auth_data.auth_url,
                                                 setup_url: auth_data.setup_url,
+                                                auth_mode: auth_data.auth_mode.unwrap_or_else(|| {
+                                                    match auth_request.auth_mode {
+                                                        crate::agent::session::PendingAuthMode::ManualToken => "manual_token".to_string(),
+                                                        crate::agent::session::PendingAuthMode::ExternalOAuth => "oauth".to_string(),
+                                                    }
+                                                }),
+                                                auth_status: auth_data
+                                                    .auth_status
+                                                    .unwrap_or(auth_request.auth_status),
+                                                shared_auth_provider: auth_data.shared_auth_provider,
+                                                missing_scopes: auth_data.missing_scopes,
+                                                thread_id: Some(thread_id.to_string()),
                                             },
                                             &message.metadata,
                                         )
                                         .await;
-                                    deferred_auth = Some(instructions);
+                                    deferred_auth = Some(auth_request.instructions);
                                 }
 
                                 // Sanitize and add tool result to context

@@ -67,6 +67,15 @@ impl SetupWizard {
         if let Some(ref url) = self.settings.libsql_url {
             env_vars.push(("LIBSQL_URL", url.clone()));
         }
+        if self.settings.secrets_master_key_source == crate::settings::KeySource::Env {
+            if let Some(ref key) = self.generated_env_master_key {
+                env_vars.push(("SECRETS_MASTER_KEY", key.clone()));
+            } else if let Ok(key) = std::env::var("SECRETS_MASTER_KEY")
+                && !key.trim().is_empty()
+            {
+                env_vars.push(("SECRETS_MASTER_KEY", key));
+            }
+        }
 
         // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
         // Config::from_env() needs the backend before the DB is connected.
@@ -158,6 +167,12 @@ impl SetupWizard {
         }
         if let Some(ref relays) = self.settings.channels.nostr_relays {
             env_vars.push(("NOSTR_RELAYS", relays.clone()));
+        }
+        if let Some(ref owner_pubkey) = self.settings.channels.nostr_owner_pubkey {
+            env_vars.push(("NOSTR_OWNER_PUBKEY", owner_pubkey.clone()));
+        }
+        if self.settings.channels.nostr_social_dm_enabled {
+            env_vars.push(("NOSTR_SOCIAL_DM_ENABLED", "true".to_string()));
         }
         if let Some(ref allow_from) = self.settings.channels.nostr_allow_from {
             env_vars.push(("NOSTR_ALLOW_FROM", allow_from.clone()));

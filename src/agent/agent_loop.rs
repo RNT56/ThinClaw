@@ -78,6 +78,13 @@ fn telegram_startup_thread_id(
     }
 }
 
+#[derive(Debug, Clone)]
+struct GatewayStartupThreadTarget {
+    principal_id: String,
+    actor_id: String,
+    thread_id: Uuid,
+}
+
 /// Core dependencies for the agent.
 ///
 /// Bundles the shared components to reduce argument count.
@@ -668,10 +675,12 @@ impl Agent {
                         let gateway_diagnostics =
                             self.channels.channel_diagnostics("gateway").await;
                         let (heartbeat_user_id, heartbeat_actor_id) =
-                            heartbeat_routine_owner_from_diagnostics(
+                            heartbeat_routine_owner_for_gateway(
+                                store,
                                 gateway_diagnostics.as_ref(),
                                 workspace.user_id(),
-                            );
+                            )
+                            .await;
                         if let Err(e) = upsert_heartbeat_routine(
                             store,
                             hb_config,
@@ -913,7 +922,8 @@ impl Agent {
         tracing::info!("Agent {} ready and listening", self.config.name);
 
         // ── Proactive startup hooks ────────────────────────────────────
-        // Execute BOOT.md (every startup) and BOOTSTRAP.md (first run only)
+        // Execute BOOT.md (every startup after bootstrap completes) and
+        // BOOTSTRAP.md while bootstrap is still pending.
         // before entering the main message loop. Responses are routed to the
         // user's preferred notification channel (e.g., Telegram).
         self.run_startup_hooks().await;
@@ -1055,7 +1065,8 @@ impl Agent {
 
     // ── Proactive startup hooks ────────────────────────────────────────
 
-    /// Execute startup hooks: BOOT.md (every boot) and BOOTSTRAP.md (first run).
+    /// Execute startup hooks: BOOT.md after bootstrap completion, and
+    /// BOOTSTRAP.md while bootstrap remains pending.
     ///
     /// Each hook is read from the workspace, processed as a synthetic user
     /// message, and the response is sent to the user's preferred notification
@@ -1068,6 +1079,7 @@ impl Agent {
                 return;
             }
         };
+        let workspace_user_id = workspace.user_id().to_string();
 
         let target_channel = self.config.notify_channel.as_deref().unwrap_or("web");
 
@@ -1080,13 +1092,14 @@ impl Agent {
             .as_ref()
             .and_then(|hb| hb.notify_user.as_deref())
             .unwrap_or("default");
+        let gateway_target = self.gateway_startup_hook_target(&workspace_user_id).await;
 
         let bootstrap_doc = match workspace.read(crate::workspace::paths::BOOTSTRAP).await {
             Ok(doc) => Some(doc),
             Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => None,
             Err(e) => {
                 tracing::warn!(
-                    "Failed to read BOOTSTRAP.md: {} — skipping first-run hook",
+                    "Failed to read BOOTSTRAP.md: {} — skipping bootstrap hook",
                     e
                 );
                 None
@@ -1096,74 +1109,80 @@ impl Agent {
             .as_ref()
             .is_some_and(|doc| !crate::agent::heartbeat::is_effectively_empty(&doc.content));
 
-        // ── 1. BOOT.md — runs on every startup ────────────────────────
-        match workspace.read(crate::workspace::paths::BOOT).await {
-            Ok(doc) => {
-                if !crate::agent::heartbeat::is_effectively_empty(&doc.content) {
-                    tracing::info!(
-                        "Executing BOOT.md startup hook (target channel: {})",
-                        target_channel,
-                    );
+        // ── 1. BOOT.md — runs on every startup after bootstrap completes ──
+        if bootstrap_pending {
+            tracing::debug!("BOOTSTRAP.md is still active — deferring BOOT.md startup hook");
+        } else {
+            match workspace.read(crate::workspace::paths::BOOT).await {
+                Ok(doc) => {
+                    if !crate::agent::heartbeat::is_effectively_empty(&doc.content) {
+                        tracing::info!(
+                            "Executing BOOT.md startup hook (target channel: {})",
+                            target_channel,
+                        );
 
-                    // Pre-read workspace documents that BOOT.md references so the
-                    // LLM always has this context, even if it skips tool calls.
-                    let mut context_sections = Vec::new();
+                        // Pre-read workspace documents that BOOT.md references so the
+                        // LLM always has this context, even if it skips tool calls.
+                        let mut context_sections = Vec::new();
 
-                    let today = workspace.local_today().format("%Y-%m-%d").to_string();
-                    let ctx_docs = [
-                        ("HEARTBEAT.md", "HEARTBEAT.md"),
-                        ("MEMORY.md", "MEMORY.md"),
-                        (
-                            &format!("daily/{}.md", today),
-                            &format!("daily/{}.md", today),
-                        ),
-                    ];
-                    for (path, label) in &ctx_docs {
-                        match workspace.read(path).await {
-                            Ok(d) if !d.content.trim().is_empty() => {
-                                context_sections.push(format!("--- {} ---\n{}", label, d.content));
+                        let today = workspace.local_today().format("%Y-%m-%d").to_string();
+                        let ctx_docs = [
+                            ("HEARTBEAT.md", "HEARTBEAT.md"),
+                            ("MEMORY.md", "MEMORY.md"),
+                            (
+                                &format!("daily/{}.md", today),
+                                &format!("daily/{}.md", today),
+                            ),
+                        ];
+                        for (path, label) in &ctx_docs {
+                            match workspace.read(path).await {
+                                Ok(d) if !d.content.trim().is_empty() => {
+                                    context_sections
+                                        .push(format!("--- {} ---\n{}", label, d.content));
+                                }
+                                _ => {} // Missing or empty — skip silently
                             }
-                            _ => {} // Missing or empty — skip silently
                         }
-                    }
 
-                    let enriched_content = if context_sections.is_empty() {
-                        doc.content.clone()
-                    } else {
-                        format!(
-                            "{}\n\n## Pre-loaded context\n\nThe following workspace documents were pre-read for you. \
-                             You do NOT need to call memory_read for these — the data is already here.\n\n{}",
-                            doc.content,
-                            context_sections.join("\n\n")
+                        let enriched_content = if context_sections.is_empty() {
+                            doc.content.clone()
+                        } else {
+                            format!(
+                                "{}\n\n## Pre-loaded context\n\nThe following workspace documents were pre-read for you. \
+                                 You do NOT need to call memory_read for these — the data is already here.\n\n{}",
+                                doc.content,
+                                context_sections.join("\n\n")
+                            )
+                        };
+
+                        self.run_startup_hook(
+                            "boot",
+                            &enriched_content,
+                            target_channel,
+                            notify_user,
+                            telegram_startup_thread_id("boot", target_channel, bootstrap_pending),
+                            gateway_target.as_ref(),
                         )
-                    };
-
-                    self.run_startup_hook(
-                        "boot",
-                        &enriched_content,
-                        target_channel,
-                        notify_user,
-                        telegram_startup_thread_id("boot", target_channel, bootstrap_pending),
-                    )
-                    .await;
-                } else {
-                    tracing::debug!("BOOT.md is empty/template-only — skipping");
+                        .await;
+                    } else {
+                        tracing::debug!("BOOT.md is empty/template-only — skipping");
+                    }
                 }
-            }
-            Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
-                tracing::debug!("No BOOT.md found — skipping boot hook");
-            }
-            Err(e) => {
-                tracing::warn!("Failed to read BOOT.md: {} — skipping boot hook", e);
+                Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
+                    tracing::debug!("No BOOT.md found — skipping boot hook");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to read BOOT.md: {} — skipping boot hook", e);
+                }
             }
         }
 
-        // ── 2. BOOTSTRAP.md — runs only on first run ──────────────────
+        // ── 2. BOOTSTRAP.md — runs while bootstrap is pending ──────────
         match bootstrap_doc {
             Some(doc) => {
                 if bootstrap_pending {
                     tracing::info!(
-                        "Executing BOOTSTRAP.md first-run hook (target channel: {})",
+                        "Executing BOOTSTRAP.md pending-bootstrap hook (target channel: {})",
                         target_channel,
                     );
                     self.run_startup_hook(
@@ -1172,50 +1191,16 @@ impl Agent {
                         target_channel,
                         notify_user,
                         telegram_startup_thread_id("bootstrap", target_channel, bootstrap_pending),
+                        gateway_target.as_ref(),
                     )
                     .await;
-
-                    // Replace BOOTSTRAP.md content with a sentinel so it
-                    // only runs once. We write a marker instead of deleting
-                    // because the workspace seeder re-creates deleted files
-                    // on every startup (DocumentNotFound → re-seed).
-                    // The marker is non-empty (seeder skips it) but
-                    // is_effectively_empty() returns true (execution skips it).
-                    match workspace
-                        .write(
-                            crate::workspace::paths::BOOTSTRAP,
-                            "<!-- bootstrap completed -->",
-                        )
-                        .await
-                    {
-                        Ok(_) => {
-                            tracing::info!(
-                                "BOOTSTRAP.md marked as completed — first-run hook complete"
-                            );
-                        }
-                        Err(e) => {
-                            // Fall back to delete if write fails
-                            tracing::warn!(
-                                "Failed to mark BOOTSTRAP.md as completed, attempting delete: {}",
-                                e
-                            );
-                            if let Err(del_err) =
-                                workspace.delete(crate::workspace::paths::BOOTSTRAP).await
-                            {
-                                tracing::warn!(
-                                    "Failed to delete BOOTSTRAP.md (may re-run next startup): {}",
-                                    del_err
-                                );
-                            }
-                        }
-                    }
                 } else {
                     tracing::debug!("BOOTSTRAP.md is empty/template-only — skipping");
                 }
             }
             None => {
                 tracing::debug!(
-                    "No BOOTSTRAP.md found — first-run hook already executed or not configured"
+                    "No BOOTSTRAP.md found — bootstrap completed, manually removed, or not configured"
                 );
             }
         }
@@ -1230,6 +1215,7 @@ impl Agent {
         target_channel: &str,
         notify_user: &str,
         broadcast_thread_id: Option<&str>,
+        gateway_target: Option<&GatewayStartupThreadTarget>,
     ) {
         // Build a synthetic IncomingMessage from the hook content.
         // The channel is set to the hook name (e.g. "boot", "bootstrap")
@@ -1239,47 +1225,58 @@ impl Agent {
             serde_json::json!({
                 "synthetic_origin": "startup_hook",
                 "startup_hook": hook_name,
-                "hide_from_webui_chat": true,
+                "hide_user_input_from_webui_chat": true,
             }),
         );
 
         match self.handle_message(&message).await {
             Ok(Some(response)) if !response.is_empty() => {
+                let web_thread_synced = if let Some(target) = gateway_target {
+                    self.sync_startup_hook_to_gateway_assistant(
+                        target, hook_name, content, &response,
+                    )
+                    .await
+                } else {
+                    false
+                };
+
                 // Send the response to the user's preferred notification channel.
                 let out = match broadcast_thread_id {
                     Some(thread_id) => OutgoingResponse::text(&response).in_thread(thread_id),
                     None => OutgoingResponse::text(&response),
                 };
-                if let Err(e) = self
+                if target_channel == "web" {
+                    if !web_thread_synced {
+                        let _ = self
+                            .channels
+                            .broadcast("web", notify_user, OutgoingResponse::text(&response))
+                            .await;
+                    }
+                } else if let Err(e) = self
                     .channels
                     .broadcast(target_channel, notify_user, out.clone())
                     .await
                 {
                     tracing::warn!(
-                        "Failed to send {} hook response to '{}': {} — falling back to web",
+                        "Failed to send {} hook response to '{}': {}{}",
                         hook_name,
                         target_channel,
-                        e
+                        e,
+                        if web_thread_synced {
+                            " — WebUI assistant thread already synced"
+                        } else {
+                            " — falling back to web"
+                        }
                     );
-                    // Fallback: try web channel so the user at least sees it somewhere.
-                    if target_channel != "web" {
-                        let _ = self.channels.broadcast("web", notify_user, out).await;
+                    if !web_thread_synced {
+                        let _ = self
+                            .channels
+                            .broadcast("web", notify_user, OutgoingResponse::text(&response))
+                            .await;
                     }
                 } else {
                     tracing::info!("Sent {} hook response to '{}'", hook_name, target_channel,);
                 }
-                // Also mirror to web if the primary channel is not web.
-                if target_channel != "web" {
-                    let _ = self
-                        .channels
-                        .broadcast("web", notify_user, OutgoingResponse::text(&response))
-                        .await;
-                }
-
-                // Persist the boot/bootstrap response to conversation history
-                // so late-connecting WebUI clients can see it when they load.
-                self.persist_hook_response(hook_name, notify_user, &response)
-                    .await;
             }
             Ok(Some(_empty)) => {
                 tracing::debug!(
@@ -1300,69 +1297,177 @@ impl Agent {
         }
     }
 
-    /// Persist a startup hook response to the **assistant conversation** in the
-    /// database. This is the pinned "Assistant" thread in the WebUI sidebar.
-    ///
-    /// By writing the boot greeting here, late-connecting WebUI clients see it
-    /// when they click on the Assistant thread.
-    async fn persist_hook_response(&self, hook_name: &str, notify_user: &str, response: &str) {
-        let store = match self.store() {
-            Some(s) => Arc::clone(s),
-            None => return,
-        };
-
-        // Use the same (user_id, channel) pair as the WebUI's threads handler
-        // so the boot response appears in the pinned "Assistant" thread.
-        // The WebUI calls get_or_create_assistant_conversation(user_id, "gateway").
-        let gateway_user = if notify_user == "default" {
-            "default"
-        } else {
-            // For Telegram users (numeric IDs), the web gateway still uses
-            // "default" as its user_id. Boot responses should appear in the
-            // web assistant thread regardless of the notification recipient.
-            "default"
-        };
-
-        let conversation_id = match store
-            .get_or_create_assistant_conversation(gateway_user, "gateway")
+    async fn gateway_startup_hook_target(
+        &self,
+        fallback_user_id: &str,
+    ) -> Option<GatewayStartupThreadTarget> {
+        let store = self.store().map(Arc::clone)?;
+        let gateway_diagnostics = self.channels.channel_diagnostics("gateway").await;
+        let (principal_id, actor_id) = heartbeat_routine_owner_for_gateway(
+            &store,
+            gateway_diagnostics.as_ref(),
+            fallback_user_id,
+        )
+        .await;
+        let thread_id =
+            crate::channels::web::identity_helpers::get_or_create_gateway_assistant_conversation(
+                store.as_ref(),
+                &principal_id,
+                &actor_id,
+            )
             .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to get/create conversation for {} hook: {}",
-                    hook_name,
-                    e
-                );
-                return;
-            }
+            .ok()?;
+
+        Some(GatewayStartupThreadTarget {
+            principal_id,
+            actor_id,
+            thread_id,
+        })
+    }
+
+    /// Mirror a startup hook turn into the pinned WebUI Assistant thread.
+    ///
+    /// The startup hook still runs as a background synthetic message, but we
+    /// also persist the hidden prompt + assistant reply into the gateway
+    /// assistant conversation, keep any loaded in-memory thread in sync, and
+    /// emit a thread-scoped SSE response so open browser tabs update live.
+    async fn sync_startup_hook_to_gateway_assistant(
+        &self,
+        target: &GatewayStartupThreadTarget,
+        hook_name: &str,
+        prompt: &str,
+        response: &str,
+    ) -> bool {
+        let Some(store) = self.store().map(Arc::clone) else {
+            return false;
         };
 
-        // Save the agent's startup response
-        let metadata = serde_json::json!({
+        let thread_id = target.thread_id;
+        let thread_id_string = thread_id.to_string();
+        let prompt_metadata = serde_json::json!({
             "synthetic_origin": "startup_hook",
             "startup_hook": hook_name,
-            "hide_from_webui_chat": true,
+            "hide_user_input_from_webui_chat": true,
         });
-        if let Err(e) = store
+        let response_metadata = serde_json::json!({
+            "synthetic_origin": "startup_hook",
+            "startup_hook": hook_name,
+        });
+
+        if let Err(error) = store
             .add_conversation_message_with_attribution(
-                conversation_id,
+                thread_id,
+                "user",
+                prompt,
+                None,
+                None,
+                None,
+                Some(&prompt_metadata),
+            )
+            .await
+        {
+            tracing::warn!(
+                thread = %thread_id,
+                hook = hook_name,
+                %error,
+                "Failed to persist hidden startup hook prompt to gateway assistant thread"
+            );
+        }
+
+        if let Err(error) = store
+            .add_conversation_message_with_attribution(
+                thread_id,
                 "assistant",
                 response,
                 None,
                 None,
                 None,
-                Some(&metadata),
+                Some(&response_metadata),
             )
             .await
         {
-            tracing::warn!("Failed to persist {} hook response: {}", hook_name, e);
-        } else {
-            tracing::debug!(
-                "Persisted {} hook response to assistant conversation {}",
-                hook_name,
-                conversation_id
+            tracing::warn!(
+                thread = %thread_id,
+                hook = hook_name,
+                %error,
+                "Failed to persist startup hook response to gateway assistant thread"
             );
+        }
+
+        let identity = crate::channels::web::identity_helpers::gateway_identity(
+            &target.principal_id,
+            &target.actor_id,
+            Some(&thread_id_string),
+        );
+        let sync_message = IncomingMessage::new("gateway", &target.principal_id, prompt)
+            .with_thread(thread_id_string.clone())
+            .with_identity(identity.clone())
+            .with_metadata(serde_json::json!({
+                "thread_id": thread_id_string,
+                "synthetic_origin": "startup_hook",
+                "startup_hook": hook_name,
+                "hide_user_input_from_webui_chat": true,
+            }));
+        let session = self
+            .session_manager
+            .get_or_create_session_for_identity(&identity)
+            .await;
+        let (had_thread_loaded, previous_active_thread) = {
+            let sess = session.lock().await;
+            (sess.threads.contains_key(&thread_id), sess.active_thread)
+        };
+
+        if had_thread_loaded {
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                thread.start_turn_with_visibility(prompt, true);
+                thread.complete_turn(response);
+            }
+        } else {
+            self.maybe_hydrate_thread(&sync_message, &thread_id.to_string())
+                .await;
+
+            let mut sess = session.lock().await;
+            if !sess.threads.contains_key(&thread_id) {
+                let session_id = sess.id;
+                let mut thread = crate::agent::session::Thread::with_id(thread_id, session_id);
+                thread.start_turn_with_visibility(prompt, true);
+                thread.complete_turn(response);
+                sess.threads.insert(thread_id, thread);
+            }
+            if let Some(previous_active_thread) = previous_active_thread
+                && previous_active_thread != thread_id
+                && sess.threads.contains_key(&previous_active_thread)
+            {
+                sess.active_thread = Some(previous_active_thread);
+            }
+        }
+
+        self.session_manager
+            .register_direct_main_thread_for_scope(
+                SessionManager::scope_id_for_user_id(&target.principal_id),
+                thread_id,
+                Arc::clone(&session),
+            )
+            .await;
+
+        let web_response = OutgoingResponse::text(response).in_thread(thread_id.to_string());
+        match self
+            .channels
+            .broadcast("web", &target.principal_id, web_response)
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    thread = %thread_id,
+                    principal = %target.principal_id,
+                    actor = %target.actor_id,
+                    %error,
+                    "Failed to broadcast startup hook response to WebUI assistant thread"
+                );
+                false
+            }
         }
     }
 
@@ -1438,9 +1543,9 @@ impl Agent {
             }
         }
 
-        // Auth mode interception: if the thread is awaiting a token, route
-        // the message directly to the credential store. Nothing touches
-        // logs, turns, history, or compaction.
+        // Manual auth interception: only manual-token flows consume the next
+        // user message as a credential. External OAuth flows remain in the
+        // normal pipeline while the browser callback finishes separately.
         let pending_auth = {
             let sess = session.lock().await;
             sess.threads
@@ -1448,7 +1553,9 @@ impl Agent {
                 .and_then(|t| t.pending_auth.clone())
         };
 
-        if let Some(pending) = pending_auth {
+        if let Some(pending) = pending_auth
+            && pending.auth_mode == crate::agent::session::PendingAuthMode::ManualToken
+        {
             match &submission {
                 Submission::UserInput { content } => {
                     return self
@@ -1962,11 +2069,35 @@ async fn upsert_heartbeat_routine(
     Ok(())
 }
 
-fn heartbeat_routine_owner_from_diagnostics(
+async fn heartbeat_routine_owner_for_gateway(
+    store: &Arc<dyn Database>,
     diagnostics: Option<&serde_json::Value>,
     fallback_user_id: &str,
 ) -> (String, String) {
-    let user_id = diagnostics
+    let (fallback_principal_id, fallback_actor_id) =
+        heartbeat_gateway_fallback_identity_from_diagnostics(diagnostics, fallback_user_id);
+    let inferred_user_id =
+        if fallback_principal_id.trim().is_empty() || fallback_principal_id == "default" {
+            match store.infer_primary_user_id_for_channel("gateway").await {
+                Ok(Some(inferred)) if !inferred.trim().is_empty() => Some(inferred),
+                Ok(_) | Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+    heartbeat_routine_owner_from_gateway_defaults(
+        &fallback_principal_id,
+        &fallback_actor_id,
+        inferred_user_id.as_deref(),
+    )
+}
+
+fn heartbeat_gateway_fallback_identity_from_diagnostics(
+    diagnostics: Option<&serde_json::Value>,
+    fallback_user_id: &str,
+) -> (String, String) {
+    let principal_id = diagnostics
         .and_then(|value| value.get("user_id"))
         .and_then(|value| value.as_str())
         .map(str::trim)
@@ -1978,15 +2109,41 @@ fn heartbeat_routine_owner_from_diagnostics(
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(user_id.as_str())
+        .unwrap_or(principal_id.as_str())
         .to_string();
+    (principal_id, actor_id)
+}
+
+fn heartbeat_routine_owner_from_gateway_defaults(
+    fallback_principal_id: &str,
+    fallback_actor_id: &str,
+    inferred_user_id: Option<&str>,
+) -> (String, String) {
+    let user_id = if !fallback_principal_id.trim().is_empty() && fallback_principal_id != "default"
+    {
+        fallback_principal_id.to_string()
+    } else {
+        inferred_user_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(fallback_principal_id)
+            .to_string()
+    };
+    let actor_id =
+        if fallback_actor_id.trim().is_empty() || fallback_actor_id == fallback_principal_id {
+            user_id.clone()
+        } else {
+            fallback_actor_id.to_string()
+        };
     (user_id, actor_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        heartbeat_routine_owner_from_diagnostics, telegram_startup_thread_id, truncate_for_preview,
+        heartbeat_gateway_fallback_identity_from_diagnostics,
+        heartbeat_routine_owner_from_gateway_defaults, telegram_startup_thread_id,
+        truncate_for_preview,
     };
 
     #[test]
@@ -2069,30 +2226,55 @@ mod tests {
     }
 
     #[test]
-    fn test_heartbeat_routine_owner_prefers_gateway_identity() {
+    fn test_heartbeat_gateway_fallback_identity_prefers_gateway_identity() {
         let diagnostics = serde_json::json!({
             "user_id": "household-user",
             "actor_id": "desk-actor",
         });
 
-        let (user_id, actor_id) =
-            heartbeat_routine_owner_from_diagnostics(Some(&diagnostics), "fallback-user");
+        let (user_id, actor_id) = heartbeat_gateway_fallback_identity_from_diagnostics(
+            Some(&diagnostics),
+            "fallback-user",
+        );
 
         assert_eq!(user_id, "household-user");
         assert_eq!(actor_id, "desk-actor");
     }
 
     #[test]
-    fn test_heartbeat_routine_owner_falls_back_to_workspace_user() {
+    fn test_heartbeat_gateway_fallback_identity_falls_back_to_workspace_user() {
         let diagnostics = serde_json::json!({
             "user_id": "",
             "actor_id": "",
         });
 
-        let (user_id, actor_id) =
-            heartbeat_routine_owner_from_diagnostics(Some(&diagnostics), "fallback-user");
+        let (user_id, actor_id) = heartbeat_gateway_fallback_identity_from_diagnostics(
+            Some(&diagnostics),
+            "fallback-user",
+        );
 
         assert_eq!(user_id, "fallback-user");
         assert_eq!(actor_id, "fallback-user");
+    }
+
+    #[test]
+    fn test_heartbeat_routine_owner_uses_inferred_gateway_principal_when_default() {
+        let (user_id, actor_id) =
+            heartbeat_routine_owner_from_gateway_defaults("default", "default", Some("684480568"));
+
+        assert_eq!(user_id, "684480568");
+        assert_eq!(actor_id, "684480568");
+    }
+
+    #[test]
+    fn test_heartbeat_routine_owner_preserves_distinct_gateway_actor() {
+        let (user_id, actor_id) = heartbeat_routine_owner_from_gateway_defaults(
+            "default",
+            "desk-actor",
+            Some("household-user"),
+        );
+
+        assert_eq!(user_id, "household-user");
+        assert_eq!(actor_id, "desk-actor");
     }
 }

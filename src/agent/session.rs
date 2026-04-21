@@ -221,10 +221,23 @@ pub enum ThreadState {
 /// The next user message is intercepted before entering the normal pipeline
 /// (no logging, no turn creation, no history) and routed directly to the
 /// credential store.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingAuthMode {
+    ManualToken,
+    ExternalOAuth,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingAuth {
     /// Extension name to authenticate.
     pub extension_name: String,
+    #[serde(default = "default_pending_auth_mode")]
+    pub auth_mode: PendingAuthMode,
+}
+
+fn default_pending_auth_mode() -> PendingAuthMode {
+    PendingAuthMode::ManualToken
 }
 
 /// Pending tool approval request stored on a thread.
@@ -424,14 +437,14 @@ impl Thread {
         self.start_turn_with_visibility(user_input, false)
     }
 
-    /// Start a new turn with user input and explicit UI visibility.
+    /// Start a new turn with user input and explicit user-message visibility.
     pub fn start_turn_with_visibility(
         &mut self,
         user_input: impl Into<String>,
-        hidden_from_ui: bool,
+        hide_user_input_from_ui: bool,
     ) -> &mut Turn {
         let turn_number = self.turns.len();
-        let turn = Turn::new(turn_number, user_input, hidden_from_ui);
+        let turn = Turn::new(turn_number, user_input, hide_user_input_from_ui);
         self.turns.push(turn);
         self.state = ThreadState::Processing;
         self.updated_at = Utc::now();
@@ -478,8 +491,11 @@ impl Thread {
 
     /// Enter auth mode: next user message will be routed directly to
     /// the credential store, bypassing the normal pipeline entirely.
-    pub fn enter_auth_mode(&mut self, extension_name: String) {
-        self.pending_auth = Some(PendingAuth { extension_name });
+    pub fn enter_auth_mode(&mut self, extension_name: String, auth_mode: PendingAuthMode) {
+        self.pending_auth = Some(PendingAuth {
+            extension_name,
+            auth_mode,
+        });
         self.updated_at = Utc::now();
     }
 
@@ -581,19 +597,28 @@ impl Thread {
 
         while let Some(msg) = iter.next() {
             if msg.role != "user" {
+                if msg.role == "assistant" && message_is_startup_hook(&msg.metadata) {
+                    let mut turn = Turn::new(turn_number, "", true);
+                    turn.complete(&msg.content);
+                    self.turns.push(turn);
+                    turn_number += 1;
+                }
                 continue;
             }
 
-            let hidden_from_ui = startup_hook_turn_hidden(&msg.metadata);
-            let mut turn = Turn::new(turn_number, &msg.content, hidden_from_ui);
+            let hide_user_input_from_ui = message_hides_user_input_in_main_chat(&msg.metadata);
+            let mut turn = Turn::new(turn_number, &msg.content, hide_user_input_from_ui);
 
             if let Some(next) = iter.peek()
                 && next.role == "assistant"
             {
                 if let Some(response) = iter.next() {
-                    turn.hidden_from_ui |= startup_hook_turn_hidden(&response.metadata);
                     turn.complete(&response.content);
                 }
+            }
+
+            if turn.hide_user_input_from_ui && turn.response.is_none() {
+                continue;
             }
 
             self.turns.push(turn);
@@ -624,9 +649,9 @@ pub struct Turn {
     pub turn_number: usize,
     /// User input that started this turn.
     pub user_input: String,
-    /// Whether this turn should be excluded from the main WebUI chat transcript.
-    #[serde(default)]
-    pub hidden_from_ui: bool,
+    /// Whether the user-side prompt should be hidden from the main WebUI chat transcript.
+    #[serde(default, alias = "hidden_from_ui")]
+    pub hide_user_input_from_ui: bool,
     /// Agent response (if completed).
     pub response: Option<String>,
     /// Tool calls made during this turn.
@@ -643,11 +668,15 @@ pub struct Turn {
 
 impl Turn {
     /// Create a new turn.
-    pub fn new(turn_number: usize, user_input: impl Into<String>, hidden_from_ui: bool) -> Self {
+    pub fn new(
+        turn_number: usize,
+        user_input: impl Into<String>,
+        hide_user_input_from_ui: bool,
+    ) -> Self {
         Self {
             turn_number,
             user_input: user_input.into(),
-            hidden_from_ui,
+            hide_user_input_from_ui,
             response: None,
             tool_calls: Vec::new(),
             state: TurnState::Processing,
@@ -702,11 +731,23 @@ impl Turn {
     }
 }
 
-fn startup_hook_turn_hidden(metadata: &serde_json::Value) -> bool {
+fn message_hides_user_input_in_main_chat(metadata: &serde_json::Value) -> bool {
     metadata
-        .get("hide_from_webui_chat")
+        .get("hide_user_input_from_webui_chat")
         .and_then(|value| value.as_bool())
+        .or_else(|| {
+            metadata
+                .get("hide_from_webui_chat")
+                .and_then(|value| value.as_bool())
+        })
         .unwrap_or(false)
+}
+
+fn message_is_startup_hook(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("synthetic_origin")
+        .and_then(|value| value.as_str())
+        == Some("startup_hook")
 }
 
 /// Record of a tool call made during a turn.
@@ -820,18 +861,22 @@ mod tests {
         let mut thread = Thread::new(Uuid::new_v4());
         assert!(thread.pending_auth.is_none());
 
-        thread.enter_auth_mode("telegram".to_string());
+        thread.enter_auth_mode("telegram".to_string(), PendingAuthMode::ManualToken);
         assert!(thread.pending_auth.is_some());
         assert_eq!(
             thread.pending_auth.as_ref().unwrap().extension_name,
             "telegram"
+        );
+        assert_eq!(
+            thread.pending_auth.as_ref().unwrap().auth_mode,
+            PendingAuthMode::ManualToken
         );
     }
 
     #[test]
     fn test_take_pending_auth() {
         let mut thread = Thread::new(Uuid::new_v4());
-        thread.enter_auth_mode("notion".to_string());
+        thread.enter_auth_mode("notion".to_string(), PendingAuthMode::ManualToken);
 
         let pending = thread.take_pending_auth();
         assert!(pending.is_some());
@@ -845,7 +890,7 @@ mod tests {
     #[test]
     fn test_pending_auth_serialization() {
         let mut thread = Thread::new(Uuid::new_v4());
-        thread.enter_auth_mode("openai".to_string());
+        thread.enter_auth_mode("openai".to_string(), PendingAuthMode::ExternalOAuth);
 
         let json = serde_json::to_string(&thread).expect("should serialize");
         assert!(json.contains("pending_auth"));
@@ -853,7 +898,9 @@ mod tests {
 
         let restored: Thread = serde_json::from_str(&json).expect("should deserialize");
         assert!(restored.pending_auth.is_some());
-        assert_eq!(restored.pending_auth.unwrap().extension_name, "openai");
+        let pending = restored.pending_auth.unwrap();
+        assert_eq!(pending.extension_name, "openai");
+        assert_eq!(pending.auth_mode, PendingAuthMode::ExternalOAuth);
     }
 
     #[test]
@@ -885,6 +932,7 @@ mod tests {
         });
         thread.pending_auth = Some(PendingAuth {
             extension_name: "github".to_string(),
+            auth_mode: PendingAuthMode::ManualToken,
         });
 
         let runtime = thread.runtime_state(
@@ -1092,7 +1140,7 @@ mod tests {
     }
 
     #[test]
-    fn test_restore_from_conversation_messages_preserves_hidden_startup_turns() {
+    fn test_restore_from_conversation_messages_hides_only_startup_user_prompt() {
         let mut thread = Thread::new(Uuid::new_v4());
         let now = Utc::now();
         let messages = vec![
@@ -1113,7 +1161,7 @@ mod tests {
                 actor_id: None,
                 actor_display_name: None,
                 raw_sender_id: None,
-                metadata: serde_json::json!({"hide_from_webui_chat": true}),
+                metadata: serde_json::json!({"synthetic_origin": "startup_hook"}),
                 created_at: now + chrono::TimeDelta::seconds(1),
             },
             crate::history::ConversationMessage {
@@ -1141,9 +1189,33 @@ mod tests {
         thread.restore_from_conversation_messages(&messages);
 
         assert_eq!(thread.turns.len(), 2);
-        assert!(thread.turns[0].hidden_from_ui);
+        assert!(thread.turns[0].hide_user_input_from_ui);
+        assert_eq!(thread.turns[0].response.as_deref(), Some("boot reply"));
         assert_eq!(thread.turns[1].user_input, "real question");
-        assert!(!thread.turns[1].hidden_from_ui);
+        assert!(!thread.turns[1].hide_user_input_from_ui);
+    }
+
+    #[test]
+    fn test_restore_from_conversation_messages_preserves_legacy_assistant_only_startup_reply() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        let now = Utc::now();
+        let messages = vec![crate::history::ConversationMessage {
+            id: Uuid::new_v4(),
+            role: "assistant".to_string(),
+            content: "boot reply".to_string(),
+            actor_id: None,
+            actor_display_name: None,
+            raw_sender_id: None,
+            metadata: serde_json::json!({"synthetic_origin": "startup_hook"}),
+            created_at: now,
+        }];
+
+        thread.restore_from_conversation_messages(&messages);
+
+        assert_eq!(thread.turns.len(), 1);
+        assert!(thread.turns[0].hide_user_input_from_ui);
+        assert_eq!(thread.turns[0].user_input, "");
+        assert_eq!(thread.turns[0].response.as_deref(), Some("boot reply"));
     }
 
     #[test]

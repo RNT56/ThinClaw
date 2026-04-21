@@ -265,36 +265,34 @@ impl RegistryInstaller {
                     reason: format!("build failed: {}", e),
                 })?;
 
-        // Copy WASM binary
         println!("  Installing to {}", target_wasm.display());
-        fs::copy(&wasm_path, &target_wasm)
-            .await
-            .map_err(RegistryError::Io)?;
-
-        // Copy capabilities file
-        let caps_source = source_dir.join(&manifest.source.capabilities);
+        let installed_wasm = crate::registry::artifacts::install_wasm_files(
+            &wasm_path,
+            &source_dir,
+            &manifest.name,
+            target_dir,
+            force,
+        )
+        .await
+        .map_err(|e| RegistryError::ManifestRead {
+            path: source_dir.clone(),
+            reason: format!("failed to install built artifact: {e}"),
+        })?;
         let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
-        let has_capabilities = if caps_source.exists() {
-            fs::copy(&caps_source, &target_caps)
-                .await
-                .map_err(RegistryError::Io)?;
-            true
-        } else {
-            false
-        };
+        let has_capabilities = target_caps.exists();
 
         let mut warnings = Vec::new();
         if !has_capabilities {
             warnings.push(format!(
-                "No capabilities file found at {}",
-                caps_source.display()
+                "No capabilities file found for '{}' in source sidecars",
+                manifest.name
             ));
         }
 
         Ok(InstallOutcome {
             name: manifest.name.clone(),
             kind: manifest.kind,
-            wasm_path: target_wasm,
+            wasm_path: installed_wasm,
             has_capabilities,
             warnings,
         })
@@ -713,7 +711,7 @@ fn extract_tar_gz(
             .and_then(|n| n.to_str())
             .unwrap_or("");
 
-        if filename == wasm_filename {
+        if filename == wasm_filename || (!found_wasm && filename.ends_with(".wasm")) {
             let mut data = Vec::with_capacity(entry.size() as usize);
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                 .map_err(|e| RegistryError::DownloadFailed {
@@ -722,7 +720,11 @@ fn extract_tar_gz(
                 })?;
             std::fs::write(target_wasm, &data).map_err(RegistryError::Io)?;
             found_wasm = true;
-        } else if filename == caps_filename {
+        } else if !found_caps
+            && (filename == caps_filename
+                || filename.ends_with(".capabilities.json")
+                || filename == "capabilities.json")
+        {
             let mut data = Vec::with_capacity(entry.size() as usize);
             std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                 .map_err(|e| RegistryError::DownloadFailed {
@@ -738,8 +740,8 @@ fn extract_tar_gz(
         return Err(RegistryError::DownloadFailed {
             url: url.to_string(),
             reason: format!(
-                "tar.gz archive does not contain '{}'. Archive may be malformed.",
-                wasm_filename
+                "tar.gz archive does not contain a wasm binary (expected '{}'). Archive may be malformed.",
+                wasm_filename,
             ),
         });
     }

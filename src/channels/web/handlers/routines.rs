@@ -363,8 +363,12 @@ pub(crate) async fn webhook_routine_trigger_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
-    let secret = match &routine.trigger {
-        crate::agent::routine::Trigger::Webhook { secret, .. } => secret.clone(),
+    let (secret, allow_unsigned_webhook) = match &routine.trigger {
+        crate::agent::routine::Trigger::Webhook {
+            secret,
+            allow_unsigned_webhook,
+            ..
+        } => (secret.clone(), *allow_unsigned_webhook),
         _ => {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -375,6 +379,13 @@ pub(crate) async fn webhook_routine_trigger_handler(
 
     if !routine.enabled {
         return Err((StatusCode::CONFLICT, "Routine is disabled".to_string()));
+    }
+
+    if !allow_unsigned_webhook && secret.is_none() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Unsigned webhooks are disabled for this routine; configure a secret or opt in explicitly".to_string(),
+        ));
     }
 
     if let Some(ref expected_secret) = secret {
@@ -398,6 +409,11 @@ pub(crate) async fn webhook_routine_trigger_handler(
                 "Invalid webhook signature".to_string(),
             ));
         }
+    } else if !allow_unsigned_webhook {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Missing webhook secret configuration".to_string(),
+        ));
     }
 
     if let Some(ref engine) = state.routine_engine {

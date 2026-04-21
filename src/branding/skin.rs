@@ -29,6 +29,8 @@ struct SkinToml {
     #[serde(default)]
     ascii_art: Vec<String>,
     #[serde(default)]
+    hero_art: Vec<String>,
+    #[serde(default)]
     tool_emojis: HashMap<String, String>,
     #[serde(default)]
     web: Option<SkinWebToml>,
@@ -162,7 +164,7 @@ pub struct CliSkin {
     pub bad: Color,
     pub header: Color,
     pub prompt_symbol: String,
-    pub ascii_art: Vec<String>,
+    pub hero_art: Vec<String>,
     pub tool_emojis: HashMap<String, String>,
     pub web: SkinWebColors,
 }
@@ -223,8 +225,8 @@ impl CliSkin {
         self.tagline.as_deref()
     }
 
-    pub fn ascii_art(&self) -> &[String] {
-        &self.ascii_art
+    pub fn hero_art(&self) -> &[String] {
+        &self.hero_art
     }
 
     pub fn tool_label(&self, tool_name: &str) -> String {
@@ -425,7 +427,11 @@ fn parse_skin_toml(data: &str, fallback_name: &str) -> Result<CliSkin, String> {
         bad,
         header,
         prompt_symbol: raw.prompt_symbol,
-        ascii_art: raw.ascii_art,
+        hero_art: if raw.hero_art.is_empty() {
+            raw.ascii_art
+        } else {
+            raw.hero_art
+        },
         tool_emojis: raw.tool_emojis,
         web,
     })
@@ -556,9 +562,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_skin_includes_ascii_art() {
+    fn builtin_skin_includes_hero_art() {
         let skin = CliSkin::load("athena");
-        assert!(!skin.ascii_art().is_empty());
+        assert!(!skin.hero_art().is_empty());
         assert!(skin.tagline().is_some());
     }
 
@@ -575,7 +581,7 @@ warn = "#FFD166"
 bad = "#FF6B6B"
 header = "#C9E1FF"
 prompt_symbol = ">"
-ascii_art = ["DERIVED"]
+hero_art = ["DERIVED"]
 "##;
         let parsed: SkinToml = toml::from_str(toml).expect("parse test skin");
         let web = parse_web_colors(

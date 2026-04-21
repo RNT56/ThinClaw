@@ -1003,7 +1003,12 @@ impl AppBuilder {
                         "Background process tool disabled in restricted workspace mode"
                     );
                 }
-                RuntimeExecRegistrationMode::DockerSandbox => unreachable!(),
+                RuntimeExecRegistrationMode::DockerSandbox => {
+                    tracing::warn!(
+                        workspace_mode = mode,
+                        "Background process tool is unavailable for Docker sandbox mode"
+                    );
+                }
             }
 
             match mode {

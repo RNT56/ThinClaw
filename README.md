@@ -59,8 +59,10 @@ thinclaw onboard
 # or fully reset ThinClaw state and start over:
 # thinclaw reset --yes
 
-# 3. Start ThinClaw locally
-thinclaw run --no-onboard
+# 3. Start ThinClaw locally later
+thinclaw
+# or launch the full-screen runtime directly:
+thinclaw tui
 
 # 4. Open the gateway
 # http://127.0.0.1:3000
@@ -77,8 +79,10 @@ thinclaw onboard
 # or fully reset ThinClaw state and start over:
 # thinclaw reset --yes
 
-# 3. Start ThinClaw locally
-thinclaw run --no-onboard
+# 3. Start ThinClaw locally later
+thinclaw
+# or launch the full-screen runtime directly:
+thinclaw tui
 
 # 4. Open the gateway
 # http://127.0.0.1:3000
@@ -95,7 +99,7 @@ If you need more targeted filtering, `RUST_LOG=...` still works and takes preced
 
 For a deeper setup path, including service mode, remote access, provider guidance, Windows service management, and external dependencies, use the docs hub at [docs/README.md](docs/README.md).
 
-The onboarding flow now uses a calmer "Humanist Cockpit" framing in both CLI and TUI modes, with shared readiness summaries, skin-aware presentation, and saved follow-up notes so operators can pause setup without losing context.
+The onboarding flow now uses a calmer "Humanist Cockpit" framing in both CLI and TUI modes, with shared readiness summaries, skin-aware presentation, saved follow-up notes, an explicit Quick Setup vs Advanced Setup split, and automatic handoff from onboarding into the matching local runtime.
 
 ## Why ThinClaw
 
@@ -199,7 +203,7 @@ Skin TOML files now support:
 
 - core palette tokens: `accent`, `border`, `body`, `muted`, `good`, `warn`, `bad`, `header`
 - prompt symbol: `prompt_symbol`
-- ASCII banner art: `ascii_art`
+- skin-specific TUI hero art: `hero_art`
 - optional skin subtitle: `tagline`
 - tool label embellishments: `tool_emojis`
 - optional WebUI aura colors: `[web].aura_primary`, `[web].aura_secondary`

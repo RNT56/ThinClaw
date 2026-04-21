@@ -345,13 +345,14 @@ pub enum LeakDetectionError {
 ///
 /// Shows first 4 and last 4 characters, masks the middle.
 fn mask_secret(secret: &str) -> String {
-    let len = secret.len();
+    let chars: Vec<char> = secret.chars().collect();
+    let len = chars.len();
     if len <= 8 {
         return "*".repeat(len);
     }
 
-    let prefix: String = secret.chars().take(4).collect();
-    let suffix: String = secret.chars().skip(len - 4).collect();
+    let prefix: String = chars.iter().take(4).collect();
+    let suffix: String = chars.iter().skip(len - 4).collect();
     let middle_len = len - 8;
     format!("{}{}{}", prefix, "*".repeat(middle_len.min(8)), suffix)
 }

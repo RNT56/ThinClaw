@@ -9,14 +9,16 @@ use crate::settings::{
     OnboardingFollowup, OnboardingFollowupCategory, OnboardingFollowupStatus, Settings,
 };
 use crate::setup::prompts::{
-    PromptUiMode as PromptRenderMode, begin_tui_prompt_session, current_prompt_ui_mode,
-    print_header, print_info, print_phase_banner, print_step, print_success, print_warning,
-    push_prompt_ui_mode, select_one,
+    PromptUiMode as PromptRenderMode, TuiPromptContext, clear_tui_prompt_context,
+    clear_tui_prompt_messages, current_prompt_ui_mode, is_back_navigation, print_header,
+    print_info, print_phase_banner, print_step, print_success, print_warning, push_prompt_ui_mode,
+    select_one, set_tui_prompt_context,
 };
+use crate::terminal_branding::set_runtime_cli_skin_override;
 
 pub use self::contracts::{
-    FollowupDraft, OnboardingProfile, ReadinessSummary, StepDescriptor, StepStatus, UiMode,
-    ValidationItem, ValidationLevel, WizardPhase, WizardPhaseId, WizardPlan, WizardStepId,
+    FollowupDraft, GuideTopic, OnboardingProfile, ReadinessSummary, StepDescriptor, StepStatus,
+    UiMode, ValidationItem, ValidationLevel, WizardPhase, WizardPhaseId, WizardPlan, WizardStepId,
 };
 
 /// Setup wizard error.
@@ -48,7 +50,7 @@ impl From<crate::setup::channels::ChannelSetupError> for SetupError {
 }
 
 /// Setup wizard configuration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SetupConfig {
     /// Skip authentication step (use existing session).
     pub skip_auth: bool,
@@ -56,6 +58,22 @@ pub struct SetupConfig {
     pub channels_only: bool,
     /// Preferred onboarding UI mode.
     pub ui_mode: UiMode,
+    /// Optional guided settings topic.
+    pub guide_topic: Option<GuideTopic>,
+    /// When true, save settings and return without continuing into runtime.
+    pub pause_after_completion: bool,
+}
+
+impl Default for SetupConfig {
+    fn default() -> Self {
+        Self {
+            skip_auth: false,
+            channels_only: false,
+            ui_mode: UiMode::Auto,
+            guide_topic: None,
+            pause_after_completion: false,
+        }
+    }
 }
 
 /// Interactive setup wizard for ThinClaw.
@@ -83,6 +101,29 @@ pub struct SetupWizard {
     followups: Vec<FollowupDraft>,
     /// Latest non-destructive channel verification readiness map.
     verified_channels: BTreeMap<String, bool>,
+    /// Quick-setup primary channel selection for notification defaults.
+    quick_primary_channel: Option<String>,
+    /// Generated env-backed secrets master key when no secure store is available.
+    generated_env_master_key: Option<String>,
+    /// Actual prompt/runtime mode chosen for this onboarding run.
+    resolved_ui_mode: UiMode,
+}
+
+#[derive(Clone)]
+struct WizardCheckpoint {
+    settings: Settings,
+    #[cfg(feature = "postgres")]
+    db_pool: Option<deadpool_postgres::Pool>,
+    #[cfg(feature = "libsql")]
+    db_backend: Option<crate::db::libsql::LibSqlBackend>,
+    secrets_crypto: Option<Arc<SecretsCrypto>>,
+    llm_api_key: Option<SecretString>,
+    selected_profile: OnboardingProfile,
+    step_statuses: BTreeMap<WizardStepId, StepStatus>,
+    followups: Vec<FollowupDraft>,
+    verified_channels: BTreeMap<String, bool>,
+    quick_primary_channel: Option<String>,
+    generated_env_master_key: Option<String>,
 }
 
 impl SetupWizard {
@@ -102,6 +143,9 @@ impl SetupWizard {
             step_statuses: BTreeMap::new(),
             followups: Vec::new(),
             verified_channels: BTreeMap::new(),
+            quick_primary_channel: None,
+            generated_env_master_key: None,
+            resolved_ui_mode: UiMode::Cli,
         }
     }
 
@@ -121,6 +165,9 @@ impl SetupWizard {
             step_statuses: BTreeMap::new(),
             followups: Vec::new(),
             verified_channels: BTreeMap::new(),
+            quick_primary_channel: None,
+            generated_env_master_key: None,
+            resolved_ui_mode: UiMode::Cli,
         }
     }
 
@@ -140,6 +187,60 @@ impl SetupWizard {
             }
             mode => mode,
         }
+    }
+
+    fn is_guide_mode(&self) -> bool {
+        self.config.guide_topic.is_some()
+    }
+
+    fn is_quick_setup(&self) -> bool {
+        !self.config.channels_only && !self.is_guide_mode()
+    }
+
+    pub fn runtime_ui_mode(&self) -> UiMode {
+        match self.resolved_ui_mode {
+            UiMode::Cli | UiMode::Tui => self.resolved_ui_mode,
+            UiMode::Auto => UiMode::Cli,
+        }
+    }
+
+    pub fn should_continue_to_runtime(&self) -> bool {
+        !self.config.pause_after_completion
+    }
+
+    pub(super) fn primary_runtime_command(&self) -> &'static str {
+        match self.runtime_ui_mode() {
+            UiMode::Tui => "thinclaw tui",
+            UiMode::Cli | UiMode::Auto => "thinclaw",
+        }
+    }
+
+    pub(super) fn runtime_handoff_summary(&self) -> String {
+        if self.should_continue_to_runtime() {
+            format!(
+                "ThinClaw will now continue into `{}` using the settings from this run.",
+                self.primary_runtime_command()
+            )
+        } else {
+            "Settings are saved. This pass stops here so you can launch runtime later on your own."
+                .to_string()
+        }
+    }
+
+    pub(super) fn what_next_commands(&self) -> Vec<String> {
+        let mut commands = vec![
+            format!("Primary runtime: {}", self.primary_runtime_command()),
+            "Standard CLI runtime: thinclaw".to_string(),
+            "Full-screen TUI runtime: thinclaw tui".to_string(),
+            "Reopen onboarding: thinclaw onboard".to_string(),
+            "Revisit channels only: thinclaw onboard --channels-only".to_string(),
+        ];
+
+        if self.config.pause_after_completion {
+            commands.push("Topic guide: thinclaw onboard --guide".to_string());
+        }
+
+        commands
     }
 
     fn build_plan(&self) -> WizardPlan {
@@ -163,14 +264,10 @@ impl SetupWizard {
         if self.config.channels_only {
             phases.push(WizardPhase {
                 id: Phase::ChannelsContinuity,
-                title: Phase::ChannelsContinuity.title(),
-                description: Phase::ChannelsContinuity.description(),
                 step_ids: vec![Step::Channels, Step::ChannelVerification],
             });
             phases.push(WizardPhase {
                 id: Phase::Finish,
-                title: Phase::Finish.title(),
-                description: Phase::Finish.description(),
                 step_ids: vec![Step::Summary],
             });
 
@@ -202,87 +299,95 @@ impl SetupWizard {
             return WizardPlan { phases, steps };
         }
 
-        phases.push(WizardPhase {
-            id: Phase::WelcomeProfile,
-            title: Phase::WelcomeProfile.title(),
-            description: Phase::WelcomeProfile.description(),
-            step_ids: vec![Step::Welcome, Step::Profile],
-        });
-        phases.push(WizardPhase {
-            id: Phase::CoreRuntime,
-            title: Phase::CoreRuntime.title(),
-            description: Phase::CoreRuntime.description(),
-            step_ids: vec![Step::Database, Step::Security],
-        });
-        phases.push(WizardPhase {
-            id: Phase::AiStack,
-            title: Phase::AiStack.title(),
-            description: Phase::AiStack.description(),
-            step_ids: vec![
-                Step::InferenceProvider,
-                Step::ModelSelection,
-                Step::SmartRouting,
-                Step::FallbackProviders,
-                Step::Embeddings,
-            ],
-        });
-        phases.push(WizardPhase {
-            id: Phase::IdentityPresence,
-            title: Phase::IdentityPresence.title(),
-            description: Phase::IdentityPresence.description(),
-            step_ids: vec![Step::AgentIdentity, Step::Timezone],
-        });
-        phases.push(WizardPhase {
-            id: Phase::ChannelsContinuity,
-            title: Phase::ChannelsContinuity.title(),
-            description: Phase::ChannelsContinuity.description(),
-            step_ids: vec![
-                Step::Channels,
-                Step::ChannelContinuity,
-                Step::ChannelVerification,
-                Step::Notifications,
-            ],
-        });
-        phases.push(WizardPhase {
-            id: Phase::CapabilitiesAutomation,
-            title: Phase::CapabilitiesAutomation.title(),
-            description: Phase::CapabilitiesAutomation.description(),
-            step_ids: vec![
-                Step::Extensions,
-                Step::DockerSandbox,
-                Step::ClaudeCode,
-                Step::CodexCode,
-                Step::ToolApproval,
-                Step::Routines,
-                Step::Skills,
-                Step::Heartbeat,
-            ],
-        });
-        phases.push(WizardPhase {
-            id: Phase::ExperienceOperations,
-            title: Phase::ExperienceOperations.title(),
-            description: Phase::ExperienceOperations.description(),
-            step_ids: vec![Step::WebUi, Step::Observability],
-        });
-        phases.push(WizardPhase {
-            id: Phase::Finish,
-            title: Phase::Finish.title(),
-            description: Phase::Finish.description(),
-            step_ids: vec![Step::Summary],
-        });
+        if let Some(topic) = self.config.guide_topic {
+            let step_ids = match topic {
+                GuideTopic::Menu => vec![Step::Summary],
+                GuideTopic::Ai => vec![
+                    Step::InferenceProvider,
+                    Step::ModelSelection,
+                    Step::SmartRouting,
+                    Step::FallbackProviders,
+                    Step::Embeddings,
+                ],
+                GuideTopic::Channels => vec![
+                    Step::Channels,
+                    Step::ChannelContinuity,
+                    Step::ChannelVerification,
+                    Step::Notifications,
+                ],
+                GuideTopic::Agent => {
+                    vec![
+                        Step::CliSkin,
+                        Step::AgentIdentity,
+                        Step::Timezone,
+                        Step::WebUi,
+                    ]
+                }
+                GuideTopic::Tools => vec![
+                    Step::ToolApproval,
+                    Step::DockerSandbox,
+                    Step::Extensions,
+                    Step::ClaudeCode,
+                    Step::CodexCode,
+                ],
+                GuideTopic::Automation => vec![Step::Routines, Step::Skills, Step::Heartbeat],
+                GuideTopic::Runtime => {
+                    vec![Step::Database, Step::Security, Step::Observability]
+                }
+            };
+
+            let phase_id = match topic {
+                GuideTopic::Menu => Phase::Finish,
+                GuideTopic::Ai => Phase::AiStack,
+                GuideTopic::Channels => Phase::ChannelsContinuity,
+                GuideTopic::Agent => Phase::WelcomeProfile,
+                GuideTopic::Tools => Phase::CapabilitiesAutomation,
+                GuideTopic::Automation => Phase::CapabilitiesAutomation,
+                GuideTopic::Runtime => Phase::CoreRuntime,
+            };
+            phases.push(WizardPhase {
+                id: phase_id,
+                step_ids,
+            });
+            phases.push(WizardPhase {
+                id: Phase::Finish,
+                step_ids: vec![Step::Summary],
+            });
+        } else {
+            phases.push(WizardPhase {
+                id: Phase::WelcomeProfile,
+                step_ids: vec![Step::CliSkin, Step::AgentIdentity],
+            });
+            phases.push(WizardPhase {
+                id: Phase::AiStack,
+                step_ids: vec![Step::InferenceProvider, Step::ModelSelection],
+            });
+            phases.push(WizardPhase {
+                id: Phase::ChannelsContinuity,
+                step_ids: vec![Step::Channels, Step::ChannelVerification],
+            });
+            phases.push(WizardPhase {
+                id: Phase::CapabilitiesAutomation,
+                step_ids: vec![Step::ToolApproval, Step::DockerSandbox, Step::CodingWorkers],
+            });
+            phases.push(WizardPhase {
+                id: Phase::Finish,
+                step_ids: vec![Step::Summary],
+            });
+        }
 
         push_step(
-            Step::Welcome,
+            Step::CliSkin,
             Phase::WelcomeProfile,
-            "Let's Set Up ThinClaw",
-            "Get a quick overview of what this flow will configure and how resume works.",
-            "A clear start reduces mistakes and makes every next decision easier.",
-            Some("If you are unsure, keep the recommended options and adjust later."),
+            "Choose Your Cockpit Skin",
+            "Pick the skin you want onboarding, the CLI, and the default web experience to use.",
+            "The first visual choice sets the tone for the whole operator experience.",
+            Some("Pick the one that feels easiest to read for a long session."),
         );
         push_step(
             Step::Profile,
             Phase::WelcomeProfile,
-            "Choose Your Setup Style",
+            "Choose Your Setup Lane",
             "Pick a profile to prefill practical defaults for your environment.",
             "Profiles speed up setup without taking away your ability to review each section.",
             Some("Balanced is the best default for most operators."),
@@ -291,7 +396,7 @@ impl SetupWizard {
             Step::Database,
             Phase::CoreRuntime,
             "Storage Foundation",
-            "Choose where ThinClaw stores settings, history, and runtime state.",
+            "Review where ThinClaw stores settings, history, and runtime state.",
             "This storage path underpins everything else in onboarding.",
             Some("libSQL + local file is the fastest reliable path for day one."),
         );
@@ -299,7 +404,7 @@ impl SetupWizard {
             Step::Security,
             Phase::CoreRuntime,
             "Secret Protection",
-            "Choose how API keys and sensitive values are protected.",
+            "Review how API keys and sensitive values are protected.",
             "Trust boundaries should be explicit before provider credentials are stored.",
             Some("Use your OS secure store when available."),
         );
@@ -307,25 +412,25 @@ impl SetupWizard {
             Step::InferenceProvider,
             Phase::AiStack,
             "Primary Model Provider",
-            "Pick the provider ThinClaw should rely on for most requests.",
+            "Choose the provider ThinClaw should rely on for its primary advisor model.",
             "This choice impacts quality, latency, auth, and operating cost.",
             Some("Start with one reliable provider, then add fallback later."),
         );
         push_step(
             Step::ModelSelection,
             Phase::AiStack,
-            "Primary Model",
-            "Choose the main model for complex reasoning and tool planning.",
+            "Advisor Model (Primary)",
+            "Choose the stronger primary model used for strategic guidance and high-quality reasoning.",
             "This model defines the quality ceiling for everyday operation.",
             None,
         );
         push_step(
             Step::SmartRouting,
             Phase::AiStack,
-            "Routing Strategy",
-            "Choose how ThinClaw distributes work across configured models.",
-            "Routing directly shapes speed, cost, and answer quality.",
-            Some("Cheap split is the recommended default for most users."),
+            "Executor Model (Fast)",
+            "Choose the fast execution model used in advisor/executor routing.",
+            "A strong executor keeps everyday work responsive while the advisor stays available for escalation.",
+            Some("Pick a fast model that lives next to your primary provider when possible."),
         );
         push_step(
             Step::FallbackProviders,
@@ -346,8 +451,8 @@ impl SetupWizard {
         push_step(
             Step::AgentIdentity,
             Phase::IdentityPresence,
-            "Agent Name & Presence",
-            "Set the agent name and how it introduces itself to users.",
+            "Agent Name & Personality",
+            "Set the agent name and the personality pack that seeds the canonical home soul.",
             "Identity details shape trust and consistency across channels.",
             None,
         );
@@ -362,8 +467,8 @@ impl SetupWizard {
         push_step(
             Step::Channels,
             Phase::ChannelsContinuity,
-            "Channel Configuration",
-            "Choose and configure the channels ThinClaw should use.",
+            "Primary Channel",
+            "Choose the main channel users should use to reach ThinClaw and configure only what is needed for that path.",
             "Channels are the interface where users will actually meet the agent.",
             Some("Pick only channels you can verify today."),
         );
@@ -379,7 +484,7 @@ impl SetupWizard {
             Step::ChannelVerification,
             Phase::ChannelsContinuity,
             "Channel Verification",
-            "Run non-destructive checks for each configured channel and capture follow-ups.",
+            "Run non-destructive checks for the selected channel and capture any follow-ups.",
             "Known gaps are manageable; hidden gaps break trust in production.",
             Some("Leave onboarding with at least one fully verified path."),
         );
@@ -400,12 +505,30 @@ impl SetupWizard {
             Some("Use the Balanced bundle unless you need strict minimalism."),
         );
         push_step(
+            Step::ToolApproval,
+            Phase::CapabilitiesAutomation,
+            "Autonomy Level",
+            "Choose how much local autonomy ThinClaw has when running tools on your machine.",
+            "Autonomy level defines the default operator trust posture on day one.",
+            Some("Standard keeps approvals on. Autonomous and Full Autonomous enable local tools."),
+        );
+        push_step(
             Step::DockerSandbox,
             Phase::CapabilitiesAutomation,
-            "Local Tools & Docker Sandbox",
-            "Set trust boundaries for local commands and isolated worker execution.",
+            "Worker Sandbox",
+            "Decide whether ThinClaw should isolate worker processes such as coding delegates in Docker.",
             "Early boundary choices reduce surprise and security drift later.",
-            None,
+            Some(
+                "Keep the worker sandbox on unless you already know you do not want container isolation.",
+            ),
+        );
+        push_step(
+            Step::CodingWorkers,
+            Phase::CapabilitiesAutomation,
+            "Coding Workers",
+            "Optionally enable Claude Code and Codex after the sandbox is configured.",
+            "Coding workers add power, but only matter if you want delegated coding help right away.",
+            Some("Leave them off unless you already know you want coding delegates today."),
         );
         push_step(
             Step::ClaudeCode,
@@ -422,14 +545,6 @@ impl SetupWizard {
             "Configure optional Codex CLI worker integration.",
             "Only required if your workflow depends on Codex sandbox execution.",
             None,
-        );
-        push_step(
-            Step::ToolApproval,
-            Phase::CapabilitiesAutomation,
-            "Tool Approval Mode",
-            "Choose how much autonomy ThinClaw has when executing tools.",
-            "Approval mode is the core operational safety control.",
-            Some("Standard approval is recommended until trust boundaries are proven."),
         );
         push_step(
             Step::Routines,
@@ -475,12 +590,26 @@ impl SetupWizard {
             Step::Summary,
             Phase::Finish,
             "Finish",
-            "Review readiness, deferred tasks, and the bootstrap handoff.",
+            "Review readiness, deferred tasks, and the bootstrap handoff into normal startup.",
             "A strong finish gives operators confidence to launch immediately.",
             None,
         );
 
-        WizardPlan { phases, steps }
+        let mut filtered_steps = Vec::new();
+        let allowed_ids: std::collections::BTreeSet<_> = phases
+            .iter()
+            .flat_map(|phase| phase.step_ids.iter().copied())
+            .collect();
+        for descriptor in steps {
+            if allowed_ids.contains(&descriptor.id) {
+                filtered_steps.push(descriptor);
+            }
+        }
+
+        WizardPlan {
+            phases,
+            steps: filtered_steps,
+        }
     }
 
     fn reset_plan_state(&mut self) {
@@ -488,6 +617,7 @@ impl SetupWizard {
         self.step_statuses.clear();
         self.followups.clear();
         self.verified_channels.clear();
+        self.quick_primary_channel = None;
         self.settings.onboarding_followups.clear();
         if let Some(plan) = &self.plan {
             for step in &plan.steps {
@@ -511,8 +641,47 @@ impl SetupWizard {
             .collect();
     }
 
+    fn checkpoint(&self) -> WizardCheckpoint {
+        WizardCheckpoint {
+            settings: self.settings.clone(),
+            #[cfg(feature = "postgres")]
+            db_pool: self.db_pool.clone(),
+            #[cfg(feature = "libsql")]
+            db_backend: self.db_backend.clone(),
+            secrets_crypto: self.secrets_crypto.clone(),
+            llm_api_key: self.llm_api_key.clone(),
+            selected_profile: self.selected_profile,
+            step_statuses: self.step_statuses.clone(),
+            followups: self.followups.clone(),
+            verified_channels: self.verified_channels.clone(),
+            quick_primary_channel: self.quick_primary_channel.clone(),
+            generated_env_master_key: self.generated_env_master_key.clone(),
+        }
+    }
+
+    fn restore_checkpoint(&mut self, checkpoint: WizardCheckpoint) {
+        self.settings = checkpoint.settings;
+        #[cfg(feature = "postgres")]
+        {
+            self.db_pool = checkpoint.db_pool;
+        }
+        #[cfg(feature = "libsql")]
+        {
+            self.db_backend = checkpoint.db_backend;
+        }
+        self.secrets_crypto = checkpoint.secrets_crypto;
+        self.llm_api_key = checkpoint.llm_api_key;
+        self.selected_profile = checkpoint.selected_profile;
+        self.step_statuses = checkpoint.step_statuses;
+        self.followups = checkpoint.followups;
+        self.verified_channels = checkpoint.verified_channels;
+        self.quick_primary_channel = checkpoint.quick_primary_channel;
+        self.generated_env_master_key = checkpoint.generated_env_master_key;
+    }
+
     async fn run_cli_flow(&mut self) -> Result<(), SetupError> {
         let _prompt_mode = push_prompt_ui_mode(PromptRenderMode::Cli);
+        set_runtime_cli_skin_override(self.settings.agent.cli_skin.clone());
         let mode_label = match current_prompt_ui_mode() {
             PromptRenderMode::Cli => "cli",
             PromptRenderMode::Tui => "tui",
@@ -525,36 +694,51 @@ impl SetupWizard {
             "Progress is saved as you go, so you can pause and resume without redoing the stable parts.",
         );
         print_info(&format!("Cockpit mode: {mode_label}"));
-        println!();
+        crate::setup::prompts::print_blank_line();
         self.run_planned_flow(None).await
     }
 
     async fn run_tui_flow(&mut self) -> Result<(), SetupError> {
         let _prompt_mode = push_prompt_ui_mode(PromptRenderMode::Tui);
-        let _prompt_session = begin_tui_prompt_session().map_err(SetupError::Io)?;
+        set_runtime_cli_skin_override(self.settings.agent.cli_skin.clone());
+        clear_tui_prompt_messages();
+        clear_tui_prompt_context();
         let plan = self
             .plan
             .clone()
             .ok_or_else(|| SetupError::Config("Onboarding plan was not initialized".to_string()))?;
         let mut shell = tui_shell::OnboardingTuiShell::new(plan);
-        shell.show_intro(self)?;
         self.run_planned_flow(Some(&mut shell)).await?;
         shell.show_completion(self)?;
+        clear_tui_prompt_context();
         Ok(())
     }
 
     async fn run_planned_flow(
         &mut self,
-        mut shell: Option<&mut tui_shell::OnboardingTuiShell>,
+        shell: Option<&mut tui_shell::OnboardingTuiShell>,
     ) -> Result<(), SetupError> {
-        let plan = self
+        let mut plan = self
             .plan
             .clone()
             .ok_or_else(|| SetupError::Config("Onboarding plan was not initialized".to_string()))?;
-        let total_steps = plan.total_steps();
+        let mut total_steps = plan.total_steps();
         let mut last_phase = None;
+        let mut index = 0usize;
 
-        for (index, descriptor) in plan.steps.iter().enumerate() {
+        while index < total_steps {
+            let descriptor = plan.steps[index].clone();
+            if shell.is_some() {
+                clear_tui_prompt_messages();
+                set_tui_prompt_context(TuiPromptContext {
+                    phase_title: Some(descriptor.phase_id.title().to_string()),
+                    phase_description: Some(descriptor.phase_id.description().to_string()),
+                    step_progress: Some(format!("Step {}/{}", index + 1, total_steps)),
+                    description: Some(descriptor.description.to_string()),
+                    why_this_matters: Some(descriptor.why_this_matters.to_string()),
+                    recommended: descriptor.recommended.map(ToOwned::to_owned),
+                });
+            }
             if shell.is_none() && last_phase != Some(descriptor.phase_id) {
                 print_phase_banner(
                     descriptor.phase_id.title(),
@@ -563,22 +747,44 @@ impl SetupWizard {
             }
             last_phase = Some(descriptor.phase_id);
 
+            let checkpoint = self.checkpoint();
             self.step_statuses
                 .insert(descriptor.id, StepStatus::InProgress);
 
-            if let Some(shell) = shell.as_deref_mut() {
-                shell.show_step(self, descriptor, index + 1, total_steps)?;
-            } else {
+            if shell.is_none() {
                 print_step(index + 1, total_steps, descriptor.title);
                 print_info(descriptor.description);
                 print_info(descriptor.why_this_matters);
                 if let Some(recommended) = descriptor.recommended {
                     print_success(&format!("Recommended: {}", recommended));
                 }
-                println!();
+                crate::setup::prompts::print_blank_line();
             }
 
-            let status = self.execute_step(descriptor.id).await?;
+            let status = match self.execute_step(descriptor.id).await {
+                Ok(status) => status,
+                Err(SetupError::Io(error)) if shell.is_some() && is_back_navigation(&error) => {
+                    self.restore_checkpoint(checkpoint);
+                    if self.should_reopen_tui_menus_on_back(index, shell.is_some())
+                        && self.reroute_tui_back_from_first_guided_step().await?
+                    {
+                        plan = self.plan.clone().ok_or_else(|| {
+                            SetupError::Config(
+                                "Onboarding plan was not initialized after back navigation"
+                                    .to_string(),
+                            )
+                        })?;
+                        total_steps = plan.total_steps();
+                        index = 0;
+                        last_phase = None;
+                        continue;
+                    }
+                    index = index.saturating_sub(1);
+                    last_phase = None;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             self.step_statuses.insert(descriptor.id, status);
             self.persist_followups();
 
@@ -586,28 +792,81 @@ impl SetupWizard {
                 self.persist_after_step().await;
             }
 
-            if let Some(shell) = shell.as_deref_mut() {
-                shell.show_step_result(self, descriptor, status)?;
+            if shell.is_some() {
+                match status {
+                    StepStatus::NeedsAttention => {
+                        print_warning("This step left follow-up work queued for later.");
+                    }
+                    StepStatus::Skipped => {
+                        print_info("This step was skipped for now.");
+                    }
+                    _ => {}
+                }
             }
+
+            index += 1;
         }
 
         Ok(())
     }
 
+    fn should_reopen_tui_menus_on_back(&self, index: usize, has_shell: bool) -> bool {
+        has_shell && index == 0 && !self.config.channels_only && self.is_guide_mode()
+    }
+
+    async fn reroute_tui_back_from_first_guided_step(&mut self) -> Result<bool, SetupError> {
+        let original_guide_topic = self.config.guide_topic;
+        if !self.should_reopen_tui_menus_on_back(0, true) {
+            return Ok(false);
+        }
+
+        self.config.guide_topic = Some(GuideTopic::Menu);
+
+        loop {
+            match self.resolve_guide_topic_prompt() {
+                Ok(()) => break,
+                Err(SetupError::Io(error)) if is_back_navigation(&error) => {
+                    self.config.guide_topic = None;
+                    match self.resolve_setup_entry_prompt(self.resolved_ui_mode) {
+                        Ok(()) => {
+                            if self.config.guide_topic == Some(GuideTopic::Menu) {
+                                continue;
+                            }
+                            break;
+                        }
+                        Err(SetupError::Io(error)) if is_back_navigation(&error) => {
+                            self.config.guide_topic = original_guide_topic;
+                            return Ok(false);
+                        }
+                        Err(error) => {
+                            self.config.guide_topic = original_guide_topic;
+                            return Err(error);
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.config.guide_topic = original_guide_topic;
+                    return Err(error);
+                }
+            }
+        }
+
+        self.apply_run_mode_defaults().await?;
+        self.reset_plan_state();
+        Ok(true)
+    }
+
     fn should_persist_step(&self, step_id: WizardStepId) -> bool {
         !matches!(
             step_id,
-            WizardStepId::Welcome
-                | WizardStepId::Profile
-                | WizardStepId::ChannelContinuity
-                | WizardStepId::Summary
+            WizardStepId::Profile | WizardStepId::ChannelContinuity | WizardStepId::Summary
         )
     }
 
     async fn execute_step(&mut self, step_id: WizardStepId) -> Result<StepStatus, SetupError> {
         match step_id {
-            WizardStepId::Welcome => {
-                self.step_welcome()?;
+            WizardStepId::CliSkin => {
+                self.step_cli_skin()?;
                 Ok(StepStatus::Completed)
             }
             WizardStepId::Profile => {
@@ -636,6 +895,10 @@ impl SetupWizard {
             }
             WizardStepId::ModelSelection => {
                 self.step_model_selection().await?;
+                if self.is_quick_setup() {
+                    self.apply_quick_embeddings_defaults();
+                    self.step_smart_routing().await?;
+                }
                 Ok(StepStatus::Completed)
             }
             WizardStepId::SmartRouting => {
@@ -671,7 +934,11 @@ impl SetupWizard {
                 if self.config.channels_only {
                     self.reconnect_existing_db().await?;
                 }
-                self.step_channels().await?;
+                if self.is_quick_setup() {
+                    self.step_primary_channel_quick().await?;
+                } else {
+                    self.step_channels().await?;
+                }
                 Ok(StepStatus::Completed)
             }
             WizardStepId::ChannelContinuity => {
@@ -680,6 +947,9 @@ impl SetupWizard {
             }
             WizardStepId::ChannelVerification => {
                 let issues = self.step_channel_verification().await?;
+                if self.is_quick_setup() {
+                    self.apply_quick_notification_defaults();
+                }
                 Ok(if issues == 0 {
                     StepStatus::Completed
                 } else {
@@ -697,6 +967,16 @@ impl SetupWizard {
             WizardStepId::DockerSandbox => {
                 self.step_docker_sandbox().await?;
                 Ok(StepStatus::Completed)
+            }
+            WizardStepId::CodingWorkers => {
+                self.step_coding_workers().await?;
+                Ok(
+                    if self.settings.claude_code_enabled || self.settings.codex_code_enabled {
+                        StepStatus::Completed
+                    } else {
+                        StepStatus::Skipped
+                    },
+                )
             }
             WizardStepId::ClaudeCode => {
                 self.step_claude_code().await?;
@@ -860,29 +1140,88 @@ impl SetupWizard {
         self.followups.retain(|item| item.id != id);
     }
 
-    fn step_welcome(&self) -> Result<(), SetupError> {
+    fn resolve_guide_topic_prompt(&mut self) -> Result<(), SetupError> {
+        if self.config.guide_topic != Some(GuideTopic::Menu) {
+            return Ok(());
+        }
+
+        print_info("Choose the settings topic you want to revisit.");
+        let options = [
+            "AI & Models",
+            "Channels & Notifications",
+            "Agent & Experience",
+            "Tools & Safety",
+            "Automation & Skills",
+            "Runtime & Diagnostics",
+        ];
+        let choice = select_one("Guided settings topic", &options).map_err(SetupError::Io)?;
+        self.config.guide_topic = Some(match choice {
+            1 => GuideTopic::Channels,
+            2 => GuideTopic::Agent,
+            3 => GuideTopic::Tools,
+            4 => GuideTopic::Automation,
+            5 => GuideTopic::Runtime,
+            _ => GuideTopic::Ai,
+        });
+        Ok(())
+    }
+
+    fn resolve_setup_entry_prompt(&mut self, ui_mode: UiMode) -> Result<(), SetupError> {
+        if !matches!(ui_mode, UiMode::Cli | UiMode::Tui)
+            || self.config.channels_only
+            || self.config.guide_topic.is_some()
+        {
+            return Ok(());
+        }
+
         print_info(
-            "Welcome to the Humanist Cockpit. We will bring ThinClaw online in focused phases instead of one long checklist.",
+            "Choose whether you want the streamlined default path or the guided advanced lane.",
         );
-        print_info(
-            "Progress is saved incrementally, so you can pause safely and resume without losing ground.",
-        );
-        print_info(
-            "When onboarding is complete, ThinClaw hands you back to the normal bootstrap flow automatically.",
-        );
+        let options = [
+            "Quick Setup     - reduced day-one path that gets ThinClaw running fast",
+            "Advanced Setup  - choose a topic and tune more deeply before launch",
+        ];
+        let choice = select_one("Setup mode", &options).map_err(SetupError::Io)?;
+        if choice == 1 {
+            self.config.guide_topic = Some(GuideTopic::Menu);
+            print_info(
+                "Advanced Setup keeps Quick Setup short and opens the guided topic menu instead.",
+            );
+        } else {
+            print_success("Quick Setup selected. ThinClaw will stay on the reduced day-one path.");
+        }
+
+        Ok(())
+    }
+
+    async fn prepare_run_mode(&mut self, ui_mode: UiMode) -> Result<(), SetupError> {
+        self.resolve_setup_entry_prompt(ui_mode)?;
+        self.resolve_guide_topic_prompt()?;
+        self.apply_run_mode_defaults().await?;
+
+        Ok(())
+    }
+
+    async fn apply_run_mode_defaults(&mut self) -> Result<(), SetupError> {
+        if self.is_quick_setup() {
+            self.auto_configure_quick_runtime_defaults().await?;
+        } else if self.config.channels_only || self.is_guide_mode() {
+            let _ = self.reconnect_existing_db().await;
+        }
+
         Ok(())
     }
 
     fn step_profile(&mut self) -> Result<(), SetupError> {
         let options = [
-            "Balanced            - recommended defaults for most first runs",
-            "Local & Private     - prefer local inference and fewer outbound dependencies",
-            "Builder & Coding    - optimize for tool use, coding, and advisor/executor routing",
-            "Channel-First       - prioritize messaging reachability and notification setup",
-            "Custom / Advanced   - neutral baseline with minimal profile-driven defaults",
+            "Balanced            - calm defaults for most first runs",
+            "Local & Private     - prefer local models and fewer external services",
+            "Builder & Coding    - bias for tools, coding, and stronger routing",
+            "Channel-First       - prioritize reachability and notification setup",
+            "Custom / Advanced   - start neutral and tune each major choice directly",
         ];
-        let choice =
-            select_one("Which onboarding lane fits best?", &options).map_err(SetupError::Io)?;
+        print_info("Choose the lane that best matches the system you want to leave setup with.");
+        let choice = select_one("Choose your setup lane", &options).map_err(SetupError::Io)?;
         self.selected_profile = match choice {
             1 => OnboardingProfile::LocalAndPrivate,
             2 => OnboardingProfile::BuilderAndCoding,
@@ -1066,6 +1405,12 @@ impl SetupWizard {
         self.remove_followup("channel-verification");
 
         if self.configured_channel_names().is_empty() {
+            if self.is_quick_setup() && self.quick_primary_channel.as_deref() == Some("web") {
+                self.verified_channels.insert("web".to_string(), true);
+                print_success("Web Dashboard selected as the verified quick-setup path.");
+                return Ok(0);
+            }
+
             self.add_followup(FollowupDraft {
                 id: "channel-verification".to_string(),
                 title: "No external channels verified yet".to_string(),
@@ -1447,29 +1792,37 @@ impl SetupWizard {
     /// settings are loaded from the database after Step 1 establishes a
     /// connection, so users don't have to re-enter everything.
     pub async fn run(&mut self) -> Result<(), SetupError> {
+        let requested_ui_mode = self.config.ui_mode;
+        let ui_mode = self.resolve_ui_mode();
+        self.resolved_ui_mode = ui_mode;
+
+        let prompt_mode = match ui_mode {
+            UiMode::Tui => PromptRenderMode::Tui,
+            UiMode::Cli | UiMode::Auto => PromptRenderMode::Cli,
+        };
+        {
+            let _prompt_mode = push_prompt_ui_mode(prompt_mode);
+            self.prepare_run_mode(ui_mode).await?;
+        }
         self.reset_plan_state();
 
-        match self.config.ui_mode {
-            UiMode::Cli => self.run_cli_flow().await,
-            UiMode::Tui => self.run_tui_flow().await,
-            UiMode::Auto => {
-                if self.resolve_ui_mode() == UiMode::Tui {
-                    match self.run_tui_flow().await {
-                        Ok(()) => Ok(()),
-                        Err(SetupError::Cancelled) => Err(SetupError::Cancelled),
-                        Err(error) => {
-                            print_warning(&format!(
-                                "The onboarding TUI could not continue cleanly ({}). Falling back to the terminal wizard.",
-                                error
-                            ));
-                            self.reset_plan_state();
-                            self.run_cli_flow().await
-                        }
-                    }
-                } else {
+        match (requested_ui_mode, ui_mode) {
+            (_, UiMode::Cli) => self.run_cli_flow().await,
+            (UiMode::Auto, UiMode::Tui) => match self.run_tui_flow().await {
+                Ok(()) => Ok(()),
+                Err(SetupError::Cancelled) => Err(SetupError::Cancelled),
+                Err(error) => {
+                    print_warning(&format!(
+                        "The onboarding TUI could not continue cleanly ({}). Falling back to the terminal wizard.",
+                        error
+                    ));
+                    self.resolved_ui_mode = UiMode::Cli;
+                    self.reset_plan_state();
                     self.run_cli_flow().await
                 }
-            }
+            },
+            (_, UiMode::Tui) => self.run_tui_flow().await,
+            (_, UiMode::Auto) => unreachable!("auto mode is resolved before onboarding begins"),
         }
     }
 
@@ -1608,9 +1961,97 @@ mod tests {
             skip_auth: true,
             channels_only: false,
             ui_mode: UiMode::Cli,
+            guide_topic: None,
+            pause_after_completion: false,
         };
         let wizard = SetupWizard::with_config(config);
         assert!(wizard.config.skip_auth);
+    }
+
+    #[test]
+    fn test_default_onboarding_continues_into_runtime() {
+        let wizard = SetupWizard::new();
+        assert!(wizard.should_continue_to_runtime());
+        assert_eq!(wizard.primary_runtime_command(), "thinclaw");
+    }
+
+    #[test]
+    fn test_quick_setup_plan_uses_ten_steps() {
+        let wizard = SetupWizard::new();
+        let plan = wizard.build_plan();
+
+        assert_eq!(plan.steps.len(), 10);
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| step.id == WizardStepId::SmartRouting)
+        );
+        assert!(
+            plan.steps
+                .iter()
+                .any(|step| step.id == WizardStepId::CodingWorkers)
+        );
+    }
+
+    #[test]
+    fn test_tui_back_reopens_menus_on_first_guided_step() {
+        let mut wizard = SetupWizard::new();
+        wizard.config.guide_topic = Some(GuideTopic::Ai);
+
+        assert!(wizard.should_reopen_tui_menus_on_back(0, true));
+    }
+
+    #[test]
+    fn test_tui_back_does_not_reopen_menus_after_first_step() {
+        let mut wizard = SetupWizard::new();
+        wizard.config.guide_topic = Some(GuideTopic::Ai);
+
+        assert!(!wizard.should_reopen_tui_menus_on_back(1, true));
+    }
+
+    #[test]
+    fn test_tui_back_does_not_reopen_menus_in_quick_setup() {
+        let wizard = SetupWizard::new();
+
+        assert!(!wizard.should_reopen_tui_menus_on_back(0, true));
+    }
+
+    #[test]
+    fn test_quick_notification_defaults_use_verified_telegram_owner() {
+        let mut wizard = SetupWizard::new();
+        wizard.quick_primary_channel = Some("telegram".to_string());
+        wizard
+            .verified_channels
+            .insert("telegram".to_string(), true);
+        wizard.settings.channels.telegram_owner_id = Some(684480568);
+
+        wizard.apply_quick_notification_defaults();
+
+        assert_eq!(
+            wizard.settings.notifications.preferred_channel.as_deref(),
+            Some("telegram")
+        );
+        assert_eq!(
+            wizard.settings.notifications.recipient.as_deref(),
+            Some("684480568")
+        );
+        assert!(wizard.settings.heartbeat.enabled);
+        assert_eq!(
+            wizard.settings.heartbeat.notify_channel.as_deref(),
+            Some("telegram")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_quick_web_channel_verification_is_ready() {
+        let mut wizard = SetupWizard::new();
+        wizard.quick_primary_channel = Some("web".to_string());
+
+        let issues = wizard.step_channel_verification().await.unwrap();
+
+        assert_eq!(issues, 0);
+        assert_eq!(wizard.verified_channels.get("web"), Some(&true));
     }
 
     #[test]

@@ -330,6 +330,12 @@ pub trait ConversationStore: Send + Sync {
         limit: i64,
         now: DateTime<Utc>,
     ) -> Result<Vec<OutcomeContract>, DatabaseError>;
+    async fn claim_due_outcome_contracts_for_user(
+        &self,
+        user_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError>;
     async fn update_outcome_contract(
         &self,
         contract: &OutcomeContract,
@@ -838,7 +844,16 @@ pub trait ExperimentStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<ExperimentCampaign>, DatabaseError>;
+    async fn get_experiment_campaign_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentCampaign>, DatabaseError>;
     async fn list_experiment_campaigns(&self) -> Result<Vec<ExperimentCampaign>, DatabaseError>;
+    async fn list_experiment_campaigns_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentCampaign>, DatabaseError>;
     async fn update_experiment_campaign(
         &self,
         campaign: &ExperimentCampaign,
@@ -849,9 +864,19 @@ pub trait ExperimentStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<ExperimentTrial>, DatabaseError>;
+    async fn get_experiment_trial_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentTrial>, DatabaseError>;
     async fn list_experiment_trials(
         &self,
         campaign_id: Uuid,
+    ) -> Result<Vec<ExperimentTrial>, DatabaseError>;
+    async fn list_experiment_trials_for_owner(
+        &self,
+        campaign_id: Uuid,
+        owner_user_id: &str,
     ) -> Result<Vec<ExperimentTrial>, DatabaseError>;
     async fn update_experiment_trial(&self, trial: &ExperimentTrial) -> Result<(), DatabaseError>;
 
@@ -863,6 +888,11 @@ pub trait ExperimentStore: Send + Sync {
     async fn list_experiment_artifacts(
         &self,
         trial_id: Uuid,
+    ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError>;
+    async fn list_experiment_artifacts_for_owner(
+        &self,
+        trial_id: Uuid,
+        owner_user_id: &str,
     ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError>;
 
     async fn create_experiment_target(

@@ -92,7 +92,7 @@ impl Default for ContainerJobConfig {
             claude_code_api_key: None,
             claude_code_oauth_token: None,
             claude_code_enabled: false,
-            claude_code_model: "sonnet".to_string(),
+            claude_code_model: crate::config::ClaudeCodeConfig::default().model,
             claude_code_max_turns: 50,
             claude_code_memory_limit_mb: 4096,
             claude_code_allowed_tools: crate::config::ClaudeCodeConfig::default().allowed_tools,
@@ -148,8 +148,11 @@ pub struct ContainerHandle {
 /// Result reported by a worker on completion.
 #[derive(Debug, Clone)]
 pub struct CompletionResult {
+    pub status: String,
+    pub session_id: Option<String>,
     pub success: bool,
     pub message: Option<String>,
+    pub iterations: u32,
 }
 
 /// Validate that a project directory is under `~/.thinclaw/projects/`.

@@ -166,7 +166,7 @@ lru = "0.16.3"
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 sysinfo = "0.38.2"
-nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04"] }
+nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"] }
 chromiumoxide = "0.9.1"
 ratatui = "0.30.0"
 unicode-width = "0.2.2"
@@ -336,3 +336,9 @@ doc_lazy_continuation      = "allow"
 # Treat unused imports as warnings (default), not errors.
 # CI will still catch them via `-D warnings`.
 unused_imports = "warn"
+
+# Patch libsql to handle sqlite3_config SQLITE_MISUSE gracefully.
+# sqlx-sqlite (used by Scrappy) calls sqlite3_config() first; the stock libsql
+# asserts on the duplicate call. Our patch checks sqlite3_threadsafe() instead.
+[patch.crates-io]
+libsql = { path = "patches/libsql-0.6.0" }

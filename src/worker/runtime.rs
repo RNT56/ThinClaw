@@ -165,21 +165,25 @@ Work independently to complete this job. Report when done."#,
         .await;
 
         match result {
-            Ok(Ok(output)) => {
+            Ok(Ok((output, iterations))) => {
                 tracing::info!("Worker completed job {} successfully", self.config.job_id);
                 self.post_event(
                     "result",
                     serde_json::json!({
+                        "status": "completed",
                         "success": true,
                         "message": truncate(&output, 2000),
+                        "iterations": iterations,
                     }),
                 )
                 .await;
                 self.client
                     .report_complete(&CompletionReport {
+                        status: Some("completed".to_string()),
+                        session_id: None,
                         success: true,
                         message: Some(output),
-                        iterations: 0,
+                        iterations,
                     })
                     .await?;
             }
@@ -188,13 +192,17 @@ Work independently to complete this job. Report when done."#,
                 self.post_event(
                     "result",
                     serde_json::json!({
+                        "status": "error",
                         "success": false,
                         "message": format!("Execution failed: {}", e),
+                        "iterations": 0,
                     }),
                 )
                 .await;
                 self.client
                     .report_complete(&CompletionReport {
+                        status: Some("error".to_string()),
+                        session_id: None,
                         success: false,
                         message: Some(format!("Execution failed: {}", e)),
                         iterations: 0,
@@ -206,13 +214,17 @@ Work independently to complete this job. Report when done."#,
                 self.post_event(
                     "result",
                     serde_json::json!({
+                        "status": "error",
                         "success": false,
                         "message": "Execution timed out",
+                        "iterations": 0,
                     }),
                 )
                 .await;
                 self.client
                     .report_complete(&CompletionReport {
+                        status: Some("error".to_string()),
+                        session_id: None,
                         success: false,
                         message: Some("Execution timed out".to_string()),
                         iterations: 0,
@@ -228,7 +240,7 @@ Work independently to complete this job. Report when done."#,
         &self,
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
-    ) -> Result<String, WorkerError> {
+    ) -> Result<(String, u32), WorkerError> {
         let max_iterations = self.config.max_iterations;
         let mut last_output = String::new();
 
@@ -274,6 +286,14 @@ Work independently to complete this job. Report when done."#,
                         iteration,
                     })
                     .await;
+                self.post_event(
+                    "status",
+                    serde_json::json!({
+                        "message": format!("Iteration {}", iteration),
+                        "iteration": iteration,
+                    }),
+                )
+                .await;
             }
 
             // Poll for follow-up prompts from the user
@@ -342,7 +362,7 @@ Work independently to complete this job. Report when done."#,
                             if last_output.is_empty() {
                                 last_output = response.clone();
                             }
-                            return Ok(last_output);
+                            return Ok((last_output, iteration));
                         }
                         reason_ctx.messages.push(ChatMessage::assistant(&response));
                     }
@@ -389,6 +409,14 @@ Work independently to complete this job. Report when done."#,
                                         Ok(output) => truncate(output, 2000),
                                         Err(e) => format!("Error: {}", truncate(e, 500)),
                                     },
+                                    "output_text": match &result {
+                                        Ok(output) => truncate(output, 2000),
+                                        Err(e) => format!("Error: {}", truncate(e, 500)),
+                                    },
+                                    "output_json": match &result {
+                                        Ok(output) => serde_json::from_str::<serde_json::Value>(output).ok(),
+                                        Err(_) => None,
+                                    },
                                     "success": result.is_ok(),
                                 }),
                             )
@@ -432,6 +460,14 @@ Work independently to complete this job. Report when done."#,
                                 Ok(output) => truncate(output, 2000),
                                 Err(e) => format!("Error: {}", truncate(e, 500)),
                             },
+                            "output_text": match &result {
+                                Ok(output) => truncate(output, 2000),
+                                Err(e) => format!("Error: {}", truncate(e, 500)),
+                            },
+                            "output_json": match &result {
+                                Ok(output) => serde_json::from_str::<serde_json::Value>(output).ok(),
+                                Err(_) => None,
+                            },
                             "success": result.is_ok(),
                         }),
                     )
@@ -443,7 +479,7 @@ Work independently to complete this job. Report when done."#,
 
                     let completed = self.process_result(reason_ctx, selection, result);
                     if completed {
-                        return Ok(last_output);
+                        return Ok((last_output, iteration));
                     }
                 }
             }

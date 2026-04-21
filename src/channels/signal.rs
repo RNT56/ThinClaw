@@ -1026,6 +1026,7 @@ impl Channel for SignalChannel {
             instructions,
             auth_url,
             setup_url,
+            ..
         } = &status
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
@@ -1047,6 +1048,7 @@ impl Channel for SignalChannel {
             extension_name,
             success,
             message: msg,
+            ..
         } = &status
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {

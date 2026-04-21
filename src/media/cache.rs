@@ -149,7 +149,10 @@ impl MediaCache {
         let mut freed: u64 = 0;
         let target = total + new_bytes - self.config.max_bytes;
 
-        for (path, (_, size)) in &entries {
+        let mut ordered_entries: Vec<_> = entries.into_iter().collect();
+        ordered_entries.sort_by_key(|(_, (modified, _))| *modified);
+
+        for (path, (_, size)) in &ordered_entries {
             if freed >= target {
                 break;
             }

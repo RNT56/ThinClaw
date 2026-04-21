@@ -37,7 +37,9 @@ impl Default for GeminiConfig {
 impl GeminiConfig {
     /// Create from environment variables.
     pub fn from_env() -> Self {
-        let api_key = std::env::var("GOOGLE_AI_API_KEY").ok();
+        let api_key = std::env::var("GOOGLE_AI_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("GEMINI_API_KEY").ok());
 
         let mut config = Self {
             api_key,

@@ -117,46 +117,31 @@ impl OutcomeService {
         let limit = i64::from(settings.outcomes.max_due_per_tick.max(1));
         let contracts = self
             .store
-            .list_outcome_contracts(&OutcomeContractQuery {
-                user_id: user_id.to_string(),
-                actor_id: None,
-                status: None,
-                contract_type: None,
-                source_kind: None,
-                source_id: None,
-                thread_id: None,
-                limit: (limit * 16).max(limit),
-            })
+            .claim_due_outcome_contracts_for_user(user_id, limit, now)
             .await
             .map_err(|err| err.to_string())?;
         let mut processed = 0usize;
-        for mut contract in contracts.into_iter().filter(|entry| {
-            matches!(entry.status.as_str(), STATUS_OPEN | STATUS_EVALUATING) && entry.due_at <= now
-        }) {
-            if contract.evaluated_at.is_some() {
-                continue;
-            }
-            if contract.expires_at <= now {
-                contract.status = "expired".to_string();
-                contract.updated_at = now;
-                self.store
-                    .update_outcome_contract(&contract)
-                    .await
-                    .map_err(|err| err.to_string())?;
-                continue;
-            }
-            contract.status = STATUS_EVALUATING.to_string();
-            contract.claimed_at = Some(now);
-            contract.updated_at = now;
-            self.store
-                .update_outcome_contract(&contract)
-                .await
-                .map_err(|err| err.to_string())?;
-            if self.evaluate_contract(contract).await.is_ok() {
-                processed += 1;
-            }
-            if processed >= limit as usize {
-                break;
+        for contract in contracts {
+            match self.evaluate_contract(contract.clone()).await {
+                Ok(()) => {
+                    processed += 1;
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        contract_id = %contract.id,
+                        user_id,
+                        error = %err,
+                        "Outcome evaluation failed; requeueing contract"
+                    );
+                    if let Err(requeue_err) = self.requeue_failed_contract(&contract, &err).await {
+                        tracing::debug!(
+                            contract_id = %contract.id,
+                            user_id,
+                            error = %requeue_err,
+                            "Outcome contract requeue failed"
+                        );
+                    }
+                }
             }
         }
         Ok(processed)
@@ -236,6 +221,37 @@ impl OutcomeService {
                 "Outcome candidate routing failed"
             );
         }
+        Ok(())
+    }
+
+    async fn requeue_failed_contract(
+        &self,
+        contract: &OutcomeContract,
+        reason: &str,
+    ) -> Result<(), String> {
+        let Some(mut current) = self
+            .store
+            .get_outcome_contract(&contract.user_id, contract.id)
+            .await
+            .map_err(|err| err.to_string())?
+        else {
+            return Ok(());
+        };
+        if current.status != STATUS_EVALUATING || current.evaluated_at.is_some() {
+            return Ok(());
+        }
+        current.status = STATUS_OPEN.to_string();
+        current.claimed_at = None;
+        current.updated_at = Utc::now();
+        upsert_json_string(
+            &mut current.evaluation_details,
+            "last_error",
+            reason.to_string(),
+        );
+        self.store
+            .update_outcome_contract(&current)
+            .await
+            .map_err(|err| err.to_string())?;
         Ok(())
     }
 
@@ -417,8 +433,7 @@ impl OutcomeService {
             "Repeated negative outcome pattern detected for {} ({})",
             contract.contract_type, pattern_key
         );
-        let routine_patch = routine_candidate_patch(contract, observations);
-        let proposal = json!({
+        let evidence = json!({
             "source": "outcome_backed_learning",
             "contract_id": contract.id,
             "contract_type": contract.contract_type,
@@ -426,9 +441,9 @@ impl OutcomeService {
             "pattern_count": same_pattern,
             "final_verdict": score.verdict,
             "observations": observations,
-            "target": target_name,
+            "target": target_name.clone(),
             "target_type": candidate_target_type(contract),
-            "routine_patch": routine_patch,
+            "routine_patch": routine_candidate_patch(contract, observations),
         });
 
         let recent_candidates = self
@@ -451,6 +466,38 @@ impl OutcomeService {
             return Ok(None);
         }
 
+        let mut proposal = serde_json::Map::new();
+        proposal.insert("dedupe_key".to_string(), json!(dedupe));
+        proposal.insert("source".to_string(), json!("outcome_backed_learning"));
+        proposal.insert("pattern_key".to_string(), json!(pattern_key));
+        proposal.insert("pattern_count".to_string(), json!(same_pattern));
+        proposal.insert("contract_type".to_string(), json!(contract.contract_type));
+        proposal.insert("verdict".to_string(), json!(score.verdict));
+        proposal.insert("evidence".to_string(), evidence);
+        proposal.insert(
+            "routine_patch".to_string(),
+            routine_candidate_patch(contract, observations),
+        );
+
+        match class {
+            ImprovementClass::Prompt => {
+                let Some(prompt_payload) = self
+                    .prompt_candidate_payload(contract, observations, target_name.as_deref())
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                merge_json_object(&mut proposal, prompt_payload);
+            }
+            ImprovementClass::Code => {
+                let Some(code_payload) = code_candidate_payload(contract) else {
+                    return Ok(None);
+                };
+                merge_json_object(&mut proposal, code_payload);
+            }
+            _ => {}
+        }
+
         let candidate = LearningCandidate {
             id: Uuid::new_v4(),
             learning_event_id: Some(learning_event_id),
@@ -461,16 +508,7 @@ impl OutcomeService {
             target_type: Some(candidate_target_type(contract)),
             target_name,
             summary: Some(summary),
-            proposal: json!({
-                "dedupe_key": dedupe,
-                "source": "outcome_backed_learning",
-                "pattern_key": pattern_key,
-                "pattern_count": same_pattern,
-                "contract_type": contract.contract_type,
-                "verdict": score.verdict,
-                "evidence": proposal,
-                "routine_patch": routine_candidate_patch(contract, observations),
-            }),
+            proposal: serde_json::Value::Object(proposal),
             created_at: Utc::now(),
         };
         self.store
@@ -498,6 +536,43 @@ impl OutcomeService {
             "Outcome candidate routed through learning orchestrator"
         );
         Ok(())
+    }
+
+    async fn prompt_candidate_payload(
+        &self,
+        contract: &OutcomeContract,
+        observations: &[OutcomeObservation],
+        target_name: Option<&str>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let target = target_name.unwrap_or(paths::USER);
+        if !is_prompt_candidate_target_name_allowed(target) {
+            return Ok(None);
+        }
+        let heading = "Outcome-Backed Guidance";
+        let section_content = prompt_guidance_section(contract, observations);
+        let existing = if target.eq_ignore_ascii_case(paths::SOUL) {
+            crate::identity::soul_store::read_home_soul().unwrap_or_default()
+        } else if let Some(workspace) = self.workspace.as_ref() {
+            workspace
+                .read(target)
+                .await
+                .ok()
+                .map(|doc| doc.content)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let patch = json!({
+            "operation": "upsert_section",
+            "heading": heading,
+            "section_content": section_content,
+        });
+        let content = apply_prompt_patch_content(&existing, &patch, target)?;
+        Ok(Some(json!({
+            "target": target,
+            "content": content,
+            "prompt_patch": patch,
+        })))
     }
 }
 
@@ -812,9 +887,16 @@ pub async fn maybe_create_proposal_contract(
         final_score: None,
         evaluation_details: json!({}),
         metadata: json!({
+            "artifact_type": "code",
+            "artifact_name": proposal.title,
             "pattern_key": format!("code_proposal:{}", stable_key(&[&proposal.title, &proposal.target_files.join(",")])),
             "title": proposal.title,
+            "rationale": proposal.rationale,
             "target_files": proposal.target_files,
+            "diff": proposal.diff,
+            "validation_results": proposal.validation_results,
+            "rollback_note": proposal.rollback_note,
+            "confidence": proposal.confidence,
         }),
         dedupe_key: stable_key(&[
             CONTRACT_TOOL,
@@ -1431,6 +1513,45 @@ fn candidate_target_name(contract: &OutcomeContract) -> Option<String> {
     }
 }
 
+fn code_candidate_payload(contract: &OutcomeContract) -> Option<serde_json::Value> {
+    if contract.source_kind != SOURCE_CODE_PROPOSAL {
+        return None;
+    }
+    let diff = contract
+        .metadata
+        .get("diff")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(json!({
+        "title": contract
+            .metadata
+            .get("title")
+            .and_then(|value| value.as_str())
+            .or(contract.summary.as_deref())
+            .unwrap_or("Outcome-backed learning code proposal"),
+        "rationale": contract
+            .metadata
+            .get("rationale")
+            .and_then(|value| value.as_str())
+            .or(contract.summary.as_deref())
+            .unwrap_or("Repeated negative durability outcomes indicate this change needs revision."),
+        "target_files": contract
+            .metadata
+            .get("target_files")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+        "diff": diff,
+        "validation_results": contract
+            .metadata
+            .get("validation_results")
+            .cloned()
+            .unwrap_or_else(|| json!({"status":"not_run"})),
+        "rollback_note": contract.metadata.get("rollback_note").cloned().unwrap_or(serde_json::Value::Null),
+        "confidence": contract.metadata.get("confidence").cloned().unwrap_or(serde_json::Value::Null),
+    }))
+}
+
 fn routine_candidate_patch(
     contract: &OutcomeContract,
     observations: &[OutcomeObservation],
@@ -1495,12 +1616,14 @@ fn is_outcome_prompt_target_allowed(contract: &OutcomeContract) -> bool {
         .metadata
         .get("artifact_name")
         .and_then(|value| value.as_str())
-        .is_some_and(|name| {
-            name.eq_ignore_ascii_case(paths::USER)
-                || name
-                    .to_ascii_lowercase()
-                    .ends_with(&format!("/{}", paths::USER.to_ascii_lowercase()))
-        })
+        .is_some_and(is_prompt_candidate_target_name_allowed)
+}
+
+fn is_prompt_candidate_target_name_allowed(name: &str) -> bool {
+    name.eq_ignore_ascii_case(paths::USER)
+        || name
+            .to_ascii_lowercase()
+            .ends_with(&format!("/{}", paths::USER.to_ascii_lowercase()))
 }
 
 fn feedback_polarity(verdict: &str) -> (&'static str, f64) {
@@ -1688,6 +1811,273 @@ fn stable_key(parts: &[&str]) -> String {
         part.hash(&mut hasher);
     }
     format!("{:016x}", hasher.finish())
+}
+
+fn merge_json_object(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    patch: serde_json::Value,
+) {
+    let Some(patch_obj) = patch.as_object() else {
+        return;
+    };
+    for (key, value) in patch_obj {
+        target.insert(key.clone(), value.clone());
+    }
+}
+
+fn prompt_guidance_section(
+    contract: &OutcomeContract,
+    observations: &[OutcomeObservation],
+) -> String {
+    let mut bullets = Vec::new();
+    let has_kind = |kind: &str| observations.iter().any(|obs| obs.observation_kind == kind);
+
+    if has_kind("explicit_correction") || has_kind("repeated_request") {
+        bullets.push(
+            "When the user asks for a concrete fix or implementation, finish the requested work before concluding."
+                .to_string(),
+        );
+    }
+    if has_kind("explicit_correction") {
+        bullets.push(
+            "Treat direct corrections as a signal to revise the answer immediately around the exact requested deliverable."
+                .to_string(),
+        );
+    }
+    if has_kind("repeated_request") {
+        bullets.push(
+            "If the user repeats a request or says it is still not right, treat the earlier response as incomplete and close the remaining gap explicitly."
+                .to_string(),
+        );
+    }
+    if has_kind("rollback") || has_kind("proposal_rejected") {
+        bullets.push(
+            "Only propose durable, reviewable changes that include the concrete content or diff needed to apply them."
+                .to_string(),
+        );
+    }
+    if has_kind("routine_disabled") || has_kind("routine_muted") || has_kind("routine_paused") {
+        bullets.push(
+            "Avoid proactive follow-ups unless there is clear user-visible value; low-signal notifications create noise."
+                .to_string(),
+        );
+    }
+    if bullets.is_empty() {
+        bullets.push(
+            "This user benefits from direct execution, clear verification, and concise close-out notes instead of partial analysis."
+                .to_string(),
+        );
+    }
+    if contract.contract_type == CONTRACT_TURN {
+        bullets.push(
+            "Before replying, verify that the response fully satisfies the latest user request and includes any promised verification."
+                .to_string(),
+        );
+    }
+
+    bullets.sort();
+    bullets.dedup();
+    bullets
+        .into_iter()
+        .take(4)
+        .map(|bullet| format!("- {bullet}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn apply_prompt_patch_content(
+    current: &str,
+    patch: &serde_json::Value,
+    target: &str,
+) -> Result<String, String> {
+    let operation = patch
+        .get("operation")
+        .and_then(|value| value.as_str())
+        .unwrap_or("replace");
+    let base = ensure_prompt_document_root(current, target);
+    let next = match operation {
+        "replace" => patch
+            .get("content")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "prompt patch missing content".to_string())?
+            .to_string(),
+        "upsert_section" => {
+            let heading = patch
+                .get("heading")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "prompt patch missing heading".to_string())?;
+            let section_content = patch
+                .get("section_content")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            upsert_markdown_section(&base, heading, section_content)
+        }
+        "append_section" => {
+            let heading = patch
+                .get("heading")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "prompt patch missing heading".to_string())?;
+            let section_content = patch
+                .get("section_content")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            append_markdown_section(&base, heading, section_content)
+        }
+        "remove_section" => {
+            let heading = patch
+                .get("heading")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "prompt patch missing heading".to_string())?;
+            remove_markdown_section(&base, heading)?
+        }
+        other => return Err(format!("unsupported prompt patch operation '{}'", other)),
+    };
+    Ok(ensure_prompt_trailing_newline(&next))
+}
+
+fn ensure_prompt_document_root(current: &str, target: &str) -> String {
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        return ensure_prompt_trailing_newline(trimmed);
+    }
+    if target.ends_with(paths::SOUL_LOCAL) {
+        let mut sections = std::collections::BTreeMap::new();
+        for section in crate::identity::soul::LOCAL_SECTIONS {
+            sections.insert((*section).to_string(), String::new());
+        }
+        return crate::identity::soul::render_local_soul_overlay(
+            &crate::identity::soul::LocalSoulOverlay { sections },
+        );
+    }
+    if target.ends_with(paths::SOUL) {
+        return crate::identity::soul::compose_seeded_soul("balanced").unwrap_or_else(|_| {
+            "# SOUL.md - Who You Are\n\n- **Schema:** v2\n- **Seed Pack:** balanced\n\n## Core Truths\n\n## Boundaries\n\n## Vibe\n\n## Default Behaviors\n\n## Continuity\n\n## Change Contract\n"
+                .to_string()
+        });
+    }
+    let title = if target.ends_with(paths::USER) {
+        "USER.md"
+    } else if target.ends_with(paths::AGENTS) {
+        "AGENTS.md"
+    } else {
+        target.rsplit('/').next().unwrap_or("PROMPT.md")
+    };
+    format!("# {title}\n")
+}
+
+fn ensure_prompt_trailing_newline(content: &str) -> String {
+    let trimmed = content.trim_end();
+    format!("{trimmed}\n")
+}
+
+fn normalize_heading_name(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('#')
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn parse_markdown_heading(line: &str) -> Option<(usize, String)> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if level == 0 {
+        return None;
+    }
+    let title = trimmed[level..].trim();
+    if title.is_empty() {
+        return None;
+    }
+    Some((level, title.to_string()))
+}
+
+fn find_section_byte_range(doc: &str, heading_name: &str) -> Option<(usize, usize, usize, String)> {
+    let target = normalize_heading_name(heading_name);
+    let mut offset = 0usize;
+    let mut start: Option<(usize, usize, usize, String)> = None;
+
+    for line in doc.split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = offset + line.len();
+        offset = line_end;
+
+        if let Some((level, title)) = parse_markdown_heading(line) {
+            if let Some((start_offset, current_level, _, current_title)) = &start
+                && level <= *current_level
+            {
+                return Some((
+                    *start_offset,
+                    line_start,
+                    *current_level,
+                    current_title.clone(),
+                ));
+            }
+
+            if normalize_heading_name(&title) == target {
+                start = Some((line_start, level, line_end, title));
+            }
+        }
+    }
+
+    start.map(|(start_offset, level, _, title)| (start_offset, doc.len(), level, title))
+}
+
+fn upsert_markdown_section(doc: &str, heading: &str, section_content: &str) -> String {
+    let normalized_content = section_content.trim();
+    let body = if normalized_content.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}\n", normalized_content)
+    };
+
+    if let Some((start, end, level, title)) = find_section_byte_range(doc, heading) {
+        let heading_line = format!("{} {}", "#".repeat(level.max(1)), title.trim());
+        let replacement = format!("{heading_line}{body}");
+        let mut merged = String::with_capacity(doc.len() + replacement.len());
+        merged.push_str(&doc[..start]);
+        merged.push_str(replacement.trim_end_matches('\n'));
+        merged.push('\n');
+        merged.push_str(doc[end..].trim_start_matches('\n'));
+        return ensure_prompt_trailing_newline(merged.trim());
+    }
+
+    let mut merged = doc.trim().to_string();
+    if !merged.is_empty() {
+        merged.push_str("\n\n");
+    }
+    merged.push_str(&format!("## {}\n", heading.trim()));
+    if !normalized_content.is_empty() {
+        merged.push_str(normalized_content);
+        merged.push('\n');
+    }
+    ensure_prompt_trailing_newline(&merged)
+}
+
+fn append_markdown_section(doc: &str, heading: &str, section_content: &str) -> String {
+    let mut merged = doc.trim().to_string();
+    if !merged.is_empty() {
+        merged.push_str("\n\n");
+    }
+    merged.push_str(&format!("## {}\n", heading.trim()));
+    let content = section_content.trim();
+    if !content.is_empty() {
+        merged.push_str(content);
+        merged.push('\n');
+    }
+    ensure_prompt_trailing_newline(&merged)
+}
+
+fn remove_markdown_section(doc: &str, heading: &str) -> Result<String, String> {
+    let Some((start, end, _, _)) = find_section_byte_range(doc, heading) else {
+        return Err(format!("section '{}' not found", heading));
+    };
+
+    let mut merged = String::with_capacity(doc.len());
+    merged.push_str(&doc[..start]);
+    merged.push_str(doc[end..].trim_start_matches('\n'));
+    Ok(ensure_prompt_trailing_newline(merged.trim()))
 }
 
 async fn resolve_learning_event_for_manual_review(
@@ -2008,5 +2398,99 @@ mod tests {
             tool_event.payload.get("trajectory_target_id").is_none(),
             "non-turn synthetic events should stay out of trajectory hydration"
         );
+    }
+
+    #[test]
+    fn code_candidate_payload_requires_non_empty_diff() {
+        let mut code_contract = contract();
+        code_contract.contract_type = CONTRACT_TOOL.to_string();
+        code_contract.source_kind = SOURCE_CODE_PROPOSAL.to_string();
+        code_contract.metadata = json!({
+            "title": "Fix contract drift",
+            "rationale": "Repeated negative durability outcomes",
+            "target_files": ["src/agent/outcomes.rs"],
+            "diff": "",
+        });
+        assert!(
+            code_candidate_payload(&code_contract).is_none(),
+            "empty diffs should suppress outcome-driven code proposals"
+        );
+
+        code_contract.metadata["diff"] =
+            json!("diff --git a/src/agent/outcomes.rs b/src/agent/outcomes.rs");
+        let payload = code_candidate_payload(&code_contract).expect("code payload");
+        assert_eq!(
+            payload.get("title").and_then(|value| value.as_str()),
+            Some("Fix contract drift")
+        );
+        assert_eq!(
+            payload.get("diff").and_then(|value| value.as_str()),
+            Some("diff --git a/src/agent/outcomes.rs b/src/agent/outcomes.rs")
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn prompt_candidate_payload_includes_materialized_content() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let user_id = "outcome-prompt-payload-user";
+        let workspace = std::sync::Arc::new(crate::workspace::Workspace::new_with_db(
+            user_id,
+            std::sync::Arc::clone(&db),
+        ));
+        workspace
+            .write(
+                paths::USER,
+                "# USER.md\n\n## Preferences\n- prefer concise implementation notes\n",
+            )
+            .await
+            .expect("seed USER.md");
+
+        let service = OutcomeService::new(
+            std::sync::Arc::clone(&db),
+            None,
+            std::sync::Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig::default(),
+            )),
+        )
+        .with_learning_context(
+            Some(workspace),
+            None::<std::sync::Arc<tokio::sync::RwLock<crate::skills::SkillRegistry>>>,
+            None::<std::sync::Arc<crate::agent::routine_engine::RoutineEngine>>,
+        );
+
+        let mut prompt_contract = contract();
+        prompt_contract.user_id = user_id.to_string();
+        prompt_contract.metadata = json!({
+            "pattern_key": "turn:actor:thread",
+        });
+        let payload = service
+            .prompt_candidate_payload(
+                &prompt_contract,
+                &[observation("explicit_correction", VERDICT_NEGATIVE, 1.0)],
+                Some(paths::USER),
+            )
+            .await
+            .expect("payload generation should succeed")
+            .expect("prompt payload");
+
+        assert_eq!(
+            payload.get("target").and_then(|value| value.as_str()),
+            Some(paths::USER)
+        );
+        assert_eq!(
+            payload
+                .get("prompt_patch")
+                .and_then(|value| value.get("operation"))
+                .and_then(|value| value.as_str()),
+            Some("upsert_section")
+        );
+        let content = payload
+            .get("content")
+            .and_then(|value| value.as_str())
+            .expect("materialized content");
+        assert!(content.contains("## Preferences"));
+        assert!(content.contains("## Outcome-Backed Guidance"));
+        assert!(content.contains("finish the requested work before concluding"));
     }
 }

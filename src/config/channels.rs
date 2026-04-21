@@ -108,15 +108,18 @@ pub struct SignalConfig {
     pub ignore_stories: bool,
 }
 
-/// Nostr channel configuration (NIP-04 encrypted DMs via nostr-sdk).
+/// Nostr channel configuration.
 #[derive(Debug, Clone)]
 pub struct NostrConfig {
     /// Nostr private key in hex or bech32 (nsec) format.
     pub private_key: secrecy::SecretString,
     /// Relay URLs to connect to.
     pub relays: Vec<String>,
-    /// Public keys (hex or npub) allowed to interact with the bot.
-    /// Empty list denies all senders. `*` allows everyone.
+    /// Canonical owner public key (hex) authorized to control the agent over DMs.
+    pub owner_pubkey: Option<String>,
+    /// Whether non-owner DMs may be read via the Nostr tool.
+    pub social_dm_enabled: bool,
+    /// Deprecated legacy allow-from entries kept only for migration/warnings.
     pub allow_from: Vec<String>,
 }
 
@@ -241,7 +244,7 @@ impl ChannelsConfig {
             http,
             gateway,
             signal,
-            nostr: Self::resolve_nostr()?,
+            nostr: Self::resolve_nostr(settings)?,
             wasm_channels_dir: optional_env("WASM_CHANNELS_DIR")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_channels_dir),
@@ -278,12 +281,17 @@ impl ChannelsConfig {
         })
     }
 
-    fn resolve_nostr() -> Result<Option<NostrConfig>, ConfigError> {
+    pub(crate) fn resolve_nostr(settings: &Settings) -> Result<Option<NostrConfig>, ConfigError> {
+        let enabled = parse_bool_env("NOSTR_ENABLED", settings.channels.nostr_enabled)?;
         let private_key =
             match optional_env("NOSTR_PRIVATE_KEY")?.or(optional_env("NOSTR_SECRET_KEY")?) {
                 Some(k) => secrecy::SecretString::from(k),
                 None => return Ok(None),
             };
+
+        if !enabled {
+            return Ok(None);
+        }
 
         let relays = optional_env("NOSTR_RELAYS")?
             .map(|s| {
@@ -300,7 +308,8 @@ impl ChannelsConfig {
                 ]
             });
 
-        let allow_from = optional_env("NOSTR_ALLOW_FROM")?
+        let allow_from: Vec<String> = optional_env("NOSTR_ALLOW_FROM")?
+            .or(settings.channels.nostr_allow_from.clone())
             .map(|s| {
                 s.split(',')
                     .map(|e| e.trim().to_string())
@@ -309,9 +318,46 @@ impl ChannelsConfig {
             })
             .unwrap_or_default();
 
+        let owner_pubkey = optional_env("NOSTR_OWNER_PUBKEY")?
+            .or(settings.channels.nostr_owner_pubkey.clone())
+            .map(|raw| {
+                crate::channels::nostr_runtime::normalize_public_key(&raw).map_err(|message| {
+                    ConfigError::InvalidValue {
+                        key: "NOSTR_OWNER_PUBKEY".to_string(),
+                        message,
+                    }
+                })
+            })
+            .transpose()?;
+
+        let owner_pubkey = match owner_pubkey {
+            Some(owner) => Some(owner),
+            None if allow_from.len() == 1
+                && allow_from.first().is_some_and(|entry| entry != "*") =>
+            {
+                let migrated = crate::channels::nostr_runtime::normalize_public_key(&allow_from[0])
+                    .map_err(|message| ConfigError::InvalidValue {
+                        key: "NOSTR_ALLOW_FROM".to_string(),
+                        message,
+                    })?;
+                tracing::warn!(
+                    "NOSTR_ALLOW_FROM is deprecated for command authorization; treating its single entry as NOSTR_OWNER_PUBKEY"
+                );
+                Some(migrated)
+            }
+            None => None,
+        };
+
+        let social_dm_enabled = parse_bool_env(
+            "NOSTR_SOCIAL_DM_ENABLED",
+            settings.channels.nostr_social_dm_enabled,
+        )?;
+
         Ok(Some(NostrConfig {
             private_key,
             relays,
+            owner_pubkey,
+            social_dm_enabled,
             allow_from,
         }))
     }
@@ -826,9 +872,12 @@ mod tests {
     fn clear_nostr_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
+            std::env::remove_var("NOSTR_ENABLED");
             std::env::remove_var("NOSTR_PRIVATE_KEY");
             std::env::remove_var("NOSTR_SECRET_KEY");
             std::env::remove_var("NOSTR_RELAYS");
+            std::env::remove_var("NOSTR_OWNER_PUBKEY");
+            std::env::remove_var("NOSTR_SOCIAL_DM_ENABLED");
             std::env::remove_var("NOSTR_ALLOW_FROM");
         }
     }
@@ -840,14 +889,64 @@ mod tests {
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
+            std::env::set_var("NOSTR_ENABLED", "true");
             std::env::set_var("NOSTR_SECRET_KEY", "nsec_test_alias");
         }
 
-        let nostr = ChannelsConfig::resolve_nostr()
+        let nostr = ChannelsConfig::resolve_nostr(&Settings::default())
             .expect("nostr resolution should succeed")
             .expect("nostr config should exist");
 
         assert_eq!(nostr.private_key.expose_secret(), "nsec_test_alias");
+
+        clear_nostr_env();
+    }
+
+    #[test]
+    fn resolve_nostr_honors_enabled_flag() {
+        let _guard = lock_env();
+        clear_nostr_env();
+
+        unsafe {
+            std::env::set_var(
+                "NOSTR_PRIVATE_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            );
+            std::env::set_var("NOSTR_ENABLED", "false");
+        }
+
+        let nostr = ChannelsConfig::resolve_nostr(&Settings::default())
+            .expect("nostr resolution should succeed");
+        assert!(nostr.is_none());
+
+        clear_nostr_env();
+    }
+
+    #[test]
+    fn resolve_nostr_migrates_single_legacy_allow_from_entry_to_owner() {
+        let _guard = lock_env();
+        clear_nostr_env();
+
+        unsafe {
+            std::env::set_var(
+                "NOSTR_PRIVATE_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            );
+            std::env::set_var("NOSTR_ENABLED", "true");
+            std::env::set_var(
+                "NOSTR_ALLOW_FROM",
+                "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            );
+        }
+
+        let nostr = ChannelsConfig::resolve_nostr(&Settings::default())
+            .expect("nostr resolution should succeed")
+            .expect("nostr config should exist");
+
+        assert_eq!(
+            nostr.owner_pubkey.as_deref(),
+            Some("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+        );
 
         clear_nostr_env();
     }

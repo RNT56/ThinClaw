@@ -82,8 +82,8 @@ const SLASH_COMMANDS: &[&str] = &[
     "/heartbeat",
     "/summarize",
     "/suggest",
-    "/thread new",
-    "/resume <id>",
+    "/thread",
+    "/resume",
     "/rollback",
     "/personality",
     "/vibe",
@@ -815,6 +815,7 @@ impl Channel for ReplChannel {
                 extension_name,
                 success,
                 message,
+                ..
             } => {
                 if success {
                     eprintln!(

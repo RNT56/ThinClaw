@@ -17,7 +17,7 @@ For onboarding details, use [../src/setup/README.md](../src/setup/README.md). Fo
 
 | Mode | Best For | Main Shape |
 |---|---|---|
-| Local standalone | laptop, workstation, single-user local run | `thinclaw run --no-onboard` |
+| Local standalone | laptop, workstation, single-user local run | `thinclaw` or `thinclaw tui` |
 | Long-running service | Mac Mini, home server, Linux box, Windows workstation/server, VPS | launchd, systemd user service, or Windows Service Control Manager |
 | Remote gateway | controlled LAN or Tailscale access | bind gateway to non-loopback host |
 | Reckless desktop autonomy | operator-approved host-level desktop agenting | `desktop_autonomy.profile = "reckless_desktop"` plus bootstrap |
@@ -38,14 +38,18 @@ If you installed a release build:
 
 ```bash
 thinclaw onboard
-thinclaw run --no-onboard
+# onboarding now continues directly into runtime by default
+# later, start the standard local runtime with:
+thinclaw
+# or launch the full-screen runtime directly:
+thinclaw tui
 ```
 
-Startup logging defaults to a quiet operator experience: `thinclaw` and `thinclaw run` both show warnings and errors, not the full initialization trace. For a verbose startup session, use either:
+Startup logging defaults to a quiet operator experience: `thinclaw` and `thinclaw tui` show warnings and errors, not the full initialization trace. For a verbose startup session, use either:
 
 ```bash
-thinclaw --debug --no-onboard
-thinclaw --debug run --no-onboard
+thinclaw --debug
+thinclaw --debug tui
 ```
 
 If the runtime is already up and you want to inspect logs without restarting, use the logs CLI:
@@ -67,7 +71,11 @@ Windows quick path:
 
 ```powershell
 thinclaw onboard
-thinclaw run --no-onboard
+# onboarding now continues directly into runtime by default
+# later, start the standard local runtime with:
+thinclaw
+# or launch the full-screen runtime directly:
+thinclaw tui
 ```
 
 If you are using a release install on Windows, prefer the MSI for PATH integration and service-friendly installs. The portable ZIP is supported for manual or side-by-side installs.
@@ -125,7 +133,7 @@ ThinClaw ships with service helpers for:
 - Linux `systemd --user`
 - Windows Service Control Manager
 
-The service path runs:
+The service path runs the normal agent bootstrap without interactive local runtime surfaces:
 
 ```bash
 thinclaw run --no-onboard
@@ -266,7 +274,7 @@ $env:GATEWAY_ENABLED = "true"
 $env:GATEWAY_HOST = "0.0.0.0"
 $env:GATEWAY_PORT = "3000"
 $env:GATEWAY_AUTH_TOKEN = "replace-with-a-long-random-token"
-thinclaw run --no-onboard
+thinclaw
 ```
 
 ## Tunnels And Webhook Delivery
@@ -411,7 +419,7 @@ Check:
 - you did not override `GATEWAY_PORT`
 - the gateway is enabled for the current deployment
 
-For deeper startup diagnostics, run `thinclaw --debug --no-onboard` or `thinclaw --debug run --no-onboard` in the foreground.
+For deeper startup diagnostics, run `thinclaw --debug` or `thinclaw --debug tui` in the foreground.
 
 ### The host is reachable locally but not from another machine
 

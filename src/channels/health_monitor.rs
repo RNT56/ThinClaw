@@ -43,8 +43,8 @@ struct ChannelState {
     consecutive_failures: u32,
     /// Number of restart attempts so far.
     restart_attempts: u32,
-    /// Whether the channel is in cooldown after a restart.
-    in_cooldown: bool,
+    /// Next instant when the channel is eligible for health checks again.
+    cooldown_until: Option<std::time::Instant>,
 }
 
 /// Monitors channel health and restarts failed channels.
@@ -95,11 +95,16 @@ impl ChannelHealthMonitor {
                 for name in &channel_names {
                     let state = states_lock.entry(name.clone()).or_default();
 
-                    // Skip channels in cooldown
-                    if state.in_cooldown {
-                        state.in_cooldown = false;
-                        tracing::debug!(channel = %name, "Channel in cooldown, skipping health check");
-                        continue;
+                    // Skip channels in cooldown.
+                    if let Some(until) = state.cooldown_until {
+                        if std::time::Instant::now() < until {
+                            tracing::debug!(
+                                channel = %name,
+                                "Channel in cooldown, skipping health check"
+                            );
+                            continue;
+                        }
+                        state.cooldown_until = None;
                     }
 
                     if let Some(result) = results.get(name) {
@@ -157,7 +162,8 @@ impl ChannelHealthMonitor {
                                     && state.consecutive_failures >= restart_threshold
                                 {
                                     state.restart_attempts += 1;
-                                    state.in_cooldown = true;
+                                    state.cooldown_until =
+                                        Some(std::time::Instant::now() + config.restart_cooldown);
 
                                     tracing::info!(
                                         channel = %name,
@@ -193,9 +199,8 @@ impl ChannelHealthMonitor {
                                     }
 
                                     // Re-enter the loop — states_lock was dropped.
-                                    // Skip remaining channels this cycle; next tick
-                                    // will process them.
-                                    break;
+                                    states_lock = states.write().await;
+                                    continue;
                                 } else if state.restart_attempts >= config.max_restart_attempts {
                                     tracing::error!(
                                         channel = %name,

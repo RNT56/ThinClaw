@@ -8,6 +8,7 @@
 //! isolation and deterministic behavior.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -106,13 +107,15 @@ impl StoreData {
         capabilities: Capabilities,
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
+        available_secret_names: HashSet<String>,
     ) -> Self {
         // Minimal WASI context: no filesystem, no env vars (security)
         let wasi = WasiCtxBuilder::new().build();
 
         Self {
             limiter: WasmResourceLimiter::new(memory_limit),
-            host_state: HostState::new(capabilities),
+            host_state: HostState::new(capabilities)
+                .with_available_secret_names(available_secret_names),
             wasi,
             table: ResourceTable::new(),
             credentials,
@@ -551,6 +554,7 @@ impl WasmToolWrapper {
         params: serde_json::Value,
         context_json: Option<String>,
         host_credentials: Vec<ResolvedHostCredential>,
+        available_secret_names: HashSet<String>,
     ) -> Result<(String, Vec<crate::tools::wasm::host::LogEntry>), WasmError> {
         let engine = self.runtime.engine();
         let limits = &self.prepared.limits;
@@ -561,6 +565,7 @@ impl WasmToolWrapper {
             self.capabilities.clone(),
             self.credentials.clone(),
             host_credentials,
+            available_secret_names,
         );
         let mut store = Store::new(engine, store_data);
 
@@ -660,6 +665,12 @@ impl Tool for WasmToolWrapper {
             self.oauth_refresh.as_ref(),
         )
         .await;
+        let available_secret_names = resolve_available_secret_names(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+            &ctx.user_id,
+        )
+        .await;
 
         // Serialize context for WASM
         let context_json = serde_json::to_string(ctx).ok();
@@ -686,7 +697,12 @@ impl Tool for WasmToolWrapper {
             };
 
             tokio::task::spawn_blocking(move || {
-                wrapper.execute_sync(params, context_json, host_credentials)
+                wrapper.execute_sync(
+                    params,
+                    context_json,
+                    host_credentials,
+                    available_secret_names,
+                )
             })
             .await
             .map_err(|e| WasmError::ExecutionPanicked(e.to_string()))?
@@ -876,6 +892,40 @@ async fn refresh_oauth_token(
         "OAuth access token refreshed successfully"
     );
     true
+}
+
+async fn resolve_available_secret_names(
+    capabilities: &Capabilities,
+    store: Option<&(dyn SecretsStore + Send + Sync)>,
+    user_id: &str,
+) -> HashSet<String> {
+    let Some(secret_capability) = capabilities.secrets.as_ref() else {
+        return HashSet::new();
+    };
+    let Some(store) = store else {
+        return HashSet::new();
+    };
+
+    match store.list(user_id).await {
+        Ok(secret_refs) => secret_refs
+            .into_iter()
+            .filter_map(|secret| {
+                if secret_capability.is_allowed(&secret.name) {
+                    Some(secret.name)
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                user_id = %user_id,
+                error = %error,
+                "Failed to list secrets for WASM secret_exists checks"
+            );
+            HashSet::new()
+        }
+    }
 }
 
 /// Pre-resolve credentials for all HTTP capability mappings.
@@ -1147,7 +1197,7 @@ mod tests {
     #[test]
     fn test_inject_host_credentials_bearer() {
         use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
 
         let host_credentials = vec![ResolvedHostCredential {
             host_patterns: vec!["www.googleapis.com".to_string()],
@@ -1168,6 +1218,7 @@ mod tests {
             Capabilities::default(),
             HashMap::new(),
             host_credentials,
+            HashSet::new(),
         );
 
         // Should inject for matching host
@@ -1189,7 +1240,7 @@ mod tests {
     #[test]
     fn test_inject_host_credentials_query_params() {
         use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
 
         let host_credentials = vec![ResolvedHostCredential {
             host_patterns: vec!["api.example.com".to_string()],
@@ -1207,6 +1258,7 @@ mod tests {
             Capabilities::default(),
             HashMap::new(),
             host_credentials,
+            HashSet::new(),
         );
 
         let mut headers = HashMap::new();
@@ -1219,7 +1271,7 @@ mod tests {
     #[test]
     fn test_redact_credentials_includes_host_credentials() {
         use crate::tools::wasm::wrapper::{ResolvedHostCredential, StoreData};
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
 
         let host_credentials = vec![ResolvedHostCredential {
             host_patterns: vec!["api.example.com".to_string()],
@@ -1233,6 +1285,7 @@ mod tests {
             Capabilities::default(),
             HashMap::new(),
             host_credentials,
+            HashSet::new(),
         );
 
         let text = "Error: request to https://api.example.com?key=super-secret-token failed";

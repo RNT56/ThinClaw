@@ -3353,52 +3353,116 @@ impl Store {
         limit: i64,
         now: DateTime<Utc>,
     ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.claim_due_outcome_contracts_for_user(None, limit, now)
+            .await
+    }
+
+    /// Claim due contracts for a single user.
+    pub async fn claim_due_outcome_contracts_for_user(
+        &self,
+        user_id: Option<&str>,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
         if limit <= 0 {
             return Ok(Vec::new());
         }
         let conn = self.conn().await?;
-        conn.execute(
-            r#"
-            UPDATE outcome_contracts
-            SET status = 'expired',
-                updated_at = $1
-            WHERE status IN ('open', 'evaluating')
-              AND evaluated_at IS NULL
-              AND expires_at <= $1
-            "#,
-            &[&now],
-        )
-        .await?;
-
-        let rows = conn
-            .query(
-                r#"
-                WITH due AS (
-                    SELECT id
-                    FROM outcome_contracts
-                    WHERE status = 'open'
-                      AND due_at <= $2
-                      AND expires_at > $2
-                    ORDER BY due_at ASC, created_at ASC
-                    LIMIT $1
-                    FOR UPDATE SKIP LOCKED
+        match user_id {
+            Some(user_id) => {
+                conn.execute(
+                    r#"
+                    UPDATE outcome_contracts
+                    SET status = 'expired',
+                        updated_at = $1
+                    WHERE user_id = $2
+                      AND status IN ('open', 'evaluating')
+                      AND evaluated_at IS NULL
+                      AND expires_at <= $1
+                    "#,
+                    &[&now, &user_id],
                 )
-                UPDATE outcome_contracts oc
-                SET status = 'evaluating',
-                    claimed_at = $2,
-                    updated_at = $2
-                FROM due
-                WHERE oc.id = due.id
-                RETURNING
-                    oc.id, oc.user_id, oc.actor_id, oc.channel, oc.thread_id, oc.source_kind,
-                    oc.source_id, oc.contract_type, oc.status, oc.summary, oc.due_at,
-                    oc.expires_at, oc.final_verdict, oc.final_score, oc.evaluation_details,
-                    oc.metadata, oc.dedupe_key, oc.claimed_at, oc.evaluated_at,
-                    oc.created_at, oc.updated_at
-                "#,
-                &[&limit, &now],
-            )
-            .await?;
+                .await?;
+            }
+            None => {
+                conn.execute(
+                    r#"
+                    UPDATE outcome_contracts
+                    SET status = 'expired',
+                        updated_at = $1
+                    WHERE status IN ('open', 'evaluating')
+                      AND evaluated_at IS NULL
+                      AND expires_at <= $1
+                    "#,
+                    &[&now],
+                )
+                .await?;
+            }
+        }
+
+        let rows = match user_id {
+            Some(user_id) => {
+                conn.query(
+                    r#"
+                    WITH due AS (
+                        SELECT id
+                        FROM outcome_contracts
+                        WHERE user_id = $3
+                          AND status = 'open'
+                          AND due_at <= $2
+                          AND expires_at > $2
+                        ORDER BY due_at ASC, created_at ASC
+                        LIMIT $1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE outcome_contracts oc
+                    SET status = 'evaluating',
+                        claimed_at = $2,
+                        updated_at = $2
+                    FROM due
+                    WHERE oc.id = due.id
+                    RETURNING
+                        oc.id, oc.user_id, oc.actor_id, oc.channel, oc.thread_id, oc.source_kind,
+                        oc.source_id, oc.contract_type, oc.status, oc.summary, oc.due_at,
+                        oc.expires_at, oc.final_verdict, oc.final_score, oc.evaluation_details,
+                        oc.metadata, oc.dedupe_key, oc.claimed_at, oc.evaluated_at,
+                        oc.created_at, oc.updated_at
+                    "#,
+                    &[&limit, &now, &user_id],
+                )
+                .await?
+            }
+            None => {
+                conn.query(
+                    r#"
+                    WITH due AS (
+                        SELECT id
+                        FROM outcome_contracts
+                        WHERE status = 'open'
+                          AND due_at <= $2
+                          AND expires_at > $2
+                        ORDER BY due_at ASC, created_at ASC
+                        LIMIT $1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE outcome_contracts oc
+                    SET status = 'evaluating',
+                        claimed_at = $2,
+                        updated_at = $2
+                    FROM due
+                    WHERE oc.id = due.id
+                    RETURNING
+                        oc.id, oc.user_id, oc.actor_id, oc.channel, oc.thread_id, oc.source_kind,
+                        oc.source_id, oc.contract_type, oc.status, oc.summary, oc.due_at,
+                        oc.expires_at, oc.final_verdict, oc.final_score, oc.evaluation_details,
+                        oc.metadata, oc.dedupe_key, oc.claimed_at, oc.evaluated_at,
+                        oc.created_at, oc.updated_at
+                    "#,
+                    &[&limit, &now],
+                )
+                .await?
+            }
+        };
         Ok(rows.iter().map(outcome_contract_from_row).collect())
     }
 
@@ -3509,7 +3573,7 @@ impl Store {
         })
     }
 
-    /// Return distinct users with due or evaluating outcome work.
+    /// Return distinct users with due outcome work.
     pub async fn list_users_with_pending_outcome_work(
         &self,
         now: DateTime<Utc>,
@@ -3520,8 +3584,9 @@ impl Store {
                 r#"
                 SELECT DISTINCT user_id
                 FROM outcome_contracts
-                WHERE (status = 'open' AND due_at <= $1 AND expires_at > $1)
-                   OR status = 'evaluating'
+                WHERE status = 'open'
+                  AND due_at <= $1
+                  AND expires_at > $1
                 ORDER BY user_id ASC
                 "#,
                 &[&now],

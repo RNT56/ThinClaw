@@ -73,7 +73,10 @@ pub struct VideoAnalysis {
     pub metadata: VideoMetadata,
     /// Paths to extracted keyframe images.
     pub keyframe_paths: Vec<String>,
-    /// Extracted audio transcript (if available).
+    /// Path to extracted audio data for downstream transcription (if available).
+    pub audio_transcript_path: Option<String>,
+    /// Deprecated alias maintained for one release cycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_transcript: Option<String>,
     /// Summary suitable for LLM context.
     pub summary: String,
@@ -291,10 +294,14 @@ impl VideoAnalyzer {
 
         let summary = format_video_summary(&metadata, path);
 
+        let audio_transcript_path = audio_path;
+        let audio_transcript = audio_transcript_path.clone();
+
         Ok(VideoAnalysis {
             metadata,
             keyframe_paths,
-            audio_transcript: audio_path, // Path to extracted WAV for downstream transcription.
+            audio_transcript_path,
+            audio_transcript,
             summary,
         })
     }
@@ -307,7 +314,7 @@ impl VideoAnalyzer {
     ) -> Result<Vec<String>, VideoError> {
         let fps_filter = format!("fps=1/{}", self.config.keyframe_interval_secs);
         let scale_filter = format!(
-            "scale='min({max_dim},iw)':min'({max_dim},ih)':force_original_aspect_ratio=decrease",
+            "scale='min({max_dim},iw)':'min({max_dim},ih)':force_original_aspect_ratio=decrease",
             max_dim = self.config.keyframe_max_dimension
         );
         let output_pattern = out_dir.join("frame_%04d.jpg");

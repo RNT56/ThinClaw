@@ -6,7 +6,13 @@
 //! 3. Validates the configuration
 //! 4. Saves secrets to the database
 
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, HashMap},
+    io,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
@@ -14,13 +20,14 @@ use serde::Deserialize;
 use url::Url;
 use uuid::Uuid;
 
+use crate::pairing::PairingStore;
 #[cfg(feature = "postgres")]
 use crate::secrets::SecretsCrypto;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::settings::{Settings, TunnelSettings};
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_error, print_info, print_success, secret_input,
-    select_one,
+    PromptUiMode, confirm, current_prompt_ui_mode, input, optional_input, print_blank_line,
+    print_error, print_info, print_success, print_warning, secret_input, select_one,
 };
 
 /// Typed errors for channel setup flows.
@@ -143,6 +150,7 @@ struct TelegramUpdate {
 #[derive(Debug, Deserialize)]
 struct TelegramUpdateMessage {
     from: Option<TelegramUpdateUser>,
+    chat: Option<TelegramUpdateChat>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +158,53 @@ struct TelegramUpdateUser {
     id: i64,
     first_name: String,
     username: Option<String>,
+    #[serde(default)]
+    is_bot: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramUpdateChat {
+    #[serde(rename = "type")]
+    chat_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TelegramOwnerCandidate {
+    user_id: i64,
+    display_name: String,
+    username: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TelegramOwnerCapture {
+    candidate: TelegramOwnerCandidate,
+    acknowledged_offset: i64,
+    ignored_update_upper_bound: i64,
+}
+
+impl TelegramOwnerCandidate {
+    fn summary(&self) -> String {
+        if let Some(username) = self.username.as_deref() {
+            format!("@{} (ID: {})", username, self.user_id)
+        } else {
+            format!("{} (ID: {})", self.display_name, self.user_id)
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TelegramBindingOutcome {
+    Bound(TelegramOwnerCandidate),
+    TimedOut,
+    ManualEntryRequested,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramBindingRecovery {
+    RetryAutomatic,
+    ManualEntry,
+    Skip,
 }
 
 /// Set up Telegram bot channel.
@@ -163,13 +218,13 @@ pub async fn setup_telegram(
     secrets: &SecretsContext,
     settings: &Settings,
 ) -> Result<TelegramSetupResult, ChannelSetupError> {
-    println!("Telegram Setup:");
-    println!();
+    print_info("Telegram setup");
+    print_blank_line();
     print_info("To create a Telegram bot:");
     print_info("1. Open Telegram and message @BotFather");
     print_info("2. Send /newbot and follow the prompts");
     print_info("3. Copy the bot token (looks like 123456:ABC-DEF...)");
-    println!();
+    print_blank_line();
 
     // Check if token already exists
     if secrets.secret_exists("telegram_bot_token").await {
@@ -205,7 +260,7 @@ pub async fn setup_telegram(
                 print_success("Token saved to database");
 
                 // Bind bot to owner's Telegram account
-                let owner_id = bind_telegram_owner(&token).await?;
+                let owner_id = bind_telegram_owner(&token, username.as_deref()).await?;
 
                 // Offer webhook secret configuration
                 let webhook_secret =
@@ -238,105 +293,172 @@ pub async fn setup_telegram(
 ///
 /// Polls `getUpdates` until a message arrives, then captures the sender's user ID.
 /// Returns `None` if the user declines or the flow times out.
-async fn bind_telegram_owner(token: &SecretString) -> Result<Option<i64>, ChannelSetupError> {
-    println!();
+async fn bind_telegram_owner(
+    token: &SecretString,
+    bot_username: Option<&str>,
+) -> Result<Option<i64>, ChannelSetupError> {
+    crate::setup::prompts::print_blank_line();
     print_info("Account Binding (recommended):");
     print_info("Binding restricts the bot so only YOU can use it.");
     print_info("Without this, anyone who finds your bot can send it messages.");
-    println!();
+    crate::setup::prompts::print_blank_line();
 
     if !confirm("Bind bot to your Telegram account?", true)? {
         print_info("Skipping account binding. Bot will accept messages from all users.");
         return Ok(None);
     }
 
-    print_info("Send any message (e.g. /start) to your bot in Telegram.");
-    print_info("Waiting for your message (up to 120 seconds)...");
-
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(35))
-        .build()
-        .map_err(|e| ChannelSetupError::Network(format!("Failed to create HTTP client: {}", e)))?;
-
-    // Clear any existing webhook so getUpdates works
-    let delete_url = format!(
-        "https://api.telegram.org/bot{}/deleteWebhook",
-        token.expose_secret()
-    );
-    if let Err(e) = client.post(&delete_url).send().await {
-        tracing::warn!("Failed to delete webhook (getUpdates may not work): {e}");
+    print_info("Send a private message (for example /start) to your bot in Telegram.");
+    if let Some(username) = bot_username {
+        print_info(&format!("Bot to message: @{}", username));
     }
+    print_info("ThinClaw listens for the first NEW private message after this step starts.");
 
-    let updates_url = format!(
-        "https://api.telegram.org/bot{}/getUpdates",
-        token.expose_secret()
-    );
+    loop {
+        let automatic_result = match current_prompt_ui_mode() {
+            PromptUiMode::Tui => match wait_for_telegram_owner_tui(token, bot_username).await {
+                Ok(outcome) => outcome,
+                Err(ChannelSetupError::Io(error)) => return Err(ChannelSetupError::Io(error)),
+                Err(error) => {
+                    print_error(&format!(
+                        "Automatic Telegram binding could not complete: {}",
+                        error
+                    ));
+                    match prompt_telegram_binding_recovery(
+                        "Automatic Telegram binding ran into a network or API error.",
+                    )? {
+                        TelegramBindingRecovery::RetryAutomatic => continue,
+                        TelegramBindingRecovery::ManualEntry => {
+                            TelegramBindingOutcome::ManualEntryRequested
+                        }
+                        TelegramBindingRecovery::Skip => TelegramBindingOutcome::Skipped,
+                    }
+                }
+            },
+            PromptUiMode::Cli => {
+                print_info("Waiting for your private message (up to 120 seconds)...");
+                match capture_telegram_owner_candidate(token).await {
+                    Ok(Some(candidate)) => TelegramBindingOutcome::Bound(candidate),
+                    Ok(None) => TelegramBindingOutcome::TimedOut,
+                    Err(error) => {
+                        print_error(&format!(
+                            "Automatic Telegram binding could not complete: {}",
+                            error
+                        ));
+                        match prompt_telegram_binding_recovery(
+                            "Automatic Telegram binding ran into a network or API error.",
+                        )? {
+                            TelegramBindingRecovery::RetryAutomatic => continue,
+                            TelegramBindingRecovery::ManualEntry => {
+                                TelegramBindingOutcome::ManualEntryRequested
+                            }
+                            TelegramBindingRecovery::Skip => TelegramBindingOutcome::Skipped,
+                        }
+                    }
+                }
+            }
+        };
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-
-    while std::time::Instant::now() < deadline {
-        let response = client
-            .get(&updates_url)
-            .query(&[("timeout", "30"), ("allowed_updates", "[\"message\"]")])
-            .send()
-            .await
-            .map_err(|e| ChannelSetupError::Network(format!("getUpdates request failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            return Err(ChannelSetupError::Network(format!(
-                "getUpdates returned status {}",
-                response.status()
-            )));
-        }
-
-        let body: TelegramGetUpdatesResponse = response.json().await.map_err(|e| {
-            ChannelSetupError::Network(format!("Failed to parse getUpdates response: {}", e))
-        })?;
-
-        if !body.ok {
-            return Err(ChannelSetupError::Network(
-                "Telegram API returned error for getUpdates".to_string(),
-            ));
-        }
-
-        // Find the first message with a sender
-        for update in &body.result {
-            if let Some(ref msg) = update.message
-                && let Some(ref from) = msg.from
-            {
-                let display_name = from
-                    .username
-                    .as_ref()
-                    .map(|u| format!("@{}", u))
-                    .unwrap_or_else(|| from.first_name.clone());
-
+        match automatic_result {
+            TelegramBindingOutcome::Bound(candidate) => {
                 print_success(&format!(
-                    "Received message from {} (ID: {})",
-                    display_name, from.id
+                    "Captured Telegram account: {}",
+                    candidate.summary()
                 ));
-
-                // Acknowledge the update so it doesn't pile up
-                let ack_url = format!(
-                    "https://api.telegram.org/bot{}/getUpdates",
-                    token.expose_secret()
+                print_info(
+                    "ThinClaw will store this numeric Telegram ID as the bot owner and seed the pairing allowlist.",
                 );
-                if let Err(e) = client
-                    .get(&ack_url)
-                    .query(&[("offset", &(update.update_id + 1).to_string())])
-                    .send()
-                    .await
-                {
-                    tracing::warn!("Failed to acknowledge Telegram update: {e}");
+                if confirm("Use this Telegram account as the bot owner?", true)? {
+                    if let Err(error) = persist_telegram_runtime_polling_snapshot(token).await {
+                        tracing::warn!(
+                            %error,
+                            "Failed to persist Telegram backlog snapshot after automatic owner capture"
+                        );
+                    }
+                    seed_telegram_owner_allowlist(candidate.user_id);
+                    return Ok(Some(candidate.user_id));
                 }
 
-                return Ok(Some(from.id));
+                match prompt_telegram_binding_recovery(
+                    "The captured Telegram account was not accepted.",
+                )? {
+                    TelegramBindingRecovery::RetryAutomatic => continue,
+                    TelegramBindingRecovery::ManualEntry => {
+                        if let Err(error) = persist_telegram_runtime_polling_snapshot(token).await {
+                            tracing::warn!(
+                                %error,
+                                "Failed to persist Telegram backlog snapshot before manual owner ID entry"
+                            );
+                        }
+                        if let Some(owner_id) =
+                            prompt_manual_telegram_owner_id(Some(candidate.user_id))?
+                        {
+                            seed_telegram_owner_allowlist(owner_id);
+                            return Ok(Some(owner_id));
+                        }
+                    }
+                    TelegramBindingRecovery::Skip => {
+                        if let Err(error) = persist_telegram_runtime_polling_snapshot(token).await {
+                            tracing::warn!(
+                                %error,
+                                "Failed to persist Telegram backlog snapshot before skipping owner binding"
+                            );
+                        }
+                    }
+                }
+            }
+            TelegramBindingOutcome::TimedOut => {
+                match prompt_telegram_binding_recovery(
+                    "No new private Telegram message reached the bot before the timeout.",
+                )? {
+                    TelegramBindingRecovery::RetryAutomatic => continue,
+                    TelegramBindingRecovery::ManualEntry => {
+                        if let Err(error) = persist_telegram_runtime_polling_snapshot(token).await {
+                            tracing::warn!(
+                                %error,
+                                "Failed to persist Telegram backlog snapshot before manual owner ID entry"
+                            );
+                        }
+                        if let Some(owner_id) = prompt_manual_telegram_owner_id(None)? {
+                            seed_telegram_owner_allowlist(owner_id);
+                            return Ok(Some(owner_id));
+                        }
+                    }
+                    TelegramBindingRecovery::Skip => {
+                        if let Err(error) = persist_telegram_runtime_polling_snapshot(token).await {
+                            tracing::warn!(
+                                %error,
+                                "Failed to persist Telegram backlog snapshot before skipping owner binding"
+                            );
+                        }
+                    }
+                }
+            }
+            TelegramBindingOutcome::ManualEntryRequested => {
+                if let Err(error) = persist_telegram_runtime_polling_snapshot(token).await {
+                    tracing::warn!(
+                        %error,
+                        "Failed to persist Telegram backlog snapshot after manual owner entry request"
+                    );
+                }
+                if let Some(owner_id) = prompt_manual_telegram_owner_id(None)? {
+                    seed_telegram_owner_allowlist(owner_id);
+                    return Ok(Some(owner_id));
+                }
+            }
+            TelegramBindingOutcome::Skipped => {
+                if let Err(error) = persist_telegram_runtime_polling_snapshot(token).await {
+                    tracing::warn!(
+                        %error,
+                        "Failed to persist Telegram backlog snapshot after skipping owner binding"
+                    );
+                }
             }
         }
-    }
 
-    print_error("Timed out waiting for a message. You can re-run setup to try again.");
-    print_info("Bot will accept messages from all users until owner is bound.");
-    Ok(None)
+        print_info("Skipping owner binding. Bot will accept messages from all users.");
+        return Ok(None);
+    }
 }
 
 /// Bind flow when the token already exists (reads from secrets store).
@@ -356,7 +478,589 @@ async fn bind_telegram_owner_flow(
     // We need the token to poll getUpdates
     let token = secrets.get_secret("telegram_bot_token").await?;
 
-    bind_telegram_owner(&token).await
+    bind_telegram_owner(&token, None).await
+}
+
+fn seed_telegram_owner_allowlist(owner_id: i64) {
+    let pairing_store = PairingStore::new();
+    if let Err(error) = pairing_store.ensure_allow_from("telegram", &owner_id.to_string()) {
+        tracing::warn!(
+            owner_id,
+            %error,
+            "Failed to seed Telegram owner into pairing allowlist"
+        );
+    }
+}
+
+fn prompt_telegram_binding_recovery(
+    reason: &str,
+) -> Result<TelegramBindingRecovery, ChannelSetupError> {
+    print_warning(reason);
+    print_info(
+        "ThinClaw can retry the automatic capture, accept a manual numeric Telegram user ID, or skip owner binding for now.",
+    );
+
+    let options = [
+        "Retry automatic capture",
+        "Enter Telegram user ID manually",
+        "Skip owner binding for now",
+    ];
+    let choice = select_one("How should ThinClaw continue?", &options)?;
+    Ok(match choice {
+        0 => TelegramBindingRecovery::RetryAutomatic,
+        1 => TelegramBindingRecovery::ManualEntry,
+        _ => TelegramBindingRecovery::Skip,
+    })
+}
+
+fn prompt_manual_telegram_owner_id(
+    suggested_id: Option<i64>,
+) -> Result<Option<i64>, ChannelSetupError> {
+    print_info("Enter the numeric Telegram user ID that should own this bot.");
+    if suggested_id.is_some() {
+        print_info("Press Enter to use the captured ID, or type a different numeric ID.");
+    } else {
+        print_info("Leave it blank to skip owner binding for now.");
+    }
+
+    let hint = suggested_id.map(|id| id.to_string());
+    loop {
+        let entered = optional_input("Telegram user ID (numeric)", hint.as_deref())?;
+        let value = match (entered, suggested_id) {
+            (Some(raw), _) => raw,
+            (None, Some(id)) => return Ok(Some(id)),
+            (None, None) => return Ok(None),
+        };
+
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        match trimmed.parse::<i64>() {
+            Ok(owner_id) if owner_id > 0 => return Ok(Some(owner_id)),
+            _ => {
+                print_error(
+                    "Telegram owner IDs must be positive whole numbers. Example: 684480568",
+                );
+                if !confirm("Try entering the Telegram ID again?", true)? {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
+
+fn extract_telegram_owner_capture(updates: &[TelegramUpdate]) -> Option<TelegramOwnerCapture> {
+    updates.iter().find_map(|update| {
+        let message = update.message.as_ref()?;
+        let from = message.from.as_ref()?;
+        let chat = message.chat.as_ref()?;
+        if from.is_bot || chat.chat_type != "private" {
+            return None;
+        }
+
+        let display_name = from
+            .username
+            .as_ref()
+            .map(|username| format!("@{}", username))
+            .unwrap_or_else(|| from.first_name.clone());
+
+        let candidate = TelegramOwnerCandidate {
+            user_id: from.id,
+            display_name,
+            username: from.username.clone(),
+        };
+        let acknowledged_offset = next_telegram_update_offset(updates)
+            .unwrap_or_else(|| update.update_id.saturating_add(1));
+        let ignored_update_upper_bound = acknowledged_offset.saturating_sub(1);
+
+        Some(TelegramOwnerCapture {
+            candidate,
+            acknowledged_offset,
+            ignored_update_upper_bound,
+        })
+    })
+}
+
+fn next_telegram_update_offset(updates: &[TelegramUpdate]) -> Option<i64> {
+    updates
+        .iter()
+        .map(|update| update.update_id.saturating_add(1))
+        .max()
+}
+
+async fn fetch_telegram_updates(
+    client: &Client,
+    token: &SecretString,
+    timeout_secs: u64,
+    offset: Option<i64>,
+) -> Result<Vec<TelegramUpdate>, ChannelSetupError> {
+    let updates_url = format!(
+        "https://api.telegram.org/bot{}/getUpdates",
+        token.expose_secret()
+    );
+    let mut query = vec![
+        ("timeout".to_string(), timeout_secs.to_string()),
+        ("allowed_updates".to_string(), "[\"message\"]".to_string()),
+    ];
+    if let Some(offset) = offset {
+        query.push(("offset".to_string(), offset.to_string()));
+    }
+
+    let response = client
+        .get(&updates_url)
+        .query(&query)
+        .send()
+        .await
+        .map_err(|e| ChannelSetupError::Network(format!("getUpdates request failed: {}", e)))?;
+
+    if !response.status().is_success() {
+        return Err(ChannelSetupError::Network(format!(
+            "getUpdates returned status {}",
+            response.status()
+        )));
+    }
+
+    let body: TelegramGetUpdatesResponse = response.json().await.map_err(|e| {
+        ChannelSetupError::Network(format!("Failed to parse getUpdates response: {}", e))
+    })?;
+
+    if !body.ok {
+        return Err(ChannelSetupError::Network(
+            "Telegram API returned error for getUpdates".to_string(),
+        ));
+    }
+
+    Ok(body.result)
+}
+
+async fn capture_telegram_owner_candidate(
+    token: &SecretString,
+) -> Result<Option<TelegramOwnerCandidate>, ChannelSetupError> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(35))
+        .build()
+        .map_err(|e| ChannelSetupError::Network(format!("Failed to create HTTP client: {}", e)))?;
+
+    let delete_url = format!(
+        "https://api.telegram.org/bot{}/deleteWebhook",
+        token.expose_secret()
+    );
+    if let Err(error) = client.post(&delete_url).send().await {
+        tracing::warn!("Failed to delete webhook (getUpdates may not work): {error}");
+    }
+
+    let baseline_updates = fetch_telegram_updates(&client, token, 0, None).await?;
+    let mut next_offset = next_telegram_update_offset(&baseline_updates);
+    let deadline = Instant::now() + Duration::from_secs(120);
+
+    while Instant::now() < deadline {
+        let remaining_secs = deadline.saturating_duration_since(Instant::now()).as_secs();
+        let timeout_secs = remaining_secs.clamp(1, 30);
+        let updates = match fetch_telegram_updates(&client, token, timeout_secs, next_offset).await
+        {
+            Ok(updates) => updates,
+            Err(error) => {
+                persist_telegram_runtime_offset_from_next_offset(next_offset);
+                return Err(error);
+            }
+        };
+
+        if let Some(capture) = extract_telegram_owner_capture(&updates) {
+            if let Err(error) =
+                acknowledge_telegram_update_offset(&client, token, capture.acknowledged_offset)
+                    .await
+            {
+                tracing::warn!(
+                    offset = capture.acknowledged_offset,
+                    %error,
+                    "Failed to acknowledge captured Telegram binding update; relying on local runtime offset fallback"
+                );
+            }
+
+            if let Err(error) = persist_telegram_runtime_polling_offset(
+                capture.acknowledged_offset,
+                capture.ignored_update_upper_bound,
+            ) {
+                tracing::warn!(
+                    offset = capture.acknowledged_offset,
+                    %error,
+                    "Failed to persist Telegram runtime polling offset after owner capture"
+                );
+            }
+
+            return Ok(Some(capture.candidate));
+        }
+
+        if let Some(offset) = next_telegram_update_offset(&updates) {
+            next_offset = Some(offset);
+        }
+    }
+
+    // Even when no candidate is captured (timeout), persist the highest observed
+    // offset so any pairing-window messages do not replay into runtime.
+    persist_telegram_runtime_offset_from_next_offset(next_offset);
+
+    Ok(None)
+}
+
+fn persist_telegram_runtime_offset_from_next_offset(next_offset: Option<i64>) {
+    if let Some(offset) = next_offset
+        && let Err(error) =
+            persist_telegram_runtime_polling_offset(offset, offset.saturating_sub(1))
+    {
+        tracing::warn!(
+            offset,
+            %error,
+            "Failed to persist Telegram runtime polling offset from observed high-watermark"
+        );
+    }
+}
+
+async fn persist_telegram_runtime_polling_snapshot(
+    token: &SecretString,
+) -> Result<(), ChannelSetupError> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| ChannelSetupError::Network(format!("Failed to create HTTP client: {}", e)))?;
+
+    let delete_url = format!(
+        "https://api.telegram.org/bot{}/deleteWebhook",
+        token.expose_secret()
+    );
+    if let Err(error) = client.post(&delete_url).send().await {
+        tracing::warn!("Failed to delete webhook while persisting Telegram snapshot: {error}");
+    }
+
+    let mut next_offset = None;
+    let mut high_watermark = None;
+
+    // Drain pending updates in pages so we capture a reliable high-watermark
+    // even when Telegram has more than one page buffered.
+    for _ in 0..20 {
+        let updates = fetch_telegram_updates(&client, token, 0, next_offset).await?;
+        if updates.is_empty() {
+            break;
+        }
+
+        let Some(observed_next_offset) = next_telegram_update_offset(&updates) else {
+            break;
+        };
+
+        if next_offset == Some(observed_next_offset) {
+            break;
+        }
+
+        high_watermark = Some(observed_next_offset);
+        next_offset = Some(observed_next_offset);
+    }
+
+    persist_telegram_runtime_offset_from_next_offset(high_watermark);
+    Ok(())
+}
+
+async fn acknowledge_telegram_update_offset(
+    client: &Client,
+    token: &SecretString,
+    offset: i64,
+) -> Result<(), ChannelSetupError> {
+    if offset <= 0 {
+        return Ok(());
+    }
+
+    let _ = fetch_telegram_updates(client, token, 0, Some(offset)).await?;
+    Ok(())
+}
+
+fn persist_telegram_runtime_polling_offset(
+    offset: i64,
+    ignored_update_upper_bound: i64,
+) -> Result<(), ChannelSetupError> {
+    if offset <= 0 {
+        return Ok(());
+    }
+
+    let workspace_path = crate::platform::state_paths()
+        .channels_dir
+        .join("telegram.workspace.json");
+    ensure_parent_dir(&workspace_path)?;
+
+    let mut state = read_telegram_workspace_state(&workspace_path);
+    let existing_offset = state
+        .get("channels/telegram/state/last_update_id")
+        .and_then(|raw| raw.parse::<i64>().ok());
+    if existing_offset.is_some_and(|current| current >= offset) {
+        return Ok(());
+    }
+
+    state.insert(
+        "channels/telegram/state/last_update_id".to_string(),
+        offset.to_string(),
+    );
+    state.insert(
+        "channels/telegram/state/last_emitted_update_id".to_string(),
+        offset.saturating_sub(1).to_string(),
+    );
+    if ignored_update_upper_bound > 0 {
+        let existing_ignored_upper_bound = state
+            .get("channels/telegram/state/ignore_updates_until_id")
+            .and_then(|raw| raw.parse::<i64>().ok());
+        if existing_ignored_upper_bound.is_none_or(|current| current < ignored_update_upper_bound) {
+            state.insert(
+                "channels/telegram/state/ignore_updates_until_id".to_string(),
+                ignored_update_upper_bound.to_string(),
+            );
+        }
+    }
+
+    write_telegram_workspace_state(&workspace_path, &state)
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<(), ChannelSetupError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn read_telegram_workspace_state(path: &Path) -> HashMap<String, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return HashMap::new(),
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "Failed to read Telegram workspace state file; starting with an empty state map"
+            );
+            return HashMap::new();
+        }
+    };
+
+    serde_json::from_str::<HashMap<String, String>>(&raw).unwrap_or_else(|error| {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "Failed to parse Telegram workspace state file; starting with an empty state map"
+        );
+        HashMap::new()
+    })
+}
+
+fn write_telegram_workspace_state(
+    path: &Path,
+    state: &HashMap<String, String>,
+) -> Result<(), ChannelSetupError> {
+    let sorted: BTreeMap<&String, &String> = state.iter().collect();
+    let serialized = serde_json::to_vec_pretty(&sorted).map_err(|error| {
+        ChannelSetupError::Io(io::Error::other(format!(
+            "Failed to serialize Telegram workspace state: {}",
+            error
+        )))
+    })?;
+
+    let tmp_path = path.with_extension("tmp");
+    std::fs::write(&tmp_path, serialized)?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+async fn wait_for_telegram_owner_tui(
+    token: &SecretString,
+    bot_username: Option<&str>,
+) -> Result<TelegramBindingOutcome, ChannelSetupError> {
+    use crossterm::{
+        ExecutableCommand, cursor,
+        event::{self, Event, KeyCode, KeyModifiers},
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    };
+    use ratatui::{
+        Terminal,
+        backend::CrosstermBackend,
+        prelude::*,
+        widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    };
+
+    use crate::terminal_branding::resolve_cli_skin_name;
+    use crate::tui::skin::CliSkin;
+
+    let mut capture_task = tokio::spawn({
+        let token = token.clone();
+        async move { capture_telegram_owner_candidate(&token).await }
+    });
+
+    enable_raw_mode().map_err(ChannelSetupError::Io)?;
+    io::stdout()
+        .execute(EnterAlternateScreen)
+        .map_err(ChannelSetupError::Io)?;
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend).map_err(ChannelSetupError::Io)?;
+    terminal.hide_cursor().map_err(ChannelSetupError::Io)?;
+
+    let skin = CliSkin::load(&resolve_cli_skin_name());
+    let started = Instant::now();
+    let timeout = Duration::from_secs(120);
+    let spinner_frames = ['|', '/', '-', '\\'];
+    let mut frame_index = 0usize;
+
+    let result = loop {
+        let elapsed = started.elapsed();
+        let remaining = timeout.saturating_sub(elapsed);
+        let spinner = spinner_frames[frame_index % spinner_frames.len()];
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Clear, frame.area());
+
+                let width = frame.area().width.saturating_sub(6).clamp(62, 92);
+                let area = centered_rect(frame.area(), width, 18);
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(skin.accent_style())
+                    .title(Span::styled(" Telegram Binding ", skin.accent_style()));
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
+
+                let mut lines = vec![
+                    Line::from(Span::styled(
+                        "ThinClaw is waiting for a fresh private Telegram message.",
+                        skin.body_style().bold(),
+                    )),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("1. ", skin.accent_style()),
+                        Span::styled(
+                            "Open Telegram on the account that should own this bot.",
+                            skin.body_style(),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("2. ", skin.accent_style()),
+                        Span::styled(
+                            "Send a private message such as /start to the bot.",
+                            skin.body_style(),
+                        ),
+                    ]),
+                ];
+
+                if let Some(username) = bot_username {
+                    lines.push(Line::from(vec![
+                        Span::styled("Bot: ", skin.accent_soft_style()),
+                        Span::styled(format!("@{}", username), skin.body_style()),
+                    ]));
+                }
+
+                lines.extend([
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled(format!("[{}] ", spinner), skin.accent_style()),
+                        Span::styled(
+                            "Listening for the first new private message after this step started.",
+                            skin.body_style(),
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Elapsed: ", skin.accent_soft_style()),
+                        Span::styled(format!("{}s", elapsed.as_secs()), skin.body_style()),
+                        Span::styled("   Remaining: ", skin.accent_soft_style()),
+                        Span::styled(format!("{}s", remaining.as_secs()), skin.body_style()),
+                    ]),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "M manual ID   S skip binding   Esc exit setup   Ctrl+C abort",
+                        skin.muted_style(),
+                    )),
+                ]);
+
+                frame.render_widget(
+                    Paragraph::new(Text::from(lines))
+                        .wrap(Wrap { trim: false })
+                        .alignment(Alignment::Left),
+                    inner,
+                );
+            })
+            .map_err(ChannelSetupError::Io)?;
+
+        tokio::select! {
+            joined = &mut capture_task => {
+                let outcome = match joined {
+                    Ok(Ok(Some(candidate))) => TelegramBindingOutcome::Bound(candidate),
+                    Ok(Ok(None)) => TelegramBindingOutcome::TimedOut,
+                    Ok(Err(error)) => break Err(error),
+                    Err(error) => break Err(ChannelSetupError::Network(format!(
+                        "Telegram binding task failed: {}",
+                        error
+                    ))),
+                };
+                break Ok(outcome);
+            }
+            _ = tokio::time::sleep(Duration::from_millis(120)) => {
+                frame_index = frame_index.wrapping_add(1);
+                let mut exit_action = None;
+                while event::poll(Duration::from_millis(0)).map_err(ChannelSetupError::Io)? {
+                    if let Event::Key(key) = event::read().map_err(ChannelSetupError::Io)? {
+                        match (key.modifiers, key.code) {
+                            (_, KeyCode::Char('m')) | (_, KeyCode::Char('M')) => {
+                                capture_task.abort();
+                                exit_action = Some(Ok(TelegramBindingOutcome::ManualEntryRequested));
+                                break;
+                            }
+                            (_, KeyCode::Char('s')) | (_, KeyCode::Char('S')) => {
+                                capture_task.abort();
+                                exit_action = Some(Ok(TelegramBindingOutcome::Skipped));
+                                break;
+                            }
+                            (_, KeyCode::Esc) => {
+                                capture_task.abort();
+                                exit_action = Some(Err(ChannelSetupError::Io(io::Error::new(
+                                    io::ErrorKind::Interrupted,
+                                    "Esc",
+                                ))));
+                                break;
+                            }
+                            (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                                capture_task.abort();
+                                exit_action = Some(Err(ChannelSetupError::Io(io::Error::new(
+                                    io::ErrorKind::Interrupted,
+                                    "Ctrl-C",
+                                ))));
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some(exit_action) = exit_action {
+                    break exit_action;
+                }
+            }
+        }
+    };
+
+    disable_raw_mode().map_err(ChannelSetupError::Io)?;
+    io::stdout()
+        .execute(LeaveAlternateScreen)
+        .map_err(ChannelSetupError::Io)?;
+    io::stdout()
+        .execute(cursor::Show)
+        .map_err(ChannelSetupError::Io)?;
+    terminal.show_cursor().map_err(ChannelSetupError::Io)?;
+
+    result
+}
+
+fn centered_rect(
+    area: ratatui::layout::Rect,
+    desired_width: u16,
+    desired_height: u16,
+) -> ratatui::layout::Rect {
+    let width = desired_width.max(24).min(area.width);
+    let height = desired_height.max(8).min(area.height);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    ratatui::layout::Rect::new(x, y, width, height)
 }
 
 /// Set up a tunnel for exposing the agent to the internet.
@@ -371,7 +1075,7 @@ pub async fn setup_tunnel(
     // Show existing config
     let has_existing = settings.tunnel.public_url.is_some() || settings.tunnel.provider.is_some();
     if has_existing {
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info("Current tunnel configuration:");
         let t = &settings.tunnel;
         let has_ngrok_secret = if let Some(ctx) = secrets {
@@ -428,32 +1132,32 @@ pub async fn setup_tunnel(
         if let Some(ref url) = t.public_url {
             print_info(&format!("  URL:       {}", url));
         }
-        println!();
+        crate::setup::prompts::print_blank_line();
         if !confirm("Change tunnel configuration?", false)? {
             return Ok(settings.tunnel.clone());
         }
     }
 
-    println!();
+    crate::setup::prompts::print_blank_line();
     print_info("Tunnel Configuration");
-    println!();
+    crate::setup::prompts::print_blank_line();
     print_info("Without a tunnel, channels like Telegram use POLLING mode:");
     print_info("  Your agent asks Telegram \"any new messages?\" every ~5 seconds.");
     print_info("  This works reliably from anywhere (home WiFi, VPN, any network).");
-    println!();
+    crate::setup::prompts::print_blank_line();
     print_info("With a tunnel, channels switch to WEBHOOK mode:");
     print_info("  Telegram pushes messages to your agent INSTANTLY (< 200ms).");
     print_info("  Also enables: Slack events, Discord interactions, GitHub webhooks.");
-    println!();
+    crate::setup::prompts::print_blank_line();
     print_info("Why is a tunnel needed?");
     print_info("  Webhooks require a publicly reachable HTTPS URL. Most home networks");
     print_info("  use NAT/firewall — Telegram's servers simply cannot reach your machine");
     print_info("  without a tunnel creating a public entrypoint.");
-    println!();
+    crate::setup::prompts::print_blank_line();
     print_info("Recommended: Tailscale Funnel (free, zero-config, persistent hostname)");
     print_info("  Alternatives: ngrok (free), Cloudflare Tunnel (free), or your own.");
     print_info("  If you're unsure, skip this — polling works perfectly for most users.");
-    println!();
+    crate::setup::prompts::print_blank_line();
 
     if !confirm("Configure a tunnel for instant webhook delivery?", false)? {
         print_info("No tunnel configured. Telegram and other channels will use polling mode.");
@@ -485,13 +1189,13 @@ async fn setup_tunnel_ngrok(
 ) -> Result<TunnelSettings, ChannelSetupError> {
     // Check if ngrok is installed
     if !is_binary_installed("ngrok") {
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_error("'ngrok' binary not found in PATH.");
         print_info("Install ngrok before starting the agent:");
         print_info("  macOS:   brew install ngrok");
         print_info("  Linux:   snap install ngrok  (or download from https://ngrok.com/download)");
         print_info("  Windows: choco install ngrok");
-        println!();
+        crate::setup::prompts::print_blank_line();
         if !confirm(
             "Continue configuring ngrok anyway? (you can install it before starting the agent)",
             false,
@@ -501,7 +1205,7 @@ async fn setup_tunnel_ngrok(
     }
 
     print_info("Get your auth token from: https://dashboard.ngrok.com/get-started/your-authtoken");
-    println!();
+    crate::setup::prompts::print_blank_line();
 
     let token = secret_input("ngrok auth token")?;
     let domain = optional_input("Custom domain", Some("leave empty for auto-assigned"))?;
@@ -530,7 +1234,7 @@ async fn setup_tunnel_cloudflare(
 ) -> Result<TunnelSettings, ChannelSetupError> {
     // Check if cloudflared is installed
     if !is_binary_installed("cloudflared") {
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_error("'cloudflared' binary not found in PATH.");
         print_info("Install cloudflared before starting the agent:");
         print_info("  macOS:   brew install cloudflare/cloudflare/cloudflared");
@@ -538,7 +1242,7 @@ async fn setup_tunnel_cloudflare(
             "  Linux:   See https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
         );
         print_info("  Windows: winget install Cloudflare.cloudflared");
-        println!();
+        crate::setup::prompts::print_blank_line();
         if !confirm(
             "Continue configuring cloudflared anyway? (you can install it before starting the agent)",
             false,
@@ -549,7 +1253,7 @@ async fn setup_tunnel_cloudflare(
 
     print_info("Get your tunnel token from the Cloudflare Zero Trust dashboard:");
     print_info("  https://one.dash.cloudflare.com/ > Networks > Tunnels");
-    println!();
+    crate::setup::prompts::print_blank_line();
 
     let token = secret_input("Cloudflare tunnel token")?;
     let cf_token = if let Some(ctx) = secrets {
@@ -614,7 +1318,7 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
     let cli_working = test_tailscale_cli();
 
     if !cli_working {
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         #[cfg(target_os = "macos")]
         {
@@ -629,7 +1333,7 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
                 print_error("Tailscale is not installed.");
             }
 
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             // Check if Homebrew is available for auto-install
             let has_brew = std::process::Command::new("brew")
@@ -665,7 +1369,7 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
                             print_error(
                                 "Homebrew install failed. Try manually: brew install tailscale",
                             );
-                            println!();
+                            crate::setup::prompts::print_blank_line();
                             if !confirm("Continue configuring anyway?", false)? {
                                 return Ok(TunnelSettings::default());
                             }
@@ -686,10 +1390,10 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
             } else {
                 // No Homebrew
                 print_info("Homebrew is not installed. Install the Tailscale CLI manually:");
-                println!();
+                crate::setup::prompts::print_blank_line();
                 print_info("  Option 1: Install Homebrew, then: brew install tailscale");
                 print_info("  Option 2: Download from https://tailscale.com/download/mac");
-                println!();
+                crate::setup::prompts::print_blank_line();
                 if !confirm(
                     "Continue configuring anyway? (install before starting the agent)",
                     false,
@@ -705,7 +1409,7 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
             print_info("Install Tailscale before starting the agent:");
             print_info("  Linux:   curl -fsSL https://tailscale.com/install.sh | sh");
             print_info("  Windows: Download from https://tailscale.com/download/windows");
-            println!();
+            crate::setup::prompts::print_blank_line();
             if !confirm(
                 "Continue configuring anyway? (install before starting the agent)",
                 false,
@@ -715,19 +1419,19 @@ fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
         }
     }
 
-    println!();
+    crate::setup::prompts::print_blank_line();
     print_info("Tailscale offers two modes:");
-    println!();
+    crate::setup::prompts::print_blank_line();
     print_info("  Funnel (public)  — Makes your agent reachable from the public internet.");
     print_info("                     Required for Telegram/Slack/Discord webhooks.");
     print_info("                     Your hostname (e.g. my-mac.tail1234.ts.net) becomes");
     print_info("                     publicly resolvable with a valid HTTPS certificate.");
-    println!();
+    crate::setup::prompts::print_blank_line();
     print_info("  Serve (tailnet)  — Only reachable from devices on YOUR Tailscale network.");
     print_info("                     Great for private Web UI access from your phone/laptop,");
     print_info("                     but Telegram's servers CANNOT reach it (webhooks won't work,");
     print_info("                     Telegram will fall back to polling mode).");
-    println!();
+    crate::setup::prompts::print_blank_line();
 
     let funnel = confirm(
         "Use Tailscale Funnel (public internet — needed for webhooks)?",
@@ -767,7 +1471,7 @@ fn setup_tunnel_custom() -> Result<TunnelSettings, ChannelSetupError> {
     print_info("Enter a shell command to start your tunnel.");
     print_info("Use {port} and {host} as placeholders.");
     print_info("Example: bore local {port} --to bore.pub");
-    println!();
+    crate::setup::prompts::print_blank_line();
 
     let command = input("Tunnel command")?;
     if command.is_empty() {
@@ -795,7 +1499,7 @@ fn setup_tunnel_custom() -> Result<TunnelSettings, ChannelSetupError> {
 
 fn setup_tunnel_static() -> Result<TunnelSettings, ChannelSetupError> {
     print_info("Enter the public URL of your externally managed tunnel.");
-    println!();
+    crate::setup::prompts::print_blank_line();
 
     let tunnel_url = input("Tunnel URL (e.g., https://abc123.ngrok.io)")?;
 
@@ -863,14 +1567,14 @@ async fn setup_telegram_webhook_secret(
     tunnel: &TunnelSettings,
 ) -> Result<Option<String>, ChannelSetupError> {
     if tunnel.public_url.is_none() {
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info("No tunnel configured — Telegram will use polling mode (~5s message delay).");
         print_info("This works perfectly for most users. To switch to instant webhook delivery,");
         print_info("configure a tunnel (Tailscale Funnel, ngrok, or Cloudflare) in setup.");
         return Ok(None);
     }
 
-    println!();
+    crate::setup::prompts::print_blank_line();
     print_info("Telegram Webhook Security:");
     print_info("A webhook secret adds an extra layer of security by validating");
     print_info("that requests actually come from Telegram's servers.");
@@ -957,10 +1661,10 @@ pub struct SignalSetupResult {
 
 /// Set up HTTP webhook channel.
 pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, ChannelSetupError> {
-    println!("HTTP Webhook Setup:");
-    println!();
+    print_info("HTTP webhook setup");
+    print_blank_line();
     print_info("The HTTP webhook allows external services to send messages to the agent.");
-    println!();
+    print_blank_line();
 
     let port_str = optional_input("Port", Some("default: 8080"))?;
     let port: u16 = port_str
@@ -1068,10 +1772,10 @@ fn validate_allow_from_groups_list(list: &str) -> Result<(), String> {
 /// Set up Signal channel.
 /// `Settings` is reserved for future use
 pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, ChannelSetupError> {
-    println!("Signal Channel Setup:");
-    println!();
+    print_info("Signal channel setup");
+    print_blank_line();
     print_info("Signal channel connects to a signal-cli daemon running in HTTP mode.");
-    println!();
+    print_blank_line();
 
     let http_url = input("Signal-cli HTTP URL")?;
     match Url::parse(&http_url) {
@@ -1137,7 +1841,7 @@ pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, Cha
         return Err(ChannelSetupError::Validation(e));
     }
 
-    println!();
+    crate::setup::prompts::print_blank_line();
     print_success(&format!(
         "Signal channel configured for account: {}",
         account
@@ -1189,8 +1893,8 @@ pub async fn setup_wasm_channel(
     channel_name: &str,
     setup: &crate::channels::wasm::SetupSchema,
 ) -> Result<WasmChannelSetupResult, ChannelSetupError> {
-    println!("{} Setup:", channel_name);
-    println!();
+    print_info(&format!("{channel_name} setup"));
+    print_blank_line();
 
     for secret_config in &setup.required_secrets {
         // Check if this secret already exists
@@ -1340,7 +2044,11 @@ fn generate_secret_with_length(length: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::setup::channels::generate_webhook_secret;
+    use crate::setup::channels::{
+        TelegramOwnerCandidate, TelegramUpdate, TelegramUpdateChat, TelegramUpdateMessage,
+        TelegramUpdateUser, extract_telegram_owner_capture, generate_webhook_secret,
+        next_telegram_update_offset,
+    };
 
     #[test]
     fn test_generate_webhook_secret() {
@@ -1358,5 +2066,96 @@ mod tests {
 
         let s2 = generate_secret_with_length(1);
         assert_eq!(s2.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_telegram_owner_candidate_uses_first_private_human_message() {
+        let updates = vec![
+            telegram_update(10, 42, "private", "Ada", Some("ada"), false),
+            telegram_update(11, 99, "private", "Grace", Some("grace"), false),
+        ];
+
+        assert_eq!(
+            extract_telegram_owner_capture(&updates).map(|capture| capture.candidate),
+            Some(TelegramOwnerCandidate {
+                user_id: 42,
+                display_name: "@ada".to_string(),
+                username: Some("ada".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn test_extract_telegram_owner_candidate_ignores_group_messages_and_bots() {
+        let updates = vec![
+            telegram_update(7, 13, "group", "Ignored Group", Some("group_user"), false),
+            telegram_update(8, 21, "private", "Ignored Bot", Some("helper_bot"), true),
+            telegram_update(9, 34, "private", "Owner", None, false),
+        ];
+
+        assert_eq!(
+            extract_telegram_owner_capture(&updates).map(|capture| capture.candidate),
+            Some(TelegramOwnerCandidate {
+                user_id: 34,
+                display_name: "Owner".to_string(),
+                username: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_extract_telegram_owner_capture_tracks_acknowledged_offset() {
+        let updates = vec![
+            telegram_update(21, 17, "private", "Owner", Some("owner"), false),
+            telegram_update(24, 88, "private", "Another", Some("another"), false),
+        ];
+
+        let capture = extract_telegram_owner_capture(&updates)
+            .expect("expected capture from private message");
+        assert_eq!(
+            capture.candidate,
+            TelegramOwnerCandidate {
+                user_id: 17,
+                display_name: "@owner".to_string(),
+                username: Some("owner".to_string()),
+            }
+        );
+        assert_eq!(capture.acknowledged_offset, 25);
+        assert_eq!(capture.ignored_update_upper_bound, 24);
+    }
+
+    #[test]
+    fn test_next_telegram_update_offset_tracks_latest_update_plus_one() {
+        let updates = vec![
+            telegram_update(4, 1, "private", "One", None, false),
+            telegram_update(12, 2, "private", "Two", None, false),
+            telegram_update(9, 3, "private", "Three", None, false),
+        ];
+
+        assert_eq!(next_telegram_update_offset(&updates), Some(13));
+    }
+
+    fn telegram_update(
+        update_id: i64,
+        user_id: i64,
+        chat_type: &str,
+        first_name: &str,
+        username: Option<&str>,
+        is_bot: bool,
+    ) -> TelegramUpdate {
+        TelegramUpdate {
+            update_id,
+            message: Some(TelegramUpdateMessage {
+                from: Some(TelegramUpdateUser {
+                    id: user_id,
+                    first_name: first_name.to_string(),
+                    username: username.map(str::to_string),
+                    is_bot,
+                }),
+                chat: Some(TelegramUpdateChat {
+                    chat_type: chat_type.to_string(),
+                }),
+            }),
+        }
     }
 }

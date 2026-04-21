@@ -14,7 +14,7 @@ use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
 use thinclaw::channels::wasm::{
-    RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
+    RegisteredWebhookAuth, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
     WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
 };
 use thinclaw::config::Config;
@@ -339,11 +339,15 @@ pub(crate) async fn setup_wasm_channels(
         channel_names.push(channel_name.clone());
         tracing::info!("Loaded WASM channel: {}", channel_name);
 
-        let secret_name = loaded.webhook_secret_name();
+        let signature_secret_name = loaded.webhook_secret_name();
+        let verify_token_secret_name = loaded.webhook_verify_token_secret_name();
+        let secret_header = loaded.webhook_secret_header().map(str::to_string);
+        let secret_validation = loaded.webhook_secret_validation();
+        let verify_token_param = loaded.webhook_verify_token_param().map(str::to_string);
 
-        let webhook_secret = if let Some(secrets) = secrets_store {
+        let signature_secret = if let Some(secrets) = secrets_store {
             secrets
-                .get_decrypted("default", &secret_name)
+                .get_decrypted("default", &signature_secret_name)
                 .await
                 .ok()
                 .map(|s| s.expose().to_string())
@@ -351,15 +355,29 @@ pub(crate) async fn setup_wasm_channels(
             None
         };
 
-        let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+        let verify_token_secret = if let Some(secret_name) = verify_token_secret_name.as_ref() {
+            if signature_secret_name == *secret_name {
+                signature_secret.clone()
+            } else if let Some(secrets) = secrets_store {
+                secrets
+                    .get_decrypted("default", secret_name)
+                    .await
+                    .ok()
+                    .map(|s| s.expose().to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
-        let webhook_path = format!("/webhook/{}", channel_name);
-        let endpoints = vec![RegisteredEndpoint {
-            channel_name: channel_name.clone(),
-            path: webhook_path,
-            methods: vec!["POST".to_string()],
-            require_secret: webhook_secret.is_some(),
-        }];
+        let webhook_auth = RegisteredWebhookAuth {
+            secret_header: secret_header.clone(),
+            secret_validation,
+            signature_secret: signature_secret.clone(),
+            verify_token_param,
+            verify_token_secret,
+        };
 
         let channel_arc = Arc::new(loaded.channel);
 
@@ -367,7 +385,7 @@ pub(crate) async fn setup_wasm_channels(
             &channel_arc,
             &channel_name,
             &host_config,
-            webhook_secret.as_deref(),
+            signature_secret.as_deref(),
         )
         .await;
         if runtime_update_count > 0 {
@@ -378,21 +396,6 @@ pub(crate) async fn setup_wasm_channels(
             );
         }
 
-        tracing::info!(
-            channel = %channel_name,
-            has_webhook_secret = webhook_secret.is_some(),
-            secret_header = ?secret_header,
-            "Registering channel with router"
-        );
-
-        wasm_router
-            .register(
-                Arc::clone(&channel_arc),
-                endpoints,
-                webhook_secret.clone(),
-                secret_header,
-            )
-            .await;
         if let Some(secrets) = secrets_store {
             match thinclaw::channels::wasm::inject_channel_credentials_from_secrets(
                 &channel_arc,
@@ -420,6 +423,30 @@ pub(crate) async fn setup_wasm_channels(
                 }
             }
         }
+
+        if let Err(error) = channel_arc.prime_on_start_config().await {
+            tracing::warn!(
+                channel = %channel_name,
+                error = %error,
+                "Failed to prime channel on_start config before router registration"
+            );
+        }
+
+        tracing::info!(
+            channel = %channel_name,
+            has_signature_secret = webhook_auth.signature_secret.is_some(),
+            has_verify_token_secret = webhook_auth.verify_token_secret.is_some(),
+            secret_header = ?secret_header,
+            "Registering channel with router"
+        );
+
+        wasm_router
+            .register(
+                Arc::clone(&channel_arc),
+                channel_arc.endpoints().await,
+                webhook_auth,
+            )
+            .await;
 
         channels.push((channel_name, Box::new(SharedWasmChannel::new(channel_arc))));
     }

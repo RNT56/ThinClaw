@@ -15,6 +15,7 @@ The research surface is gated behind the experiments feature flag.
 
 - Enable `experiments.enabled` in Settings → Advanced → Experiments
 - Once enabled, the `Research` tab becomes available in the WebUI
+- The experiments API supports both configured database backends (`postgres` and `libsql`); there is no hidden postgres-only read path for campaign/trial/artifact retrieval
 
 ## Mental Model
 
@@ -58,7 +59,8 @@ The research stack now uses the shared execution/runtime hardening path more con
 - remote launch and revoke helpers now use the same backend-style command execution path for `ssh`, `slurm`, and `kubectl` helpers rather than raw ad hoc process spawning
 - runner validation now classifies backends into `manual_only`, `bootstrap_ready`, and `launch_ready`, and queued auto-launch only proceeds for `launch_ready` runners
 - queued campaign launch is owner-aware, so one operator's controller pass does not launch another operator's queued campaign under the wrong settings or secrets
-- campaign and trial reads are owner-scoped
+- campaign, trial, and artifact reads are owner-scoped at the storage boundary
+- remote-runner launch now fails closed when `campaign.gateway_url` is missing/empty instead of generating a broken bootstrap command
 - research subagents are worktree-scoped and their shared denylist now blocks `memory_read`, `memory_search`, and `session_search` so planner/mutator/reviewer runs do not pull unrelated recall into benchmark work
 - project `workdir` is validated as a relative in-workspace path and is re-checked against the campaign worktree before local trial execution
 - local trials now persist `summary.json` into the experiments artifact store and restore the dedicated campaign worktree back to a clean committed state after each run, so benchmark artifacts do not leak into later candidate diffs

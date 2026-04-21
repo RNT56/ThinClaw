@@ -116,6 +116,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "clarify",
     "vision_analyze",
     "send_message",
+    "nostr_actions",
     "homeassistant",
     "mixture_of_agents",
     "execute_code",
@@ -188,7 +189,9 @@ impl ToolRegistry {
     /// Register a tool. Rejects dynamic tools that try to shadow a built-in name.
     pub async fn register(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
-        if self.builtin_names.read().await.contains(&name) {
+        if self.builtin_names.read().await.contains(&name)
+            || PROTECTED_TOOL_NAMES.contains(&name.as_str())
+        {
             tracing::warn!(
                 tool = %name,
                 "Rejected tool registration: would shadow a built-in tool"
@@ -199,15 +202,24 @@ impl ToolRegistry {
         tracing::debug!("Registered tool: {}", name);
     }
 
+    /// Register a tool as built-in using async locks.
+    ///
+    /// Built-in tools are protected from shadowing by dynamic registrations.
+    pub async fn register_builtin(&self, tool: Arc<dyn Tool>) {
+        let name = tool.name().to_string();
+        self.tools.write().await.insert(name.clone(), tool);
+        self.builtin_names.write().await.insert(name.clone());
+        tracing::debug!("Registered tool: {}", name);
+    }
+
     /// Register a tool (sync version for startup, marks as built-in).
     pub fn register_sync(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
         if let Ok(mut tools) = self.tools.try_write() {
             tools.insert(name.clone(), tool);
-            // Mark as built-in so it can't be shadowed later
-            if PROTECTED_TOOL_NAMES.contains(&name.as_str())
-                && let Ok(mut builtins) = self.builtin_names.try_write()
-            {
+            // Any tool registered through startup sync registration is treated
+            // as built-in and cannot be shadowed by dynamic tools later.
+            if let Ok(mut builtins) = self.builtin_names.try_write() {
                 builtins.insert(name.clone());
             }
             tracing::debug!("Registered tool: {}", name);
@@ -1154,7 +1166,7 @@ impl ToolRegistry {
         }
 
         // Register the build_software tool
-        self.register(Arc::new(BuildSoftwareTool::new(Arc::new(builder))))
+        self.register_builtin(Arc::new(BuildSoftwareTool::new(Arc::new(builder))))
             .await;
 
         tracing::info!("Registered software builder tool");

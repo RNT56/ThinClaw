@@ -19,6 +19,32 @@ impl UiMode {
     }
 }
 
+/// Topic-oriented guided setup entry points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GuideTopic {
+    Menu,
+    Ai,
+    Channels,
+    Agent,
+    Tools,
+    Automation,
+    Runtime,
+}
+
+impl GuideTopic {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Menu => "Guided Settings",
+            Self::Ai => "AI & Models",
+            Self::Channels => "Channels & Notifications",
+            Self::Agent => "Agent & Experience",
+            Self::Tools => "Tools & Safety",
+            Self::Automation => "Automation & Skills",
+            Self::Runtime => "Runtime & Diagnostics",
+        }
+    }
+}
+
 /// High-level onboarding intent profile used to prefill recommended defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OnboardingProfile {
@@ -78,7 +104,7 @@ pub enum WizardPhaseId {
 impl WizardPhaseId {
     pub fn title(self) -> &'static str {
         match self {
-            Self::WelcomeProfile => "Welcome & Profile",
+            Self::WelcomeProfile => "Skin & Profile",
             Self::CoreRuntime => "Core Runtime",
             Self::AiStack => "AI Stack",
             Self::IdentityPresence => "Identity & Presence",
@@ -91,7 +117,9 @@ impl WizardPhaseId {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::WelcomeProfile => "Choose the onboarding lane and set the initial flight plan.",
+            Self::WelcomeProfile => {
+                "Choose the cockpit look first, then pick the onboarding lane that fits your setup."
+            }
             Self::CoreRuntime => "Establish storage, secrets, and the base operating posture.",
             Self::AiStack => "Configure providers, models, routing, fallback, and memory search.",
             Self::IdentityPresence => "Confirm how the agent presents itself and keeps time.",
@@ -111,7 +139,7 @@ impl WizardPhaseId {
 /// business logic so the CLI and TUI wrappers cannot drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WizardStepId {
-    Welcome,
+    CliSkin,
     Profile,
     Database,
     Security,
@@ -128,6 +156,7 @@ pub enum WizardStepId {
     Notifications,
     Extensions,
     DockerSandbox,
+    CodingWorkers,
     ClaudeCode,
     CodexCode,
     ToolApproval,
@@ -154,8 +183,6 @@ pub struct StepDescriptor {
 #[derive(Debug, Clone)]
 pub struct WizardPhase {
     pub id: WizardPhaseId,
-    pub title: &'static str,
-    pub description: &'static str,
     pub step_ids: Vec<WizardStepId>,
 }
 
@@ -169,6 +196,14 @@ pub struct WizardPlan {
 impl WizardPlan {
     pub fn total_steps(&self) -> usize {
         self.steps.len()
+    }
+
+    pub fn phase(&self, id: WizardPhaseId) -> Option<&WizardPhase> {
+        self.phases.iter().find(|phase| phase.id == id)
+    }
+
+    pub fn phase_index(&self, id: WizardPhaseId) -> Option<usize> {
+        self.phases.iter().position(|phase| phase.id == id)
     }
 }
 

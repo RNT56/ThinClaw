@@ -6,7 +6,7 @@
 //! - A local-first `LearningOrchestrator` that records evaluations,
 //!   creates candidates, applies low-risk mutations, and tracks code proposals.
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -2202,10 +2202,6 @@ impl LearningOrchestrator {
     }
 
     async fn auto_apply_prompt(&self, candidate: &DbLearningCandidate) -> Result<bool, String> {
-        let Some(workspace) = self.workspace.as_ref() else {
-            return Ok(false);
-        };
-
         let target = candidate
             .target_name
             .clone()
@@ -2218,34 +2214,22 @@ impl LearningOrchestrator {
             })
             .unwrap_or_else(|| paths::USER.to_string());
 
-        if !matches!(target.as_str(), paths::SOUL | paths::AGENTS | paths::USER) {
+        if !is_prompt_target_supported(&target) {
             return Ok(false);
         }
 
-        let content = candidate
-            .proposal
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "prompt candidate missing content".to_string())?;
+        let before = read_prompt_target_content(self.workspace.as_deref(), &target).await?;
+        let content =
+            if let Some(content) = candidate.proposal.get("content").and_then(|v| v.as_str()) {
+                content.to_string()
+            } else {
+                materialize_prompt_candidate_content(&before, &candidate.proposal, &target)?
+            };
 
-        validate_prompt_content(content)?;
-
-        let before = workspace
-            .read(&target)
-            .await
-            .ok()
-            .map(|doc| doc.content)
-            .unwrap_or_default();
-        workspace
-            .write(&target, content)
-            .await
-            .map_err(|e| e.to_string())?;
-        let after = workspace
-            .read(&target)
-            .await
-            .ok()
-            .map(|doc| doc.content)
-            .unwrap_or_default();
+        validate_prompt_content(&content)?;
+        validate_prompt_target_content(&target, &content)?;
+        write_prompt_target_content(self.workspace.as_deref(), &target, &content).await?;
+        let after = read_prompt_target_content(self.workspace.as_deref(), &target).await?;
 
         let version = DbLearningArtifactVersion {
             id: Uuid::new_v4(),
@@ -2446,6 +2430,9 @@ impl LearningOrchestrator {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
+        if diff.trim().is_empty() {
+            return Err("code proposal missing diff".to_string());
+        }
         let fingerprint = proposal_fingerprint(&title, &rationale, &target_files, &diff);
 
         if let Ok(rejected) = self
@@ -3417,7 +3404,10 @@ fn classify_event(event: &DbLearningEvent) -> ImprovementClass {
         return ImprovementClass::Routine;
     }
     if let Some(target) = event.payload.get("target").and_then(|v| v.as_str())
-        && matches!(target, "SOUL.md" | "AGENTS.md" | "USER.md")
+        && matches!(
+            target,
+            "SOUL.md" | "SOUL.local.md" | "AGENTS.md" | "USER.md"
+        )
     {
         return ImprovementClass::Prompt;
     }
@@ -3444,6 +3434,287 @@ fn validate_prompt_content(content: &str) -> Result<(), String> {
         return Err("prompt content appears to include transcript/tool residue".to_string());
     }
     Ok(())
+}
+
+fn validate_prompt_target_content(target: &str, content: &str) -> Result<(), String> {
+    if target.eq_ignore_ascii_case(paths::SOUL) {
+        return crate::identity::soul::validate_canonical_soul(content);
+    }
+    if target.eq_ignore_ascii_case(paths::SOUL_LOCAL) {
+        return crate::identity::soul::validate_local_overlay(content);
+    }
+    if target.eq_ignore_ascii_case(paths::AGENTS) {
+        let lowered = content.to_ascii_lowercase();
+        let required_markers = ["red lines", "ask first", "don't"];
+        if required_markers
+            .iter()
+            .all(|marker| !lowered.contains(marker))
+        {
+            return Err(format!(
+                "{} update rejected: core safety guidance appears to be missing",
+                target
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_prompt_target_supported(target: &str) -> bool {
+    matches!(
+        target,
+        paths::SOUL | paths::SOUL_LOCAL | paths::AGENTS | paths::USER
+    ) || target
+        .to_ascii_lowercase()
+        .ends_with(&format!("/{}", paths::USER.to_ascii_lowercase()))
+}
+
+fn materialize_prompt_candidate_content(
+    current: &str,
+    proposal: &serde_json::Value,
+    target: &str,
+) -> Result<String, String> {
+    let patch = proposal
+        .get("prompt_patch")
+        .ok_or_else(|| "prompt candidate missing content".to_string())?;
+    let operation = patch
+        .get("operation")
+        .and_then(|value| value.as_str())
+        .unwrap_or("replace");
+    let base = ensure_prompt_document_root(current, target);
+    let next = match operation {
+        "replace" => patch
+            .get("content")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "prompt patch missing content".to_string())?
+            .to_string(),
+        "upsert_section" => {
+            let heading = patch
+                .get("heading")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "prompt patch missing heading".to_string())?;
+            let section_content = patch
+                .get("section_content")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            upsert_markdown_section(&base, heading, section_content)
+        }
+        "append_section" => {
+            let heading = patch
+                .get("heading")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "prompt patch missing heading".to_string())?;
+            let section_content = patch
+                .get("section_content")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            append_markdown_section(&base, heading, section_content)
+        }
+        "remove_section" => {
+            let heading = patch
+                .get("heading")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "prompt patch missing heading".to_string())?;
+            remove_markdown_section(&base, heading)?
+        }
+        other => return Err(format!("unsupported prompt patch operation '{}'", other)),
+    };
+    Ok(ensure_prompt_trailing_newline(&next))
+}
+
+async fn read_prompt_target_content(
+    workspace: Option<&Workspace>,
+    target: &str,
+) -> Result<String, String> {
+    if target.eq_ignore_ascii_case(paths::SOUL) {
+        return match crate::identity::soul_store::read_home_soul() {
+            Ok(content) => Ok(content),
+            Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => Ok(String::new()),
+            Err(err) => Err(format!("failed to read canonical SOUL.md: {}", err)),
+        };
+    }
+
+    let Some(workspace) = workspace else {
+        return Err(format!(
+            "workspace unavailable for prompt target '{}'",
+            target
+        ));
+    };
+
+    Ok(workspace
+        .read(target)
+        .await
+        .ok()
+        .map(|doc| doc.content)
+        .unwrap_or_default())
+}
+
+async fn write_prompt_target_content(
+    workspace: Option<&Workspace>,
+    target: &str,
+    content: &str,
+) -> Result<(), String> {
+    if target.eq_ignore_ascii_case(paths::SOUL) {
+        return crate::identity::soul_store::write_home_soul(content)
+            .map_err(|err| format!("failed to update canonical SOUL.md: {}", err));
+    }
+
+    let Some(workspace) = workspace else {
+        return Err(format!(
+            "workspace unavailable for prompt target '{}'",
+            target
+        ));
+    };
+
+    workspace
+        .write(target, content)
+        .await
+        .map(|_| ())
+        .map_err(|err| format!("failed to update '{}': {}", target, err))
+}
+
+fn ensure_prompt_document_root(current: &str, target: &str) -> String {
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        return ensure_prompt_trailing_newline(trimmed);
+    }
+    if target.ends_with(paths::SOUL_LOCAL) {
+        let mut sections = BTreeMap::new();
+        for section in crate::identity::soul::LOCAL_SECTIONS {
+            sections.insert((*section).to_string(), String::new());
+        }
+        return crate::identity::soul::render_local_soul_overlay(
+            &crate::identity::soul::LocalSoulOverlay { sections },
+        );
+    }
+    if target.ends_with(paths::SOUL) {
+        return crate::identity::soul::compose_seeded_soul("balanced").unwrap_or_else(|_| {
+            "# SOUL.md - Who You Are\n\n- **Schema:** v2\n- **Seed Pack:** balanced\n\n## Core Truths\n\n## Boundaries\n\n## Vibe\n\n## Default Behaviors\n\n## Continuity\n\n## Change Contract\n"
+                .to_string()
+        });
+    }
+    let title = if target.ends_with(paths::USER) {
+        "USER.md"
+    } else if target.ends_with(paths::AGENTS) {
+        "AGENTS.md"
+    } else {
+        target.rsplit('/').next().unwrap_or("PROMPT.md")
+    };
+    format!("# {title}\n")
+}
+
+fn ensure_prompt_trailing_newline(content: &str) -> String {
+    let trimmed = content.trim_end();
+    format!("{trimmed}\n")
+}
+
+fn normalize_heading_name(raw: &str) -> String {
+    raw.trim()
+        .trim_start_matches('#')
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn parse_markdown_heading(line: &str) -> Option<(usize, String)> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let level = trimmed.chars().take_while(|ch| *ch == '#').count();
+    if level == 0 {
+        return None;
+    }
+    let title = trimmed[level..].trim();
+    if title.is_empty() {
+        return None;
+    }
+    Some((level, title.to_string()))
+}
+
+fn find_section_byte_range(doc: &str, heading_name: &str) -> Option<(usize, usize, usize, String)> {
+    let target = normalize_heading_name(heading_name);
+    let mut offset = 0usize;
+    let mut start: Option<(usize, usize, usize, String)> = None;
+
+    for line in doc.split_inclusive('\n') {
+        let line_start = offset;
+        let line_end = offset + line.len();
+        offset = line_end;
+
+        if let Some((level, title)) = parse_markdown_heading(line) {
+            if let Some((start_offset, current_level, _, current_title)) = &start
+                && level <= *current_level
+            {
+                return Some((
+                    *start_offset,
+                    line_start,
+                    *current_level,
+                    current_title.clone(),
+                ));
+            }
+
+            if normalize_heading_name(&title) == target {
+                start = Some((line_start, level, line_end, title));
+            }
+        }
+    }
+
+    start.map(|(start_offset, level, _, title)| (start_offset, doc.len(), level, title))
+}
+
+fn upsert_markdown_section(doc: &str, heading: &str, section_content: &str) -> String {
+    let normalized_content = section_content.trim();
+    let body = if normalized_content.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}\n", normalized_content)
+    };
+
+    if let Some((start, end, level, title)) = find_section_byte_range(doc, heading) {
+        let heading_line = format!("{} {}", "#".repeat(level.max(1)), title.trim());
+        let replacement = format!("{heading_line}{body}");
+        let mut merged = String::with_capacity(doc.len() + replacement.len());
+        merged.push_str(&doc[..start]);
+        merged.push_str(replacement.trim_end_matches('\n'));
+        merged.push('\n');
+        merged.push_str(doc[end..].trim_start_matches('\n'));
+        return ensure_prompt_trailing_newline(merged.trim());
+    }
+
+    let mut merged = doc.trim().to_string();
+    if !merged.is_empty() {
+        merged.push_str("\n\n");
+    }
+    merged.push_str(&format!("## {}\n", heading.trim()));
+    if !normalized_content.is_empty() {
+        merged.push_str(normalized_content);
+        merged.push('\n');
+    }
+    ensure_prompt_trailing_newline(&merged)
+}
+
+fn append_markdown_section(doc: &str, heading: &str, section_content: &str) -> String {
+    let mut merged = doc.trim().to_string();
+    if !merged.is_empty() {
+        merged.push_str("\n\n");
+    }
+    merged.push_str(&format!("## {}\n", heading.trim()));
+    let content = section_content.trim();
+    if !content.is_empty() {
+        merged.push_str(content);
+        merged.push('\n');
+    }
+    ensure_prompt_trailing_newline(&merged)
+}
+
+fn remove_markdown_section(doc: &str, heading: &str) -> Result<String, String> {
+    let Some((start, end, _, _)) = find_section_byte_range(doc, heading) else {
+        return Err(format!("section '{}' not found", heading));
+    };
+
+    let mut merged = String::with_capacity(doc.len());
+    merged.push_str(&doc[..start]);
+    merged.push_str(doc[end..].trim_start_matches('\n'));
+    Ok(ensure_prompt_trailing_newline(merged.trim()))
 }
 
 async fn run_cmd(cmd: &mut Command) -> Result<String, String> {
@@ -4297,6 +4568,59 @@ mod tests {
     }
 
     #[test]
+    fn prompt_candidate_patch_materializes_content() {
+        let current = "# USER.md\n\n## Preferences\n- concise\n";
+        let proposal = serde_json::json!({
+            "prompt_patch": {
+                "operation": "upsert_section",
+                "heading": "Outcome-Backed Guidance",
+                "section_content": "- finish the requested implementation before concluding"
+            }
+        });
+
+        let next = materialize_prompt_candidate_content(current, &proposal, paths::USER)
+            .expect("prompt patch should materialize");
+
+        assert!(next.contains("## Preferences\n- concise"));
+        assert!(next.contains("## Outcome-Backed Guidance"));
+        assert!(next.contains("finish the requested implementation"));
+    }
+
+    #[test]
+    fn prompt_candidate_patch_materializes_valid_canonical_soul_when_empty() {
+        let proposal = serde_json::json!({
+            "prompt_patch": {
+                "operation": "upsert_section",
+                "heading": "Outcome-Backed Guidance",
+                "section_content": "- call out bad ideas early"
+            }
+        });
+
+        let next = materialize_prompt_candidate_content("", &proposal, paths::SOUL)
+            .expect("prompt patch should materialize");
+
+        assert!(crate::identity::soul::validate_canonical_soul(&next).is_ok());
+        assert!(next.contains("## Outcome-Backed Guidance"));
+    }
+
+    #[test]
+    fn prompt_candidate_patch_materializes_valid_local_overlay_when_empty() {
+        let proposal = serde_json::json!({
+            "prompt_patch": {
+                "operation": "upsert_section",
+                "heading": "Tone Adjustments",
+                "section_content": "- stay extra terse for this workspace"
+            }
+        });
+
+        let next = materialize_prompt_candidate_content("", &proposal, paths::SOUL_LOCAL)
+            .expect("prompt patch should materialize");
+
+        assert!(crate::identity::soul::validate_local_overlay(&next).is_ok());
+        assert!(next.contains("## Tone Adjustments"));
+    }
+
+    #[test]
     fn classify_event_prefers_code_when_diff_present() {
         let event = DbLearningEvent {
             id: Uuid::new_v4(),
@@ -4664,6 +4988,190 @@ mod tests {
             1,
             "routine artifact auto-apply should create a durability contract"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn auto_apply_prompt_materializes_patch_for_actor_user_targets() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let user_id = "prompt-auto-apply-user";
+        let actor_target = paths::actor_user("alice");
+        let workspace = Arc::new(Workspace::new_with_db(user_id, Arc::clone(&db)));
+        let orchestrator = LearningOrchestrator::new(
+            Arc::clone(&db),
+            Some(Arc::clone(&workspace)),
+            None::<Arc<_>>,
+        );
+
+        let candidate = DbLearningCandidate {
+            id: Uuid::new_v4(),
+            learning_event_id: None,
+            user_id: user_id.to_string(),
+            candidate_type: "prompt".to_string(),
+            risk_tier: "medium".to_string(),
+            confidence: Some(0.88),
+            target_type: Some("prompt".to_string()),
+            target_name: Some(actor_target.clone()),
+            summary: Some("Add outcome-backed prompt guidance".to_string()),
+            proposal: serde_json::json!({
+                "target": actor_target,
+                "prompt_patch": {
+                    "operation": "upsert_section",
+                    "heading": "Outcome-Backed Guidance",
+                    "section_content": "- prefer direct implementation and verification"
+                }
+            }),
+            created_at: Utc::now(),
+        };
+        db.insert_learning_candidate(&candidate)
+            .await
+            .expect("insert prompt learning candidate");
+
+        let applied = orchestrator
+            .auto_apply_prompt(&candidate)
+            .await
+            .expect("auto_apply_prompt should succeed");
+        assert!(applied, "prompt patch should auto-apply");
+
+        let content = workspace
+            .read(&actor_target)
+            .await
+            .expect("read actor USER.md")
+            .content;
+        assert!(content.contains("## Outcome-Backed Guidance"));
+        assert!(content.contains("prefer direct implementation and verification"));
+
+        let versions = db
+            .list_learning_artifact_versions(user_id, Some("prompt"), Some(&actor_target), 10)
+            .await
+            .expect("list prompt artifact versions");
+        assert_eq!(versions.len(), 1, "prompt auto-apply should be ledgered");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn auto_apply_prompt_routes_canonical_soul_to_home_store() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let previous_home = std::env::var_os("THINCLAW_HOME");
+        unsafe {
+            std::env::set_var("THINCLAW_HOME", temp_home.path());
+        }
+
+        let user_id = "prompt-auto-apply-soul";
+        let workspace = Arc::new(Workspace::new_with_db(user_id, Arc::clone(&db)));
+        crate::identity::soul_store::write_home_soul(
+            &crate::identity::soul::compose_seeded_soul("balanced").unwrap(),
+        )
+        .expect("write initial home soul");
+        workspace
+            .write(paths::SOUL, "# stale workspace soul should not change")
+            .await
+            .expect("write stale legacy workspace soul");
+
+        let orchestrator = LearningOrchestrator::new(
+            Arc::clone(&db),
+            Some(Arc::clone(&workspace)),
+            None::<Arc<_>>,
+        );
+
+        let candidate = DbLearningCandidate {
+            id: Uuid::new_v4(),
+            learning_event_id: None,
+            user_id: user_id.to_string(),
+            candidate_type: "prompt".to_string(),
+            risk_tier: "medium".to_string(),
+            confidence: Some(0.9),
+            target_type: Some("prompt".to_string()),
+            target_name: Some(paths::SOUL.to_string()),
+            summary: Some("Sharpen canonical soul guidance".to_string()),
+            proposal: serde_json::json!({
+                "target": paths::SOUL,
+                "prompt_patch": {
+                    "operation": "upsert_section",
+                    "heading": "Outcome-Backed Guidance",
+                    "section_content": "- be direct and finish the job"
+                }
+            }),
+            created_at: Utc::now(),
+        };
+        db.insert_learning_candidate(&candidate)
+            .await
+            .expect("insert prompt learning candidate");
+
+        let applied = orchestrator
+            .auto_apply_prompt(&candidate)
+            .await
+            .expect("auto_apply_prompt should succeed");
+        assert!(applied, "canonical soul patch should auto-apply");
+
+        let home = crate::identity::soul_store::read_home_soul().expect("read home soul");
+        assert!(home.contains("## Outcome-Backed Guidance"));
+        assert!(home.contains("be direct and finish the job"));
+
+        let workspace_soul = workspace
+            .read(paths::SOUL)
+            .await
+            .expect("read stale workspace soul");
+        assert!(
+            !workspace_soul
+                .content
+                .contains("be direct and finish the job"),
+            "auto-apply should not write canonical soul changes into workspace SOUL.md"
+        );
+
+        let versions = db
+            .list_learning_artifact_versions(user_id, Some("prompt"), Some(paths::SOUL), 10)
+            .await
+            .expect("list prompt artifact versions");
+        assert_eq!(
+            versions.len(),
+            1,
+            "canonical soul auto-apply should be ledgered"
+        );
+
+        if let Some(previous_home) = previous_home {
+            unsafe {
+                std::env::set_var("THINCLAW_HOME", previous_home);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("THINCLAW_HOME");
+            }
+        }
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn create_code_proposal_from_candidate_rejects_empty_diff() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let user_id = "empty-diff-outcome-user";
+        let orchestrator = LearningOrchestrator::new(Arc::clone(&db), None, None::<Arc<_>>);
+
+        let candidate = DbLearningCandidate {
+            id: Uuid::new_v4(),
+            learning_event_id: None,
+            user_id: user_id.to_string(),
+            candidate_type: "code".to_string(),
+            risk_tier: "critical".to_string(),
+            confidence: Some(0.92),
+            target_type: Some("code".to_string()),
+            target_name: Some("Fix missing diff handling".to_string()),
+            summary: Some("Repeated negative durability outcomes".to_string()),
+            proposal: serde_json::json!({
+                "title": "Fix missing diff handling",
+                "rationale": "Outcome-backed durability fix",
+                "target_files": ["src/agent/learning.rs"],
+                "diff": ""
+            }),
+            created_at: Utc::now(),
+        };
+
+        let err = orchestrator
+            .create_code_proposal_from_candidate(&candidate)
+            .await
+            .expect_err("empty diff should be rejected");
+        assert!(err.contains("missing diff"));
     }
 
     #[test]

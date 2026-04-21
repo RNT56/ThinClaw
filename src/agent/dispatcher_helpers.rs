@@ -7,6 +7,7 @@
 //! - Message compaction for context-length retries
 //! - String truncation utilities
 
+use crate::agent::session::PendingAuthMode;
 use crate::error::Error;
 use crate::llm::ChatMessage;
 use crate::tools::{ToolExecutionLane, ToolProfile, execution};
@@ -67,6 +68,17 @@ pub(crate) async fn execute_chat_tool_standalone(
 pub(crate) struct ParsedAuthData {
     pub(crate) auth_url: Option<String>,
     pub(crate) setup_url: Option<String>,
+    pub(crate) auth_mode: Option<String>,
+    pub(crate) auth_status: Option<String>,
+    pub(crate) shared_auth_provider: Option<String>,
+    pub(crate) missing_scopes: Vec<String>,
+}
+
+pub(crate) struct PendingAuthRequest {
+    pub(crate) extension_name: String,
+    pub(crate) instructions: String,
+    pub(crate) auth_mode: PendingAuthMode,
+    pub(crate) auth_status: String,
 }
 
 /// Extract auth_url and setup_url from a tool_auth result JSON string.
@@ -86,32 +98,84 @@ pub(crate) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthDat
             .and_then(|v| v.get("setup_url"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        auth_mode: parsed
+            .as_ref()
+            .and_then(|v| v.get("auth_mode"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        auth_status: parsed
+            .as_ref()
+            .and_then(|v| v.get("auth_status").or_else(|| v.get("status")))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        shared_auth_provider: parsed
+            .as_ref()
+            .and_then(|v| v.get("shared_auth_provider"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        missing_scopes: parsed
+            .as_ref()
+            .and_then(|v| v.get("missing_scopes"))
+            .and_then(|v| v.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
     }
 }
 
-/// Check if a tool_auth result indicates the extension is awaiting a token.
+/// Check if a tool auth/activation result indicates authentication is required.
 ///
-/// Returns `Some((extension_name, instructions))` if the tool result contains
-/// `awaiting_token: true`, meaning the thread should enter auth mode.
+/// Returns auth interception details for either manual token entry or external OAuth.
 pub(crate) fn check_auth_required(
     tool_name: &str,
     result: &Result<String, Error>,
-) -> Option<(String, String)> {
+) -> Option<PendingAuthRequest> {
     if tool_name != "tool_auth" && tool_name != "tool_activate" {
         return None;
     }
     let output = result.as_ref().ok()?;
     let parsed: serde_json::Value = serde_json::from_str(output).ok()?;
-    if parsed.get("awaiting_token") != Some(&serde_json::Value::Bool(true)) {
+    let auth_status = parsed
+        .get("auth_status")
+        .or_else(|| parsed.get("status"))
+        .and_then(|v| v.as_str())?;
+    if !matches!(
+        auth_status,
+        "awaiting_token" | "awaiting_authorization" | "needs_reauth" | "insufficient_scope"
+    ) {
         return None;
     }
     let name = parsed.get("name")?.as_str()?.to_string();
+    let auth_mode = parsed.get("auth_mode").and_then(|v| v.as_str()).unwrap_or(
+        if auth_status == "awaiting_token" {
+            "manual_token"
+        } else {
+            "oauth"
+        },
+    );
     let instructions = parsed
         .get("instructions")
         .and_then(|v| v.as_str())
-        .unwrap_or("Please provide your API token/key.")
+        .unwrap_or(if auth_mode == "oauth" {
+            "Open the browser authentication flow to continue."
+        } else {
+            "Please provide your API token/key."
+        })
         .to_string();
-    Some((name, instructions))
+    Some(PendingAuthRequest {
+        extension_name: name,
+        instructions,
+        auth_mode: if auth_mode == "manual_token" && auth_status == "awaiting_token" {
+            PendingAuthMode::ManualToken
+        } else {
+            PendingAuthMode::ExternalOAuth
+        },
+        auth_status: auth_status.to_string(),
+    })
 }
 
 /// Compact messages for retry after a context-length-exceeded error.
@@ -197,6 +261,7 @@ mod tests {
 
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+    use crate::agent::session::PendingAuthMode;
     use crate::agent::session::Session;
     use crate::channels::ChannelManager;
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
@@ -451,9 +516,10 @@ mod tests {
 
         let detected = check_auth_required("tool_auth", &result);
         assert!(detected.is_some());
-        let (name, instructions) = detected.unwrap();
-        assert_eq!(name, "telegram");
-        assert!(instructions.contains("Telegram Bot API"));
+        let detected = detected.unwrap();
+        assert_eq!(detected.extension_name, "telegram");
+        assert!(detected.instructions.contains("Telegram Bot API"));
+        assert_eq!(detected.auth_mode, PendingAuthMode::ManualToken);
     }
 
     #[test]
@@ -496,8 +562,8 @@ mod tests {
         })
         .to_string());
 
-        let (_, instructions) = check_auth_required("tool_auth", &result).unwrap();
-        assert_eq!(instructions, "Please provide your API token/key.");
+        let detected = check_auth_required("tool_auth", &result).unwrap();
+        assert_eq!(detected.instructions, "Please provide your API token/key.");
     }
 
     #[test]
@@ -513,9 +579,9 @@ mod tests {
 
         let detected = check_auth_required("tool_activate", &result);
         assert!(detected.is_some());
-        let (name, instructions) = detected.unwrap();
-        assert_eq!(name, "slack");
-        assert!(instructions.contains("Slack Bot"));
+        let detected = detected.unwrap();
+        assert_eq!(detected.extension_name, "slack");
+        assert!(detected.instructions.contains("Slack Bot"));
     }
 
     #[test]

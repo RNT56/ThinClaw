@@ -2,16 +2,57 @@
 
 use crate::branding::skin::CliSkin;
 use crate::setup::prompts::{confirm, print_info, print_success, select_one};
+use crate::terminal_branding::set_runtime_cli_skin_override;
 
 use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
+    pub(super) fn step_cli_skin(&mut self) -> Result<(), SetupError> {
+        print_info("Pick the skin for onboarding, the CLI, and the default web look.");
+        print_info("Your choice applies immediately and can be changed later.");
+
+        let current_skin = self.settings.agent.cli_skin.clone();
+        let mut skin_names = CliSkin::available_names();
+        skin_names.sort();
+        if let Some(index) = skin_names.iter().position(|name| *name == current_skin) {
+            let current = skin_names.remove(index);
+            skin_names.insert(0, current);
+        }
+
+        let skin_options: Vec<String> = skin_names
+            .iter()
+            .map(|name| {
+                let skin = CliSkin::load(name);
+                let tagline = skin
+                    .tagline()
+                    .unwrap_or("No tagline available for this skin.");
+                if *name == current_skin {
+                    format!("{name:<12} — {tagline} [current]")
+                } else {
+                    format!("{name:<12} — {tagline}")
+                }
+            })
+            .collect();
+        let skin_refs: Vec<&str> = skin_options.iter().map(String::as_str).collect();
+        let skin_idx =
+            select_one("Choose your cockpit skin", &skin_refs).map_err(SetupError::Io)?;
+        let chosen = skin_names
+            .get(skin_idx)
+            .cloned()
+            .unwrap_or_else(|| current_skin.clone());
+
+        self.settings.agent.cli_skin = chosen.clone();
+        set_runtime_cli_skin_override(chosen.clone());
+        print_success(&format!("Skin set to '{}'.", chosen));
+        Ok(())
+    }
+
     pub(super) fn step_web_ui(&mut self) -> Result<(), SetupError> {
         print_info("ThinClaw includes a web dashboard for chat, monitoring, and operator control.");
         print_info(
             "This step tunes the cockpit feel without changing the underlying runtime behavior.",
         );
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         if !confirm("Customize web UI appearance?", false).map_err(SetupError::Io)? {
             print_info(
@@ -20,7 +61,7 @@ impl SetupWizard {
             return Ok(());
         }
 
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let mut skin_options = vec!["Follow CLI skin".to_string()];
         skin_options.extend(CliSkin::available_names());
@@ -69,7 +110,7 @@ impl SetupWizard {
         print_info(
             "Observability controls how much operational signal ThinClaw emits for debugging and monitoring.",
         );
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let options: &[&str] = &[
             "None (no overhead, default)",

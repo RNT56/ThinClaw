@@ -3,7 +3,7 @@
 use secrecy::SecretString;
 
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_error, print_info, print_success,
+    confirm, input, optional_input, print_error, print_info, print_success, select_many,
 };
 
 use super::{SetupError, SetupWizard};
@@ -31,12 +31,12 @@ impl SetupWizard {
             return Ok(());
         }
 
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info(
             "ThinClaw can also reuse this Anthropic API key for the general Anthropic provider.",
         );
         print_info("That makes it available in Provider Vault, the Web UI, and Anthropic routing.");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         if !confirm(
             "Also save this API key for ThinClaw's Anthropic provider and Web UI?",
@@ -83,10 +83,10 @@ impl SetupWizard {
             return Ok(());
         }
 
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info("ThinClaw can also reuse this OpenAI API key for the general OpenAI provider.");
         print_info("That makes it available in Provider Vault, the Web UI, and OpenAI routing.");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         if !confirm(
             "Also save this API key for ThinClaw's OpenAI provider and Web UI?",
@@ -125,50 +125,18 @@ impl SetupWizard {
     }
 
     pub(super) async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
-        // ── Part A: Local tools for the main agent ───────────────────────
-        println!();
-        print_info("═══ Main Agent: Local Tools ═══");
-        println!();
-        print_info("ThinClaw's main agent always runs on your machine.");
-        print_info("Enabling local tools gives the agent access to:");
-        print_info("  • Shell commands (run scripts, install packages, etc.)");
-        print_info("  • File read/write anywhere on disk");
-        print_info("  • Screen capture (if enabled separately)");
-        println!();
-        print_info("Without local tools, the agent can only use web search, memory,");
-        print_info("and WASM-sandboxed extensions. It won't have direct host access.");
-        println!();
-
-        let allow_local = confirm("Allow ThinClaw to use local tools on your machine?", false)
-            .map_err(SetupError::Io)?;
-        self.settings.agent.allow_local_tools = allow_local;
-
-        if allow_local {
-            print_success("Local tools enabled. The agent can run commands and read/write files.");
-            print_info("You can disable this later with ALLOW_LOCAL_TOOLS=false.");
-        } else {
-            print_info("Local tools disabled. The agent will use sandboxed tools only.");
-            print_info("Enable later with ALLOW_LOCAL_TOOLS=true.");
-        }
-
-        // ── Part B: Docker sandbox for worker processes ──────────────────
-        println!();
-        print_info("═══ Docker Sandbox for Worker Processes ═══");
-        println!();
-        print_info("Docker sandboxing is separate from local tools above.");
-        print_info("It isolates worker processes like Claude Code and Codex so they run inside");
-        print_info("Docker containers without access to your credentials or full filesystem.");
-        println!();
+        crate::setup::prompts::print_blank_line();
+        print_info("═══ Worker Sandbox ═══");
+        crate::setup::prompts::print_blank_line();
+        print_info("The worker sandbox isolates delegated workers like Claude Code and Codex.");
         print_info(
-            "This does not affect ThinClaw's main agent. It still follows the local tools setting above.",
+            "It does not change the autonomy level you chose for the main interactive agent.",
         );
-        println!();
-        print_info(
-            "Docker is required for container coding agent sandboxes and container-based builds.",
-        );
-        println!();
+        crate::setup::prompts::print_blank_line();
+        print_info("Docker is required for container coding workers and isolated worker builds.");
+        crate::setup::prompts::print_blank_line();
 
-        if !confirm("Enable Docker sandbox for worker processes?", false).map_err(SetupError::Io)? {
+        if !confirm("Enable worker sandbox?", true).map_err(SetupError::Io)? {
             self.settings.sandbox.enabled = false;
             print_info("Docker sandbox disabled. Worker processes will run without containers.");
             print_info("You can enable it later with SANDBOX_ENABLED=true.");
@@ -185,7 +153,7 @@ impl SetupWizard {
             }
             crate::sandbox::detect::DockerStatus::NotInstalled
             | crate::sandbox::detect::DockerStatus::NotRunning => {
-                println!();
+                crate::setup::prompts::print_blank_line();
                 let not_installed =
                     detection.status == crate::sandbox::detect::DockerStatus::NotInstalled;
                 if not_installed {
@@ -195,7 +163,7 @@ impl SetupWizard {
                     print_error("Docker is installed but not running.");
                     print_info(detection.platform.start_hint());
                 }
-                println!();
+                crate::setup::prompts::print_blank_line();
 
                 let retry_prompt = if not_installed {
                     "Retry after installing Docker?"
@@ -235,9 +203,9 @@ impl SetupWizard {
 
         // ── Part C: Build worker image if needed ─────────────────────────
         if self.settings.sandbox.enabled {
-            println!();
+            crate::setup::prompts::print_blank_line();
             print_info("═══ Worker Docker Image ═══");
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             // Check if the image already exists
             let image_name = &self.settings.sandbox.image;
@@ -260,7 +228,7 @@ impl SetupWizard {
                     "This image is required for the Docker sandbox and container coding agent jobs.",
                 );
                 print_info("Building it now usually takes 5-15 minutes, one time.");
-                println!();
+                crate::setup::prompts::print_blank_line();
 
                 if confirm("Build the worker image now?", true).map_err(SetupError::Io)? {
                     print_info("Building thinclaw-worker image (this may take a while)...");
@@ -305,8 +273,60 @@ impl SetupWizard {
         Ok(())
     }
 
+    pub(super) async fn step_coding_workers(&mut self) -> Result<(), SetupError> {
+        if !self.settings.sandbox.enabled {
+            self.settings.claude_code_enabled = false;
+            self.settings.codex_code_enabled = false;
+            print_info("Worker sandbox is disabled. Skipping coding worker selection.");
+            return Ok(());
+        }
+
+        print_info("Coding workers are optional delegates for code-heavy tasks.");
+        print_info("You can leave them off and enable them later from guided settings.");
+        crate::setup::prompts::print_blank_line();
+
+        if !confirm("Enable coding workers now?", false).map_err(SetupError::Io)? {
+            self.settings.claude_code_enabled = false;
+            self.settings.codex_code_enabled = false;
+            print_info("Coding workers skipped for now.");
+            return Ok(());
+        }
+
+        if self.is_quick_setup() {
+            let options = [("Claude Code Worker", false), ("Codex Worker", false)];
+            let selected = select_many("Select coding workers to enable", &options)
+                .map_err(SetupError::Io)?;
+
+            let enable_claude = selected.contains(&0);
+            let enable_codex = selected.contains(&1);
+            self.settings.claude_code_enabled = enable_claude;
+            self.settings.codex_code_enabled = enable_codex;
+
+            if !enable_claude && !enable_codex {
+                print_info("No coding workers selected. You can enable them later from settings.");
+                return Ok(());
+            }
+
+            if enable_claude {
+                crate::setup::prompts::print_blank_line();
+                self.step_claude_code_inner(false).await?;
+            }
+            if enable_codex {
+                crate::setup::prompts::print_blank_line();
+                self.step_codex_code_inner(false).await?;
+            }
+            return Ok(());
+        }
+
+        crate::setup::prompts::print_blank_line();
+        self.step_claude_code().await?;
+        crate::setup::prompts::print_blank_line();
+        self.step_codex_code().await?;
+        Ok(())
+    }
+
     /// Step 7: Agent identity (name).
-    pub(super) async fn step_claude_code(&mut self) -> Result<(), SetupError> {
+    async fn step_claude_code_inner(&mut self, prompt_enable: bool) -> Result<(), SetupError> {
         // Claude Code requires the Docker sandbox to be enabled
         if !self.settings.sandbox.enabled {
             print_info("Claude Code requires the Docker sandbox, which is not enabled yet.");
@@ -318,22 +338,24 @@ impl SetupWizard {
         print_info("Claude Code sandbox lets ThinClaw delegate complex coding tasks");
         print_info("to Anthropic's Claude Code CLI running inside a Docker container.");
         print_info("It requires either an Anthropic API key or a Claude Code OAuth session.");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
-        if !confirm("Enable Claude Code sandbox?", false).map_err(SetupError::Io)? {
-            self.settings.claude_code_enabled = false;
-            print_info(
-                "Claude Code disabled. You can turn it on later with CLAUDE_CODE_ENABLED=true.",
-            );
-            return Ok(());
+        if prompt_enable {
+            if !confirm("Enable Claude Code sandbox?", false).map_err(SetupError::Io)? {
+                self.settings.claude_code_enabled = false;
+                print_info(
+                    "Claude Code disabled. You can turn it on later with CLAUDE_CODE_ENABLED=true.",
+                );
+                return Ok(());
+            }
         }
 
         self.settings.claude_code_enabled = true;
 
         // ── Auth strategy ────────────────────────────────────────────────
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info("═══ Claude Code Authentication ═══");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         // Check existing auth sources
         let env_api_key = std::env::var("ANTHROPIC_API_KEY")
@@ -368,7 +390,7 @@ impl SetupWizard {
                 crate::platform::secure_store::display_name()
             ));
             print_info("  2. OAuth session from 'claude login' on this machine");
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             if confirm(
                 &format!(
@@ -424,9 +446,13 @@ impl SetupWizard {
         }
 
         // ── Model ────────────────────────────────────────────────────────
-        println!();
-        let model =
-            optional_input("Claude Code model", Some("default: sonnet")).map_err(SetupError::Io)?;
+        crate::setup::prompts::print_blank_line();
+        let default_claude_model = crate::config::ClaudeCodeConfig::default().model;
+        let model = optional_input(
+            "Claude Code model",
+            Some(&format!("default: {}", default_claude_model)),
+        )
+        .map_err(SetupError::Io)?;
         if let Some(m) = model
             && !m.is_empty()
         {
@@ -445,7 +471,7 @@ impl SetupWizard {
             .settings
             .claude_code_model
             .as_deref()
-            .unwrap_or("sonnet");
+            .unwrap_or(default_claude_model.as_str());
         let turns_display = self.settings.claude_code_max_turns.unwrap_or(50);
         print_success(&format!(
             "Claude Code enabled (model: {}, max turns: {})",
@@ -455,7 +481,11 @@ impl SetupWizard {
         Ok(())
     }
 
-    pub(super) async fn step_codex_code(&mut self) -> Result<(), SetupError> {
+    pub(super) async fn step_claude_code(&mut self) -> Result<(), SetupError> {
+        self.step_claude_code_inner(true).await
+    }
+
+    async fn step_codex_code_inner(&mut self, prompt_enable: bool) -> Result<(), SetupError> {
         if !self.settings.sandbox.enabled {
             print_info("Codex requires the Docker sandbox, which is not enabled yet.");
             print_info("Skipping Codex setup.");
@@ -468,19 +498,21 @@ impl SetupWizard {
         print_info(
             "It works best with an OpenAI API key and can also reuse a local Codex auth file.",
         );
-        println!();
+        crate::setup::prompts::print_blank_line();
 
-        if !confirm("Enable Codex sandbox?", false).map_err(SetupError::Io)? {
-            self.settings.codex_code_enabled = false;
-            print_info("Codex disabled. You can turn it on later with CODEX_CODE_ENABLED=true.");
-            return Ok(());
+        if prompt_enable {
+            if !confirm("Enable Codex sandbox?", false).map_err(SetupError::Io)? {
+                self.settings.codex_code_enabled = false;
+                print_info("Codex disabled. You can turn it on later with CODEX_CODE_ENABLED=true.");
+                return Ok(());
+            }
         }
 
         self.settings.codex_code_enabled = true;
 
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info("═══ Codex Authentication ═══");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let env_api_key = std::env::var("OPENAI_API_KEY")
             .ok()
@@ -514,7 +546,7 @@ impl SetupWizard {
                 crate::platform::secure_store::display_name()
             ));
             print_info(&format!("  2. Codex auth file at {}", auth_path.display()));
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             if confirm(
                 &format!(
@@ -562,7 +594,7 @@ impl SetupWizard {
             }
         }
 
-        println!();
+        crate::setup::prompts::print_blank_line();
         let model = optional_input("Codex model", Some("default: gpt-5.3-codex"))
             .map_err(SetupError::Io)?;
         if let Some(m) = model
@@ -579,5 +611,9 @@ impl SetupWizard {
         print_success(&format!("Codex enabled (model: {})", model_display));
 
         Ok(())
+    }
+
+    pub(super) async fn step_codex_code(&mut self) -> Result<(), SetupError> {
+        self.step_codex_code_inner(true).await
     }
 }

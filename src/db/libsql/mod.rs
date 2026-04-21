@@ -55,6 +55,7 @@ pub(crate) const ROUTINE_RUN_COLUMNS: &str = "\
 /// Stores the `Database` handle in an `Arc` so that the same underlying
 /// database can be shared with stores (SecretsStore, WasmToolStore) that
 /// create their own connections per-operation.
+#[derive(Clone)]
 pub struct LibSqlBackend {
     db: Arc<LibSqlDatabase>,
     /// Path to the database file (None for in-memory databases).
@@ -375,7 +376,6 @@ impl Database for LibSqlBackend {
                     if msg.contains("duplicate column")
                         || msg.contains("already exists")
                         || msg.contains("no such table")
-                        || msg.contains("no such column")
                     {
                         tracing::trace!(
                             migration_version = upgrade.version,

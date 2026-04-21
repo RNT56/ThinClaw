@@ -3,8 +3,8 @@
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_error, print_info, print_success, print_warning,
-    secret_input, select_one,
+    confirm, input, optional_input, print_blank_line, print_error, print_info, print_success,
+    print_warning, secret_input, select_one,
 };
 
 use super::helpers::{
@@ -14,6 +14,21 @@ use super::helpers::{
 use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
+    pub(super) fn apply_quick_embeddings_defaults(&mut self) {
+        self.settings.embeddings.enabled = true;
+        match self.primary_provider_slug() {
+            Some("ollama") | Some("llama_cpp") => {
+                self.settings.embeddings.provider = "ollama".to_string();
+                self.settings.embeddings.model = "nomic-embed-text".to_string();
+            }
+            _ => {
+                self.settings.embeddings.provider = "openai".to_string();
+                self.settings.embeddings.model = "text-embedding-3-small".to_string();
+            }
+        }
+        self.remove_followup("embeddings");
+    }
+
     fn set_provider_credential_mode(
         &mut self,
         provider_slug: &str,
@@ -231,8 +246,8 @@ impl SetupWizard {
         models: &[(String, String)],
         prompt: &str,
     ) -> Result<String, SetupError> {
-        println!("Available models:");
-        println!();
+        print_info("Available models:");
+        print_blank_line();
 
         let mut options: Vec<&str> = models.iter().map(|(_, desc)| desc.as_str()).collect();
         options.push("Custom model ID");
@@ -244,7 +259,7 @@ impl SetupWizard {
                 let raw = input("Enter model ID").map_err(SetupError::Io)?;
                 let trimmed = raw.trim().to_string();
                 if trimmed.is_empty() {
-                    println!("Model ID cannot be empty.");
+                    print_error("Model ID cannot be empty.");
                     continue;
                 }
                 break trimmed;
@@ -254,6 +269,230 @@ impl SetupWizard {
         };
 
         Ok(selected)
+    }
+
+    async fn configure_routed_secondary_model(
+        &mut self,
+        routing_mode: crate::settings::RoutingMode,
+        slot_label: &str,
+        slot_prompt: &str,
+    ) -> Result<(), SetupError> {
+        let current = self
+            .settings
+            .providers
+            .cheap_model
+            .clone()
+            .unwrap_or_default();
+        if !current.is_empty() {
+            let keep = confirm(
+                &format!("Keep current {slot_label} model ({})?", current),
+                true,
+            )
+            .map_err(SetupError::Io)?;
+            if keep {
+                self.settings.providers.smart_routing_enabled = true;
+                self.settings.providers.routing_mode = routing_mode;
+                if let Some((slug, model)) = current.split_once('/') {
+                    self.set_preferred_cheap_slot_model(slug, model.to_string());
+                }
+                self.remove_followup("routing-policy");
+                print_success(&format!(
+                    "{} enabled. {slot_label} model: {}",
+                    routing_mode.as_str(),
+                    current
+                ));
+                return Ok(());
+            }
+        }
+
+        let mut provider_slugs = std::collections::BTreeSet::new();
+        if let Some(primary_slug) = self.primary_provider_slug() {
+            provider_slugs.insert(primary_slug.to_string());
+        }
+        for slug in &self.settings.providers.enabled {
+            provider_slugs.insert(slug.clone());
+        }
+        for slug in crate::config::provider_catalog::catalog().keys() {
+            provider_slugs.insert((*slug).to_string());
+        }
+        if self.settings.openai_compatible_base_url.is_some() {
+            provider_slugs.insert("openai_compatible".to_string());
+        }
+        if self.settings.bedrock_proxy_url.is_some()
+            || self.primary_provider_slug() == Some("bedrock")
+        {
+            provider_slugs.insert("bedrock".to_string());
+        }
+        if self.settings.llama_cpp_server_url.is_some()
+            || self.primary_provider_slug() == Some("llama_cpp")
+        {
+            provider_slugs.insert("llama_cpp".to_string());
+        }
+        provider_slugs.insert("ollama".to_string());
+
+        let mut provider_choices: Vec<String> = provider_slugs.into_iter().collect();
+        let preferred_provider = self
+            .settings
+            .providers
+            .preferred_cheap_provider
+            .clone()
+            .or_else(|| self.primary_provider_slug().map(str::to_string));
+        provider_choices.sort_by(|a, b| {
+            let a_score = usize::from(preferred_provider.as_deref() != Some(a.as_str()));
+            let b_score = usize::from(preferred_provider.as_deref() != Some(b.as_str()));
+            a_score
+                .cmp(&b_score)
+                .then_with(|| Self::provider_display_name(a).cmp(&Self::provider_display_name(b)))
+        });
+
+        let provider_option_labels: Vec<String> = provider_choices
+            .iter()
+            .map(|slug| {
+                let mut label = Self::provider_display_name(slug);
+                if self.primary_provider_slug() == Some(slug.as_str()) {
+                    label.push_str(" (current primary)");
+                }
+                if self.settings.providers.preferred_cheap_provider.as_deref()
+                    == Some(slug.as_str())
+                {
+                    label.push_str(" (current fast)");
+                }
+                label
+            })
+            .collect();
+        let provider_option_refs: Vec<&str> =
+            provider_option_labels.iter().map(String::as_str).collect();
+        let provider_prompt = format!("{} provider:", capitalize_first(slot_prompt));
+        let provider_choice =
+            select_one(&provider_prompt, &provider_option_refs).map_err(SetupError::Io)?;
+        let cheap_provider_slug =
+            provider_choices
+                .get(provider_choice)
+                .cloned()
+                .ok_or_else(|| {
+                    SetupError::Config("Invalid secondary provider selection".to_string())
+                })?;
+
+        let display_name = Self::provider_display_name(&cheap_provider_slug);
+
+        let mut model_options = self.fetch_models_for_provider(&cheap_provider_slug).await;
+        if model_options.is_empty()
+            && let Some(default_model) = Self::provider_default_model(&cheap_provider_slug)
+        {
+            model_options.push((default_model.clone(), default_model));
+        }
+        let suggested_cheap = Self::suggested_cheap_model_for_provider(
+            &cheap_provider_slug,
+            self.settings
+                .providers
+                .provider_models
+                .get(&cheap_provider_slug)
+                .and_then(|slots| slots.primary.as_deref()),
+        );
+        if let Some(suggested) = suggested_cheap.clone() {
+            if let Some(index) = model_options.iter().position(|(id, _)| id == &suggested) {
+                let entry = model_options.remove(index);
+                model_options.insert(
+                    0,
+                    (
+                        entry.0.clone(),
+                        format!("{} (recommended fast default)", entry.1),
+                    ),
+                );
+            } else {
+                model_options.insert(
+                    0,
+                    (
+                        suggested.clone(),
+                        format!("{} (recommended fast default)", suggested),
+                    ),
+                );
+            }
+        }
+
+        let model_prompt = format!("Select the {slot_prompt} model:");
+        let cheap_model_id = self.choose_model_from_list(&model_options, &model_prompt)?;
+        self.settings.providers.smart_routing_enabled = true;
+        self.settings.providers.routing_mode = routing_mode;
+        self.set_preferred_cheap_slot_model(&cheap_provider_slug, cheap_model_id.clone());
+        self.remove_followup("routing-policy");
+        print_success(&format!(
+            "{} enabled — {slot_label} model: {}/{} ({})",
+            routing_mode.as_str(),
+            cheap_provider_slug,
+            cheap_model_id,
+            display_name
+        ));
+
+        if let Some(cheap_provider_slug) = self
+            .settings
+            .providers
+            .cheap_model
+            .as_deref()
+            .and_then(|spec| spec.split('/').next())
+            .map(str::to_string)
+        {
+            let primary_slug = self.primary_provider_slug().unwrap_or("");
+            if !cheap_provider_slug.is_empty()
+                && cheap_provider_slug != primary_slug
+                && !matches!(
+                    cheap_provider_slug.as_str(),
+                    "ollama" | "llama_cpp" | "openai_compatible" | "bedrock"
+                )
+            {
+                if let Some(endpoint) =
+                    crate::config::provider_catalog::endpoint_for(&cheap_provider_slug)
+                {
+                    let has_provider_key = self
+                        .has_provider_secret(endpoint.env_key_name, endpoint.secret_name)
+                        .await;
+
+                    if std::env::var(endpoint.env_key_name).is_ok() {
+                        crate::setup::prompts::print_blank_line();
+                        print_success(&format!(
+                            "✓ {} API key found in environment ({}).",
+                            endpoint.display_name, endpoint.env_key_name
+                        ));
+                    } else if has_provider_key {
+                        crate::setup::prompts::print_blank_line();
+                        print_success(&format!(
+                            "✓ {} credentials already stored.",
+                            endpoint.display_name
+                        ));
+                    } else {
+                        crate::setup::prompts::print_blank_line();
+                        print_info(&format!(
+                            "The {slot_label} model uses a different provider than your primary."
+                        ));
+                        print_info(&format!(
+                            "An API key for {} is required.",
+                            endpoint.display_name
+                        ));
+
+                        self.setup_additional_api_key_provider(
+                            &cheap_provider_slug,
+                            endpoint.env_key_name,
+                            endpoint.secret_name,
+                            &format!("{} API key", endpoint.display_name),
+                            &format!("https://console.{}", cheap_provider_slug),
+                            endpoint.display_name,
+                        )
+                        .await?;
+                    }
+                } else {
+                    crate::setup::prompts::print_blank_line();
+                    print_info(&format!(
+                        "Provider '{}' is not in the built-in catalog.",
+                        cheap_provider_slug
+                    ));
+                    print_info(
+                        "Make sure the API key is set via the matching environment variable.",
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn print_ai_stack_summary(&self) {
@@ -296,7 +535,7 @@ impl SetupWizard {
         print_warning(
             "Skip-auth mode keeps provider review credential-free. This step will not ask for API keys.",
         );
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let options = &[
             "Keep current provider",
@@ -319,7 +558,7 @@ impl SetupWizard {
         }
 
         print_info("Choose the provider ThinClaw should be ready for after onboarding.");
-        println!();
+        crate::setup::prompts::print_blank_line();
         let options = &[
             "Anthropic        - Claude models (add credentials later)",
             "OpenAI           - GPT models (add credentials later)",
@@ -432,7 +671,7 @@ impl SetupWizard {
                 }
             };
             print_info(&format!("Current provider: {}", display));
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             let is_known = matches!(
                 current.as_str(),
@@ -477,7 +716,7 @@ impl SetupWizard {
         }
 
         print_info("Choose your inference provider:");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let options = &[
             "Anthropic        - Claude models (direct API key)",
@@ -830,14 +1069,14 @@ impl SetupWizard {
             return Ok(());
         }
 
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info(
             "ThinClaw onboarding requires at least one authenticated remote provider so routing and failover have a real remote backend available.",
         );
         print_info(
             "You can still keep Ollama, llama.cpp, or a no-auth compatible endpoint as primary, but please add one authenticated remote provider now.",
         );
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let options = &[
             "OpenRouter  - single key, broad model coverage",
@@ -1033,9 +1272,9 @@ impl SetupWizard {
             return Ok(());
         }
 
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info(&format!("Get your API key here: {hint_url}"));
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let key = secret_input(prompt_label).map_err(SetupError::Io)?;
         let key_str = key.expose_secret();
@@ -1124,9 +1363,9 @@ impl SetupWizard {
             return Ok(());
         }
 
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info(&format!("Get your API key here: {hint_url}"));
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let key = secret_input(prompt_label).map_err(SetupError::Io)?;
         if key.expose_secret().is_empty() {
@@ -1242,7 +1481,7 @@ impl SetupWizard {
             native_key_ready = true;
         }
         if !native_key_ready {
-            println!();
+            crate::setup::prompts::print_blank_line();
             let api_key = secret_input("Bedrock API key").map_err(SetupError::Io)?;
             if api_key.expose_secret().is_empty() {
                 return Err(SetupError::Config(
@@ -1429,7 +1668,7 @@ impl SetupWizard {
         // Show current model if already configured
         if let Some(ref current) = self.settings.selected_model {
             print_info(&format!("Current model: {}", current));
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             let options = ["Keep current model", "Change model"];
             let choice =
@@ -1475,7 +1714,7 @@ impl SetupWizard {
     pub(super) fn step_embeddings(&mut self) -> Result<(), SetupError> {
         self.print_ai_stack_summary();
         print_info("Embeddings turn on semantic search in workspace memory.");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         if !confirm("Enable semantic search?", true).map_err(SetupError::Io)? {
             self.settings.embeddings.enabled = false;
@@ -1594,12 +1833,31 @@ impl SetupWizard {
 
     pub(super) async fn step_smart_routing(&mut self) -> Result<(), SetupError> {
         self.print_ai_stack_summary();
+        if self.is_quick_setup() {
+            self.settings.providers.smart_routing_enabled = true;
+            self.settings.providers.routing_mode = crate::settings::RoutingMode::AdvisorExecutor;
+            print_info(
+                "Quick setup uses advisor/executor routing by default: the primary model acts as the advisor and the fast model acts as the executor.",
+            );
+            print_info(
+                "Choose the executor model ThinClaw should use for regular execution before escalating to the advisor.",
+            );
+            crate::setup::prompts::print_blank_line();
+            return self
+                .configure_routed_secondary_model(
+                    crate::settings::RoutingMode::AdvisorExecutor,
+                    "executor",
+                    "executor",
+                )
+                .await;
+        }
+
         print_info("Choose how ThinClaw should split work across models.");
         print_info("You can stay on one model, split cheaper work to a faster auxiliary model,");
         print_info(
-            "or use advisor/executor mode so a lighter advisor can review work before heavy execution.",
+            "or use advisor/executor mode so a fast executor can consult the primary advisor when needed.",
         );
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let recommended_mode = match self.selected_profile {
             super::OnboardingProfile::LocalAndPrivate => {
@@ -1671,235 +1929,14 @@ impl SetupWizard {
         } else {
             crate::settings::RoutingMode::CheapSplit
         };
-        let aux_label = if routing_mode == crate::settings::RoutingMode::AdvisorExecutor {
-            "advisor"
-        } else {
-            "cheap"
-        };
-
-        let current = self
-            .settings
-            .providers
-            .cheap_model
-            .clone()
-            .unwrap_or_default();
-        if !current.is_empty() {
-            let keep = confirm(
-                &format!("Keep current {aux_label} model ({})?", current),
-                true,
-            )
-            .map_err(SetupError::Io)?;
-            if keep {
-                self.settings.providers.smart_routing_enabled = true;
-                self.settings.providers.routing_mode = routing_mode;
-                if let Some((slug, model)) = current.split_once('/') {
-                    self.set_preferred_cheap_slot_model(slug, model.to_string());
-                }
-                self.remove_followup("routing-policy");
-                print_success(&format!(
-                    "{} routing enabled. {aux_label} model: {}",
-                    routing_mode.as_str(),
-                    current
-                ));
-                return Ok(());
-            }
-        }
-
-        let mut provider_slugs = std::collections::BTreeSet::new();
-        if let Some(primary_slug) = self.primary_provider_slug() {
-            provider_slugs.insert(primary_slug.to_string());
-        }
-        for slug in &self.settings.providers.enabled {
-            provider_slugs.insert(slug.clone());
-        }
-        for slug in crate::config::provider_catalog::catalog().keys() {
-            provider_slugs.insert((*slug).to_string());
-        }
-        if self.settings.openai_compatible_base_url.is_some() {
-            provider_slugs.insert("openai_compatible".to_string());
-        }
-        if self.settings.bedrock_proxy_url.is_some()
-            || self.primary_provider_slug() == Some("bedrock")
-        {
-            provider_slugs.insert("bedrock".to_string());
-        }
-        if self.settings.llama_cpp_server_url.is_some()
-            || self.primary_provider_slug() == Some("llama_cpp")
-        {
-            provider_slugs.insert("llama_cpp".to_string());
-        }
-        provider_slugs.insert("ollama".to_string());
-
-        let mut provider_choices: Vec<String> = provider_slugs.into_iter().collect();
-        let preferred_provider = self
-            .settings
-            .providers
-            .preferred_cheap_provider
-            .clone()
-            .or_else(|| self.primary_provider_slug().map(str::to_string));
-        provider_choices.sort_by(|a, b| {
-            let a_score = usize::from(preferred_provider.as_deref() != Some(a.as_str()));
-            let b_score = usize::from(preferred_provider.as_deref() != Some(b.as_str()));
-            a_score
-                .cmp(&b_score)
-                .then_with(|| Self::provider_display_name(a).cmp(&Self::provider_display_name(b)))
-        });
-
-        let provider_option_labels: Vec<String> = provider_choices
-            .iter()
-            .map(|slug| {
-                let mut label = Self::provider_display_name(slug);
-                if self.primary_provider_slug() == Some(slug.as_str()) {
-                    label.push_str(" (current primary)");
-                }
-                if self.settings.providers.preferred_cheap_provider.as_deref()
-                    == Some(slug.as_str())
-                {
-                    label.push_str(" (current cheap)");
-                }
-                label
-            })
-            .collect();
-        let provider_option_refs: Vec<&str> =
-            provider_option_labels.iter().map(String::as_str).collect();
-        let provider_prompt = format!("{} model provider:", capitalize_first(aux_label));
-        let provider_choice =
-            select_one(&provider_prompt, &provider_option_refs).map_err(SetupError::Io)?;
-        let cheap_provider_slug = provider_choices
-            .get(provider_choice)
-            .cloned()
-            .ok_or_else(|| SetupError::Config("Invalid cheap provider selection".to_string()))?;
-
-        let display_name = Self::provider_display_name(&cheap_provider_slug);
-
-        let mut model_options = self.fetch_models_for_provider(&cheap_provider_slug).await;
-        if model_options.is_empty()
-            && let Some(default_model) = Self::provider_default_model(&cheap_provider_slug)
-        {
-            model_options.push((default_model.clone(), default_model));
-        }
-        let suggested_cheap = Self::suggested_cheap_model_for_provider(
-            &cheap_provider_slug,
-            self.settings
-                .providers
-                .provider_models
-                .get(&cheap_provider_slug)
-                .and_then(|slots| slots.primary.as_deref()),
-        );
-        if let Some(suggested) = suggested_cheap.clone() {
-            if let Some(index) = model_options.iter().position(|(id, _)| id == &suggested) {
-                let entry = model_options.remove(index);
-                model_options.insert(
-                    0,
-                    (
-                        entry.0.clone(),
-                        format!("{} (recommended cheap default)", entry.1),
-                    ),
-                );
+        let (slot_label, slot_prompt) =
+            if routing_mode == crate::settings::RoutingMode::AdvisorExecutor {
+                ("executor", "executor")
             } else {
-                model_options.insert(
-                    0,
-                    (
-                        suggested.clone(),
-                        format!("{} (recommended cheap default)", suggested),
-                    ),
-                );
-            }
-        }
-
-        let model_prompt = format!("Select the {aux_label} model:");
-        let cheap_model_id = self.choose_model_from_list(&model_options, &model_prompt)?;
-        self.settings.providers.smart_routing_enabled = true;
-        self.settings.providers.routing_mode = routing_mode;
-        self.set_preferred_cheap_slot_model(&cheap_provider_slug, cheap_model_id.clone());
-        self.remove_followup("routing-policy");
-        print_success(&format!(
-            "{} routing enabled — {aux_label} model: {}/{} ({})",
-            routing_mode.as_str(),
-            cheap_provider_slug,
-            cheap_model_id,
-            display_name
-        ));
-
-        // ── Check if the cheap model's provider needs a separate API key ──
-        // Parse provider slug from "provider/model" format.
-        if let Some(cheap_provider_slug) = self
-            .settings
-            .providers
-            .cheap_model
-            .as_deref()
-            .and_then(|spec| spec.split('/').next())
-            .map(str::to_string)
-        {
-            // Determine the primary provider slug for comparison.
-            let primary_slug = self.primary_provider_slug().unwrap_or("");
-
-            // Only prompt for a key if the cheap provider differs from the primary.
-            if !cheap_provider_slug.is_empty()
-                && cheap_provider_slug != primary_slug
-                && !matches!(
-                    cheap_provider_slug.as_str(),
-                    "ollama" | "llama_cpp" | "openai_compatible" | "bedrock"
-                )
-            {
-                // Look up the cheap provider in the catalog.
-                if let Some(endpoint) =
-                    crate::config::provider_catalog::endpoint_for(&cheap_provider_slug)
-                {
-                    // Check if the API key is already available (env var, keychain, or secrets).
-                    let has_provider_key = self
-                        .has_provider_secret(endpoint.env_key_name, endpoint.secret_name)
-                        .await;
-
-                    if std::env::var(endpoint.env_key_name).is_ok() {
-                        println!();
-                        print_success(&format!(
-                            "✓ {} API key found in environment ({}).",
-                            endpoint.display_name, endpoint.env_key_name
-                        ));
-                    } else if has_provider_key {
-                        println!();
-                        print_success(&format!(
-                            "✓ {} credentials already stored.",
-                            endpoint.display_name
-                        ));
-                    } else {
-                        // API key is missing — prompt the user.
-                        println!();
-                        print_info(&format!(
-                            "The {} model uses a different provider than your primary.",
-                            aux_label
-                        ));
-                        print_info(&format!(
-                            "An API key for {} is required.",
-                            endpoint.display_name
-                        ));
-
-                        self.setup_additional_api_key_provider(
-                            &cheap_provider_slug,
-                            endpoint.env_key_name,
-                            endpoint.secret_name,
-                            &format!("{} API key", endpoint.display_name),
-                            &format!("https://console.{}", cheap_provider_slug),
-                            endpoint.display_name,
-                        )
-                        .await?;
-                    }
-                } else {
-                    // Provider not in catalog — warn but continue.
-                    println!();
-                    print_info(&format!(
-                        "Provider '{}' is not in the built-in catalog.",
-                        cheap_provider_slug
-                    ));
-                    print_info(
-                        "Make sure the API key is set via the matching environment variable.",
-                    );
-                }
-            }
-        }
-
-        Ok(())
+                ("fast", "fast")
+            };
+        self.configure_routed_secondary_model(routing_mode, slot_label, slot_prompt)
+            .await
     }
 
     /// Step 6: Fallback Providers (optional secondary providers for failover).
@@ -1910,7 +1947,7 @@ impl SetupWizard {
         self.print_ai_stack_summary();
         print_info("ThinClaw can use multiple LLM providers for failover and cost control.");
         print_info("If your primary provider is down, it will automatically try fallbacks.");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         if !confirm("Add a fallback provider?", false).map_err(SetupError::Io)? {
             print_info("No fallback providers configured. Primary-only mode is active.");
@@ -1938,7 +1975,7 @@ impl SetupWizard {
         let mut fallback_slugs: Vec<String> = Vec::new();
 
         loop {
-            println!();
+            print_blank_line();
             print_info("Available fallback providers:");
             for (i, (slug, ep)) in available.iter().enumerate() {
                 // Check if key already exists
@@ -1947,7 +1984,12 @@ impl SetupWizard {
                     .has_provider_secret(ep.env_key_name, ep.secret_name)
                     .await;
                 let status = if has_env || has_saved { " ✅" } else { "" };
-                println!("  {}. {} ({}){status}", i + 1, ep.display_name, slug);
+                print_info(&format!(
+                    "{}. {} ({}){status}",
+                    i + 1,
+                    ep.display_name,
+                    slug
+                ));
             }
 
             let choice =
@@ -1984,7 +2026,7 @@ impl SetupWizard {
                 ));
             } else {
                 // Prompt for API key
-                println!();
+                crate::setup::prompts::print_blank_line();
                 print_info(&format!("Enter the {} API key:", endpoint.display_name));
 
                 self.setup_additional_api_key_provider(
@@ -2041,7 +2083,7 @@ impl SetupWizard {
             {
                 self.settings.providers.routing_mode = crate::settings::RoutingMode::CheapSplit;
             }
-            println!();
+            crate::setup::prompts::print_blank_line();
             print_success(&format!("Fallback chain: {}", chain));
         } else {
             print_info("No fallback providers were added.");

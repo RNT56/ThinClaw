@@ -226,15 +226,29 @@ pub async fn install_wasm_files(
     // Copy WASM binary
     fs::copy(wasm_src, &wasm_dst).await?;
 
-    // Look for capabilities.json sidecar in the source directory
-    let caps_candidates = [
+    // Look for capabilities.json sidecar in the source directory.
+    // Prefer manifest-name variants first, then fall back to wasm artifact stem
+    // in case manifest name and built artifact basename diverge.
+    let wasm_stem = wasm_src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name)
+        .to_string();
+    let mut caps_candidates = vec![
         source_dir.join(format!("{}.capabilities.json", name)),
         source_dir.join(format!("{}-tool.capabilities.json", name)),
-        source_dir.join("capabilities.json"),
     ];
-    for caps_src in &caps_candidates {
+    if wasm_stem != name {
+        caps_candidates.push(source_dir.join(format!("{}.capabilities.json", wasm_stem)));
+        caps_candidates.push(source_dir.join(format!("{}-tool.capabilities.json", wasm_stem)));
+    }
+    caps_candidates.push(source_dir.join("capabilities.json"));
+    for caps_src in caps_candidates {
+        if caps_src == caps_dst {
+            continue;
+        }
         if caps_src.exists() {
-            if let Err(e) = fs::copy(caps_src, &caps_dst).await {
+            if let Err(e) = fs::copy(&caps_src, &caps_dst).await {
                 tracing::warn!(
                     "Failed to copy capabilities sidecar {} -> {}: {}",
                     caps_src.display(),

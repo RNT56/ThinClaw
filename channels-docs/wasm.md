@@ -58,7 +58,7 @@ WASM_CHANNELS_DIR=~/.thinclaw/channels/
 
 ## Creating a WASM Channel
 
-1. Write a WASM component implementing the channel interface (exports: `on_http_req`, `on_poll`, `on_respond`)
+1. Write a WASM component implementing the channel interface (exports: `on_http_request`, `on_poll`, `on_respond`)
 2. Create a capabilities JSON file defining HTTP endpoints, polling config, and auth
 3. Place the `.wasm` file and capabilities in `~/.thinclaw/channels/`
 
@@ -66,7 +66,7 @@ WASM_CHANNELS_DIR=~/.thinclaw/channels/
 
 Some WASM channels come bundled with ThinClaw and can be installed via:
 ```bash
-thinclaw extensions install <channel-name>
+thinclaw registry install <channel-name>
 ```
 
 ## Managing Channels

@@ -455,10 +455,46 @@ impl Agent {
                     .as_ref()
                     .map(|personality| personality.name.as_str())
                     .unwrap_or("base identity");
+                let (soul_pack, soul_schema, soul_summary) =
+                    match crate::identity::soul_store::read_home_soul() {
+                        Ok(content) => (
+                            crate::identity::soul::canonical_seed_pack(&content)
+                                .unwrap_or_else(|| self.config.personality_pack.clone()),
+                            crate::identity::soul::canonical_schema_version(&content).to_string(),
+                            crate::identity::soul::summarize_canonical_soul(&content),
+                        ),
+                        Err(_) => (
+                            self.config.personality_pack.clone(),
+                            "missing".to_string(),
+                            "Canonical home soul not found yet".to_string(),
+                        ),
+                    };
+                let local_overlay = if let Some(workspace) = self.workspace() {
+                    workspace
+                        .exists(crate::workspace::paths::SOUL_LOCAL)
+                        .await
+                        .ok()
+                } else {
+                    None
+                };
+                let soul_mode = if local_overlay == Some(true) {
+                    "global + local overlay"
+                } else {
+                    "global only"
+                };
                 Ok(SubmissionResult::response(format!(
-                    "Identity\n\nName: {}\nBase personality pack: {}\nSession personality: {}\nConfigured CLI/Web skin: {}\n\nUse /personality <name> for a temporary overlay.\nAvailable overlays: {}",
+                    "Identity\n\nName: {}\nBase personality pack: {}\nCanonical soul path: {}\nSoul schema: {}\nSoul summary: {}\nWorkspace soul mode: {}\nWorkspace overlay: {}\nSession personality: {}\nConfigured CLI/Web skin: {}\n\nUse /personality <name> for a temporary overlay.\nAvailable overlays: {}",
                     agent_display_name(&self.config.name),
-                    self.config.personality_pack,
+                    soul_pack,
+                    crate::identity::soul_store::canonical_soul_path().display(),
+                    soul_schema,
+                    soul_summary,
+                    soul_mode,
+                    if local_overlay == Some(true) {
+                        "SOUL.local.md present"
+                    } else {
+                        "Using global soul"
+                    },
                     session_personality,
                     self.config.cli_skin,
                     available_personality_names().collect::<Vec<_>>().join(", ")
@@ -717,8 +753,9 @@ impl Agent {
                 // Workspace sections (identity files)
                 if let Some(workspace) = ws {
                     let paths = [
+                        ("SOUL.md (home)", "SOUL.md (home)"),
                         (crate::workspace::paths::AGENTS, "AGENTS.md"),
-                        (crate::workspace::paths::SOUL, "SOUL.md"),
+                        (crate::workspace::paths::SOUL_LOCAL, "SOUL.local.md"),
                         (crate::workspace::paths::USER, "USER.md"),
                         (crate::workspace::paths::IDENTITY, "IDENTITY.md"),
                         (crate::workspace::paths::MEMORY, "MEMORY.md"),
@@ -726,6 +763,22 @@ impl Agent {
                         (crate::workspace::paths::BOOT, "BOOT.md"),
                     ];
                     for (path, label) in paths {
+                        if path == "SOUL.md (home)" {
+                            match crate::identity::soul_store::read_home_soul() {
+                                Ok(content) if !content.is_empty() => {
+                                    let preview = if detail {
+                                        content
+                                    } else {
+                                        let first_line = content.lines().next().unwrap_or("");
+                                        format!("{} ({} chars)", first_line, content.len())
+                                    };
+                                    sections.push((label, true, preview));
+                                }
+                                Ok(_) => sections.push((label, false, "(empty)".to_string())),
+                                Err(_) => sections.push((label, false, "(not found)".to_string())),
+                            }
+                            continue;
+                        }
                         match workspace.read(path).await {
                             Ok(doc) if !doc.content.is_empty() => {
                                 let preview = if detail {

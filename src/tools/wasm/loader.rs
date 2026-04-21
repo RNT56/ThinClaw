@@ -43,7 +43,8 @@ use crate::secrets::SecretsStore;
 use crate::tools::registry::{ToolRegistry, WasmRegistrationError, WasmToolRegistration};
 use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
 use crate::tools::wasm::{
-    Capabilities, OAuthRefreshConfig, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,
+    Capabilities, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,
+    resolve_oauth_refresh_config,
 };
 
 /// Error during WASM tool loading.
@@ -307,50 +308,6 @@ impl WasmToolLoader {
 
         Ok(results)
     }
-}
-
-/// Extract OAuth refresh configuration from a parsed capabilities file.
-///
-/// Returns `None` if there's no `auth.oauth` section or if the client_id
-/// can't be resolved from any source (inline, env var, or built-in defaults).
-///
-/// Fallback chain for client_id:
-///   `oauth.client_id` > env var (`oauth.client_id_env`) > `builtin_credentials()`
-fn resolve_oauth_refresh_config(cap_file: &CapabilitiesFile) -> Option<OAuthRefreshConfig> {
-    let auth = cap_file.auth.as_ref()?;
-    let oauth = auth.oauth.as_ref()?;
-
-    let builtin = crate::cli::oauth_defaults::builtin_credentials(&auth.secret_name);
-
-    let client_id = oauth
-        .client_id
-        .clone()
-        .or_else(|| {
-            oauth
-                .client_id_env
-                .as_ref()
-                .and_then(|env| std::env::var(env).ok())
-        })
-        .or_else(|| builtin.as_ref().map(|c| c.client_id.to_string()))?;
-
-    let client_secret = oauth
-        .client_secret
-        .clone()
-        .or_else(|| {
-            oauth
-                .client_secret_env
-                .as_ref()
-                .and_then(|env| std::env::var(env).ok())
-        })
-        .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
-
-    Some(OAuthRefreshConfig {
-        token_url: oauth.token_url.clone(),
-        client_id,
-        client_secret,
-        secret_name: auth.secret_name.clone(),
-        provider: auth.provider.clone(),
-    })
 }
 
 /// Results from loading multiple tools.
@@ -724,7 +681,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = super::resolve_oauth_refresh_config(&caps);
+        let config = crate::tools::wasm::resolve_oauth_refresh_config(&caps);
         assert!(config.is_some());
 
         let config = config.unwrap();
@@ -740,7 +697,7 @@ mod tests {
         use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
 
         let caps = CapabilitiesFile::default();
-        let config = super::resolve_oauth_refresh_config(&caps);
+        let config = crate::tools::wasm::resolve_oauth_refresh_config(&caps);
         assert!(config.is_none());
     }
 
@@ -756,7 +713,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = super::resolve_oauth_refresh_config(&caps);
+        let config = crate::tools::wasm::resolve_oauth_refresh_config(&caps);
         assert!(config.is_none());
     }
 
@@ -781,7 +738,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = super::resolve_oauth_refresh_config(&caps);
+        let config = crate::tools::wasm::resolve_oauth_refresh_config(&caps);
         assert!(config.is_none());
     }
 
@@ -807,7 +764,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = super::resolve_oauth_refresh_config(&caps);
+        let config = crate::tools::wasm::resolve_oauth_refresh_config(&caps);
         assert!(config.is_some());
         let config = config.unwrap();
         assert!(!config.client_id.is_empty());

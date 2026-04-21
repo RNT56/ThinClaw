@@ -240,7 +240,7 @@ pub(crate) async fn sse_event_visible_to_identity(
 ) -> bool {
     match event {
         SseEvent::Response { thread_id, .. } => {
-            conversation_event_visible_to_identity(store, identity, thread_id).await
+            conversation_event_visible_to_identity(store, state, identity, thread_id).await
         }
         SseEvent::Thinking { thread_id, .. }
         | SseEvent::ReasoningContent { thread_id, .. }
@@ -255,11 +255,19 @@ pub(crate) async fn sse_event_visible_to_identity(
         | SseEvent::ApprovalNeeded { thread_id, .. }
         | SseEvent::Error { thread_id, .. } => {
             if let Some(thread_id) = thread_id.as_deref() {
-                conversation_event_visible_to_identity(store, identity, thread_id).await
+                conversation_event_visible_to_identity(store, state, identity, thread_id).await
             } else {
                 identity.matches_gateway_defaults(state)
             }
         }
+        SseEvent::ConversationUpdated { thread_id, .. } => {
+            conversation_event_visible_to_identity(store, state, identity, thread_id).await
+        }
+        SseEvent::ConversationDeleted {
+            principal_id,
+            actor_id,
+            ..
+        } => identity.principal_id == *principal_id && identity.actor_id == *actor_id,
         SseEvent::JobMessage { job_id, .. }
         | SseEvent::JobToolUse { job_id, .. }
         | SseEvent::JobToolResult { job_id, .. }
@@ -298,19 +306,29 @@ pub(crate) async fn sse_event_visible_to_identity(
 
 async fn conversation_event_visible_to_identity(
     store: Option<&std::sync::Arc<dyn Database>>,
+    state: &GatewayState,
     identity: &GatewayRequestIdentity,
     thread_id: &str,
 ) -> bool {
-    let Some(store) = store else {
-        return false;
-    };
     let Ok(thread_id) = uuid::Uuid::parse_str(thread_id) else {
         return false;
     };
-    store
-        .conversation_belongs_to_actor(thread_id, &identity.principal_id, &identity.actor_id)
-        .await
-        .unwrap_or(false)
+
+    if let Some(store) = store {
+        return store
+            .conversation_belongs_to_actor(thread_id, &identity.principal_id, &identity.actor_id)
+            .await
+            .unwrap_or(false);
+    }
+
+    let Some(session_manager) = state.session_manager.as_ref() else {
+        return false;
+    };
+    let session = session_manager
+        .get_or_create_session_for_identity(&identity.resolved_identity(None))
+        .await;
+    let sess = session.lock().await;
+    sess.threads.contains_key(&thread_id)
 }
 
 async fn sandbox_job_event_visible_to_identity(
@@ -609,5 +627,30 @@ mod tests {
 
         assert!(sse_event_visible_to_identity(Some(&store), &state, &allowed, &event).await);
         assert!(!sse_event_visible_to_identity(Some(&store), &state, &denied, &event).await);
+    }
+
+    #[tokio::test]
+    async fn sse_conversation_deleted_events_are_actor_scoped_without_db_lookup() {
+        let state = test_gateway_state("user-1", "actor-a", None);
+        let event = SseEvent::ConversationDeleted {
+            thread_id: uuid::Uuid::new_v4().to_string(),
+            principal_id: "user-1".to_string(),
+            actor_id: "actor-a".to_string(),
+        };
+        let allowed = GatewayRequestIdentity::new(
+            "user-1",
+            "actor-a",
+            GatewayAuthSource::TrustedProxy,
+            false,
+        );
+        let denied = GatewayRequestIdentity::new(
+            "user-1",
+            "actor-b",
+            GatewayAuthSource::TrustedProxy,
+            false,
+        );
+
+        assert!(sse_event_visible_to_identity(None, &state, &allowed, &event).await);
+        assert!(!sse_event_visible_to_identity(None, &state, &denied, &event).await);
     }
 }

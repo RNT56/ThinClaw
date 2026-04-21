@@ -25,11 +25,11 @@ Do not assume one generic auth flow for every tool.
 | GitHub | manual token / secret-entry flow | `github_token` | [github.md](github.md) |
 | Notion | manual token / secret-entry flow | `notion_token` | [notion.md](notion.md) |
 | Gmail | `thinclaw tool auth gmail` | `google_oauth_token` | [gmail.md](gmail.md) |
-| Google Calendar | shared Google auth | `google_oauth_token` | [google-calendar.md](google-calendar.md) |
-| Google Docs | shared Google auth | `google_oauth_token` | [google-docs.md](google-docs.md) |
-| Google Drive | shared Google auth | `google_oauth_token` | [google-drive.md](google-drive.md) |
-| Google Sheets | shared Google auth | `google_oauth_token` | [google-sheets.md](google-sheets.md) |
-| Google Slides | shared Google auth | `google_oauth_token` | [google-slides.md](google-slides.md) |
+| Google Calendar | `thinclaw tool auth google-calendar` | `google_oauth_token` | [google-calendar.md](google-calendar.md) |
+| Google Docs | `thinclaw tool auth google-docs` | `google_oauth_token` | [google-docs.md](google-docs.md) |
+| Google Drive | `thinclaw tool auth google-drive` | `google_oauth_token` | [google-drive.md](google-drive.md) |
+| Google Sheets | `thinclaw tool auth google-sheets` | `google_oauth_token` | [google-sheets.md](google-sheets.md) |
+| Google Slides | `thinclaw tool auth google-slides` | `google_oauth_token` | [google-slides.md](google-slides.md) |
 | Slack | `thinclaw tool auth slack-tool` or env-based auth | `slack_bot_token` | [slack.md](slack.md) |
 | Telegram | workspace files + in-tool login flow | `telegram/api_id`, `telegram/api_hash`, `telegram/session.json` | [telegram.md](telegram.md) |
 | Okta | `thinclaw tool auth okta` + workspace domain | `okta_oauth_token`, `okta/domain` | [okta.md](okta.md) |

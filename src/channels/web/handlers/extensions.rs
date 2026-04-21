@@ -3,11 +3,37 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::extensions::manager::AuthRequestContext;
+
+fn request_origin(headers: &HeaderMap) -> Option<String> {
+    if let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        return Some(origin.trim_end_matches('/').to_string());
+    }
+
+    headers
+        .get(axum::http::header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| url::Url::parse(value).ok())
+        .and_then(|url| {
+            Some(format!(
+                "{}://{}",
+                url.scheme(),
+                url.host_str().map(str::to_string).unwrap_or_default()
+                    + &url
+                        .port()
+                        .map(|port| format!(":{port}"))
+                        .unwrap_or_default()
+            ))
+        })
+}
 
 pub(crate) async fn extensions_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -65,9 +91,13 @@ pub(crate) async fn extensions_list_handler(
             description: ext.description,
             url: ext.url,
             authenticated: ext.authenticated,
+            auth_mode: ext.auth_mode,
+            auth_status: ext.auth_status,
             active: ext.active,
             tools: ext.tools,
             needs_setup: ext.needs_setup,
+            shared_auth_provider: ext.shared_auth_provider,
+            missing_scopes: ext.missing_scopes,
             activation_status,
             activation_error: ext.activation_error,
             channel_diagnostics,
@@ -146,6 +176,7 @@ pub(crate) async fn extensions_install_handler(
 
 pub(crate) async fn extensions_activate_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -165,8 +196,17 @@ pub(crate) async fn extensions_activate_handler(
                 return Ok(Json(ActionResponse::fail(err_str)));
             }
 
-            match ext_mgr.auth(&name, None).await {
-                Ok(auth_result) if auth_result.status == "authenticated" => {
+            let auth_context = AuthRequestContext {
+                callback_base_url: request_origin(&headers),
+                callback_type: Some("web".to_string()),
+                thread_id: None,
+            };
+
+            match ext_mgr.auth_with_context(&name, None, auth_context).await {
+                Ok(auth_result)
+                    if auth_result.auth_status == "authenticated"
+                        || auth_result.auth_status == "no_auth_required" =>
+                {
                     match ext_mgr.activate(&name).await {
                         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
                         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
@@ -180,8 +220,13 @@ pub(crate) async fn extensions_activate_handler(
                             .unwrap_or_else(|| format!("'{}' requires authentication.", name)),
                     );
                     resp.auth_url = auth_result.auth_url;
+                    resp.setup_url = auth_result.setup_url;
+                    resp.auth_mode = Some(auth_result.auth_mode.clone());
+                    resp.auth_status = Some(auth_result.auth_status.clone());
                     resp.awaiting_token = Some(auth_result.awaiting_token);
                     resp.instructions = auth_result.instructions;
+                    resp.shared_auth_provider = auth_result.shared_auth_provider;
+                    resp.missing_scopes = auth_result.missing_scopes;
                     Ok(Json(resp))
                 }
                 Err(auth_err) => Ok(Json(ActionResponse::fail(format!(
@@ -309,6 +354,7 @@ pub(crate) async fn extensions_registry_handler(
 
 pub(crate) async fn extensions_setup_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<ExtensionSetupResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -316,8 +362,15 @@ pub(crate) async fn extensions_setup_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    let secrets = ext_mgr
-        .get_setup_schema(&name)
+    let setup = ext_mgr
+        .get_setup_schema(
+            &name,
+            AuthRequestContext {
+                callback_base_url: request_origin(&headers),
+                callback_type: Some("web".to_string()),
+                thread_id: None,
+            },
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -332,7 +385,14 @@ pub(crate) async fn extensions_setup_handler(
     Ok(Json(ExtensionSetupResponse {
         name,
         kind,
-        secrets,
+        mode: setup.mode,
+        auth_status: setup.auth_status,
+        fields: setup.fields,
+        auth_url: setup.auth_url,
+        instructions: setup.instructions,
+        setup_url: setup.setup_url,
+        shared_auth_provider: setup.shared_auth_provider,
+        missing_scopes: setup.missing_scopes,
     }))
 }
 

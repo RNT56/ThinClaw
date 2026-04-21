@@ -17,7 +17,7 @@ workspace/
 ├── MEMORY.md              <- Long-term curated memory
 ├── HEARTBEAT.md           <- Periodic checklist
 ├── IDENTITY.md            <- Agent name, nature, and presentation
-├── SOUL.md                <- Core values
+├── SOUL.local.md          <- Optional workspace overlay (explicit-only)
 ├── AGENTS.md              <- Behavior instructions
 ├── USER.md                <- User context
 ├── context/               <- Identity-related docs
@@ -61,7 +61,7 @@ let results = workspace.search("dark mode preference", 5).await?;
 let prompt = workspace.system_prompt().await?;
 ```
 
-The onboarding-selected `personality_pack` seeds `SOUL.md` for fresh workspaces. Temporary `/personality` overlays do not rewrite these files.
+The onboarding-selected `personality_pack` seeds the canonical home `SOUL.md` in `THINCLAW_HOME`. Workspaces inherit that soul by default; `SOUL.local.md` exists only when explicitly created. Temporary `/personality` overlays do not rewrite durable files.
 
 ## Memory Tools
 

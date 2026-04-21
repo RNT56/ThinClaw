@@ -6,52 +6,159 @@
 use ratatui::prelude::*;
 use ratatui::widgets::*;
 
+use crate::branding::art::{best_wordmark_block, hero_block};
+
 use super::{ChatMessage, TuiApp};
 
 impl TuiApp {
     // ── Rendering ────────────────────────────────────────────────────
 
     pub(super) fn render(&mut self, frame: &mut Frame) {
-        let chunks = Layout::default()
+        let logo = best_wordmark_block(frame.area().width.saturating_sub(4) as usize);
+        let header_height = if let Some(logo) = &logo {
+            logo.height() as u16 + 2
+        } else {
+            1
+        };
+        let outer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(header_height), Constraint::Min(5)])
+            .split(frame.area());
+
+        self.render_header(frame, outer[0], logo);
+
+        let hero = hero_block(&self.skin);
+        let hero_width = hero
+            .as_ref()
+            .map(|art| (art.width() as u16).saturating_add(4).clamp(18, 28))
+            .unwrap_or(0);
+        let show_hero = hero.is_some() && outer[1].width >= hero_width.saturating_add(48);
+
+        let body_chunks = if show_hero {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(hero_width), Constraint::Min(36)])
+                .split(outer[1])
+        } else {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(1)])
+                .split(outer[1])
+        };
+
+        let main_area = if show_hero {
+            body_chunks[1]
+        } else {
+            body_chunks[0]
+        };
+        if show_hero {
+            self.render_hero(frame, body_chunks[0]);
+        }
+
+        let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // Header
                 Constraint::Min(5),    // Chat area
                 Constraint::Length(3), // Input
                 Constraint::Length(1), // Status bar
             ])
-            .split(frame.area());
+            .split(main_area);
 
-        self.render_header(frame, chunks[0]);
-        self.render_chat(frame, chunks[1]);
-        self.render_input(frame, chunks[2]);
-        self.render_status(frame, chunks[3]);
+        self.render_chat(frame, main_chunks[0]);
+        self.render_input(frame, main_chunks[1]);
+        self.render_status(frame, main_chunks[2]);
     }
 
-    fn render_header(&self, frame: &mut Frame, area: Rect) {
+    fn render_header(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        logo: Option<crate::branding::art::ArtBlock>,
+    ) {
         let status = if self.active_stream.is_some() {
             "live"
         } else {
             "idle"
         };
 
-        let header = Line::from(vec![
-            Span::styled(" ThinClaw ", self.skin.title_style()),
-            Span::styled(format!(" {}", self.skin.name), self.skin.accent_style()),
+        let Some(logo) = logo else {
+            let header = Line::from(vec![
+                Span::styled(" ThinClaw ", self.skin.title_style()),
+                Span::styled(format!(" {}", self.skin.name), self.skin.accent_style()),
+                Span::styled("│", self.skin.border_soft_style()),
+                Span::styled(format!(" model {}", self.model), self.skin.body_style()),
+                Span::styled("│", self.skin.border_soft_style()),
+                Span::styled(
+                    format!(" agent {}", self.agent_id),
+                    self.skin.accent_soft_style(),
+                ),
+                Span::styled("│", self.skin.border_soft_style()),
+                Span::styled(format!(" {}", status), self.skin.muted_style()),
+                Span::styled(" ", self.skin.muted_style()),
+                Span::styled(&self.status_text, self.skin.muted_style()),
+            ]);
+            frame.render_widget(Paragraph::new(header), area);
+            return;
+        };
+
+        let mut lines = logo.to_ratatui_lines(&self.skin);
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {} ", self.skin.name), self.skin.title_style()),
             Span::styled("│", self.skin.border_soft_style()),
             Span::styled(format!(" model {}", self.model), self.skin.body_style()),
-            Span::styled("│", self.skin.border_soft_style()),
+            Span::styled(" │ ", self.skin.border_soft_style()),
             Span::styled(
-                format!(" agent {}", self.agent_id),
+                format!("agent {}", self.agent_id),
                 self.skin.accent_soft_style(),
             ),
-            Span::styled("│", self.skin.border_soft_style()),
-            Span::styled(format!(" {}", status), self.skin.muted_style()),
+            Span::styled(" │ ", self.skin.border_soft_style()),
+            Span::styled(format!("{status}"), self.skin.muted_style()),
             Span::styled(" ", self.skin.muted_style()),
             Span::styled(&self.status_text, self.skin.muted_style()),
-        ]);
+        ]));
 
-        frame.render_widget(Paragraph::new(header), area);
+        let header = Paragraph::new(Text::from(lines)).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(self.skin.border_style()),
+        );
+        frame.render_widget(header, area);
+    }
+
+    fn render_hero(&self, frame: &mut Frame, area: Rect) {
+        let Some(hero) = hero_block(&self.skin) else {
+            return;
+        };
+
+        let mut lines = Vec::new();
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let top_padding = inner_height.saturating_sub(hero.height()) / 2;
+        for _ in 0..top_padding {
+            lines.push(Line::from(""));
+        }
+        lines.extend(hero.to_ratatui_lines(&self.skin));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            self.skin
+                .tagline()
+                .unwrap_or("Skin-driven operator deck")
+                .to_string(),
+            self.skin.muted_style(),
+        )));
+
+        let panel = Paragraph::new(Text::from(lines))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(self.skin.border_style())
+                    .title(Span::styled(
+                        format!(" {} sigil ", self.skin.name),
+                        self.skin.accent_style(),
+                    )),
+            );
+        frame.render_widget(panel, area);
     }
 
     fn render_chat(&mut self, frame: &mut Frame, area: Rect) {

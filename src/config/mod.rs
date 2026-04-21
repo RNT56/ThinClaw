@@ -67,7 +67,10 @@ pub use self::tunnel::{
     TunnelConfig, TunnelProviderConfig,
 };
 pub use self::wasm::WasmConfig;
-pub use self::webchat::{WebChatConfig, WebChatTheme};
+pub use self::webchat::{
+    ResolvedWebSkin, WebChatBootstrap, WebChatConfig, WebChatPresentation, WebChatTheme,
+    WebSkinCatalogEntry,
+};
 
 /// Thread-safe overlay for secrets injected from the keychain/secrets store.
 ///
@@ -349,6 +352,7 @@ impl Config {
 
 const EXTRA_SECRET_ENV_MAPPINGS: &[(&str, &str)] = &[
     ("HTTP_WEBHOOK_SECRET", "http_webhook_secret"),
+    ("NOSTR_PRIVATE_KEY", "nostr_private_key"),
     ("DISCORD_BOT_TOKEN", "discord_bot_token"),
     ("SLACK_BOT_TOKEN", "slack_bot_token"),
     ("SLACK_APP_TOKEN", "slack_app_token"),

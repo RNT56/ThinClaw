@@ -363,6 +363,21 @@ impl Store {
         row.map(|row| row_to_experiment_campaign(&row)).transpose()
     }
 
+    pub async fn get_experiment_campaign_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentCampaign>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT * FROM experiment_campaigns WHERE id = $1 AND owner_user_id = $2",
+                &[&id, &owner_user_id],
+            )
+            .await?;
+        row.map(|row| row_to_experiment_campaign(&row)).transpose()
+    }
+
     pub async fn list_experiment_campaigns(
         &self,
     ) -> Result<Vec<ExperimentCampaign>, DatabaseError> {
@@ -371,6 +386,20 @@ impl Store {
             .query(
                 "SELECT * FROM experiment_campaigns ORDER BY created_at DESC",
                 &[],
+            )
+            .await?;
+        rows.iter().map(row_to_experiment_campaign).collect()
+    }
+
+    pub async fn list_experiment_campaigns_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentCampaign>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT * FROM experiment_campaigns WHERE owner_user_id = $1 ORDER BY created_at DESC",
+                &[&owner_user_id],
             )
             .await?;
         rows.iter().map(row_to_experiment_campaign).collect()
@@ -529,6 +558,25 @@ impl Store {
         row.map(|row| row_to_experiment_trial(&row)).transpose()
     }
 
+    pub async fn get_experiment_trial_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentTrial>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT t.* FROM experiment_trials t
+                INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
+                WHERE t.id = $1 AND c.owner_user_id = $2
+                "#,
+                &[&id, &owner_user_id],
+            )
+            .await?;
+        row.map(|row| row_to_experiment_trial(&row)).transpose()
+    }
+
     pub async fn list_experiment_trials(
         &self,
         campaign_id: Uuid,
@@ -538,6 +586,26 @@ impl Store {
             .query(
                 "SELECT * FROM experiment_trials WHERE campaign_id = $1 ORDER BY sequence ASC",
                 &[&campaign_id],
+            )
+            .await?;
+        rows.iter().map(row_to_experiment_trial).collect()
+    }
+
+    pub async fn list_experiment_trials_for_owner(
+        &self,
+        campaign_id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentTrial>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT t.* FROM experiment_trials t
+                INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
+                WHERE t.campaign_id = $1 AND c.owner_user_id = $2
+                ORDER BY t.sequence ASC
+                "#,
+                &[&campaign_id, &owner_user_id],
             )
             .await?;
         rows.iter().map(row_to_experiment_trial).collect()
@@ -659,6 +727,27 @@ impl Store {
             .query(
                 "SELECT * FROM experiment_artifact_refs WHERE trial_id = $1 ORDER BY created_at ASC",
                 &[&trial_id],
+            )
+            .await?;
+        rows.iter().map(row_to_experiment_artifact).collect()
+    }
+
+    pub async fn list_experiment_artifacts_for_owner(
+        &self,
+        trial_id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT a.* FROM experiment_artifact_refs a
+                INNER JOIN experiment_trials t ON t.id = a.trial_id
+                INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
+                WHERE a.trial_id = $1 AND c.owner_user_id = $2
+                ORDER BY a.created_at ASC
+                "#,
+                &[&trial_id, &owner_user_id],
             )
             .await?;
         rows.iter().map(row_to_experiment_artifact).collect()

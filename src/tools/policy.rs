@@ -174,43 +174,54 @@ impl ToolPolicyManager {
         &self.default_policy
     }
 
-    fn from_env_override(raw: &str) -> Option<Self> {
+    fn from_env_override(raw: &str) -> Result<Option<Self>, String> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            return None;
+            return Ok(None);
         }
         serde_json::from_str(trimmed)
             .or_else(|_| toml::from_str(trimmed))
-            .ok()
+            .map(Some)
+            .map_err(|err| format!("invalid tool policy override payload: {err}"))
     }
 
-    fn load_toml_override(path: &Path) -> Option<Self> {
-        let raw = std::fs::read_to_string(path).ok()?;
-        let value = toml::from_str::<toml::Value>(&raw).ok()?;
+    fn load_toml_override(path: &Path) -> Result<Option<Self>, String> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(format!("failed to read {}: {err}", path.display())),
+        };
+        let value = toml::from_str::<toml::Value>(&raw)
+            .map_err(|err| format!("invalid TOML in {}: {err}", path.display()))?;
         if value.get("tool_policies").is_none() {
-            return None;
+            return Ok(None);
         }
         crate::settings::Settings::load_toml(path)
-            .ok()
-            .flatten()
+            .map_err(|err| format!("failed to load TOML settings: {err}"))?
             .map(|settings| settings.tool_policies)
+            .ok_or_else(|| "missing tool_policies section".to_string())
+            .map(Some)
     }
 
-    fn resolve_from_layers(
-        persisted: Option<&Self>,
-        toml: Option<&Self>,
-        env_override: Option<&str>,
-    ) -> Self {
-        let mut resolved = persisted.cloned().unwrap_or_default();
-        if let Some(toml) = toml {
-            resolved = toml.clone();
+    fn deny_all_policy_manager() -> Self {
+        Self {
+            default_policy: ToolAccessPolicy::allow_only(std::iter::empty::<String>()),
+            channel_policies: HashMap::new(),
+            group_policies: HashMap::new(),
         }
-        if let Some(raw) = env_override
-            && let Some(env) = Self::from_env_override(raw)
-        {
-            resolved = env;
-        }
-        resolved
+    }
+
+    fn fail_open_overrides_enabled() -> bool {
+        crate::config::helpers::optional_env("THINCLAW_TOOL_POLICIES_FAIL_OPEN")
+            .ok()
+            .flatten()
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
     }
 
     /// Load the effective policy manager using runtime precedence:
@@ -218,7 +229,25 @@ impl ToolPolicyManager {
     pub fn load_from_settings() -> Self {
         let persisted = crate::settings::Settings::load();
         let toml_path = crate::settings::Settings::default_toml_path();
-        let toml = Self::load_toml_override(&toml_path);
+        let fail_open = Self::fail_open_overrides_enabled();
+        let toml = match Self::load_toml_override(&toml_path) {
+            Ok(value) => value,
+            Err(err) => {
+                if fail_open {
+                    tracing::warn!(
+                        error = %err,
+                        "Ignoring invalid tool policy TOML due to THINCLAW_TOOL_POLICIES_FAIL_OPEN"
+                    );
+                    None
+                } else {
+                    tracing::error!(
+                        error = %err,
+                        "Tool policy configuration is invalid; failing closed"
+                    );
+                    return Self::deny_all_policy_manager();
+                }
+            }
+        };
         let env_override = crate::config::helpers::optional_env("THINCLAW_TOOL_POLICIES")
             .ok()
             .flatten()
@@ -227,12 +256,33 @@ impl ToolPolicyManager {
                     .ok()
                     .flatten()
             });
-
-        Self::resolve_from_layers(
-            Some(&persisted.tool_policies),
-            toml.as_ref(),
-            env_override.as_deref(),
-        )
+        let mut resolved = persisted.tool_policies;
+        if let Some(toml_policy) = toml {
+            resolved = toml_policy;
+        }
+        if let Some(raw) = env_override {
+            match Self::from_env_override(&raw) {
+                Ok(Some(env_policy)) => {
+                    resolved = env_policy;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    if fail_open {
+                        tracing::warn!(
+                            error = %err,
+                            "Ignoring invalid tool policy env override due to THINCLAW_TOOL_POLICIES_FAIL_OPEN"
+                        );
+                    } else {
+                        tracing::error!(
+                            error = %err,
+                            "Tool policy env override is invalid; failing closed"
+                        );
+                        return Self::deny_all_policy_manager();
+                    }
+                }
+            }
+        }
+        resolved
     }
 
     /// Resolve the effective `(channel, group_id)` scope from job metadata.

@@ -31,6 +31,7 @@ Do not treat all integrations as if they had the same isolation guarantees.
 ## What ThinClaw Does
 
 - Keeps secret injection at the host boundary rather than exposing raw values to WASM guests
+- Keeps OS keychain secret caching disabled by default; in-memory cache is opt-in via `THINCLAW_KEYCHAIN_CACHE=1`
 - Uses policy and validation layers around dangerous tools and external content
 - Adds a first-party pre-exec shell scanner ahead of approval for high-risk shell commands, with explicit fail-open or fail-closed operator control
 - Supports network controls and allowlists

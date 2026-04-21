@@ -104,6 +104,8 @@ impl CodexBridgeRuntime {
                 tracing::error!(job_id = %self.config.job_id, "Codex session failed: {}", e);
                 self.client
                     .report_complete(&CompletionReport {
+                        status: Some("error".to_string()),
+                        session_id: None,
                         success: false,
                         message: Some(format!("Codex CLI failed: {}", e)),
                         iterations: 1,
@@ -123,6 +125,14 @@ impl CodexBridgeRuntime {
                     }
 
                     iteration += 1;
+                    let _ = self
+                        .client
+                        .report_status(&crate::worker::api::StatusUpdate {
+                            state: "in_progress".to_string(),
+                            message: Some(format!("Iteration {}", iteration)),
+                            iteration,
+                        })
+                        .await;
                     if let Err(e) = self
                         .run_codex_session(&prompt.content, session_id.as_deref(), &extra_env)
                         .await
@@ -155,6 +165,8 @@ impl CodexBridgeRuntime {
 
         self.client
             .report_complete(&CompletionReport {
+                status: Some("completed".to_string()),
+                session_id: session_id.clone(),
                 success: true,
                 message: Some("Codex session completed".to_string()),
                 iterations: iteration,
@@ -269,6 +281,8 @@ impl CodexBridgeRuntime {
                 "result",
                 &serde_json::json!({
                     "status": "error",
+                    "success": false,
+                    "message": format!("codex exited with code {}", code),
                     "exit_code": code,
                     "session_id": session_id,
                 }),
@@ -284,6 +298,8 @@ impl CodexBridgeRuntime {
             "result",
             &serde_json::json!({
                 "status": "completed",
+                "success": true,
+                "message": "Codex session completed",
                 "session_id": session_id,
             }),
         )
@@ -409,12 +425,15 @@ fn codex_event_to_payloads(event: &Value) -> (Option<String>, Vec<JobEventPayloa
                     }
                     _ => {
                         if let Some(tool_name) = item_tool_name(item_type, item) {
+                            let output = item_output(item);
                             payloads.push(JobEventPayload {
                                 event_type: "tool_result".to_string(),
                                 data: serde_json::json!({
                                     "tool_name": tool_name,
                                     "tool_use_id": item_identifier(item),
-                                    "output": item_output(item),
+                                    "output": output.clone(),
+                                    "output_text": output.as_str(),
+                                    "output_json": if output.is_string() { None } else { Some(output) },
                                 }),
                             });
                         }
