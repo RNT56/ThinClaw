@@ -37,6 +37,25 @@ impl RoutingMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvisorAutoEscalationMode {
+    ManualOnly,
+    RiskOnly,
+    #[default]
+    RiskAndComplexFinal,
+}
+
+impl AdvisorAutoEscalationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ManualOnly => "manual_only",
+            Self::RiskOnly => "risk_only",
+            Self::RiskAndComplexFinal => "risk_and_complex_final",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderModelSlots {
     /// Primary/high-quality model for this provider.
@@ -103,7 +122,7 @@ pub struct ProvidersSettings {
     #[serde(default)]
     pub primary: Option<String>,
 
-    /// Primary model for the starred provider (e.g., "claude-sonnet-4-20250514").
+    /// Primary model for the starred provider (e.g., "claude-opus-4-7").
     /// If not set, the provider's default model from the catalog is used.
     #[serde(default)]
     pub primary_model: Option<String>,
@@ -230,13 +249,17 @@ pub struct ProvidersSettings {
     #[serde(default = "default_advisor_max_calls")]
     pub advisor_max_calls: u32,
 
+    /// Automatic advisor escalation behavior (AdvisorExecutor mode).
+    #[serde(default)]
+    pub advisor_auto_escalation_mode: AdvisorAutoEscalationMode,
+
     /// Custom advisor escalation guidance (optional override of default prompt).
     #[serde(default)]
     pub advisor_escalation_prompt: Option<String>,
 }
 
 fn default_advisor_max_calls() -> u32 {
-    3
+    4
 }
 
 fn default_moa_min_successful() -> usize {
@@ -272,6 +295,7 @@ impl Default for ProvidersSettings {
             moa_aggregator_model: None,
             moa_min_successful: default_moa_min_successful(),
             advisor_max_calls: default_advisor_max_calls(),
+            advisor_auto_escalation_mode: AdvisorAutoEscalationMode::default(),
             advisor_escalation_prompt: None,
         }
     }
@@ -1836,6 +1860,10 @@ pub struct SandboxSettings {
     #[serde(default = "default_sandbox_image")]
     pub image: String,
 
+    /// Idle timeout in seconds for interactive sandbox jobs.
+    #[serde(default = "default_sandbox_idle_timeout")]
+    pub interactive_idle_timeout_secs: u64,
+
     /// Whether to auto-pull the image if not found.
     #[serde(default = "default_true")]
     pub auto_pull_image: bool,
@@ -1865,6 +1893,10 @@ fn default_sandbox_image() -> String {
     "thinclaw-worker:latest".to_string()
 }
 
+fn default_sandbox_idle_timeout() -> u64 {
+    crate::sandbox_jobs::DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS
+}
+
 impl Default for SandboxSettings {
     fn default() -> Self {
         Self {
@@ -1874,6 +1906,7 @@ impl Default for SandboxSettings {
             memory_limit_mb: default_sandbox_memory(),
             cpu_shares: default_sandbox_cpu_shares(),
             image: default_sandbox_image(),
+            interactive_idle_timeout_secs: default_sandbox_idle_timeout(),
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
         }
@@ -2990,13 +3023,13 @@ mod tests {
         settings.providers.provider_models.insert(
             "anthropic".to_string(),
             ProviderModelSlots {
-                primary: Some("claude-sonnet-4-20250514".to_string()),
-                cheap: Some("claude-3-5-haiku-latest".to_string()),
+                primary: Some("claude-opus-4-7".to_string()),
+                cheap: Some("claude-sonnet-4-6".to_string()),
             },
         );
         settings.providers.enabled = vec!["openai".to_string(), "anthropic".to_string()];
         settings.providers.primary = Some("anthropic".to_string());
-        settings.providers.primary_model = Some("claude-sonnet-4-20250514".to_string());
+        settings.providers.primary_model = Some("claude-opus-4-7".to_string());
         settings.providers.cheap_model = Some("openai/gpt-4o-mini".to_string());
         settings.providers.preferred_cheap_provider = Some("openai".to_string());
 
@@ -3007,7 +3040,7 @@ mod tests {
         assert_eq!(restored.providers.primary, Some("anthropic".to_string()));
         assert_eq!(
             restored.providers.primary_model,
-            Some("claude-sonnet-4-20250514".to_string())
+            Some("claude-opus-4-7".to_string())
         );
 
         // Cheap model settings survive
@@ -3034,14 +3067,8 @@ mod tests {
             .provider_models
             .get("anthropic")
             .expect("anthropic provider_models entry must survive roundtrip");
-        assert_eq!(
-            anthropic_slots.primary,
-            Some("claude-sonnet-4-20250514".to_string())
-        );
-        assert_eq!(
-            anthropic_slots.cheap,
-            Some("claude-3-5-haiku-latest".to_string())
-        );
+        assert_eq!(anthropic_slots.primary, Some("claude-opus-4-7".to_string()));
+        assert_eq!(anthropic_slots.cheap, Some("claude-sonnet-4-6".to_string()));
     }
 
     #[test]

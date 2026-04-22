@@ -953,7 +953,7 @@ function connectSSE() {
   // Job event listeners (activity stream for all sandbox jobs)
   const jobEventTypes = [
     'job_message', 'job_tool_use', 'job_tool_result',
-    'job_status', 'job_result'
+    'job_status', 'job_session_result', 'job_result'
   ];
   for (const evtType of jobEventTypes) {
     eventSource.addEventListener(evtType, (e) => {
@@ -5117,6 +5117,8 @@ function renderJobsSummary(s) {
     + summaryCard('Total', s.total, '')
     + summaryCard('In Progress', s.in_progress, 'active')
     + summaryCard('Completed', s.completed, 'completed')
+    + summaryCard('Cancelled', s.cancelled || 0, 'pending')
+    + summaryCard('Interrupted', s.interrupted || 0, 'stuck')
     + summaryCard('Failed', s.failed, 'failed')
     + summaryCard('Stuck', s.stuck, 'stuck');
 }
@@ -5490,15 +5492,18 @@ function renderJobActivity(container, job) {
     + '<option value="message">Messages</option>'
     + '<option value="tool_use">Tool Calls</option>'
     + '<option value="tool_result">Results</option>'
+    + '<option value="status">Status</option>'
+    + '<option value="session_result">Session Results</option>'
+    + '<option value="result">Final Result</option>'
     + '</select>'
     + '<label class="logs-checkbox"><input type="checkbox" id="activity-autoscroll" checked> Auto-scroll</label>'
     + '</div>'
     + '<div class="activity-terminal" id="activity-terminal"></div>'
-    + '<div class="activity-input-bar" id="activity-input-bar">'
-    + '<input type="text" id="activity-prompt-input" placeholder="Send follow-up prompt..." />'
-    + '<button id="activity-send-btn">Send</button>'
-    + '<button id="activity-done-btn" title="Signal done">Done</button>'
-    + '</div>';
+    + (job && job.interactive ? '<div class="activity-input-bar" id="activity-input-bar">'
+      + '<input type="text" id="activity-prompt-input" placeholder="Send follow-up prompt..." />'
+      + '<button id="activity-send-btn">Send</button>'
+      + '<button id="activity-done-btn" title="Signal done">Done</button>'
+      + '</div>' : '<div class="activity-input-bar" id="activity-input-bar"><span class="activity-status">This job is not accepting follow-up prompts.</span></div>');
 
   document.getElementById('activity-type-filter').addEventListener('change', applyActivityFilter);
 
@@ -5507,11 +5512,13 @@ function renderJobActivity(container, job) {
   const sendBtn = document.getElementById('activity-send-btn');
   const doneBtn = document.getElementById('activity-done-btn');
 
-  sendBtn.addEventListener('click', () => sendJobPrompt(job.id, false));
-  doneBtn.addEventListener('click', () => sendJobPrompt(job.id, true));
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') sendJobPrompt(job.id, false);
-  });
+  if (sendBtn && doneBtn && input) {
+    sendBtn.addEventListener('click', () => sendJobPrompt(job.id, false));
+    doneBtn.addEventListener('click', () => sendJobPrompt(job.id, true));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendJobPrompt(job.id, false);
+    });
+  }
 
   // Load persisted events from DB, then catch up with any live SSE events
   apiFetch('/api/jobs/' + job.id + '/events').then((data) => {
@@ -5592,6 +5599,12 @@ function appendActivityEvent(terminal, eventType, data) {
     case 'status':
       el.innerHTML = '<span class="activity-status">' + escapeHtml(data.message || '') + '</span>';
       break;
+    case 'session_result':
+      el.innerHTML = '<span class="activity-status">' + escapeHtml(data.message || data.status || 'session finished') + '</span>';
+      if (data.session_id) {
+        el.innerHTML += ' <span class="activity-session-id">session: ' + escapeHtml(data.session_id) + '</span>';
+      }
+      break;
     case 'result':
       el.className += ' activity-final';
       const success = data.success !== false;
@@ -5623,7 +5636,7 @@ function sendJobPrompt(jobId, done) {
 
   apiFetch('/api/jobs/' + jobId + '/prompt', {
     method: 'POST',
-    body: { content: content || '(done)', done: done },
+    body: done && !content ? { done: true } : { content: content, done: done },
   }).then(() => {
     if (input) input.value = '';
     if (done) {
@@ -5767,6 +5780,11 @@ function renderRoutineDetail(routine) {
   html += '<div class="ui-panel ui-panel--subtle job-description"><h3>Trigger</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
 
+  if (routine.policy) {
+    html += '<div class="ui-panel ui-panel--subtle job-description"><h3>Policy</h3>'
+      + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.policy, null, 2)) + '</pre></div>';
+  }
+
   // Action config
   html += '<div class="ui-panel ui-panel--subtle job-description"><h3>Action</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.action, null, 2)) + '</pre></div>';
@@ -5792,6 +5810,61 @@ function renderRoutineDetail(routine) {
           + '</td>'
         + '<td>' + (run.tokens_used != null ? run.tokens_used : '-') + '</td>'
         + '</tr>';
+    }
+    html += '</tbody></table></div></div>';
+  }
+
+  if (routine.recent_event_checks && routine.recent_event_checks.length > 0) {
+    html += '<div class="ui-panel ui-panel--subtle job-timeline-section"><h3>Recent Event Checks</h3>'
+      + '<div class="ui-panel-table-wrap"><table class="routines-table ui-panel-table"><thead><tr>'
+      + '<th>Decision</th><th>Channel</th><th>Reason</th><th>Message</th><th>When</th>'
+      + '</tr></thead><tbody>';
+    for (const check of routine.recent_event_checks) {
+      const checkStatusClass = check.decision === 'fired' ? 'completed'
+        : check.decision.startsWith('skipped_') ? 'stuck'
+        : 'pending';
+      html += '<tr data-record-id="routine-event:' + escapeHtml(check.id) + '">'
+        + '<td><span class="badge ' + checkStatusClass + '">' + escapeHtml(check.decision) + '</span></td>'
+        + '<td>' + escapeHtml(check.channel) + '</td>'
+        + '<td>' + escapeHtml(check.reason || '-') + '</td>'
+        + '<td>' + escapeHtml(check.content_preview || '-') + '</td>'
+        + '<td>' + formatDate(check.created_at) + '</td>'
+        + '</tr>';
+      if (check.details && Object.keys(check.details).length > 0) {
+        html += '<tr class="job-log-row"><td colspan="5"><pre class="action-json">'
+          + escapeHtml(JSON.stringify(check.details, null, 2))
+          + '</pre></td></tr>';
+      }
+    }
+    html += '</tbody></table></div></div>';
+  }
+
+  if (routine.recent_trigger_checks && routine.recent_trigger_checks.length > 0) {
+    html += '<div class="ui-panel ui-panel--subtle job-timeline-section"><h3>Recent Scheduled Trigger Checks</h3>'
+      + '<div class="ui-panel-table-wrap"><table class="routines-table ui-panel-table"><thead><tr>'
+      + '<th>Kind</th><th>Due</th><th>Status</th><th>Decision</th><th>Claimed By</th><th>Collapsed</th>'
+      + '</tr></thead><tbody>';
+    for (const check of routine.recent_trigger_checks) {
+      const checkStatusClass = check.decision === 'fired' ? 'completed'
+        : (check.decision || '').startsWith('deferred_') ? 'pending'
+        : (check.decision || '').startsWith('skipped_') ? 'stuck'
+        : check.status === 'processed' ? 'completed'
+        : 'pending';
+      html += '<tr data-record-id="routine-trigger:' + escapeHtml(check.id) + '">'
+        + '<td>' + escapeHtml(check.trigger_kind) + '</td>'
+        + '<td>' + formatDate(check.due_at) + '</td>'
+        + '<td>' + escapeHtml(check.status) + '</td>'
+        + '<td><span class="badge ' + checkStatusClass + '">' + escapeHtml(check.decision || '-') + '</span></td>'
+        + '<td>' + escapeHtml(check.claimed_by || '-') + '</td>'
+        + '<td>' + (check.backlog_collapsed ? 'yes' : 'no')
+          + (check.coalesced_count ? ' (' + check.coalesced_count + ')' : '')
+          + '</td>'
+        + '</tr>';
+      if (check.diagnostics && Object.keys(check.diagnostics).length > 0) {
+        html += '<tr class="job-log-row"><td colspan="6"><pre class="action-json">'
+          + escapeHtml(JSON.stringify(check.diagnostics, null, 2))
+          + '</pre></td></tr>';
+      }
     }
     html += '</tbody></table></div></div>';
   }
@@ -10143,7 +10216,8 @@ function applyPersistedProvidersConfig(configData) {
     cheap_pool_order: Array.isArray(persisted.cheap_pool_order) ? persisted.cheap_pool_order : [],
     fallback_chain: Array.isArray(persisted.fallback_chain) ? persisted.fallback_chain : [],
     policy_rules: Array.isArray(persisted.policy_rules) ? persisted.policy_rules : [],
-    advisor_max_calls: persisted.advisor_max_calls || configData.advisor_max_calls || 3,
+    advisor_max_calls: persisted.advisor_max_calls || configData.advisor_max_calls || 4,
+    advisor_auto_escalation_mode: persisted.advisor_auto_escalation_mode || configData.advisor_auto_escalation_mode || 'risk_and_complex_final',
     advisor_escalation_prompt: persisted.advisor_escalation_prompt || null,
   };
 }
@@ -10758,7 +10832,7 @@ function renderRoutingSection(config, providers) {
   const modes = [
     { value: 'primary_only', name: 'Primary only', desc: 'All requests use your primary model' },
     { value: 'cheap_split', name: 'Cheap split', desc: 'Route simple work to the cheap model' },
-    { value: 'advisor_executor', name: 'Advisor + Executor', desc: 'Fast model executes, consults advisor when needed' },
+    { value: 'advisor_executor', name: 'Advisor + Executor', desc: 'Executor runs the turn and auto-escalates risky or complex work' },
     { value: 'policy', name: 'Policy rules', desc: 'Custom rules control routing decisions' },
   ];
 
@@ -10804,10 +10878,32 @@ function renderRoutingSection(config, providers) {
   // --- Advisor settings panel (only for advisor_executor mode) ---
   html += '<div id="routing-advisor-settings" class="advisor-settings-panel' + (mode !== 'advisor_executor' ? ' is-hidden' : '') + '">';
   html += '<div class="advisor-settings-title">Advisor Configuration</div>';
+  if (mode === 'advisor_executor' && config.advisor_ready === false && config.advisor_disabled_reason) {
+    const laneDetails = [
+      config.executor_target ? ('executor: ' + config.executor_target) : '',
+      config.advisor_target ? ('advisor: ' + config.advisor_target) : '',
+    ].filter(Boolean).join(' • ');
+    const warning = laneDetails
+      ? (config.advisor_disabled_reason + ' (' + laneDetails + ')')
+      : config.advisor_disabled_reason;
+    html += '<div class="ui-inline-alert ui-inline-alert--error">' + escapeHtml(warning) + '</div>';
+  } else if (mode === 'advisor_executor' && config.advisor_ready) {
+    const executorTarget = config.executor_target || 'cheap';
+    const advisorTarget = config.advisor_target || 'primary';
+    html += '<div class="ui-inline-alert">Executor target: ' + escapeHtml(executorTarget) + ' • Advisor target: ' + escapeHtml(advisorTarget) + '</div>';
+  }
   html += '<div class="advisor-settings-grid">';
   html += '<div>';
   html += '<label class="advisor-field-label">Max advisor calls per turn</label>';
-  html += '<input id="routing-advisor-max-calls" class="advisor-input" type="number" min="1" max="10" value="' + (config.advisor_max_calls || 3) + '" placeholder="3">';
+  html += '<input id="routing-advisor-max-calls" class="advisor-input" type="number" min="1" max="10" value="' + (config.advisor_max_calls || 4) + '" placeholder="4">';
+  html += '</div>';
+  html += '<div>';
+  html += '<label class="advisor-field-label">Auto escalation mode</label>';
+  html += '<select id="routing-advisor-auto-mode" class="advisor-input">';
+  html += '<option value="manual_only"' + (config.advisor_auto_escalation_mode === 'manual_only' ? ' selected' : '') + '>Manual only</option>';
+  html += '<option value="risk_only"' + (config.advisor_auto_escalation_mode === 'risk_only' ? ' selected' : '') + '>Risk only</option>';
+  html += '<option value="risk_and_complex_final"' + ((config.advisor_auto_escalation_mode || 'risk_and_complex_final') === 'risk_and_complex_final' ? ' selected' : '') + '>Risk + complex final pass</option>';
+  html += '</select>';
   html += '</div>';
   html += '<div style="grid-column: 1 / -1">';
   html += '<label class="advisor-field-label">Escalation prompt (optional)</label>';
@@ -11368,7 +11464,8 @@ function collectProvidersRoutingConfig() {
     ),
     policy_rules: policyRules,
     providers,
-    advisor_max_calls: Number(document.getElementById('routing-advisor-max-calls')?.value || '3'),
+    advisor_max_calls: Number(document.getElementById('routing-advisor-max-calls')?.value || '4'),
+    advisor_auto_escalation_mode: document.getElementById('routing-advisor-auto-mode')?.value || 'risk_and_complex_final',
     advisor_escalation_prompt: document.getElementById('routing-advisor-prompt')?.value?.trim() || null,
   };
 }
@@ -11409,7 +11506,7 @@ function updateRoutingModePresentation() {
     } else if (mode === 'cheap_split') {
       note.textContent = 'Simple work uses the cheap slot pool, while complex or tool-heavy work stays on the primary slot pool.';
     } else if (mode === 'advisor_executor') {
-      note.textContent = 'The executor (cheap model) handles all requests and can call the advisor (primary model) via the consult_advisor tool when it needs strategic guidance.';
+      note.textContent = 'The executor handles the turn, auto-consults the advisor on risky or complex turns, and still keeps manual consult_advisor available when the advisor lane is ready.';
     } else {
       note.textContent = 'Ordered policy rules below decide which alias, provider slot, or specific model handles each request.';
     }

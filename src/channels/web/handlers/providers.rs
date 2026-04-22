@@ -102,7 +102,16 @@ pub(crate) struct ProvidersConfigResponse {
     pub(crate) runtime_revision: Option<u64>,
     pub(crate) last_reload_error: Option<String>,
     pub(crate) advisor_max_calls: u32,
+    pub(crate) advisor_auto_escalation_mode: crate::settings::AdvisorAutoEscalationMode,
     pub(crate) advisor_escalation_prompt: Option<String>,
+    #[serde(default)]
+    pub(crate) advisor_ready: bool,
+    #[serde(default)]
+    pub(crate) advisor_disabled_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) executor_target: Option<String>,
+    #[serde(default)]
+    pub(crate) advisor_target: Option<String>,
     #[serde(default)]
     pub(crate) diagnostics: Vec<String>,
     pub(crate) derived_defaults: crate::settings::ProvidersSettings,
@@ -136,13 +145,15 @@ pub(crate) struct ProvidersConfigWriteRequest {
     #[serde(default = "default_advisor_max_calls_api")]
     pub(crate) advisor_max_calls: u32,
     #[serde(default)]
+    pub(crate) advisor_auto_escalation_mode: crate::settings::AdvisorAutoEscalationMode,
+    #[serde(default)]
     pub(crate) advisor_escalation_prompt: Option<String>,
     #[serde(default)]
     pub(crate) auto_fix: bool,
 }
 
 fn default_advisor_max_calls_api() -> u32 {
-    3
+    4
 }
 
 #[derive(serde::Serialize)]
@@ -424,9 +435,25 @@ pub(crate) async fn providers_config_handler(
         policy_rules: providers_settings.policy_rules.clone(),
         providers,
         runtime_revision: runtime_status.as_ref().map(|status| status.revision),
-        last_reload_error: runtime_status.and_then(|status| status.last_error),
+        last_reload_error: runtime_status
+            .as_ref()
+            .and_then(|status| status.last_error.clone()),
         advisor_max_calls: providers_settings.advisor_max_calls,
+        advisor_auto_escalation_mode: providers_settings.advisor_auto_escalation_mode,
         advisor_escalation_prompt: providers_settings.advisor_escalation_prompt.clone(),
+        advisor_ready: runtime_status
+            .as_ref()
+            .map(|status| status.advisor_ready)
+            .unwrap_or(false),
+        advisor_disabled_reason: runtime_status
+            .as_ref()
+            .and_then(|status| status.advisor_disabled_reason.clone()),
+        executor_target: runtime_status
+            .as_ref()
+            .and_then(|status| status.executor_target.clone()),
+        advisor_target: runtime_status
+            .as_ref()
+            .and_then(|status| status.advisor_target.clone()),
         diagnostics,
         derived_defaults,
         persisted,
@@ -711,7 +738,7 @@ fn provider_cheap_model_for_slug(
 fn suggested_cheap_model_for_slug(slug: &str, default_model: &str) -> Option<String> {
     match slug {
         "openai" => Some("gpt-4o-mini".to_string()),
-        "anthropic" => Some("claude-3-5-haiku-latest".to_string()),
+        "anthropic" => Some("claude-sonnet-4-6".to_string()),
         "gemini" => Some("gemini-2.5-flash-lite".to_string()),
         "minimax" => Some("MiniMax-M2.5-highspeed".to_string()),
         "cohere" => Some("command-r7b-12-2024".to_string()),
@@ -1105,11 +1132,15 @@ pub(crate) fn provider_model_options_from_discovery(
         current_primary_model.filter(|model| discovered_map.contains_key(*model));
     let current_cheap_model =
         current_cheap_model.filter(|model| discovered_map.contains_key(*model));
+    let preferred_default_model = (!default_model.is_empty()
+        && discovered_map.contains_key(default_model))
+    .then(|| default_model.to_string());
     let suggested_provider_cheap = suggested_cheap_model_for_slug(slug, default_model)
         .filter(|model| discovered_map.contains_key(model.as_str()));
 
     let suggested_primary_model = current_primary_model
         .map(str::to_string)
+        .or_else(|| preferred_default_model.clone())
         .or_else(|| {
             discovered_map
                 .keys()
@@ -1278,6 +1309,7 @@ fn fallback_provider_model_options(
 fn static_fallback_models(slug: &str) -> Vec<(&'static str, &'static str)> {
     match slug {
         "anthropic" => vec![
+            ("claude-opus-4-7", "Claude Opus 4.7 (recommended)"),
             ("claude-opus-4-6", "Claude Opus 4.6 (latest)"),
             ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
             ("claude-opus-4-5", "Claude Opus 4.5"),
@@ -1552,6 +1584,7 @@ pub(crate) async fn providers_config_set_handler(
     settings.providers.fallback_chain = body.fallback_chain.clone();
     settings.providers.policy_rules = body.policy_rules.clone();
     settings.providers.advisor_max_calls = body.advisor_max_calls;
+    settings.providers.advisor_auto_escalation_mode = body.advisor_auto_escalation_mode;
     settings.providers.advisor_escalation_prompt = body
         .advisor_escalation_prompt
         .as_deref()
@@ -2205,13 +2238,9 @@ async fn reconcile_advisor_tool_registration(state: &GatewayState) {
     };
 
     let status = runtime.status();
-    if status.routing_mode == crate::settings::RoutingMode::AdvisorExecutor {
-        registry.register_advisor_tool(status.routing_mode);
-    } else {
-        let _ = registry
-            .unregister(crate::tools::builtin::advisor::ADVISOR_TOOL_NAME)
-            .await;
-    }
+    registry
+        .reconcile_advisor_tool_readiness(status.advisor_ready)
+        .await;
 }
 
 pub(crate) fn sync_legacy_llm_settings(settings: &mut crate::settings::Settings) {

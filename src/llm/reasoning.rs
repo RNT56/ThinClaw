@@ -1720,6 +1720,10 @@ Respond with a JSON plan in this format:
             .available_tools
             .iter()
             .any(|tool| tool.name == "spawn_subagent");
+        let has_consult_advisor = context
+            .available_tools
+            .iter()
+            .any(|tool| tool.name == "consult_advisor");
 
         let mut lines = vec![
             "- Narrate meaningful milestones, blockers, plan changes, and interim findings when that helps the user stay oriented.".to_string(),
@@ -1738,6 +1742,15 @@ Respond with a JSON plan in this format:
             );
             lines.push(
                 "- Do not delegate tiny tasks, tightly coupled loops, or work that requires constant shared context between the main agent and the sub-agent.".to_string(),
+            );
+        }
+
+        if has_consult_advisor {
+            lines.push(
+                "- Use `consult_advisor` for strategic uncertainty, repeated failures, risky plans, or complex planning/review/debugging decisions where a stronger second opinion can materially change the next step.".to_string(),
+            );
+            lines.push(
+                "- Do not spend advisor budget on routine tool calls, straightforward edits, or obvious follow-through once the path is already clear.".to_string(),
             );
         }
 
@@ -2281,6 +2294,33 @@ mod tests {
 
         assert!(prompt.contains("Use `spawn_subagent` when work can be cleanly delegated"));
         assert!(prompt.contains("Do not delegate tiny tasks"));
+    }
+
+    #[test]
+    fn conversation_prompt_includes_consult_advisor_guidance_when_available() {
+        let reasoning = Reasoning::new(
+            Arc::new(StubLlm::new("done")),
+            Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                    redact_pii_in_prompts: true,
+                    smart_approval_mode: "off".to_string(),
+                    external_scanner_mode: "off".to_string(),
+                    external_scanner_path: None,
+                },
+            )),
+        );
+        let context = ReasoningContext::new().with_tools(vec![ToolDefinition {
+            name: "consult_advisor".to_string(),
+            description: "Consult the advisor lane.".to_string(),
+            parameters: serde_json::json!({"type":"object"}),
+        }]);
+
+        let prompt = reasoning.build_conversation_prompt(&context);
+
+        assert!(prompt.contains("Use `consult_advisor` for strategic uncertainty"));
+        assert!(prompt.contains("Do not spend advisor budget on routine tool calls"));
     }
 
     #[test]

@@ -176,7 +176,10 @@ pub struct ToolDescriptor {
 
 impl ToolDescriptor {
     pub fn is_coordination_tool(&self) -> bool {
-        matches!(self.name.as_str(), "agent_think" | "emit_user_message")
+        matches!(
+            self.name.as_str(),
+            "agent_think" | "emit_user_message" | "consult_advisor"
+        )
     }
 
     pub fn is_safe_read_only_orchestrator(&self) -> bool {
@@ -671,5 +674,18 @@ mod tests {
             ToolSideEffectLevel::Read
         );
         assert!(live_authoritative.parallel_safe);
+    }
+
+    #[test]
+    fn consult_advisor_counts_as_coordination_tool() {
+        let descriptor = ToolDescriptor {
+            name: "consult_advisor".to_string(),
+            description: "Consult the advisor lane.".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+            domain: ToolDomain::Orchestrator,
+            metadata: ToolMetadata::default(),
+        };
+
+        assert!(descriptor.is_coordination_tool());
     }
 }

@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 #### Routing Engine V2
-- Unified `RoutePlanner` with three strategies: `Solo`, `Failover`, and new `AdvisorExecutor` mode (lightweight model drafts, heavyweight model verifies)
+- Unified `RoutePlanner` with three strategies: `Solo`, `Failover`, and new `AdvisorExecutor` mode (executor lane runs the turn, advisor lane consults and auto-escalates on risky or complex turns)
 - Dispatcher interception layer: all outbound LLM calls flow through the routing policy
 - Live cutover from legacy routing — no migration required
 - Routing telemetry: per-call latency, token counts, and strategy-hit histograms
@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `skill_tools`: runtime skill management (install, reload, inspect)
 - `learning_tools`: manual learning annotation and pattern review
 - `moa` (Mixture of Agents): fan-out queries across multiple models and merge results
-- `advisor`: lightweight pre-screening tool for the AdvisorExecutor routing strategy
+- `advisor`: strategic consultation tool for the AdvisorExecutor routing strategy
 - Enhanced `browser` tool with screenshot capture, element interaction, and cookie management
 - Enhanced `shell` tool with working directory tracking and environment variable passthrough
 

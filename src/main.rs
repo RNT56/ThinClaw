@@ -547,6 +547,7 @@ async fn main() -> anyhow::Result<()> {
             codex_code_model: config.codex_code.model.clone(),
             codex_code_memory_limit_mb: config.codex_code.memory_limit_mb,
             codex_code_home_dir: config.codex_code.home_dir.clone(),
+            interactive_idle_timeout_secs: config.sandbox.interactive_idle_timeout_secs,
         };
         let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
@@ -568,7 +569,6 @@ async fn main() -> anyhow::Result<()> {
             prompt_queue: Arc::clone(&prompt_queue),
             store: components.db.clone(),
             secrets_store: components.secrets_store.clone(),
-            user_id: "default".to_string(),
         };
 
         tokio::spawn(async move {
@@ -1020,31 +1020,57 @@ async fn main() -> anyhow::Result<()> {
     let session_manager =
         Arc::new(thinclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
 
+    #[cfg(feature = "docker-sandbox")]
+    let sandbox_children = Some(Arc::new(thinclaw::sandbox_jobs::SandboxChildRegistry::new(
+        thinclaw::sandbox_jobs::SandboxJobController::new(
+            components.db.clone(),
+            container_job_manager.clone(),
+            job_event_tx.clone(),
+            if config.sandbox.enabled {
+                Some(Arc::clone(&prompt_queue))
+            } else {
+                None
+            },
+        ),
+    )));
+    #[cfg(not(feature = "docker-sandbox"))]
+    let sandbox_children = None;
+    let shared_context_manager = Arc::clone(&components.context_manager);
+    let shared_db = components.db.clone();
+    let shared_secrets_store = components.secrets_store.clone();
+    let inject_sender = channels.inject_sender();
+    #[cfg(feature = "docker-sandbox")]
+    let shared_prompt_queue = if config.sandbox.enabled {
+        Some(Arc::clone(&prompt_queue))
+    } else {
+        None
+    };
+
     // Register job tools (sandbox deps auto-injected when container_job_manager is available)
     #[cfg(feature = "docker-sandbox")]
     components.tools.register_job_tools(
-        Arc::clone(&components.context_manager),
+        Arc::clone(&shared_context_manager),
         container_job_manager.clone(),
-        components.db.clone(),
+        shared_db.clone(),
+        None,
         job_event_tx.clone(),
-        Some(channels.inject_sender()),
-        if config.sandbox.enabled {
-            Some(Arc::clone(&prompt_queue))
-        } else {
-            None
-        },
-        components.secrets_store.clone(),
+        Some(inject_sender.clone()),
+        shared_prompt_queue.clone(),
+        sandbox_children.clone(),
+        shared_secrets_store.clone(),
     );
 
     #[cfg(not(feature = "docker-sandbox"))]
     components.tools.register_job_tools(
-        Arc::clone(&components.context_manager),
+        Arc::clone(&shared_context_manager),
         None,
-        components.db.clone(),
+        shared_db.clone(),
+        None,
         job_event_tx.clone(),
-        Some(channels.inject_sender()),
+        Some(inject_sender.clone()),
         None,
-        components.secrets_store.clone(),
+        None,
+        shared_secrets_store.clone(),
     );
 
     // ── Gateway channel ────────────────────────────────────────────────
@@ -1067,6 +1093,7 @@ async fn main() -> anyhow::Result<()> {
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));
+        gw = gw.with_context_manager(Arc::clone(&shared_context_manager));
         if let Some(ref ext_mgr) = components.extension_manager {
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
@@ -1574,9 +1601,19 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&components.llm),
         components.cheap_llm.as_ref().map(Arc::clone),
     );
-    components
-        .tools
-        .register_advisor_tool(components.llm_runtime.status().routing_mode);
+    components.llm_runtime.set_advisor_ready_callback({
+        let tools = Arc::clone(&components.tools);
+        move |advisor_ready| {
+            if advisor_ready {
+                tools.register_advisor_tool(true);
+            } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let tools = Arc::clone(&tools);
+                handle.spawn(async move {
+                    tools.reconcile_advisor_tool_readiness(false).await;
+                });
+            }
+        }
+    });
 
     // ── Agent registry (persistent multi-agent management) ──────────────
     //
@@ -1701,6 +1738,7 @@ async fn main() -> anyhow::Result<()> {
         routing_policy: Some(components.routing_policy),
         model_override: Some(model_override),
         restart_requested: Arc::clone(&restart_requested),
+        sandbox_children: sandbox_children.clone(),
     };
 
     let agent = Agent::new(
@@ -1710,9 +1748,39 @@ async fn main() -> anyhow::Result<()> {
         Some(config.heartbeat.clone()),
         Some(config.hygiene.clone()),
         Some(config.routines.clone()),
-        Some(components.context_manager),
+        Some(Arc::clone(&shared_context_manager)),
         Some(session_manager),
     );
+
+    #[cfg(feature = "docker-sandbox")]
+    agent.scheduler().tools().register_job_tools(
+        Arc::clone(&shared_context_manager),
+        container_job_manager.clone(),
+        shared_db.clone(),
+        Some(Arc::clone(agent.scheduler())),
+        job_event_tx.clone(),
+        Some(inject_sender.clone()),
+        shared_prompt_queue.clone(),
+        sandbox_children.clone(),
+        shared_secrets_store.clone(),
+    );
+
+    #[cfg(not(feature = "docker-sandbox"))]
+    agent.scheduler().tools().register_job_tools(
+        Arc::clone(&shared_context_manager),
+        None,
+        shared_db.clone(),
+        Some(Arc::clone(agent.scheduler())),
+        job_event_tx.clone(),
+        Some(inject_sender.clone()),
+        None,
+        None,
+        shared_secrets_store.clone(),
+    );
+
+    if let Some(ref gw_state) = gateway_state {
+        *gw_state.scheduler.write().await = Some(Arc::clone(agent.scheduler()));
+    }
 
     agent.run().await?;
 

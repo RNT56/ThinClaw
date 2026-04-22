@@ -14,6 +14,7 @@ use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::safety::SafetyLayer;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
+use crate::sandbox_jobs::SandboxChildRegistry;
 use crate::sandbox_types::ContainerJobManager;
 use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
@@ -735,46 +736,66 @@ impl ToolRegistry {
         context_manager: Arc<ContextManager>,
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<dyn Database>>,
+        scheduler: Option<Arc<crate::agent::Scheduler>>,
         job_event_tx: Option<
             tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>,
         >,
         inject_tx: Option<tokio::sync::mpsc::Sender<crate::channels::IncomingMessage>>,
         prompt_queue: Option<PromptQueue>,
+        sandbox_children: Option<Arc<SandboxChildRegistry>>,
         secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     ) {
         let mut create_tool = CreateJobTool::new(Arc::clone(&context_manager));
-        if let Some(jm) = job_manager {
+        if let Some(scheduler) = scheduler.clone() {
+            create_tool = create_tool.with_scheduler(scheduler);
+        }
+        if let Some(jm) = job_manager.clone() {
             create_tool = create_tool.with_sandbox(jm, store.clone());
         }
         if let (Some(etx), Some(itx)) = (job_event_tx, inject_tx) {
-            create_tool = create_tool.with_monitor_deps(etx, itx);
+            create_tool = create_tool.with_monitor_deps(etx, itx, prompt_queue.clone());
+        }
+        if let Some(children) = sandbox_children {
+            create_tool = create_tool.with_sandbox_children(children);
         }
         if let Some(secrets) = secrets_store {
             create_tool = create_tool.with_secrets(secrets);
         }
         self.register_sync(Arc::new(create_tool));
-        self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));
-        self.register_sync(Arc::new(JobStatusTool::new(Arc::clone(&context_manager))));
-        self.register_sync(Arc::new(CancelJobTool::new(Arc::clone(&context_manager))));
+        self.register_sync(Arc::new(
+            ListJobsTool::new(Arc::clone(&context_manager))
+                .with_sandbox(job_manager.clone(), store.clone()),
+        ));
+        self.register_sync(Arc::new(
+            JobStatusTool::new(Arc::clone(&context_manager))
+                .with_sandbox(job_manager.clone(), store.clone()),
+        ));
+        let mut cancel_tool = CancelJobTool::new(Arc::clone(&context_manager));
+        if let Some(scheduler) = scheduler {
+            cancel_tool = cancel_tool.with_scheduler(scheduler);
+        }
+        cancel_tool = cancel_tool.with_sandbox(job_manager.clone(), store.clone());
+        self.register_sync(Arc::new(cancel_tool));
 
         // Base tools: create, list, status, cancel
         let mut job_tool_count = 4;
 
         // Register event reader if store is available
-        if let Some(store) = store {
+        if let Some(store) = store.clone() {
             self.register_sync(Arc::new(JobEventsTool::new(
-                store,
+                store.clone(),
                 Arc::clone(&context_manager),
+                job_manager.clone(),
             )));
             job_tool_count += 1;
         }
 
         // Register prompt tool if queue is available
         if let Some(pq) = prompt_queue {
-            self.register_sync(Arc::new(JobPromptTool::new(
-                pq,
-                Arc::clone(&context_manager),
-            )));
+            self.register_sync(Arc::new(
+                JobPromptTool::new(pq, Arc::clone(&context_manager))
+                    .with_sandbox(job_manager.clone(), store.clone()),
+            ));
             job_tool_count += 1;
         }
 
@@ -970,15 +991,26 @@ impl ToolRegistry {
         tracing::info!("Registered 2 LLM management tools (llm_select, llm_list_models)");
     }
 
-    /// Register the advisor consultation tool (AdvisorExecutor mode only).
+    /// Register the advisor consultation tool when the advisor lane is ready.
     ///
-    /// When the routing mode is AdvisorExecutor, this injects the `consult_advisor`
+    /// When advisor readiness is true, this injects the `consult_advisor`
     /// tool which the executor model can call to get guidance from the advisor.
-    /// In other modes, this is a no-op.
-    pub fn register_advisor_tool(&self, routing_mode: crate::settings::RoutingMode) {
-        if routing_mode == crate::settings::RoutingMode::AdvisorExecutor {
+    /// Otherwise this is a no-op.
+    pub fn register_advisor_tool(&self, advisor_ready: bool) {
+        if advisor_ready {
             self.register_sync(Arc::new(crate::tools::builtin::advisor::ConsultAdvisorTool));
-            tracing::info!("Registered consult_advisor tool (AdvisorExecutor mode)");
+            tracing::info!("Registered consult_advisor tool (advisor ready)");
+        }
+    }
+
+    /// Reconcile advisor tool visibility with current advisor readiness.
+    pub async fn reconcile_advisor_tool_readiness(&self, advisor_ready: bool) {
+        if advisor_ready {
+            self.register_advisor_tool(true);
+        } else {
+            let _ = self
+                .unregister(crate::tools::builtin::advisor::ADVISOR_TOOL_NAME)
+                .await;
         }
     }
 
@@ -1385,6 +1417,40 @@ mod tests {
         let defs = registry.tool_definitions().await;
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn consult_advisor_survives_restricted_and_explicit_only_profiles() {
+        let registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).await;
+        registry.register_sync(Arc::new(crate::tools::builtin::advisor::ConsultAdvisorTool));
+        let defs = registry.tool_definitions().await;
+
+        let restricted = registry
+            .filter_tool_definitions_for_execution_profile(
+                defs.clone(),
+                crate::tools::ToolExecutionLane::Worker,
+                crate::tools::ToolProfile::Restricted,
+                &serde_json::json!({}),
+            )
+            .await;
+        let explicit_only = registry
+            .filter_tool_definitions_for_execution_profile(
+                defs,
+                crate::tools::ToolExecutionLane::Subagent,
+                crate::tools::ToolProfile::ExplicitOnly,
+                &serde_json::json!({}),
+            )
+            .await;
+
+        assert!(restricted.iter().any(|tool| tool.name == "consult_advisor"));
+        assert!(!restricted.iter().any(|tool| tool.name == "echo"));
+        assert!(
+            explicit_only
+                .iter()
+                .any(|tool| tool.name == "consult_advisor")
+        );
+        assert!(!explicit_only.iter().any(|tool| tool.name == "echo"));
     }
 
     #[test]

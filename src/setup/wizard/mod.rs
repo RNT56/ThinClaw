@@ -1281,7 +1281,7 @@ impl SetupWizard {
                 self.settings.providers.routing_mode =
                     crate::settings::RoutingMode::AdvisorExecutor;
                 self.settings.providers.advisor_max_calls =
-                    self.settings.providers.advisor_max_calls.max(3);
+                    self.settings.providers.advisor_max_calls.max(4);
                 self.settings.routines_enabled = true;
                 self.settings.heartbeat.enabled = false;
             }
@@ -2234,8 +2234,24 @@ mod tests {
             .provider_models
             .get("anthropic")
             .expect("anthropic slots should be created");
-        assert_eq!(slots.primary.as_deref(), Some("claude-sonnet-4-20250514"));
-        assert!(slots.cheap.is_some());
+        assert_eq!(slots.primary.as_deref(), Some("claude-opus-4-7"));
+        assert_eq!(slots.cheap.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn test_builder_and_coding_profile_enforces_advisor_executor_defaults() {
+        let mut wizard = SetupWizard::new();
+        wizard.selected_profile = OnboardingProfile::BuilderAndCoding;
+        wizard.settings.providers.advisor_max_calls = 1;
+
+        wizard.apply_profile_defaults();
+
+        assert!(wizard.settings.providers.smart_routing_enabled);
+        assert_eq!(
+            wizard.settings.providers.routing_mode,
+            crate::settings::RoutingMode::AdvisorExecutor
+        );
+        assert_eq!(wizard.settings.providers.advisor_max_calls, 4);
     }
 
     #[tokio::test]

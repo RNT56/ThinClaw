@@ -357,7 +357,7 @@ impl LlmConfig {
             let api_key = api_keys.first().cloned();
             let model = optional_env("ANTHROPIC_MODEL")?
                 .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+                .unwrap_or_else(|| "claude-opus-4-7".to_string());
             let base_url = optional_env("ANTHROPIC_BASE_URL")?;
             Some(AnthropicDirectConfig {
                 api_key,
@@ -566,7 +566,7 @@ impl LlmConfig {
                 .anthropic
                 .as_ref()
                 .map(|c| c.model.as_str())
-                .unwrap_or("claude-sonnet-4-20250514"),
+                .unwrap_or("claude-opus-4-7"),
             LlmBackend::Ollama => self
                 .ollama
                 .as_ref()

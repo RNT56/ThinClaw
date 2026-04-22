@@ -13,15 +13,31 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 use crate::context::JobContext;
 use crate::error::LlmError;
 use crate::llm::route_planner::{ADVISOR_SYSTEM_PROMPT, AdvisorConfig};
+use crate::llm::turn_analysis::TurnAwareness;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider};
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{
+    Tool, ToolApprovalClass, ToolError, ToolMetadata, ToolOutput, ToolSideEffectLevel,
+};
 
 /// Name of the advisor tool that executors can call.
 pub const ADVISOR_TOOL_NAME: &str = "consult_advisor";
+const ADVISOR_MAX_TOKENS: u32 = 1400;
+const ADVISOR_THINKING_BUDGET_TOKENS: u32 = 3072;
+const ADVISOR_RESPONSE_SCHEMA: &str = r#"Return ONLY a single JSON object with this schema:
+{
+  "recommendation": "continue" | "revise" | "stop",
+  "summary": "short strategic guidance",
+  "plan_steps": ["step 1", "step 2"],
+  "corrections": ["correction or warning"],
+  "stop_reason": "required when recommendation is stop, otherwise null",
+  "confidence": 0.0 to 1.0
+}"#;
 
 /// Built-in tool that lets the executor model consult the advisor.
 ///
@@ -69,6 +85,17 @@ impl Tool for ConsultAdvisorTool {
         })
     }
 
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            authoritative_source: true,
+            live_data: false,
+            side_effect_level: ToolSideEffectLevel::Read,
+            approval_class: ToolApprovalClass::Never,
+            parallel_safe: false,
+            route_intents: Vec::new(),
+        }
+    }
+
     async fn execute(
         &self,
         _params: serde_json::Value,
@@ -86,6 +113,123 @@ impl Tool for ConsultAdvisorTool {
 
     fn requires_sanitization(&self) -> bool {
         false // Internal tool
+    }
+
+    fn estimated_cost(&self, _params: &serde_json::Value) -> Option<Decimal> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvisorRecommendation {
+    Continue,
+    Revise,
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvisorEnvelopeStatus {
+    Ok,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvisorConsultationMode {
+    Manual,
+    Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdvisorDecision {
+    pub recommendation: AdvisorRecommendation,
+    pub summary: String,
+    #[serde(default)]
+    pub plan_steps: Vec<String>,
+    #[serde(default)]
+    pub corrections: Vec<String>,
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+    pub confidence: f32,
+}
+
+impl AdvisorDecision {
+    fn normalize(mut self) -> Result<Self, String> {
+        self.summary = self.summary.trim().to_string();
+        self.plan_steps = self
+            .plan_steps
+            .into_iter()
+            .map(|step| step.trim().to_string())
+            .filter(|step| !step.is_empty())
+            .collect();
+        self.corrections = self
+            .corrections
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+        self.stop_reason = self
+            .stop_reason
+            .map(|reason| reason.trim().to_string())
+            .filter(|reason| !reason.is_empty());
+        self.confidence = self.confidence.clamp(0.0, 1.0);
+
+        if self.summary.is_empty() {
+            return Err("summary must not be empty".to_string());
+        }
+        if self.recommendation == AdvisorRecommendation::Stop && self.stop_reason.is_none() {
+            self.stop_reason = Some(self.summary.clone());
+        }
+
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdvisorConsultationEnvelope {
+    pub status: AdvisorEnvelopeStatus,
+    pub mode: AdvisorConsultationMode,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advisor_decision: Option<AdvisorDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl AdvisorConsultationEnvelope {
+    pub fn ok(
+        mode: AdvisorConsultationMode,
+        reason: impl Into<String>,
+        advisor_decision: AdvisorDecision,
+    ) -> Self {
+        Self {
+            status: AdvisorEnvelopeStatus::Ok,
+            mode,
+            reason: reason.into(),
+            advisor_decision: Some(advisor_decision),
+            code: None,
+            message: None,
+        }
+    }
+
+    pub fn error(
+        mode: AdvisorConsultationMode,
+        reason: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            status: AdvisorEnvelopeStatus::Error,
+            mode,
+            reason: reason.into(),
+            advisor_decision: None,
+            code: Some(code.into()),
+            message: Some(message.into()),
+        }
     }
 }
 
@@ -145,75 +289,322 @@ pub async fn execute_advisor_consultation(
     question: &str,
     context_summary: Option<&str>,
     conversation_context: &[ChatMessage],
-) -> Result<String, LlmError> {
-    // Build advisor request
+) -> Result<AdvisorDecision, LlmError> {
     let system_prompt = if config.advisor_system_prompt.is_empty() {
         ADVISOR_SYSTEM_PROMPT.to_string()
     } else {
         config.advisor_system_prompt.clone()
     };
-
-    // Include a trimmed conversation context for the advisor
-    let mut context_text = String::new();
-    if let Some(summary) = context_summary {
-        context_text.push_str("## Executor Context\n");
-        context_text.push_str(summary);
-        context_text.push_str("\n\n");
-    }
-
-    // Include recent conversation messages (trimmed to last ~10 for context window)
-    let recent_msgs: Vec<_> = conversation_context
-        .iter()
-        .rev()
-        .take(10)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    if !recent_msgs.is_empty() {
-        context_text.push_str("## Recent Conversation\n");
-        for msg in &recent_msgs {
-            context_text.push_str(&format!(
-                "[{:?}]: {}\n",
-                msg.role,
-                if msg.content.len() > 500 {
-                    format!("{}...", &msg.content[..500])
-                } else {
-                    msg.content.clone()
-                }
-            ));
-        }
-        context_text.push('\n');
-    }
-
-    let advisor_request = CompletionRequest::new(vec![
-        ChatMessage::system(system_prompt),
-        ChatMessage::user(format!(
-            "The executor model needs guidance.\n\n\
-             ## Question\n{}\n\n\
-             {}",
-            question, context_text
-        )),
-    ])
-    .with_max_tokens(1024); // Advisor generates short guidance
-
-    let response = advisor_provider.complete(advisor_request).await?;
+    let prompt = build_advisor_prompt(question, context_summary, conversation_context);
+    let decision = request_advisor_decision(advisor_provider, &system_prompt, &prompt).await?;
 
     tracing::info!(
         advisor_model = %advisor_provider.active_model_name(),
-        input_tokens = response.input_tokens,
-        output_tokens = response.output_tokens,
-        cost_usd = ?response.cost_usd,
+        recommendation = ?decision.recommendation,
+        confidence = decision.confidence,
         "Advisor consultation complete"
     );
 
-    Ok(response.content)
+    Ok(decision)
+}
+
+async fn request_advisor_decision(
+    advisor_provider: &dyn LlmProvider,
+    system_prompt: &str,
+    prompt: &str,
+) -> Result<AdvisorDecision, LlmError> {
+    let mut request = CompletionRequest::new(vec![
+        ChatMessage::system(format!(
+            "{}\n\n{}",
+            system_prompt.trim(),
+            ADVISOR_RESPONSE_SCHEMA
+        )),
+        ChatMessage::user(prompt.to_string()),
+    ])
+    .with_max_tokens(ADVISOR_MAX_TOKENS)
+    .with_temperature(0.1);
+    if advisor_supports_thinking(&advisor_provider.active_model_name()) {
+        request = request.with_thinking(ADVISOR_THINKING_BUDGET_TOKENS);
+    }
+    let response = advisor_provider.complete(request).await?;
+
+    match parse_advisor_decision(&response.content, &advisor_provider.active_model_name()) {
+        Ok(decision) => Ok(decision),
+        Err(parse_error) => {
+            tracing::warn!(
+                error = %parse_error,
+                "Advisor returned invalid JSON; requesting one repair attempt"
+            );
+            let mut repair_request = CompletionRequest::new(vec![
+                ChatMessage::system(format!(
+                    "{}\n\n{}",
+                    system_prompt.trim(),
+                    ADVISOR_RESPONSE_SCHEMA
+                )),
+                ChatMessage::user(format!(
+                    "Repair the previous answer into valid JSON only.\n\nPrevious answer:\n{}\n\nReturn only the corrected JSON object.",
+                    response.content
+                )),
+            ])
+            .with_max_tokens(ADVISOR_MAX_TOKENS)
+            .with_temperature(0.0);
+            if advisor_supports_thinking(&advisor_provider.active_model_name()) {
+                repair_request = repair_request.with_thinking(ADVISOR_THINKING_BUDGET_TOKENS);
+            }
+            let repair_response = advisor_provider.complete(repair_request).await?;
+
+            parse_advisor_decision(
+                &repair_response.content,
+                &advisor_provider.active_model_name(),
+            )
+        }
+    }
+}
+
+fn parse_advisor_decision(content: &str, provider_name: &str) -> Result<AdvisorDecision, LlmError> {
+    let json = extract_json_from_text(content).unwrap_or(content);
+    let decision: AdvisorDecision =
+        serde_json::from_str(json).map_err(|error| LlmError::InvalidResponse {
+            provider: provider_name.to_string(),
+            reason: format!("advisor decision JSON parse failed: {error}"),
+        })?;
+
+    decision
+        .normalize()
+        .map_err(|error| LlmError::InvalidResponse {
+            provider: provider_name.to_string(),
+            reason: format!("advisor decision validation failed: {error}"),
+        })
+}
+
+fn extract_json_from_text(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (start < end).then_some(&text[start..=end])
+}
+
+fn advisor_supports_thinking(model_name: &str) -> bool {
+    crate::config::model_compat::find_model(model_name)
+        .or_else(|| {
+            model_name
+                .split_once('/')
+                .and_then(|(_, model)| crate::config::model_compat::find_model(model))
+        })
+        .map(|compat| compat.supports_thinking)
+        .unwrap_or(false)
+}
+
+fn build_advisor_prompt(
+    question: &str,
+    context_summary: Option<&str>,
+    conversation_context: &[ChatMessage],
+) -> String {
+    let awareness = TurnAwareness::from_messages(conversation_context);
+    let mut sections = Vec::new();
+    sections.push(section("Escalation Reason", question));
+
+    if let Some(summary) = context_summary
+        .map(str::trim)
+        .filter(|summary| !summary.is_empty())
+    {
+        sections.push(section("Executor Summary", summary));
+    }
+
+    sections.push(section(
+        "Conversation State",
+        &awareness.context_snapshot(None),
+    ));
+
+    if let Some(last_user_objective) = awareness
+        .last_user_objective
+        .as_deref()
+        .map(|message| trim_text(message, 1_200))
+    {
+        sections.push(section("Last User Objective", &last_user_objective));
+    }
+
+    let earlier_user_context = awareness
+        .recent_user_messages
+        .iter()
+        .rev()
+        .skip(1)
+        .map(|message| trim_text(message, 700))
+        .collect::<Vec<_>>();
+    if !earlier_user_context.is_empty() {
+        sections.push(section(
+            "Recent User Context",
+            &earlier_user_context
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ));
+    }
+
+    let assistant_plan = awareness
+        .recent_assistant_messages
+        .iter()
+        .map(|message| trim_text(message, 700))
+        .collect::<Vec<_>>();
+    if !assistant_plan.is_empty() {
+        sections.push(section(
+            "Recent Assistant Reasoning",
+            &assistant_plan.join("\n\n"),
+        ));
+    }
+
+    let tool_plans = awareness
+        .recent_assistant_tool_plans
+        .iter()
+        .map(|plan| trim_text(&plan.content, 700))
+        .collect::<Vec<_>>();
+    if !tool_plans.is_empty() {
+        sections.push(section(
+            "Recent Planned Tool Actions",
+            &tool_plans.join("\n\n"),
+        ));
+    }
+
+    let recent_failures = awareness
+        .recent_tool_outcomes
+        .iter()
+        .filter(|outcome| outcome.is_error)
+        .map(|outcome| format!("- {}: {}", outcome.name, trim_text(&outcome.content, 420)))
+        .collect::<Vec<_>>();
+    if !recent_failures.is_empty() {
+        sections.push(section(
+            "Recent Failures Or Warnings",
+            &recent_failures.join("\n"),
+        ));
+    }
+
+    let recent_tool_outcomes = awareness
+        .recent_tool_outcomes
+        .iter()
+        .map(|outcome| format!("- {}: {}", outcome.name, trim_text(&outcome.content, 360)))
+        .collect::<Vec<_>>();
+    if !recent_tool_outcomes.is_empty() {
+        sections.push(section(
+            "Recent Tool Outcomes",
+            &recent_tool_outcomes.join("\n"),
+        ));
+    }
+
+    let compact_conversation = conversation_context
+        .iter()
+        .rev()
+        .filter(|message| !message.content.trim().is_empty())
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|message| {
+            let role_label = match message.role {
+                crate::llm::Role::System => "system",
+                crate::llm::Role::User => "user",
+                crate::llm::Role::Assistant => "assistant",
+                crate::llm::Role::Tool => message.name.as_deref().unwrap_or("tool"),
+            };
+            format!(
+                "[{}] {}",
+                role_label,
+                trim_text(message.content.trim(), 320)
+            )
+        })
+        .collect::<Vec<_>>();
+    if !compact_conversation.is_empty() {
+        sections.push(section(
+            "Compact Recent Conversation",
+            &compact_conversation.join("\n"),
+        ));
+    }
+
+    format!(
+        "The executor needs strategic guidance. Act like a senior reviewer: prioritize correctness, concrete next actions, recovery from risk, and whether execution should continue, be revised, or stop.\n\n{}",
+        sections.join("\n\n")
+    )
+}
+
+fn section(title: &str, body: &str) -> String {
+    format!("## {}\n{}", title, body.trim())
+}
+
+fn trim_text(value: &str, max_chars: usize) -> String {
+    if value.len() <= max_chars {
+        value.to_string()
+    } else {
+        let end = crate::util::floor_char_boundary(value, max_chars);
+        format!("{}...", &value[..end])
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use rust_decimal::Decimal;
+
+    use crate::llm::{
+        CompletionResponse, FinishReason, ToolCompletionRequest, ToolCompletionResponse,
+    };
+
+    struct SequentialAdvisorProvider {
+        responses: Mutex<VecDeque<String>>,
+    }
+
+    impl SequentialAdvisorProvider {
+        fn new(responses: Vec<&str>) -> Self {
+            Self {
+                responses: Mutex::new(
+                    responses
+                        .into_iter()
+                        .map(ToOwned::to_owned)
+                        .collect::<VecDeque<_>>(),
+                ),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for SequentialAdvisorProvider {
+        fn model_name(&self) -> &str {
+            "advisor-test"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            let content = self
+                .responses
+                .lock()
+                .expect("responses lock")
+                .pop_front()
+                .expect("missing scripted advisor response");
+            Ok(CompletionResponse {
+                content,
+                provider_model: None,
+                cost_usd: None,
+                thinking_content: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            unreachable!("advisor provider should not be asked for tool completions")
+        }
+    }
 
     #[test]
     fn advisor_tool_name() {
@@ -232,6 +623,15 @@ mod tests {
                 .unwrap()
                 .contains(&"question".into())
         );
+    }
+
+    #[test]
+    fn advisor_tool_metadata_is_read_only_and_not_parallel_safe() {
+        let tool = ConsultAdvisorTool;
+        let metadata = tool.metadata();
+        assert_eq!(metadata.side_effect_level, ToolSideEffectLevel::Read);
+        assert_eq!(metadata.approval_class, ToolApprovalClass::Never);
+        assert!(!metadata.parallel_safe);
     }
 
     #[test]
@@ -266,5 +666,129 @@ mod tests {
         let ctx = JobContext::default();
         let result = tool.execute(serde_json::json!({}), &ctx).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn advisor_consultation_parses_valid_json() {
+        let provider = SequentialAdvisorProvider::new(vec![
+            r#"{
+            "recommendation":"revise",
+            "summary":"Tighten the plan before continuing.",
+            "plan_steps":["Re-check the routing path","Retry with safer state handling"],
+            "corrections":["Do not reuse the failing tool signature"],
+            "stop_reason":null,
+            "confidence":0.82
+        }"#,
+        ]);
+        let config = AdvisorConfig {
+            advisor_target: "primary".to_string(),
+            max_advisor_calls: 4,
+            advisor_system_prompt: String::new(),
+        };
+
+        let decision = execute_advisor_consultation(
+            &provider,
+            &config,
+            "How should I recover?",
+            Some("Tool calls are looping."),
+            &[ChatMessage::user("Please fix the advisor path.")],
+        )
+        .await
+        .expect("advisor decision");
+
+        assert_eq!(decision.recommendation, AdvisorRecommendation::Revise);
+        assert_eq!(decision.plan_steps.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn advisor_consultation_repairs_invalid_json_once() {
+        let provider = SequentialAdvisorProvider::new(vec![
+            "not-json-at-all",
+            r#"{"recommendation":"continue","summary":"Proceed with the corrected plan.","plan_steps":["Continue carefully"],"corrections":[],"stop_reason":null,"confidence":0.6}"#,
+        ]);
+        let config = AdvisorConfig {
+            advisor_target: "primary".to_string(),
+            max_advisor_calls: 4,
+            advisor_system_prompt: String::new(),
+        };
+
+        let decision = execute_advisor_consultation(
+            &provider,
+            &config,
+            "Need guidance",
+            None,
+            &[ChatMessage::user("Investigate the bug.")],
+        )
+        .await
+        .expect("repaired advisor decision");
+
+        assert_eq!(decision.recommendation, AdvisorRecommendation::Continue);
+    }
+
+    #[tokio::test]
+    async fn advisor_consultation_returns_structured_error_after_failed_repair() {
+        let provider = SequentialAdvisorProvider::new(vec!["oops", "still not json"]);
+        let config = AdvisorConfig {
+            advisor_target: "primary".to_string(),
+            max_advisor_calls: 4,
+            advisor_system_prompt: String::new(),
+        };
+
+        let error = execute_advisor_consultation(
+            &provider,
+            &config,
+            "Need guidance",
+            None,
+            &[ChatMessage::user("Investigate the bug.")],
+        )
+        .await
+        .expect_err("advisor parse should fail");
+
+        assert!(matches!(error, LlmError::InvalidResponse { .. }));
+    }
+
+    #[test]
+    fn advisor_prompt_uses_richer_context_sections() {
+        let prompt = build_advisor_prompt(
+            "How should I recover?",
+            Some("The executor is trying to finish a complex review."),
+            &[
+                ChatMessage::user(
+                    "Please design the migration architecture and review the implementation risks.",
+                ),
+                ChatMessage::assistant_with_tool_calls(
+                    Some("I should inspect the existing implementation first.".to_string()),
+                    vec![
+                        crate::llm::ToolCall {
+                            id: "call_1".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: serde_json::json!({"path":"src/main.rs"}),
+                        },
+                        crate::llm::ToolCall {
+                            id: "call_2".to_string(),
+                            name: "search_code".to_string(),
+                            arguments: serde_json::json!({"query":"migration"}),
+                        },
+                    ],
+                ),
+                ChatMessage::tool_result(
+                    "call_1",
+                    "read_file",
+                    "{\"status\":\"error\",\"message\":\"config missing\"}",
+                ),
+            ],
+        );
+
+        assert!(prompt.contains("Conversation State"));
+        assert!(prompt.contains("Recent Planned Tool Actions"));
+        assert!(prompt.contains("Recent Failures Or Warnings"));
+        assert!(prompt.contains("Compact Recent Conversation"));
+    }
+
+    #[test]
+    fn advisor_supports_thinking_for_known_frontier_models() {
+        assert!(advisor_supports_thinking("gpt-5.4"));
+        assert!(advisor_supports_thinking("openai/gpt-5.4"));
+        assert!(!advisor_supports_thinking("unknown-model"));
     }
 }

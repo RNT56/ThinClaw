@@ -36,6 +36,7 @@ pub mod route_planner;
 pub mod routing_policy;
 pub mod runtime_manager;
 pub mod smart_routing;
+pub mod turn_analysis;
 pub mod usage_tracking;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};

@@ -3,6 +3,8 @@
 //! Extracted from `agent_loop.rs` to keep the core agentic tool execution
 //! loop (LLM call -> tool calls -> repeat) in its own focused module.
 
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -18,7 +20,9 @@ use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{
     ChatMessage, Reasoning, ReasoningContext, RespondOutput, RespondResult, ToolDefinition,
+    turn_analysis::TurnAwareness,
 };
+use crate::settings::AdvisorAutoEscalationMode;
 use crate::tools::ToolExecutionLane;
 
 // Helper functions extracted to dispatcher_helpers.rs
@@ -77,6 +81,78 @@ enum ToolPhaseTextOutcome {
     PrimaryNeedsFinalization,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum AdvisorAutoTrigger {
+    ToolFailure,
+    StuckLoop,
+    VisionInput,
+    LargeContext,
+    ComplexFinalPass,
+}
+
+impl AdvisorAutoTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolFailure => "tool_failure",
+            Self::StuckLoop => "stuck_loop",
+            Self::VisionInput => "vision_input",
+            Self::LargeContext => "large_context",
+            Self::ComplexFinalPass => "complex_final_pass",
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::ToolFailure => "a non-auth tool failed during the current turn",
+            Self::StuckLoop => "the executor appears stuck in a repeated tool-call loop",
+            Self::VisionInput => {
+                "the request includes vision input and benefits from an early strategic check"
+            }
+            Self::LargeContext => {
+                "the request carries a large context window and benefits from an early strategic check"
+            }
+            Self::ComplexFinalPass => {
+                "this is a complex or planning-heavy turn and needs a final-pass advisor check before the answer is returned"
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AdvisorFailureContext {
+    tool_name: String,
+    message: String,
+    signature: Option<u64>,
+    checkpoint: u32,
+}
+
+#[derive(Debug, Default)]
+struct AdvisorTurnState {
+    real_tool_result_count: u32,
+    blocked_tool_signatures: HashSet<u64>,
+    auto_consult_checkpoints: HashSet<String>,
+    last_failure: Option<AdvisorFailureContext>,
+}
+
+impl AdvisorTurnState {
+    fn checkpoint_for(&self, trigger: AdvisorAutoTrigger, detail: impl Into<String>) -> String {
+        format!(
+            "{}:{}:{}",
+            trigger.as_str(),
+            self.real_tool_result_count,
+            detail.into()
+        )
+    }
+
+    fn should_fire(&self, checkpoint: &str) -> bool {
+        !self.auto_consult_checkpoints.contains(checkpoint)
+    }
+
+    fn mark_fired(&mut self, checkpoint: String) {
+        self.auto_consult_checkpoints.insert(checkpoint);
+    }
+}
+
 fn is_tool_phase_no_tools_signal(text: &str) -> bool {
     let trimmed = text.trim();
     trimmed == TOOL_PHASE_NO_TOOLS_SENTINEL
@@ -110,6 +186,40 @@ fn tool_phase_synthesis_enabled(
                 | crate::settings::RoutingMode::AdvisorExecutor
         )
         && runtime_status.tool_phase_synthesis_enabled
+}
+
+fn tool_call_signature(tool_calls: &[crate::llm::ToolCall]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for tool_call in tool_calls {
+        tool_call.name.hash(&mut hasher);
+        tool_call.arguments.to_string().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn is_complex_or_planning_turn(messages: &[ChatMessage]) -> bool {
+    TurnAwareness::from_messages(messages).is_complex_or_planning_turn()
+}
+
+fn should_hold_complex_final_pass(
+    runtime_status: Option<&crate::llm::runtime_manager::RuntimeStatus>,
+    context_messages: &[ChatMessage],
+    advisor_state: &AdvisorTurnState,
+) -> bool {
+    let Some(status) = runtime_status else {
+        return false;
+    };
+    if !status.advisor_ready
+        || status.advisor_auto_escalation_mode != AdvisorAutoEscalationMode::RiskAndComplexFinal
+    {
+        return false;
+    }
+    if !is_complex_or_planning_turn(context_messages) {
+        return false;
+    }
+    let checkpoint =
+        advisor_state.checkpoint_for(AdvisorAutoTrigger::ComplexFinalPass, "final_answer");
+    advisor_state.should_fire(&checkpoint)
 }
 
 fn classify_tool_phase_text(
@@ -557,6 +667,11 @@ impl Agent {
                 }
             }
         }
+        let _sandbox_child_guard = self
+            .deps
+            .sandbox_children
+            .as_ref()
+            .map(|registry| registry.guard(job_ctx.job_id));
         let model_override_scope_key =
             crate::tools::builtin::llm_tools::model_override_scope_key_from_metadata(
                 &job_ctx.metadata,
@@ -602,6 +717,7 @@ impl Agent {
                 .map(|runtime| runtime.status().advisor_max_calls)
                 .unwrap_or(3),
         ));
+        let mut advisor_state = AdvisorTurnState::default();
 
         loop {
             iteration += 1;
@@ -990,6 +1106,23 @@ impl Agent {
                     &job_ctx.metadata,
                 )
                 .await;
+            let tool_defs = if let Some(runtime) = self.deps.llm_runtime.as_ref() {
+                if runtime
+                    .advisor_config_for_messages(&context_messages)
+                    .is_none()
+                {
+                    tool_defs
+                        .into_iter()
+                        .filter(|tool| {
+                            tool.name != crate::tools::builtin::advisor::ADVISOR_TOOL_NAME
+                        })
+                        .collect()
+                } else {
+                    tool_defs
+                }
+            } else {
+                tool_defs
+            };
 
             if force_text {
                 tracing::info!(
@@ -1003,6 +1136,39 @@ impl Agent {
                 .llm_runtime
                 .as_ref()
                 .map(|runtime| runtime.status());
+            let advisor_ready_for_turn = self
+                .deps
+                .llm_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.advisor_config_for_messages(&context_messages))
+                .is_some();
+            if advisor_ready_for_turn {
+                if let Some((trigger, checkpoint, blocked_signature)) = self
+                    .next_auto_advisor_trigger(
+                        runtime_status.as_ref(),
+                        &context_messages,
+                        &advisor_state,
+                        consecutive_same_calls,
+                        last_call_signature,
+                    )
+                {
+                    self.inject_auto_advisor_consultation(
+                        trigger,
+                        checkpoint,
+                        blocked_signature,
+                        &mut advisor_state,
+                        &mut context_messages,
+                        &session,
+                        thread_id,
+                        message,
+                        advisor_call_budget.as_ref(),
+                        &mut last_call_signature,
+                        &mut consecutive_same_calls,
+                    )
+                    .await?;
+                    continue;
+                }
+            }
             let use_tool_phase_synthesis = tool_phase_synthesis_enabled(
                 runtime_status.as_ref(),
                 self.deps.cheap_llm.is_some(),
@@ -1010,6 +1176,12 @@ impl Agent {
                 !tool_defs.is_empty(),
                 last_applied_model_override.is_some(),
             );
+            let hold_complex_final_pass = advisor_ready_for_turn
+                && should_hold_complex_final_pass(
+                    runtime_status.as_ref(),
+                    &context_messages,
+                    &advisor_state,
+                );
             let tool_phase_primary_thinking_enabled = runtime_status
                 .as_ref()
                 .map(|status| status.tool_phase_primary_thinking_enabled)
@@ -1036,7 +1208,7 @@ impl Agent {
                             crate::llm::ThinkingConfig::Disabled
                         },
                         context_documents: prompt_context_documents.clone(),
-                        stream_to_user: !use_tool_phase_synthesis,
+                        stream_to_user: !use_tool_phase_synthesis && !hold_complex_final_pass,
                         emit_progress_status: !use_tool_phase_synthesis,
                         emit_thinking_status: !use_tool_phase_synthesis,
                         planning_mode: use_tool_phase_synthesis,
@@ -1147,31 +1319,68 @@ impl Agent {
                         }
                     }
 
+                    if hold_complex_final_pass {
+                        let checkpoint = advisor_state
+                            .checkpoint_for(AdvisorAutoTrigger::ComplexFinalPass, "final_answer");
+                        self.inject_auto_advisor_consultation(
+                            AdvisorAutoTrigger::ComplexFinalPass,
+                            checkpoint,
+                            last_call_signature,
+                            &mut advisor_state,
+                            &mut context_messages,
+                            &session,
+                            thread_id,
+                            message,
+                            advisor_call_budget.as_ref(),
+                            &mut last_call_signature,
+                            &mut consecutive_same_calls,
+                        )
+                        .await?;
+                        continue;
+                    }
+
                     return Ok(self.agentic_result_from_text(phase_one_streamed_text, text));
                 }
                 RespondResult::ToolCalls {
                     tool_calls,
                     content,
                 } => {
+                    let sig = tool_call_signature(&tool_calls);
                     // ── Stuck loop detection ──────────────────────────────────
                     // Compute a signature from the tool call names + arguments.
                     // If the same set of calls repeats consecutively, the LLM is
                     // likely stuck in a loop.
-                    {
-                        use std::hash::{Hash, Hasher};
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        for tc in &tool_calls {
-                            tc.name.hash(&mut hasher);
-                            tc.arguments.to_string().hash(&mut hasher);
-                        }
-                        let sig = hasher.finish();
+                    if last_call_signature == Some(sig) {
+                        consecutive_same_calls += 1;
+                    } else {
+                        consecutive_same_calls = 1;
+                        last_call_signature = Some(sig);
+                    }
 
-                        if last_call_signature == Some(sig) {
-                            consecutive_same_calls += 1;
-                        } else {
-                            consecutive_same_calls = 1;
-                            last_call_signature = Some(sig);
+                    if advisor_state.blocked_tool_signatures.contains(&sig) {
+                        context_messages.push(ChatMessage::assistant_with_tool_calls(
+                            content,
+                            tool_calls.clone(),
+                        ));
+                        for tc in &tool_calls {
+                            let blocked_message = serde_json::json!({
+                                "status": "error",
+                                "code": "advisor_stop_blocked",
+                                "message": "Blocked by advisor STOP guidance for this turn. Follow the revised plan, ask a narrow clarification, or return a bounded limitation instead of retrying the same tool-call pattern."
+                            })
+                            .to_string();
+                            context_messages.push(ChatMessage::tool_result(
+                                &tc.id,
+                                &tc.name,
+                                blocked_message,
+                            ));
                         }
+                        context_messages.push(ChatMessage::system(
+                            "Advisor STOP guidance is still active for the blocked tool-call pattern. Choose a different approach.",
+                        ));
+                        last_call_signature = None;
+                        consecutive_same_calls = 0;
+                        continue;
                     }
 
                     if consecutive_same_calls >= STUCK_FORCE_THRESHOLD {
@@ -1588,6 +1797,17 @@ impl Agent {
                                     {
                                         turn.record_tool_error(error_msg.clone());
                                     }
+                                }
+                                if tc.name != crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
+                                    advisor_state.real_tool_result_count += 1;
+                                    advisor_state.last_failure = Some(AdvisorFailureContext {
+                                        tool_name: tc.name.clone(),
+                                        message: error_msg.clone(),
+                                        signature: Some(tool_call_signature(std::slice::from_ref(
+                                            &tc,
+                                        ))),
+                                        checkpoint: advisor_state.real_tool_result_count,
+                                    });
                                 }
                                 context_messages
                                     .push(ChatMessage::tool_result(&tc.id, &tc.name, error_msg));
@@ -2045,6 +2265,51 @@ impl Agent {
                                     deferred_auth = Some(auth_request.instructions);
                                 }
 
+                                let advisor_stop_after_result = if tc.name
+                                    == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME
+                                {
+                                    tool_result
+                                        .as_ref()
+                                        .ok()
+                                        .and_then(|output| self.parse_advisor_envelope(output))
+                                        .and_then(|envelope| envelope.advisor_decision)
+                                } else {
+                                    advisor_state.real_tool_result_count += 1;
+                                    match &tool_result {
+                                        Ok(output) => {
+                                            if output.contains("\"success\":false")
+                                                || output.contains("\"status\":\"error\"")
+                                            {
+                                                advisor_state.last_failure =
+                                                    Some(AdvisorFailureContext {
+                                                        tool_name: tc.name.clone(),
+                                                        message: truncate_preview(output, 240),
+                                                        signature: Some(tool_call_signature(
+                                                            std::slice::from_ref(&tc),
+                                                        )),
+                                                        checkpoint: advisor_state
+                                                            .real_tool_result_count,
+                                                    });
+                                            } else {
+                                                advisor_state.last_failure = None;
+                                            }
+                                        }
+                                        Err(error) => {
+                                            advisor_state.last_failure =
+                                                Some(AdvisorFailureContext {
+                                                    tool_name: tc.name.clone(),
+                                                    message: error.to_string(),
+                                                    signature: Some(tool_call_signature(
+                                                        std::slice::from_ref(&tc),
+                                                    )),
+                                                    checkpoint: advisor_state
+                                                        .real_tool_result_count,
+                                                });
+                                        }
+                                    }
+                                    None
+                                };
+
                                 // Sanitize and add tool result to context
                                 let result_content = match tool_result {
                                     Ok(output) => {
@@ -2064,6 +2329,16 @@ impl Agent {
                                     &tc.name,
                                     result_content,
                                 ));
+                                if let Some(decision) = advisor_stop_after_result.as_ref() {
+                                    self.apply_advisor_stop_directive(
+                                        decision,
+                                        last_call_signature,
+                                        &mut advisor_state,
+                                        &mut context_messages,
+                                        &mut last_call_signature,
+                                        &mut consecutive_same_calls,
+                                    );
+                                }
                             }
                         }
                     }
@@ -2651,62 +2926,110 @@ impl Agent {
             .arguments
             .get("context_summary")
             .and_then(|value| value.as_str());
+        let envelope = self
+            .run_advisor_consultation(
+                question,
+                context_summary,
+                context_messages,
+                advisor_call_budget,
+                crate::tools::builtin::advisor::AdvisorConsultationMode::Manual,
+                "manual consultation requested by the executor",
+            )
+            .await;
+        Ok(self.serialize_advisor_envelope(&envelope))
+    }
 
-        let advisor_config = self
-            .deps
-            .llm_runtime
-            .as_ref()
-            .and_then(|runtime| runtime.advisor_config_for_messages(context_messages))
-            .unwrap_or_else(|| crate::llm::route_planner::AdvisorConfig {
-                advisor_target: "primary".to_string(),
-                max_advisor_calls: 3,
-                advisor_system_prompt: String::new(),
-            });
+    fn serialize_advisor_envelope(
+        &self,
+        envelope: &crate::tools::builtin::advisor::AdvisorConsultationEnvelope,
+    ) -> String {
+        serde_json::to_string(envelope).unwrap_or_else(|error| {
+            serde_json::json!({
+                "status": "error",
+                "mode": "manual",
+                "reason": "failed to serialize advisor envelope",
+                "code": "advisor_envelope_serialize_failed",
+                "message": error.to_string(),
+            })
+            .to_string()
+        })
+    }
+
+    async fn run_advisor_consultation(
+        &self,
+        question: &str,
+        context_summary: Option<&str>,
+        context_messages: &[ChatMessage],
+        advisor_call_budget: &crate::tools::builtin::advisor::AdvisorCallBudget,
+        mode: crate::tools::builtin::advisor::AdvisorConsultationMode,
+        reason: &str,
+    ) -> crate::tools::builtin::advisor::AdvisorConsultationEnvelope {
+        let Some(runtime) = self.deps.llm_runtime.as_ref() else {
+            return crate::tools::builtin::advisor::AdvisorConsultationEnvelope::error(
+                mode,
+                reason,
+                "advisor_unavailable",
+                "Advisor runtime is unavailable in this environment.",
+            );
+        };
+
+        let Some(advisor_config) = runtime.advisor_config_for_messages(context_messages) else {
+            let disabled_reason = runtime
+                .status()
+                .advisor_disabled_reason
+                .unwrap_or_else(|| "Advisor lane is unavailable for this turn.".to_string());
+            return crate::tools::builtin::advisor::AdvisorConsultationEnvelope::error(
+                mode,
+                reason,
+                "advisor_unavailable",
+                disabled_reason,
+            );
+        };
 
         if let Err(limit_message) = advisor_call_budget.try_consume() {
             tracing::warn!(
                 advisor_target = %advisor_config.advisor_target,
                 "Advisor call rejected: call budget exhausted"
             );
-            return Ok(serde_json::json!({
-                "status": "error",
-                "code": "advisor_call_limit_reached",
-                "message": limit_message,
-            })
-            .to_string());
+            return crate::tools::builtin::advisor::AdvisorConsultationEnvelope::error(
+                mode,
+                reason,
+                "advisor_call_limit_reached",
+                limit_message,
+            );
         }
 
-        let advisor_provider: Arc<dyn crate::llm::LlmProvider> = self
-            .deps
-            .llm_runtime
-            .as_ref()
-            .and_then(|runtime| {
-                runtime
-                    .provider_handle_for_target(&advisor_config.advisor_target)
-                    .map(|provider| {
-                        if let Some(tracker) = self.deps.cost_tracker.as_ref() {
-                            Arc::new(crate::llm::usage_tracking::UsageTrackingProvider::new(
-                                provider,
-                                Arc::clone(tracker),
-                                self.deps.store.clone(),
-                                Some(Arc::clone(&self.deps.cost_guard)),
-                            ))
-                                as Arc<dyn crate::llm::LlmProvider>
-                        } else {
-                            provider
-                        }
-                    })
-                    .map_err(|err| {
-                        tracing::warn!(
-                            advisor_target = %advisor_config.advisor_target,
-                            error = %err,
-                            "Failed to resolve concrete advisor target; falling back to generic runtime provider"
-                        );
-                        err
-                    })
-                    .ok()
-            })
-            .unwrap_or_else(|| self.llm().clone());
+        let advisor_provider =
+            match runtime.provider_handle_for_target(&advisor_config.advisor_target) {
+                Ok(provider) => {
+                    if let Some(tracker) = self.deps.cost_tracker.as_ref() {
+                        Arc::new(crate::llm::usage_tracking::UsageTrackingProvider::new(
+                            provider,
+                            Arc::clone(tracker),
+                            self.deps.store.clone(),
+                            Some(Arc::clone(&self.deps.cost_guard)),
+                        )) as Arc<dyn crate::llm::LlmProvider>
+                    } else {
+                        provider
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        advisor_target = %advisor_config.advisor_target,
+                        error = %error,
+                        "Failed to resolve advisor target"
+                    );
+                    return crate::tools::builtin::advisor::AdvisorConsultationEnvelope::error(
+                        mode,
+                        reason,
+                        "advisor_unavailable",
+                        format!(
+                            "Advisor target '{}' could not be resolved: {}",
+                            advisor_config.advisor_target, error
+                        ),
+                    );
+                }
+            };
 
         match crate::tools::builtin::advisor::execute_advisor_consultation(
             advisor_provider.as_ref(),
@@ -2717,34 +3040,320 @@ impl Agent {
         )
         .await
         {
-            Ok(guidance) => {
-                tracing::info!(
-                    question_len = question.len(),
-                    guidance_len = guidance.len(),
-                    "Advisor consultation completed"
-                );
-                Ok(serde_json::json!({
-                    "status": "ok",
-                    "advisor_guidance": guidance,
-                })
-                .to_string())
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Advisor consultation failed"
-                );
-                Ok(serde_json::json!({
-                    "status": "error",
-                    "message": format!(
-                        "Advisor consultation failed: {}. \
-                         Continue without advisor guidance.",
-                        e
+            Ok(decision) => crate::tools::builtin::advisor::AdvisorConsultationEnvelope::ok(
+                mode, reason, decision,
+            ),
+            Err(error) => {
+                tracing::warn!(error = %error, "Advisor consultation failed");
+                crate::tools::builtin::advisor::AdvisorConsultationEnvelope::error(
+                    mode,
+                    reason,
+                    "advisor_consultation_failed",
+                    format!(
+                        "Advisor consultation failed: {}. Continue without advisor guidance.",
+                        error
                     ),
-                })
-                .to_string())
+                )
             }
         }
+    }
+
+    fn parse_advisor_envelope(
+        &self,
+        content: &str,
+    ) -> Option<crate::tools::builtin::advisor::AdvisorConsultationEnvelope> {
+        serde_json::from_str(content).ok()
+    }
+
+    fn apply_advisor_stop_directive(
+        &self,
+        decision: &crate::tools::builtin::advisor::AdvisorDecision,
+        blocked_signature: Option<u64>,
+        advisor_state: &mut AdvisorTurnState,
+        context_messages: &mut Vec<ChatMessage>,
+        last_call_signature: &mut Option<u64>,
+        consecutive_same_calls: &mut u32,
+    ) {
+        if decision.recommendation != crate::tools::builtin::advisor::AdvisorRecommendation::Stop {
+            return;
+        }
+
+        if let Some(signature) = blocked_signature {
+            advisor_state.blocked_tool_signatures.insert(signature);
+            if *last_call_signature == Some(signature) {
+                *last_call_signature = None;
+                *consecutive_same_calls = 0;
+            }
+        }
+
+        advisor_state.last_failure = None;
+        let stop_reason = decision
+            .stop_reason
+            .as_deref()
+            .unwrap_or(decision.summary.as_str());
+        let directive = if blocked_signature.is_some() {
+            format!(
+                "Advisor STOP directive: {} Do not repeat the blocked tool-call pattern in this turn. Follow the revised plan, ask a narrow clarification, or return a bounded limitation.",
+                stop_reason
+            )
+        } else {
+            format!(
+                "Advisor STOP directive: {} Follow the revised plan, ask a narrow clarification, or return a bounded limitation instead of retrying the same approach.",
+                stop_reason
+            )
+        };
+        context_messages.push(ChatMessage::system(directive));
+    }
+
+    fn build_auto_advisor_arguments(
+        &self,
+        trigger: AdvisorAutoTrigger,
+        context_messages: &[ChatMessage],
+        advisor_state: &AdvisorTurnState,
+    ) -> (String, Option<String>) {
+        let awareness = TurnAwareness::from_messages(context_messages);
+        let last_user = awareness
+            .last_user_objective
+            .as_deref()
+            .unwrap_or("No user objective found.");
+        let base_context = awareness.context_snapshot(Some(advisor_state.real_tool_result_count));
+        match trigger {
+            AdvisorAutoTrigger::ToolFailure => {
+                if let Some(failure) = advisor_state.last_failure.as_ref() {
+                    (
+                        format!(
+                            "A tool failed during execution. How should I recover without repeating the mistake? Failed tool: {}. Failure: {}",
+                            failure.tool_name, failure.message
+                        ),
+                        Some(format!(
+                            "User objective: {}. {}",
+                            last_user, base_context
+                        )),
+                    )
+                } else {
+                    (
+                        "A tool failed during execution. What is the safest recovery plan?"
+                            .to_string(),
+                        Some(format!("User objective: {}. {}", last_user, base_context)),
+                    )
+                }
+            }
+            AdvisorAutoTrigger::StuckLoop => (
+                "I appear to be repeating the same tool calls without making progress. What should I do next, and should I stop retrying this path?"
+                    .to_string(),
+                Some(format!("User objective: {}. {}", last_user, base_context)),
+            ),
+            AdvisorAutoTrigger::VisionInput => (
+                "This turn includes image input. What strategy should I follow before taking action?"
+                    .to_string(),
+                Some(format!("User objective: {}. {}", last_user, base_context)),
+            ),
+            AdvisorAutoTrigger::LargeContext => (
+                "This turn has a large context window. What is the safest high-level plan before I continue?"
+                    .to_string(),
+                Some(format!("User objective: {}. {}", last_user, base_context)),
+            ),
+            AdvisorAutoTrigger::ComplexFinalPass => (
+                "Before I return the final answer on this complex turn, what corrections or caveats should I incorporate?"
+                    .to_string(),
+                Some(format!(
+                    "User objective: {}. {}",
+                    last_user, base_context
+                )),
+            ),
+        }
+    }
+
+    fn next_auto_advisor_trigger(
+        &self,
+        runtime_status: Option<&crate::llm::runtime_manager::RuntimeStatus>,
+        context_messages: &[ChatMessage],
+        advisor_state: &AdvisorTurnState,
+        consecutive_same_calls: u32,
+        last_call_signature: Option<u64>,
+    ) -> Option<(AdvisorAutoTrigger, String, Option<u64>)> {
+        let Some(status) = runtime_status else {
+            return None;
+        };
+        if !status.advisor_ready
+            || status.advisor_auto_escalation_mode == AdvisorAutoEscalationMode::ManualOnly
+        {
+            return None;
+        }
+        let awareness = TurnAwareness::from_messages(context_messages);
+
+        if let Some(failure) = advisor_state.last_failure.as_ref() {
+            let checkpoint = advisor_state.checkpoint_for(
+                AdvisorAutoTrigger::ToolFailure,
+                failure.checkpoint.to_string(),
+            );
+            if advisor_state.should_fire(&checkpoint) {
+                return Some((
+                    AdvisorAutoTrigger::ToolFailure,
+                    checkpoint,
+                    failure.signature,
+                ));
+            }
+        }
+
+        if consecutive_same_calls >= 3
+            && let Some(signature) = last_call_signature
+        {
+            let checkpoint = advisor_state.checkpoint_for(
+                AdvisorAutoTrigger::StuckLoop,
+                format!("{}:{}", signature, consecutive_same_calls),
+            );
+            if advisor_state.should_fire(&checkpoint) {
+                return Some((AdvisorAutoTrigger::StuckLoop, checkpoint, Some(signature)));
+            }
+        }
+
+        let vision_checkpoint =
+            advisor_state.checkpoint_for(AdvisorAutoTrigger::VisionInput, "vision");
+        if awareness.has_vision && advisor_state.should_fire(&vision_checkpoint) {
+            return Some((AdvisorAutoTrigger::VisionInput, vision_checkpoint, None));
+        }
+
+        let large_context_checkpoint =
+            advisor_state.checkpoint_for(AdvisorAutoTrigger::LargeContext, "large_context");
+        if awareness.estimated_tokens >= 12_000
+            && advisor_state.should_fire(&large_context_checkpoint)
+        {
+            return Some((
+                AdvisorAutoTrigger::LargeContext,
+                large_context_checkpoint,
+                None,
+            ));
+        }
+
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn inject_auto_advisor_consultation(
+        &self,
+        trigger: AdvisorAutoTrigger,
+        checkpoint: String,
+        blocked_signature: Option<u64>,
+        advisor_state: &mut AdvisorTurnState,
+        context_messages: &mut Vec<ChatMessage>,
+        session: &Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        message: &IncomingMessage,
+        advisor_call_budget: &crate::tools::builtin::advisor::AdvisorCallBudget,
+        last_call_signature: &mut Option<u64>,
+        consecutive_same_calls: &mut u32,
+    ) -> Result<(), Error> {
+        let (question, context_summary) =
+            self.build_auto_advisor_arguments(trigger, context_messages, advisor_state);
+        let tool_call = crate::llm::ToolCall {
+            id: format!(
+                "auto_consult_advisor_{}_{}",
+                trigger.as_str(),
+                advisor_state.real_tool_result_count
+            ),
+            name: crate::tools::builtin::advisor::ADVISOR_TOOL_NAME.to_string(),
+            arguments: serde_json::json!({
+                "question": question,
+                "context_summary": context_summary,
+            }),
+        };
+        context_messages.push(ChatMessage::assistant_with_tool_calls(
+            Some(format!("Auto consulting advisor: {}", trigger.reason())),
+            vec![tool_call.clone()],
+        ));
+        {
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id)
+                && let Some(turn) = thread.last_turn_mut()
+            {
+                turn.record_tool_call(&tool_call.name, tool_call.arguments.clone());
+            }
+        }
+
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::ToolStarted {
+                    name: tool_call.name.clone(),
+                    parameters: Some(tool_call.arguments.clone()),
+                },
+                &message.metadata,
+            )
+            .await;
+
+        let envelope = self
+            .run_advisor_consultation(
+                tool_call
+                    .arguments
+                    .get("question")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("(no question provided)"),
+                tool_call
+                    .arguments
+                    .get("context_summary")
+                    .and_then(|value| value.as_str()),
+                context_messages,
+                advisor_call_budget,
+                crate::tools::builtin::advisor::AdvisorConsultationMode::Auto,
+                trigger.reason(),
+            )
+            .await;
+        let serialized = self.serialize_advisor_envelope(&envelope);
+
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::ToolCompleted {
+                    name: tool_call.name.clone(),
+                    success: matches!(
+                        envelope.status,
+                        crate::tools::builtin::advisor::AdvisorEnvelopeStatus::Ok
+                    ),
+                    result_preview: Some(truncate_preview(&serialized, 500)),
+                },
+                &message.metadata,
+            )
+            .await;
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::ToolResult {
+                    name: tool_call.name.clone(),
+                    preview: serialized.clone(),
+                },
+                &message.metadata,
+            )
+            .await;
+
+        {
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id)
+                && let Some(turn) = thread.last_turn_mut()
+            {
+                turn.record_tool_result(serde_json::json!(serialized.clone()));
+            }
+        }
+        context_messages.push(ChatMessage::tool_result(
+            &tool_call.id,
+            &tool_call.name,
+            serialized,
+        ));
+        advisor_state.mark_fired(checkpoint);
+        if let Some(decision) = envelope.advisor_decision.as_ref() {
+            self.apply_advisor_stop_directive(
+                decision,
+                blocked_signature,
+                advisor_state,
+                context_messages,
+                last_call_signature,
+                consecutive_same_calls,
+            );
+        }
+        Ok(())
     }
 
     /// Execute a tool for chat (without full job context).
@@ -2779,9 +3388,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
+        AdvisorAutoTrigger, AdvisorFailureContext, AdvisorTurnState,
         STUCK_LOOP_FINALIZATION_PROMPT, TOOL_PHASE_NO_TOOLS_SENTINEL,
         TOOL_PHASE_PLANNING_MAX_TOKENS, TOOL_PHASE_PLANNING_PROMPT, TOOL_PHASE_SYNTHESIS_PROMPT,
-        classify_tool_phase_text, is_tool_phase_no_tools_signal, tool_phase_synthesis_enabled,
+        classify_tool_phase_text, is_tool_phase_no_tools_signal, should_hold_complex_final_pass,
+        tool_phase_synthesis_enabled,
     };
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
@@ -2799,7 +3410,9 @@ mod tests {
         ThinkingConfig, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
     };
     use crate::safety::SafetyLayer;
-    use crate::settings::{ProviderModelSlots, ProvidersSettings, RoutingMode};
+    use crate::settings::{
+        AdvisorAutoEscalationMode, ProviderModelSlots, ProvidersSettings, RoutingMode,
+    };
     use crate::tools::{ApprovalRequirement, Tool, ToolOutput, ToolRegistry};
 
     #[derive(Debug, Clone)]
@@ -3170,8 +3783,15 @@ mod tests {
             tool_phase_primary_thinking_enabled: true,
             primary_provider: Some("openai_compatible".to_string()),
             fallback_chain: Vec::new(),
-            advisor_max_calls: 3,
+            advisor_max_calls: 4,
+            advisor_auto_escalation_mode: AdvisorAutoEscalationMode::RiskAndComplexFinal,
             advisor_escalation_prompt: None,
+            advisor_ready: routing_mode == RoutingMode::AdvisorExecutor,
+            advisor_disabled_reason: None,
+            executor_target: (routing_mode == RoutingMode::AdvisorExecutor)
+                .then_some("cheap".to_string()),
+            advisor_target: (routing_mode == RoutingMode::AdvisorExecutor)
+                .then_some("primary".to_string()),
         }
     }
 
@@ -3179,18 +3799,20 @@ mod tests {
         tool_phase_synthesis_enabled: bool,
         tool_phase_primary_thinking_enabled: bool,
     ) -> Arc<crate::llm::runtime_manager::LlmRuntimeManager> {
-        make_runtime_manager_with_advisor_limit(
+        make_runtime_manager_for_mode(
             tool_phase_synthesis_enabled,
             tool_phase_primary_thinking_enabled,
+            RoutingMode::CheapSplit,
             3,
         )
         .await
     }
 
     #[allow(clippy::await_holding_lock)]
-    async fn make_runtime_manager_with_advisor_limit(
+    async fn make_runtime_manager_for_mode(
         tool_phase_synthesis_enabled: bool,
         tool_phase_primary_thinking_enabled: bool,
+        routing_mode: RoutingMode,
         advisor_max_calls: u32,
     ) -> Arc<crate::llm::runtime_manager::LlmRuntimeManager> {
         let config = {
@@ -3199,7 +3821,7 @@ mod tests {
             unsafe {
                 std::env::set_var("LLM_BACKEND", "openai_compatible");
                 std::env::set_var("LLM_BASE_URL", "http://localhost:12345/v1");
-                std::env::set_var("LLM_MODEL", "primary-model");
+                std::env::set_var("LLM_MODEL", "gpt-5.4");
                 // Avoid keychain probes in tests (can block/hang in CI/local).
                 std::env::set_var(
                     "SECRETS_MASTER_KEY",
@@ -3220,20 +3842,21 @@ mod tests {
         let mut providers = ProvidersSettings {
             enabled: vec!["openai_compatible".to_string()],
             primary: Some("openai_compatible".to_string()),
-            primary_model: Some("primary-model".to_string()),
-            cheap_model: Some("openai_compatible/cheap-model".to_string()),
+            primary_model: Some("gpt-5.4".to_string()),
+            cheap_model: Some("openai_compatible/gpt-5.4-mini".to_string()),
             smart_routing_enabled: true,
-            routing_mode: RoutingMode::CheapSplit,
+            routing_mode,
             tool_phase_synthesis_enabled,
             tool_phase_primary_thinking_enabled,
             advisor_max_calls,
+            advisor_auto_escalation_mode: AdvisorAutoEscalationMode::RiskAndComplexFinal,
             ..ProvidersSettings::default()
         };
         providers.provider_models.insert(
             "openai_compatible".to_string(),
             ProviderModelSlots {
-                primary: Some("primary-model".to_string()),
-                cheap: Some("cheap-model".to_string()),
+                primary: Some("gpt-5.4".to_string()),
+                cheap: Some("gpt-5.4-mini".to_string()),
             },
         );
 
@@ -3313,6 +3936,7 @@ mod tests {
             routing_policy: None,
             model_override: None,
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sandbox_children: None,
         };
 
         let agent = Agent::new(
@@ -3436,6 +4060,112 @@ mod tests {
             false,
             true,
             false,
+        ));
+    }
+
+    #[test]
+    fn complex_final_pass_only_holds_for_ready_advisor_complex_turns() {
+        let status = runtime_status(
+            RoutingMode::AdvisorExecutor,
+            Some("openai/gpt-5.4-mini"),
+            false,
+        );
+        let advisor_state = AdvisorTurnState::default();
+        let messages = vec![ChatMessage::user(
+            "Please design an architecture and implementation analysis for this migration.",
+        )];
+
+        assert!(should_hold_complex_final_pass(
+            Some(&status),
+            &messages,
+            &advisor_state
+        ));
+        assert!(!should_hold_complex_final_pass(
+            Some(&runtime_status(
+                RoutingMode::CheapSplit,
+                Some("openai/gpt-5.4-mini"),
+                false
+            )),
+            &messages,
+            &advisor_state
+        ));
+    }
+
+    #[test]
+    fn complex_final_pass_uses_full_turn_context_not_only_last_user_message() {
+        let status = runtime_status(
+            RoutingMode::AdvisorExecutor,
+            Some("openai/gpt-5.4-mini"),
+            false,
+        );
+        let advisor_state = AdvisorTurnState::default();
+        let messages = vec![
+            ChatMessage::user(
+                "Please design the migration architecture and review the implementation risks.",
+            ),
+            ChatMessage::assistant_with_tool_calls(
+                Some(
+                    "I should inspect the current implementation before finalizing the design."
+                        .to_string(),
+                ),
+                vec![tool_call("read_file"), tool_call("search_code")],
+            ),
+            ChatMessage::tool_result(
+                "call_1",
+                "read_file",
+                "{\"status\":\"error\",\"message\":\"config missing\"}",
+            ),
+            ChatMessage::user("Continue."),
+        ];
+
+        assert!(should_hold_complex_final_pass(
+            Some(&status),
+            &messages,
+            &advisor_state
+        ));
+    }
+
+    #[tokio::test]
+    async fn auto_trigger_prefers_recorded_tool_failure() {
+        let primary = Arc::new(ScriptedLlm::new(
+            "primary-model",
+            vec![ScriptedResponse::text("done", FinishReason::Stop)],
+        ));
+        let (agent, _) = make_test_agent(
+            primary.clone(),
+            Some(primary),
+            Arc::new(ToolRegistry::new()),
+            None,
+            StreamMode::None,
+            true,
+            4,
+        )
+        .await;
+        let status = runtime_status(
+            RoutingMode::AdvisorExecutor,
+            Some("openai/gpt-5.4-mini"),
+            false,
+        );
+        let mut advisor_state = AdvisorTurnState::default();
+        advisor_state.real_tool_result_count = 2;
+        advisor_state.last_failure = Some(AdvisorFailureContext {
+            tool_name: "shell".to_string(),
+            message: "command failed".to_string(),
+            signature: Some(42),
+            checkpoint: 2,
+        });
+
+        let trigger = agent.next_auto_advisor_trigger(
+            Some(&status),
+            &[ChatMessage::user("Debug the deployment failure.")],
+            &advisor_state,
+            0,
+            None,
+        );
+
+        assert!(matches!(
+            trigger,
+            Some((AdvisorAutoTrigger::ToolFailure, _, Some(42)))
         ));
     }
 
@@ -3935,9 +4665,12 @@ mod tests {
                     FinishReason::ToolUse,
                 ),
                 ScriptedResponse::text("Final answer", FinishReason::Stop),
+                ScriptedResponse::text("Final answer", FinishReason::Stop),
+                ScriptedResponse::text("Final answer", FinishReason::Stop),
             ],
         ));
-        let runtime = make_runtime_manager_with_advisor_limit(false, true, 0).await;
+        let runtime =
+            make_runtime_manager_for_mode(false, true, RoutingMode::AdvisorExecutor, 0).await;
         let tools = Arc::new(ToolRegistry::new());
         register_tool(
             &tools,

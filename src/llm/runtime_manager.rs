@@ -47,8 +47,18 @@ pub struct RuntimeStatus {
     pub fallback_chain: Vec<String>,
     /// AdvisorExecutor: max advisor calls per turn.
     pub advisor_max_calls: u32,
+    /// AdvisorExecutor: automatic escalation policy.
+    pub advisor_auto_escalation_mode: crate::settings::AdvisorAutoEscalationMode,
     /// AdvisorExecutor: custom advisor escalation prompt.
     pub advisor_escalation_prompt: Option<String>,
+    /// Whether the advisor lane is currently usable.
+    pub advisor_ready: bool,
+    /// Why the advisor lane is unavailable, if known.
+    pub advisor_disabled_reason: Option<String>,
+    /// Resolved executor model spec selected for AdvisorExecutor diagnostics.
+    pub executor_target: Option<String>,
+    /// Resolved advisor model spec selected for AdvisorExecutor diagnostics.
+    pub advisor_target: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +91,8 @@ struct LlmRuntimeSnapshot {
     llm: Arc<dyn LlmProvider>,
     cheap_llm: Option<Arc<dyn LlmProvider>>,
 }
+
+type AdvisorReadyCallback = Arc<dyn Fn(bool) + Send + Sync>;
 
 #[derive(Clone, Copy)]
 enum RuntimeProviderRole {
@@ -533,6 +545,7 @@ pub struct LlmRuntimeManager {
     dynamic_pricing_revision_seen: AtomicU64,
     revision: AtomicU64,
     last_error: RwLock<Option<String>>,
+    advisor_ready_callback: RwLock<Option<AdvisorReadyCallback>>,
 }
 
 impl LlmRuntimeManager {
@@ -584,9 +597,32 @@ impl LlmRuntimeManager {
             ),
             revision: AtomicU64::new(1),
             last_error: RwLock::new(None),
+            advisor_ready_callback: RwLock::new(None),
         });
         manager.refresh_route_caches()?;
         Ok(manager)
+    }
+
+    pub fn set_advisor_ready_callback<F>(&self, callback: F)
+    where
+        F: Fn(bool) + Send + Sync + 'static,
+    {
+        let callback: AdvisorReadyCallback = Arc::new(callback);
+        if let Ok(mut slot) = self.advisor_ready_callback.write() {
+            *slot = Some(Arc::clone(&callback));
+        }
+        callback(self.status().advisor_ready);
+    }
+
+    fn notify_advisor_ready_callback(&self) {
+        let callback = self
+            .advisor_ready_callback
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(callback) = callback {
+            callback(self.status().advisor_ready);
+        }
     }
 
     pub fn primary_handle(self: &Arc<Self>) -> Arc<dyn LlmProvider> {
@@ -612,6 +648,21 @@ impl LlmRuntimeManager {
 
     pub fn status(&self) -> RuntimeStatus {
         let snapshot = self.snapshot();
+        let advisor_status = self.advisor_status_decision(&snapshot);
+        let executor_target = advisor_status
+            .as_ref()
+            .and_then(|decision| decision.executor_target.as_deref())
+            .and_then(|target| {
+                self.resolve_route_model_spec(target, &snapshot)
+                    .or_else(|| Some(target.to_string()))
+            });
+        let advisor_target = advisor_status
+            .as_ref()
+            .and_then(|decision| decision.advisor_target.as_deref())
+            .and_then(|target| {
+                self.resolve_route_model_spec(target, &snapshot)
+                    .or_else(|| Some(target.to_string()))
+            });
         RuntimeStatus {
             revision: self.revision.load(Ordering::Relaxed),
             last_error: self.last_error.read().ok().and_then(|guard| guard.clone()),
@@ -632,7 +683,25 @@ impl LlmRuntimeManager {
             primary_provider: snapshot.providers.primary.clone(),
             fallback_chain: snapshot.providers.fallback_chain.clone(),
             advisor_max_calls: snapshot.providers.advisor_max_calls,
+            advisor_auto_escalation_mode: snapshot.providers.advisor_auto_escalation_mode,
             advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
+            advisor_ready: advisor_status
+                .as_ref()
+                .map(|decision| decision.advisor_ready)
+                .unwrap_or(false),
+            advisor_disabled_reason: advisor_status
+                .as_ref()
+                .and_then(|decision| decision.advisor_disabled_reason.clone())
+                .or_else(|| {
+                    (snapshot.providers.routing_mode == RoutingMode::AdvisorExecutor
+                        && !snapshot.providers.smart_routing_enabled)
+                        .then_some(
+                            "advisor routing is disabled because smart routing is turned off"
+                                .to_string(),
+                        )
+                }),
+            executor_target,
+            advisor_target,
         }
     }
 
@@ -696,6 +765,7 @@ impl LlmRuntimeManager {
             *last_error = None;
         }
         self.revision.fetch_add(1, Ordering::Relaxed);
+        self.notify_advisor_ready_callback();
         Ok(())
     }
 
@@ -1236,23 +1306,7 @@ impl LlmRuntimeManager {
             budget_usd: None,
         };
 
-        let planner_input = RoutePlannerInput {
-            required_capabilities: RequiredCapabilities::from_routing_context(&ctx),
-            routing_mode: snapshot.providers.routing_mode,
-            routing_context: ctx,
-            model_override: None,
-            provider_health: self.route_health_snapshot(),
-            candidates: self.available_route_candidates(&snapshot),
-            turn_cost_usd: 0.0,
-            budget_utilization: None,
-            last_user_message,
-            advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
-        };
-
-        self.route_planner
-            .read()
-            .ok()
-            .map(|planner| planner.plan(&planner_input, self.routing_policy.read().ok().as_deref()))
+        self.route_decision_for_context(&snapshot, ctx, last_user_message)
             .and_then(|decision| decision.advisor)
     }
 
@@ -1295,21 +1349,9 @@ impl LlmRuntimeManager {
             };
         }
 
-        let planner_input = RoutePlannerInput {
-            required_capabilities: RequiredCapabilities::from_routing_context(&ctx),
-            routing_mode: snapshot.providers.routing_mode,
-            routing_context: ctx.clone(),
-            model_override: None,
-            provider_health: self.route_health_snapshot(),
-            candidates: self.available_route_candidates(&snapshot),
-            turn_cost_usd: 0.0,
-            budget_utilization: None,
-            last_user_message: prompt.map(ToOwned::to_owned),
-            advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
-        };
-
-        if let Ok(guard) = self.route_planner.read() {
-            let decision = guard.plan(&planner_input, self.routing_policy.read().ok().as_deref());
+        if let Some(decision) =
+            self.route_decision_for_context(&snapshot, ctx.clone(), prompt.map(ToOwned::to_owned))
+        {
             let reason = if decision.fallbacks.is_empty() {
                 decision.reason
             } else {
@@ -1356,6 +1398,54 @@ impl LlmRuntimeManager {
                 diagnostics: Vec::new(),
             }
         }
+    }
+
+    fn advisor_status_decision(
+        &self,
+        snapshot: &LlmRuntimeSnapshot,
+    ) -> Option<crate::llm::route_planner::RouteDecision> {
+        if snapshot.providers.routing_mode != RoutingMode::AdvisorExecutor
+            || !snapshot.providers.smart_routing_enabled
+        {
+            return None;
+        }
+
+        self.route_decision_for_context(
+            snapshot,
+            RoutingContext {
+                estimated_input_tokens: 1024,
+                has_vision: false,
+                has_tools: true,
+                requires_streaming: false,
+                budget_usd: None,
+            },
+            Some("advisor readiness probe".to_string()),
+        )
+    }
+
+    fn route_decision_for_context(
+        &self,
+        snapshot: &LlmRuntimeSnapshot,
+        ctx: RoutingContext,
+        last_user_message: Option<String>,
+    ) -> Option<crate::llm::route_planner::RouteDecision> {
+        let planner_input = RoutePlannerInput {
+            required_capabilities: RequiredCapabilities::from_routing_context(&ctx),
+            routing_mode: snapshot.providers.routing_mode,
+            routing_context: ctx,
+            model_override: None,
+            provider_health: self.route_health_snapshot(),
+            candidates: self.available_route_candidates(snapshot),
+            turn_cost_usd: 0.0,
+            budget_utilization: None,
+            last_user_message,
+            advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
+        };
+
+        self.route_planner
+            .read()
+            .ok()
+            .map(|planner| planner.plan(&planner_input, self.routing_policy.read().ok().as_deref()))
     }
 
     fn available_route_candidates(&self, snapshot: &LlmRuntimeSnapshot) -> Vec<RouteCandidate> {
@@ -1887,7 +1977,7 @@ fn suggest_cheap_model(
 fn suggest_provider_cheap_model(slug: &str, primary_model: Option<&str>) -> Option<String> {
     let mapped = match slug {
         "openai" => Some("gpt-4o-mini"),
-        "anthropic" => Some("claude-3-5-haiku-latest"),
+        "anthropic" => Some("claude-sonnet-4-6"),
         "gemini" => Some("gemini-2.5-flash-lite"),
         "openrouter" => Some("openai/gpt-4o-mini"),
         "tinfoil" => Some("kimi-k2-5"),
@@ -2304,8 +2394,8 @@ mod tests {
         providers.provider_models.insert(
             "anthropic".to_string(),
             ProviderModelSlots {
-                primary: Some("claude-sonnet-4-20250514".to_string()),
-                cheap: Some("claude-3-5-haiku-latest".to_string()),
+                primary: Some("claude-opus-4-7".to_string()),
+                cheap: Some("claude-sonnet-4-6".to_string()),
             },
         );
         providers.provider_models.insert(
@@ -2362,8 +2452,8 @@ mod tests {
         providers.provider_models.insert(
             "anthropic".to_string(),
             ProviderModelSlots {
-                primary: Some("claude-sonnet-4-20250514".to_string()),
-                cheap: Some("claude-3-5-haiku-latest".to_string()),
+                primary: Some("claude-opus-4-7".to_string()),
+                cheap: Some("claude-sonnet-4-6".to_string()),
             },
         );
         providers.provider_models.insert(
@@ -2418,8 +2508,8 @@ mod tests {
         settings.providers.provider_models.insert(
             "anthropic".to_string(),
             ProviderModelSlots {
-                primary: Some("claude-sonnet-4-20250514".to_string()),
-                cheap: Some("claude-3-5-haiku-latest".to_string()),
+                primary: Some("claude-opus-4-7".to_string()),
+                cheap: Some("claude-sonnet-4-6".to_string()),
             },
         );
 
@@ -2518,7 +2608,7 @@ mod tests {
             unsafe {
                 std::env::set_var("LLM_BACKEND", "openai_compatible");
                 std::env::set_var("LLM_BASE_URL", "http://localhost:12345/v1");
-                std::env::set_var("LLM_MODEL", "primary-model");
+                std::env::set_var("LLM_MODEL", "gpt-5.4");
                 std::env::set_var(
                     "SECRETS_MASTER_KEY",
                     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -2538,8 +2628,8 @@ mod tests {
         let mut providers = ProvidersSettings {
             enabled: vec!["openai_compatible".to_string()],
             primary: Some("openai_compatible".to_string()),
-            primary_model: Some("primary-model".to_string()),
-            cheap_model: Some("openai_compatible/cheap-model".to_string()),
+            primary_model: Some("gpt-5.4".to_string()),
+            cheap_model: Some("openai_compatible/gpt-5.4-mini".to_string()),
             smart_routing_enabled: true,
             routing_mode: RoutingMode::AdvisorExecutor,
             ..ProvidersSettings::default()
@@ -2547,8 +2637,8 @@ mod tests {
         providers.provider_models.insert(
             "openai_compatible".to_string(),
             ProviderModelSlots {
-                primary: Some("primary-model".to_string()),
-                cheap: Some("cheap-model".to_string()),
+                primary: Some("gpt-5.4".to_string()),
+                cheap: Some("gpt-5.4-mini".to_string()),
             },
         );
 
@@ -2559,6 +2649,119 @@ mod tests {
             .provider_handle_for_target("primary")
             .expect("primary advisor target should resolve");
 
-        assert_eq!(provider.active_model_name(), "primary-model");
+        assert_eq!(provider.active_model_name(), "gpt-5.4");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn advisor_executor_status_reports_readiness_and_targets() {
+        let config = {
+            let _env_guard = crate::config::helpers::lock_env();
+            unsafe {
+                std::env::set_var("LLM_BACKEND", "openai_compatible");
+                std::env::set_var("LLM_BASE_URL", "http://localhost:12345/v1");
+                std::env::set_var("LLM_MODEL", "gpt-5.4");
+                std::env::set_var(
+                    "SECRETS_MASTER_KEY",
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                );
+            }
+            let loaded = Config::from_env().await.expect("config should load");
+            unsafe {
+                std::env::remove_var("LLM_BACKEND");
+                std::env::remove_var("LLM_BASE_URL");
+                std::env::remove_var("LLM_MODEL");
+                std::env::remove_var("SECRETS_MASTER_KEY");
+            }
+            loaded
+        };
+
+        let mut providers = ProvidersSettings {
+            enabled: vec!["openai_compatible".to_string()],
+            primary: Some("openai_compatible".to_string()),
+            primary_model: Some("gpt-5.4".to_string()),
+            cheap_model: Some("openai_compatible/gpt-5.4-mini".to_string()),
+            smart_routing_enabled: true,
+            routing_mode: RoutingMode::AdvisorExecutor,
+            ..ProvidersSettings::default()
+        };
+        providers.provider_models.insert(
+            "openai_compatible".to_string(),
+            ProviderModelSlots {
+                primary: Some("gpt-5.4".to_string()),
+                cheap: Some("gpt-5.4-mini".to_string()),
+            },
+        );
+
+        let manager = LlmRuntimeManager::new(config, providers, None, None, "test-user", None)
+            .expect("runtime manager should build");
+        let status = manager.status();
+
+        assert!(status.advisor_ready);
+        assert_eq!(
+            status.executor_target.as_deref(),
+            Some("openai_compatible/gpt-5.4-mini")
+        );
+        assert_eq!(
+            status.advisor_target.as_deref(),
+            Some("openai_compatible/gpt-5.4")
+        );
+        assert_eq!(
+            status.advisor_auto_escalation_mode,
+            crate::settings::AdvisorAutoEscalationMode::RiskAndComplexFinal
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn advisor_ready_callback_reports_current_readiness_immediately() {
+        let config = {
+            let _env_guard = crate::config::helpers::lock_env();
+            unsafe {
+                std::env::set_var("LLM_BACKEND", "openai_compatible");
+                std::env::set_var("LLM_BASE_URL", "http://localhost:12345/v1");
+                std::env::set_var("LLM_MODEL", "gpt-5.4");
+                std::env::set_var(
+                    "SECRETS_MASTER_KEY",
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                );
+            }
+            let loaded = Config::from_env().await.expect("config should load");
+            unsafe {
+                std::env::remove_var("LLM_BACKEND");
+                std::env::remove_var("LLM_BASE_URL");
+                std::env::remove_var("LLM_MODEL");
+                std::env::remove_var("SECRETS_MASTER_KEY");
+            }
+            loaded
+        };
+
+        let mut providers = ProvidersSettings {
+            enabled: vec!["openai_compatible".to_string()],
+            primary: Some("openai_compatible".to_string()),
+            primary_model: Some("gpt-5.4".to_string()),
+            cheap_model: Some("openai_compatible/gpt-5.4-mini".to_string()),
+            smart_routing_enabled: true,
+            routing_mode: RoutingMode::AdvisorExecutor,
+            ..ProvidersSettings::default()
+        };
+        providers.provider_models.insert(
+            "openai_compatible".to_string(),
+            ProviderModelSlots {
+                primary: Some("gpt-5.4".to_string()),
+                cheap: Some("gpt-5.4-mini".to_string()),
+            },
+        );
+
+        let manager = LlmRuntimeManager::new(config, providers, None, None, "test-user", None)
+            .expect("runtime manager should build");
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let seen_for_callback = Arc::clone(&seen);
+
+        manager.set_advisor_ready_callback(move |advisor_ready| {
+            *seen_for_callback.lock().expect("callback lock") = Some(advisor_ready);
+        });
+
+        assert_eq!(*seen.lock().expect("callback lock"), Some(true));
     }
 }

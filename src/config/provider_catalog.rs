@@ -67,7 +67,7 @@ pub fn catalog() -> &'static HashMap<&'static str, ProviderEndpoint> {
                     display_name: "Anthropic",
                     base_url: "https://api.anthropic.com/v1",
                     api_style: ApiStyle::Anthropic,
-                    default_model: "claude-sonnet-4-20250514",
+                    default_model: "claude-opus-4-7",
                     default_context_size: 200_000,
                     supports_streaming: true,
                     env_key_name: "ANTHROPIC_API_KEY",

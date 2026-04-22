@@ -9,6 +9,23 @@ use serde::Deserialize;
 
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::workspace::paths;
+
+fn root_list_with_home_soul(mut entries: Vec<ListEntry>) -> Vec<ListEntry> {
+    let has_soul = entries.iter().any(|entry| entry.path == paths::SOUL);
+    if !has_soul && crate::identity::soul_store::read_home_soul().is_ok() {
+        entries.insert(
+            0,
+            ListEntry {
+                name: paths::SOUL.to_string(),
+                path: paths::SOUL.to_string(),
+                is_dir: false,
+                updated_at: None,
+            },
+        );
+    }
+    entries
+}
 
 #[derive(Deserialize)]
 pub(crate) struct TreeQuery {
@@ -50,6 +67,15 @@ pub(crate) async fn memory_tree_handler(
         });
     }
 
+    if !all_paths.iter().any(|path| path == paths::SOUL)
+        && crate::identity::soul_store::read_home_soul().is_ok()
+    {
+        entries.push(TreeEntry {
+            path: paths::SOUL.to_string(),
+            is_dir: false,
+        });
+    }
+
     entries.sort_by(|a, b| a.path.cmp(&b.path));
 
     Ok(Json(MemoryTreeResponse { entries }))
@@ -85,6 +111,12 @@ pub(crate) async fn memory_list_handler(
         })
         .collect();
 
+    let list_entries = if path.is_empty() {
+        root_list_with_home_soul(list_entries)
+    } else {
+        list_entries
+    };
+
     Ok(Json(MemoryListResponse {
         path: path.to_string(),
         entries: list_entries,
@@ -104,6 +136,16 @@ pub(crate) async fn memory_read_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Workspace not available".to_string(),
     ))?;
+
+    if query.path == paths::SOUL {
+        if let Ok(content) = crate::identity::soul_store::read_home_soul() {
+            return Ok(Json(MemoryReadResponse {
+                path: query.path,
+                content,
+                updated_at: None,
+            }));
+        }
+    }
 
     let doc = workspace
         .read(&query.path)
@@ -125,6 +167,15 @@ pub(crate) async fn memory_write_handler(
         StatusCode::SERVICE_UNAVAILABLE,
         "Workspace not available".to_string(),
     ))?;
+
+    if req.path == paths::SOUL {
+        crate::identity::soul_store::write_home_soul(&req.content)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        return Ok(Json(MemoryWriteResponse {
+            path: req.path,
+            status: "written",
+        }));
+    }
 
     workspace
         .write(&req.path, &req.content)
