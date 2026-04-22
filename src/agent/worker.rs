@@ -13,6 +13,10 @@ use uuid::Uuid;
 use std::sync::Mutex as StdMutex;
 
 use crate::agent::outcomes;
+use crate::agent::routine::{
+    routine_state_has_runtime_advance_for_run, routine_state_with_runtime_advance,
+};
+use crate::agent::routine_engine::persist_routine_runtime_update;
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
 use crate::channels::web::types::SseEvent;
@@ -46,6 +50,8 @@ pub struct WorkerDeps {
     pub sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
     /// Routine name if this worker was dispatched from a routine.
     pub routine_name: Option<String>,
+    /// Stable routine ID for completion/finalization lookups.
+    pub routine_id: Option<Uuid>,
     /// Routine run ID for correlation.
     pub routine_run_id: Option<String>,
     /// Workspace for loading identity files (SOUL.md, IDENTITY.md, USER.md).
@@ -166,13 +172,41 @@ impl Worker {
     fn persist_status(&self, status: JobState, reason: Option<String>) {
         if let Some(store) = self.store() {
             let store = store.clone();
+            let context_manager = self.context_manager().clone();
             let job_id = self.job_id;
             tokio::spawn(async move {
-                if let Err(e) = store
-                    .update_job_status(job_id, status, reason.as_deref())
-                    .await
-                {
-                    tracing::warn!("Failed to persist status for job {}: {}", job_id, e);
+                match context_manager.get_context(job_id).await {
+                    Ok(ctx) => {
+                        if let Err(error) = store.save_job(&ctx).await {
+                            tracing::warn!(
+                                "Failed to persist job snapshot for job {}: {}",
+                                job_id,
+                                error
+                            );
+                            if let Err(update_error) = store
+                                .update_job_status(job_id, status, reason.as_deref())
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to persist status fallback for job {}: {}",
+                                    job_id,
+                                    update_error
+                                );
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        if let Err(error) = store
+                            .update_job_status(job_id, status, reason.as_deref())
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to persist status for job {}: {}",
+                                job_id,
+                                error
+                            );
+                        }
+                    }
                 }
             });
         }
@@ -317,6 +351,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                                 | JobState::Failed
                                 | JobState::Stuck
                                 | JobState::Cancelled
+                                | JobState::Abandoned
                         )
                     })
                     .unwrap_or(false);
@@ -472,7 +507,11 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
                 && matches!(
                     ctx.state,
-                    JobState::Completed | JobState::Failed | JobState::Stuck | JobState::Cancelled
+                    JobState::Completed
+                        | JobState::Failed
+                        | JobState::Stuck
+                        | JobState::Cancelled
+                        | JobState::Abandoned
                 )
             {
                 return Ok(());
@@ -1307,6 +1346,13 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                             Some(ctx.user_id.clone()),
                             Some(ctx.owner_actor_id().to_string()),
                         ),
+                        JobState::Abandoned => (
+                            crate::agent::routine::RunStatus::Failed,
+                            "failed",
+                            reason.unwrap_or_else(|| "Job abandoned".to_string()),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
                         other => (
                             crate::agent::routine::RunStatus::Failed,
                             "failed",
@@ -1341,27 +1387,84 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             }
             if let (Some(user_id), Some(actor_id)) =
                 (job_user_id.as_deref(), job_actor_id.as_deref())
-                && let Ok(Some(routine)) = store
-                    .get_routine_by_name_for_actor(user_id, actor_id, &routine_name)
-                    .await
             {
-                let completed_run = crate::agent::routine::RoutineRun {
-                    id: run_id,
-                    routine_id: routine.id,
-                    trigger_type: "worker".to_string(),
-                    trigger_detail: Some("worker_finalization".to_string()),
-                    started_at: Utc::now(),
-                    completed_at: Some(Utc::now()),
-                    status,
-                    result_summary: Some(summary_ref.clone()),
-                    tokens_used: None,
-                    job_id: Some(self.job_id),
-                    created_at: Utc::now(),
-                };
-                if let Err(err) =
-                    outcomes::maybe_create_routine_contract(&store, &routine, &completed_run).await
+                let mut routine = None;
+                if let Some(routine_id) = self.deps.routine_id {
+                    if let Ok(Some(found)) = store.get_routine(routine_id).await
+                        && found.user_id == user_id
+                        && found.owner_actor_id() == actor_id
+                    {
+                        routine = Some(found);
+                    }
+                }
+                if routine.is_none()
+                    && let Ok(Some(found)) = store
+                        .get_routine_by_name_for_actor(user_id, actor_id, &routine_name)
+                        .await
                 {
-                    tracing::debug!(run_id = %run_id, error = %err, "Outcome worker routine hook skipped");
+                    routine = Some(found);
+                }
+                if let Some(routine) = routine {
+                    let completed_at = Utc::now();
+                    let runtime_already_advanced =
+                        routine_state_has_runtime_advance_for_run(&routine.state, run_id);
+                    let next_fire_at = if runtime_already_advanced {
+                        routine.next_fire_at
+                    } else {
+                        crate::agent::routine::next_fire_for_routine(&routine, None, completed_at)
+                            .unwrap_or(routine.next_fire_at)
+                    };
+                    let run_count = if runtime_already_advanced {
+                        routine.run_count
+                    } else {
+                        routine.run_count + 1
+                    };
+                    let consecutive_failures = if status == crate::agent::routine::RunStatus::Failed
+                    {
+                        routine.consecutive_failures + 1
+                    } else {
+                        0
+                    };
+                    let state =
+                        routine_state_with_runtime_advance(&routine.state, run_id, completed_at);
+                    if let Err(error) = persist_routine_runtime_update(
+                        &store,
+                        routine.id,
+                        completed_at,
+                        next_fire_at,
+                        run_count,
+                        consecutive_failures,
+                        &state,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            routine = %routine.name,
+                            run_id = %run_id,
+                            "Failed to update routine runtime after worker finalization: {}",
+                            error
+                        );
+                    }
+                    let completed_run = crate::agent::routine::RoutineRun {
+                        id: run_id,
+                        routine_id: routine.id,
+                        trigger_type: "worker".to_string(),
+                        trigger_detail: Some("worker_finalization".to_string()),
+                        trigger_key: None,
+                        started_at: completed_at,
+                        completed_at: Some(completed_at),
+                        status,
+                        result_summary: Some(summary_ref.clone()),
+                        tokens_used: None,
+                        job_id: Some(self.job_id),
+                        created_at: completed_at,
+                    };
+                    if let Err(err) =
+                        outcomes::maybe_create_routine_contract(&store, &routine, &completed_run)
+                            .await
+                    {
+                        tracing::debug!(run_id = %run_id, error = %err, "Outcome worker routine hook skipped");
+                    }
                 }
             }
         }
@@ -1614,8 +1717,12 @@ fn compact_post_plan(messages: &mut Vec<ChatMessage>, plan_goal: &str) {
 mod tests {
     use crate::llm::ToolSelection;
     use crate::util::llm_signals_completion;
+    use chrono::Utc;
 
     use super::*;
+    use crate::agent::routine::{
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
+    };
     use crate::config::SafetyConfig;
     use crate::context::JobContext;
     use crate::llm::{
@@ -1623,6 +1730,8 @@ mod tests {
         ToolCompletionResponse,
     };
     use crate::safety::SafetyLayer;
+    #[cfg(feature = "libsql")]
+    use crate::testing::test_db;
     use crate::tools::{Tool, ToolError, ToolOutput};
 
     /// A test tool that sleeps for a configurable duration before returning.
@@ -1712,6 +1821,7 @@ mod tests {
             use_planning: false,
             sse_tx: None,
             routine_name: None,
+            routine_id: None,
             routine_run_id: None,
             workspace: None,
             cost_tracker: None,
@@ -1920,5 +2030,114 @@ mod tests {
             results[0].result.is_err(),
             "Missing tool should produce an error, not a panic"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn finalize_routine_run_resolves_routine_by_id_when_name_changes() {
+        let (db, _tmp) = test_db().await;
+        let context_manager = Arc::new(crate::context::ContextManager::new(5));
+        let job_id = context_manager
+            .create_job_for_identity("default", "default", "routine job", "test")
+            .await
+            .unwrap();
+        context_manager
+            .update_context(job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, Some("started".to_string()))
+                    .unwrap();
+                ctx.transition_to(JobState::Completed, Some("done".to_string()))
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+
+        let routine = Routine {
+            id: Uuid::new_v4(),
+            name: "renamed-routine".to_string(),
+            description: "test routine".to_string(),
+            user_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Cron {
+                schedule: "0 */15 * * * * *".to_string(),
+            },
+            action: RoutineAction::FullJob {
+                title: "Test".to_string(),
+                description: "Test".to_string(),
+                max_iterations: 1,
+                allowed_tools: None,
+                allowed_skills: None,
+                tool_profile: None,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: NotifyConfig::default(),
+            policy: Default::default(),
+            last_run_at: None,
+            next_fire_at: Some(Utc::now()),
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            config_version: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.create_routine(&routine).await.unwrap();
+
+        let run = RoutineRun {
+            id: Uuid::new_v4(),
+            routine_id: routine.id,
+            trigger_type: "cron".to_string(),
+            trigger_detail: Some("0 */15 * * * * *".to_string()),
+            trigger_key: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            status: RunStatus::Running,
+            result_summary: None,
+            tokens_used: None,
+            job_id: None,
+            created_at: Utc::now(),
+        };
+        db.create_routine_run(&run).await.unwrap();
+
+        let deps = WorkerDeps {
+            context_manager,
+            llm: Arc::new(StubLlm),
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+                redact_pii_in_prompts: true,
+                smart_approval_mode: "off".to_string(),
+                external_scanner_mode: "off".to_string(),
+                external_scanner_path: None,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            store: Some(db.clone()),
+            hooks: Arc::new(crate::hooks::HookRegistry::new()),
+            timeout: Duration::from_secs(30),
+            use_planning: false,
+            sse_tx: None,
+            routine_name: Some("stale-routine-name".to_string()),
+            routine_id: Some(routine.id),
+            routine_run_id: Some(run.id.to_string()),
+            workspace: None,
+            cost_tracker: None,
+            tool_profile: ToolProfile::Restricted,
+        };
+
+        let worker = Worker::new(job_id, deps);
+        worker.finalize_routine_run().await;
+
+        let refreshed_routine = db.get_routine(routine.id).await.unwrap().unwrap();
+        assert_eq!(refreshed_routine.run_count, 1);
+        assert_eq!(refreshed_routine.consecutive_failures, 0);
+
+        let completed_run = db
+            .list_routine_runs(routine.id, 1)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(completed_run.status, RunStatus::Ok);
     }
 }

@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Shared fixture helpers are compiled into multiple test targets.
+
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
@@ -19,6 +21,8 @@ use thinclaw::history::{
     LearningEvent, OutcomeContract, OutcomeObservation, SandboxJobRecord,
 };
 use thinclaw::identity::{ActorEndpointRef, ActorStatus, NewActorEndpointRecord, NewActorRecord};
+use thinclaw::sandbox_jobs::SandboxJobSpec;
+use thinclaw::sandbox_types::JobMode;
 use uuid::Uuid;
 
 use crate::db_contract::support::unique_id;
@@ -58,11 +62,15 @@ pub(crate) fn sandbox_job_record(user_id: &str, actor_id: &str, status: &str) ->
     let now = Utc::now();
     SandboxJobRecord {
         id: Uuid::new_v4(),
-        task: format!("task-{}", Uuid::new_v4().simple()),
+        spec: SandboxJobSpec::new(
+            format!("task-{}", Uuid::new_v4().simple()),
+            "contract sandbox job",
+            user_id,
+            actor_id,
+            Some("/tmp/contract".to_string()),
+            JobMode::Worker,
+        ),
         status: status.to_string(),
-        user_id: user_id.to_string(),
-        actor_id: actor_id.to_string(),
-        project_dir: "/tmp/contract".to_string(),
         success: None,
         failure_reason: None,
         created_at: now,
@@ -125,11 +133,13 @@ pub(crate) fn routine(user_id: &str, actor_id: &str) -> Routine {
             dedup_window: Some(Duration::from_secs(300)),
         },
         notify: NotifyConfig::default(),
+        policy: Default::default(),
         last_run_at: None,
         next_fire_at: None,
         run_count: 0,
         consecutive_failures: 0,
         state: serde_json::json!({}),
+        config_version: 1,
         created_at: now,
         updated_at: now,
     }
@@ -141,6 +151,7 @@ pub(crate) fn routine_run(routine_id: Uuid, status: RunStatus) -> RoutineRun {
         routine_id,
         trigger_type: "manual".to_string(),
         trigger_detail: Some("contract".to_string()),
+        trigger_key: None,
         started_at: Utc::now(),
         completed_at: None,
         status,

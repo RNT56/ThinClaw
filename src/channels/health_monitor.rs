@@ -273,7 +273,7 @@ mod tests {
         let state = ChannelState::default();
         assert_eq!(state.consecutive_failures, 0);
         assert_eq!(state.restart_attempts, 0);
-        assert!(!state.in_cooldown);
+        assert!(state.cooldown_until.is_none());
     }
 
     #[tokio::test]

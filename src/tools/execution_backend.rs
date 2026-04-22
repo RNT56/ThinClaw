@@ -11,6 +11,7 @@ use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use uuid::Uuid;
 
+use crate::agent::Scheduler;
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::SseEvent;
 #[cfg(test)]
@@ -20,7 +21,10 @@ use crate::db::Database;
 use crate::history::SandboxJobRecord;
 use crate::platform::shell_launcher;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
-use crate::sandbox_types::{ContainerJobManager, ContainerState, CredentialGrant, JobMode};
+use crate::sandbox_jobs::{SandboxChildRegistry, SandboxJobController, SandboxJobSpec};
+use crate::sandbox_types::{
+    ContainerJobManager, ContainerState, CredentialGrant, JobMode, PromptQueue,
+};
 use crate::tools::tool::ToolError;
 
 pub const MAX_CAPTURED_OUTPUT_SIZE: usize = 64 * 1024;
@@ -305,10 +309,18 @@ pub struct JobExecutionRequest {
     pub description: String,
     pub principal_id: String,
     pub actor_id: String,
+    pub parent_job_id: Option<Uuid>,
     pub wait: bool,
     pub explicit_project_dir: Option<PathBuf>,
     pub mode: Option<JobMode>,
+    pub metadata: serde_json::Value,
+    pub allowed_tools: Option<Vec<String>>,
+    pub allowed_skills: Option<Vec<String>>,
+    pub tool_profile: Option<String>,
     pub credential_grants: Vec<CredentialGrant>,
+    pub job_events_available: bool,
+    pub job_prompt_available: bool,
+    pub job_status_available: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -327,8 +339,11 @@ pub struct JobOrchestrationContext {
     context_manager: Arc<ContextManager>,
     job_manager: Option<Arc<ContainerJobManager>>,
     store: Option<Arc<dyn Database>>,
+    scheduler: Option<Arc<Scheduler>>,
     event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, SseEvent)>>,
     inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
+    prompt_queue: Option<PromptQueue>,
+    sandbox_children: Option<Arc<SandboxChildRegistry>>,
 }
 
 impl JobOrchestrationContext {
@@ -336,15 +351,21 @@ impl JobOrchestrationContext {
         context_manager: Arc<ContextManager>,
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<dyn Database>>,
+        scheduler: Option<Arc<Scheduler>>,
         event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, SseEvent)>>,
         inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
+        prompt_queue: Option<PromptQueue>,
+        sandbox_children: Option<Arc<SandboxChildRegistry>>,
     ) -> Self {
         Self {
             context_manager,
             job_manager,
             store,
+            scheduler,
             event_tx,
             inject_tx,
+            prompt_queue,
+            sandbox_children,
         }
     }
 
@@ -370,6 +391,70 @@ impl JobOrchestrationContext {
                 }
             });
         }
+    }
+
+    fn sandbox_controller(&self) -> SandboxJobController {
+        SandboxJobController::new(
+            self.store.clone(),
+            self.job_manager.clone(),
+            self.event_tx.clone(),
+            self.prompt_queue.clone(),
+        )
+    }
+
+    fn build_local_job_metadata(&self, request: &JobExecutionRequest) -> serde_json::Value {
+        let runtime = local_job_runtime_descriptor();
+        let mut metadata = match request.metadata.as_object() {
+            Some(obj) => obj.clone(),
+            None => serde_json::Map::new(),
+        };
+
+        if !request.metadata.is_null() && !request.metadata.is_object() {
+            metadata.insert("request_metadata".to_string(), request.metadata.clone());
+        }
+        if let Some(parent_job_id) = request.parent_job_id {
+            metadata.insert(
+                "parent_job_id".to_string(),
+                serde_json::json!(parent_job_id),
+            );
+        }
+        if let Some(allowed_tools) = request.allowed_tools.as_ref() {
+            metadata.insert(
+                "allowed_tools".to_string(),
+                serde_json::json!(allowed_tools),
+            );
+        }
+        if let Some(allowed_skills) = request.allowed_skills.as_ref() {
+            metadata.insert(
+                "allowed_skills".to_string(),
+                serde_json::json!(allowed_skills),
+            );
+        }
+        if let Some(tool_profile) = request.tool_profile.as_ref() {
+            metadata.insert("tool_profile".to_string(), serde_json::json!(tool_profile));
+        }
+        metadata.insert(
+            "execution_backend".to_string(),
+            serde_json::json!(runtime.execution_backend),
+        );
+        metadata.insert(
+            "runtime_family".to_string(),
+            serde_json::json!(runtime.runtime_family),
+        );
+        metadata.insert(
+            "runtime_mode".to_string(),
+            serde_json::json!(runtime.runtime_mode),
+        );
+        metadata.insert(
+            "runtime_capabilities".to_string(),
+            serde_json::json!(runtime.runtime_capabilities),
+        );
+        metadata.insert(
+            "network_isolation".to_string(),
+            serde_json::json!(runtime.network_isolation),
+        );
+
+        serde_json::Value::Object(metadata)
     }
 
     fn update_status(
@@ -405,6 +490,31 @@ impl JobOrchestrationContext {
         &self,
         request: JobExecutionRequest,
     ) -> Result<JobExecutionResult, ToolError> {
+        let runtime = local_job_runtime_descriptor();
+        let metadata = self.build_local_job_metadata(&request);
+
+        if let Some(scheduler) = self.scheduler.as_ref() {
+            let job_id = scheduler
+                .dispatch_job_for_identity(
+                    &request.principal_id,
+                    &request.actor_id,
+                    &request.title,
+                    &request.description,
+                    Some(metadata),
+                )
+                .await
+                .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+            return Ok(JobExecutionResult {
+                job_id,
+                status: "started".to_string(),
+                runtime,
+                message: Some(format!("Scheduled job '{}'", request.title)),
+                output: None,
+                project_dir: None,
+                browse_url: None,
+            });
+        }
+
         let job_id = self
             .context_manager
             .create_job_for_identity(
@@ -415,10 +525,23 @@ impl JobOrchestrationContext {
             )
             .await
             .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+        if let Err(error) = self
+            .context_manager
+            .update_context(job_id, |ctx| {
+                ctx.metadata = metadata.clone();
+            })
+            .await
+        {
+            tracing::warn!(
+                job_id = %job_id,
+                "Failed to attach metadata to fallback local job: {}",
+                error
+            );
+        }
         Ok(JobExecutionResult {
             job_id,
             status: "pending".to_string(),
-            runtime: local_job_runtime_descriptor(),
+            runtime,
             message: Some(format!("Created job '{}'", request.title)),
             output: None,
             project_dir: None,
@@ -434,11 +557,25 @@ impl JobOrchestrationContext {
             ToolError::ExecutionFailed("sandbox job execution is unavailable".to_string())
         })?;
         let mode = request.mode.unwrap_or(JobMode::Worker);
-        let task = format!("{}\n\n{}", request.title, request.description);
 
         let job_id = Uuid::new_v4();
         let (project_dir, browse_id) = resolve_project_dir(request.explicit_project_dir, job_id)?;
         let project_dir_str = project_dir.display().to_string();
+        let spec = SandboxJobSpec {
+            title: request.title.clone(),
+            description: request.description.clone(),
+            principal_id: request.principal_id.clone(),
+            actor_id: request.actor_id.clone(),
+            project_dir: Some(project_dir_str.clone()),
+            mode,
+            interactive: !request.wait,
+            idle_timeout_secs: job_manager.interactive_idle_timeout_secs(),
+            parent_job_id: request.parent_job_id,
+            metadata: request.metadata.clone(),
+            allowed_tools: request.allowed_tools.clone(),
+            allowed_skills: request.allowed_skills.clone(),
+            tool_profile: request.tool_profile.clone(),
+        };
 
         let credential_grants_json = match serde_json::to_string(&request.credential_grants) {
             Ok(json) => json,
@@ -454,11 +591,8 @@ impl JobOrchestrationContext {
 
         self.persist_job(SandboxJobRecord {
             id: job_id,
-            task: task.clone(),
+            spec: spec.clone(),
             status: "creating".to_string(),
-            user_id: request.principal_id.clone(),
-            actor_id: request.actor_id.clone(),
-            project_dir: project_dir_str.clone(),
             success: None,
             failure_reason: None,
             created_at: Utc::now(),
@@ -467,25 +601,8 @@ impl JobOrchestrationContext {
             credential_grants_json,
         });
 
-        if matches!(mode, JobMode::ClaudeCode | JobMode::CodexCode)
-            && let Some(store) = self.store.clone()
-        {
-            let mode_name = mode.as_str().to_string();
-            tokio::spawn(async move {
-                if let Err(error) = store.update_sandbox_job_mode(job_id, &mode_name).await {
-                    tracing::warn!(job_id = %job_id, "Failed to set job mode: {}", error);
-                }
-            });
-        }
-
         job_manager
-            .create_job(
-                job_id,
-                &task,
-                Some(project_dir),
-                mode,
-                request.credential_grants,
-            )
+            .create_job(job_id, spec.clone(), request.credential_grants)
             .await
             .map_err(|error| {
                 self.update_status(
@@ -502,6 +619,13 @@ impl JobOrchestrationContext {
         let now = Utc::now();
         self.update_status(job_id, "running", None, None, Some(now), None);
 
+        if spec.interactive
+            && let (Some(parent_job_id), Some(children)) =
+                (spec.parent_job_id, self.sandbox_children.as_ref())
+        {
+            children.register_child(parent_job_id, job_id).await;
+        }
+
         if !request.wait {
             if let (Some(event_tx), Some(inject_tx)) = (&self.event_tx, &self.inject_tx) {
                 crate::agent::job_monitor::spawn_job_monitor(
@@ -510,14 +634,26 @@ impl JobOrchestrationContext {
                     inject_tx.clone(),
                 );
             }
+            let mut hints = Vec::new();
+            if request.job_events_available {
+                hints.push("Use job_events to inspect streamed activity.".to_string());
+            } else if request.job_status_available {
+                hints.push("Use job_status to inspect progress.".to_string());
+            }
+            if request.job_prompt_available {
+                hints.push(
+                    "Use job_prompt to send follow-up instructions or done=true when wrapping up."
+                        .to_string(),
+                );
+            }
+            if hints.is_empty() {
+                hints.push("Use the Jobs UI to inspect progress.".to_string());
+            }
             return Ok(JobExecutionResult {
                 job_id,
                 status: "started".to_string(),
                 runtime: sandbox_job_runtime_descriptor(mode),
-                message: Some(
-                    "Container started. Use job_events to check status or job_prompt to send follow-up instructions."
-                        .to_string(),
-                ),
+                message: Some(format!("Container started. {}", hints.join(" "))),
                 output: None,
                 project_dir: Some(project_dir_str),
                 browse_url: Some(format!("/projects/{}", browse_id)),
@@ -530,16 +666,18 @@ impl JobOrchestrationContext {
 
         loop {
             if tokio::time::Instant::now() > deadline {
-                let _ = job_manager.stop_job(job_id).await;
+                let _ = self
+                    .sandbox_controller()
+                    .finalize_job(
+                        job_id,
+                        "failed",
+                        false,
+                        Some("Timed out (10 minutes)".to_string()),
+                        None,
+                        0,
+                    )
+                    .await;
                 job_manager.cleanup_job(job_id).await;
-                self.update_status(
-                    job_id,
-                    "failed",
-                    Some(false),
-                    Some("Timed out (10 minutes)".to_string()),
-                    None,
-                    Some(Utc::now()),
-                );
                 return Err(ToolError::ExecutionFailed(
                     "container execution timed out (10 minutes)".to_string(),
                 ));
@@ -563,16 +701,7 @@ impl JobOrchestrationContext {
                             .unwrap_or(true);
                         job_manager.cleanup_job(job_id).await;
 
-                        let finished_at = Utc::now();
                         if success {
-                            self.update_status(
-                                job_id,
-                                "completed",
-                                Some(true),
-                                None,
-                                None,
-                                Some(finished_at),
-                            );
                             return Ok(JobExecutionResult {
                                 job_id,
                                 status: "completed".to_string(),
@@ -584,14 +713,6 @@ impl JobOrchestrationContext {
                             });
                         }
 
-                        self.update_status(
-                            job_id,
-                            "failed",
-                            Some(false),
-                            Some(message.clone()),
-                            None,
-                            Some(finished_at),
-                        );
                         return Err(ToolError::ExecutionFailed(format!(
                             "container job failed: {}",
                             message
@@ -604,14 +725,6 @@ impl JobOrchestrationContext {
                             .and_then(|result| result.message.clone())
                             .unwrap_or_else(|| "unknown failure".to_string());
                         job_manager.cleanup_job(job_id).await;
-                        self.update_status(
-                            job_id,
-                            "failed",
-                            Some(false),
-                            Some(message.clone()),
-                            None,
-                            Some(Utc::now()),
-                        );
                         return Err(ToolError::ExecutionFailed(format!(
                             "container job failed: {}",
                             message
@@ -1520,7 +1633,7 @@ mod tests {
     async fn local_backend_supports_job_execution_when_job_orchestration_is_configured() {
         let context_manager = Arc::new(ContextManager::new(5));
         let backend = LocalHostExecutionBackend::with_job_orchestration(Arc::new(
-            JobOrchestrationContext::new(context_manager, None, None, None, None),
+            JobOrchestrationContext::new(context_manager, None, None, None, None, None, None, None),
         ));
 
         let result = backend
@@ -1529,10 +1642,18 @@ mod tests {
                 description: "Created through the shared execution backend".to_string(),
                 principal_id: "default".to_string(),
                 actor_id: "default".to_string(),
+                parent_job_id: None,
                 wait: false,
                 explicit_project_dir: None,
                 mode: None,
+                metadata: serde_json::json!({}),
+                allowed_tools: None,
+                allowed_skills: None,
+                tool_profile: None,
                 credential_grants: Vec::new(),
+                job_events_available: false,
+                job_prompt_available: false,
+                job_status_available: true,
             })
             .await
             .expect("job execution should succeed");

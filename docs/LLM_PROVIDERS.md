@@ -19,7 +19,7 @@ These providers have dedicated `LLM_BACKEND` values with first-class support:
 
 | Provider | `LLM_BACKEND` | API Key Env | Default Model |
 |---|---|---|---|
-| [Anthropic](#anthropic) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` |
+| [Anthropic](#anthropic) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-7` |
 | [OpenAI](#openai) | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
 | [Google Gemini](#google-gemini) | `gemini` | `GEMINI_API_KEY` | `gemini-3.1-flash` |
 | [Tinfoil](#tinfoil) | `tinfoil` | `TINFOIL_API_KEY` | `kimi-k2-5` |
@@ -74,13 +74,13 @@ LLM_BACKEND=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Popular models: `claude-sonnet-4-20250514`, `claude-opus-4-5`, `claude-haiku-4-5`
+Popular models: `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`
 
 Optional overrides:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Model override |
+| `ANTHROPIC_MODEL` | `claude-opus-4-7` | Model override |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com/v1` | For proxies |
 
 ---

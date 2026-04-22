@@ -781,11 +781,13 @@ pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
         action: params.action,
         guardrails: RoutineGuardrails::default(),
         notify: params.notify.unwrap_or_default(),
+        policy: Default::default(),
         last_run_at: None,
         next_fire_at: None,
         run_count: 0,
         consecutive_failures: 0,
         state: serde_json::Value::Null,
+        config_version: 1,
         created_at: now,
         updated_at: now,
     };

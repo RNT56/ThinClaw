@@ -371,11 +371,13 @@ async fn add_routine(
         },
         guardrails: crate::agent::routine::RoutineGuardrails::default(),
         notify: crate::agent::routine::NotifyConfig::default(),
+        policy: Default::default(),
         last_run_at: None,
         next_fire_at: next_fire,
         run_count: 0,
         consecutive_failures: 0,
         state: serde_json::json!({}),
+        config_version: 1,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     };

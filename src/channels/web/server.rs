@@ -74,6 +74,10 @@ pub struct GatewayState {
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.
     pub prompt_queue: Option<PromptQueue>,
+    /// Shared direct-job context manager for local job visibility.
+    pub context_manager: Option<Arc<crate::context::ContextManager>>,
+    /// Direct-job scheduler, filled once the main agent is constructed.
+    pub scheduler: tokio::sync::RwLock<Option<Arc<crate::agent::Scheduler>>>,
     /// User ID for this gateway.
     pub user_id: String,
     /// Actor ID this gateway session should act as by default.
@@ -303,6 +307,7 @@ pub async fn start_server(
         // Routines
         .route("/api/routines", get(routines_list_handler))
         .route("/api/routines/summary", get(routines_summary_handler))
+        .route("/api/routines/events", get(routines_events_handler))
         .route("/api/routines/{id}", get(routines_detail_handler))
         .route("/api/routines/{id}/trigger", post(routines_trigger_handler))
         .route("/api/routines/{id}/toggle", post(routines_toggle_handler))
@@ -709,6 +714,39 @@ mod tests {
         assert_eq!(model_ids, vec!["gpt-4o", "gpt-4o-mini"]);
         assert_eq!(suggested_primary.as_deref(), Some("gpt-4o"));
         assert_eq!(suggested_cheap.as_deref(), Some("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn test_provider_model_options_from_discovery_prefers_catalog_default_primary() {
+        let discovered = vec![
+            crate::llm::discovery::DiscoveredModel {
+                id: "claude-sonnet-4-6".to_string(),
+                name: "claude-sonnet-4-6".to_string(),
+                provider: "anthropic".to_string(),
+                is_chat: true,
+                context_length: None,
+            },
+            crate::llm::discovery::DiscoveredModel {
+                id: "claude-opus-4-7".to_string(),
+                name: "claude-opus-4-7".to_string(),
+                provider: "anthropic".to_string(),
+                is_chat: true,
+                context_length: None,
+            },
+        ];
+
+        let (_models, suggested_primary, suggested_cheap, has_live_models) =
+            provider_model_options_from_discovery(
+                "anthropic",
+                "claude-opus-4-7",
+                discovered,
+                None,
+                None,
+            );
+
+        assert!(has_live_models);
+        assert_eq!(suggested_primary.as_deref(), Some("claude-opus-4-7"));
+        assert_eq!(suggested_cheap.as_deref(), Some("claude-sonnet-4-6"));
     }
 
     #[test]
@@ -1317,6 +1355,8 @@ mod tests {
             store,
             job_manager: None,
             prompt_queue: None,
+            context_manager: None,
+            scheduler: tokio::sync::RwLock::new(None),
             user_id: user_id.to_string(),
             actor_id: actor_id.to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
@@ -1413,6 +1453,8 @@ mod tests {
             store: None,
             job_manager: None,
             prompt_queue: None,
+            context_manager: None,
+            scheduler: tokio::sync::RwLock::new(None),
             user_id: "gateway-default".to_string(),
             actor_id: "gateway-actor".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),

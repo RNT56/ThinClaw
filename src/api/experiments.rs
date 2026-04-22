@@ -4545,6 +4545,7 @@ fn experiment_sandbox_config(settings: &Settings) -> crate::sandbox::SandboxConf
             memory_limit_mb: settings.sandbox.memory_limit_mb,
             cpu_shares: settings.sandbox.cpu_shares,
             image: settings.sandbox.image.clone(),
+            interactive_idle_timeout_secs: settings.sandbox.interactive_idle_timeout_secs,
             auto_pull_image: settings.sandbox.auto_pull_image,
             extra_allowed_domains: settings.sandbox.extra_allowed_domains.clone(),
         })

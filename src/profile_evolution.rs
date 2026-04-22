@@ -251,11 +251,13 @@ fn build_profile_evolution_routine(
         action,
         guardrails,
         notify,
+        policy: Default::default(),
         last_run_at: None,
         next_fire_at: None,
         run_count: 0,
         consecutive_failures: 0,
         state: serde_json::json!({}),
+        config_version: 1,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };

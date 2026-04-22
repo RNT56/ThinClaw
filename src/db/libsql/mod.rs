@@ -27,7 +27,9 @@ use libsql::{Connection, Database as LibSqlDatabase};
 use rust_decimal::Decimal;
 
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
+    NotifyConfig, Routine, RoutineAction, RoutineEvent, RoutineEventDecision,
+    RoutineEventEvaluation, RoutineEventStatus, RoutineGuardrails, RoutinePolicy, RoutineRun,
+    RoutineTrigger, RunStatus, Trigger,
 };
 use crate::context::JobState;
 use crate::db::Database;
@@ -42,13 +44,26 @@ pub(crate) const ROUTINE_COLUMNS: &str = "\
     trigger_type, trigger_config, action_type, action_config, \
     cooldown_secs, max_concurrent, dedup_window_secs, \
     notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention, \
-    state, last_run_at, next_fire_at, run_count, consecutive_failures, \
-    created_at, updated_at";
+    policy_config, state, last_run_at, next_fire_at, run_count, consecutive_failures, \
+    config_version, created_at, updated_at";
 
 /// Explicit column list for routine_runs table (matches positional access in `row_to_routine_run_libsql`).
 pub(crate) const ROUTINE_RUN_COLUMNS: &str = "\
-    id, routine_id, trigger_type, trigger_detail, started_at, \
+    id, routine_id, trigger_type, trigger_detail, trigger_key, started_at, \
     status, completed_at, result_summary, tokens_used, job_id, created_at";
+
+pub(crate) const ROUTINE_EVENT_COLUMNS: &str = "\
+    id, principal_id, actor_id, channel, event_type, raw_sender_id, conversation_scope_id, \
+    stable_external_conversation_key, idempotency_key, content, content_hash, metadata, status, diagnostics, \
+    claimed_by, claimed_at, lease_expires_at, processed_at, error_message, matched_routines, fired_routines, attempt_count, created_at";
+
+pub(crate) const ROUTINE_EVENT_EVALUATION_COLUMNS: &str = "\
+    id, event_id, routine_id, decision, reason, details, sequence_num, channel, content_preview, created_at";
+
+pub(crate) const ROUTINE_TRIGGER_COLUMNS: &str = "\
+    id, routine_id, trigger_kind, trigger_label, due_at, status, decision, active_key, \
+    idempotency_key, claimed_by, claimed_at, lease_expires_at, processed_at, error_message, \
+    diagnostics, coalesced_count, backlog_collapsed, routine_config_version, created_at";
 
 /// libSQL/Turso database backend.
 ///
@@ -228,6 +243,7 @@ pub(crate) fn parse_job_state(s: &str) -> JobState {
         "failed" => JobState::Failed,
         "stuck" => JobState::Stuck,
         "cancelled" => JobState::Cancelled,
+        "abandoned" => JobState::Abandoned,
         _ => JobState::Pending,
     }
 }
@@ -480,11 +496,13 @@ pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, Databa
     let cooldown_secs = get_i64(row, 10);
     let max_concurrent = get_i64(row, 11);
     let dedup_window_secs: Option<i64> = row.get::<i64>(12).ok();
+    let policy_config = get_json(row, 18);
 
     let trigger = Trigger::from_db(&trigger_type, trigger_config)
         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
     let action = RoutineAction::from_db(&action_type, action_config)
         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+    let policy = serde_json::from_value::<RoutinePolicy>(policy_config).unwrap_or_default();
 
     Ok(Routine {
         id: get_text(row, 0).parse().unwrap_or_default(),
@@ -507,18 +525,20 @@ pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, Databa
             on_failure: get_i64(row, 16) != 0,
             on_attention: get_i64(row, 17) != 0,
         },
-        state: get_json(row, 18),
-        last_run_at: get_opt_ts(row, 19),
-        next_fire_at: get_opt_ts(row, 20),
-        run_count: get_i64(row, 21) as u64,
-        consecutive_failures: get_i64(row, 22) as u32,
-        created_at: get_ts(row, 23),
-        updated_at: get_ts(row, 24),
+        policy,
+        state: get_json(row, 19),
+        last_run_at: get_opt_ts(row, 20),
+        next_fire_at: get_opt_ts(row, 21),
+        run_count: get_i64(row, 22) as u64,
+        consecutive_failures: get_i64(row, 23) as u32,
+        config_version: get_i64(row, 24),
+        created_at: get_ts(row, 25),
+        updated_at: get_ts(row, 26),
     })
 }
 
 pub(crate) fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun, DatabaseError> {
-    let status_str = get_text(row, 5);
+    let status_str = get_text(row, 6);
     let status: RunStatus = status_str
         .parse()
         .map_err(|e: crate::error::RoutineError| DatabaseError::Serialization(e.to_string()))?;
@@ -528,13 +548,111 @@ pub(crate) fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun,
         routine_id: get_text(row, 1).parse().unwrap_or_default(),
         trigger_type: get_text(row, 2),
         trigger_detail: get_opt_text(row, 3),
-        started_at: get_ts(row, 4),
-        completed_at: get_opt_ts(row, 6),
+        trigger_key: get_opt_text(row, 4),
+        started_at: get_ts(row, 5),
+        completed_at: get_opt_ts(row, 7),
         status,
-        result_summary: get_opt_text(row, 7),
-        tokens_used: row.get::<i64>(8).ok().map(|v| v as i32),
-        job_id: get_opt_text(row, 9).and_then(|s| s.parse().ok()),
-        created_at: get_ts(row, 10),
+        result_summary: get_opt_text(row, 8),
+        tokens_used: row.get::<i64>(9).ok().map(|v| v as i32),
+        job_id: get_opt_text(row, 10).and_then(|s| s.parse().ok()),
+        created_at: get_ts(row, 11),
+    })
+}
+
+pub(crate) fn row_to_routine_event_libsql(
+    row: &libsql::Row,
+) -> Result<RoutineEvent, DatabaseError> {
+    let status_str = get_text(row, 12);
+    let status: RoutineEventStatus = status_str
+        .parse()
+        .map_err(|e: crate::error::RoutineError| DatabaseError::Serialization(e.to_string()))?;
+
+    Ok(RoutineEvent {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        principal_id: get_text(row, 1),
+        actor_id: get_text(row, 2),
+        channel: get_text(row, 3),
+        event_type: get_text(row, 4),
+        raw_sender_id: get_text(row, 5),
+        conversation_scope_id: get_text(row, 6),
+        stable_external_conversation_key: get_text(row, 7),
+        idempotency_key: get_text(row, 8),
+        content: get_text(row, 9),
+        content_hash: get_text(row, 10),
+        metadata: get_json(row, 11),
+        status,
+        diagnostics: get_json(row, 13),
+        claimed_by: get_opt_text(row, 14),
+        claimed_at: get_opt_ts(row, 15),
+        lease_expires_at: get_opt_ts(row, 16),
+        processed_at: get_opt_ts(row, 17),
+        error_message: get_opt_text(row, 18),
+        matched_routines: get_i64(row, 19) as u32,
+        fired_routines: get_i64(row, 20) as u32,
+        attempt_count: get_i64(row, 21) as u32,
+        created_at: get_ts(row, 22),
+    })
+}
+
+pub(crate) fn row_to_routine_event_evaluation_libsql(
+    row: &libsql::Row,
+) -> Result<RoutineEventEvaluation, DatabaseError> {
+    let decision_str = get_text(row, 3);
+    let decision: RoutineEventDecision = decision_str
+        .parse()
+        .map_err(|e: crate::error::RoutineError| DatabaseError::Serialization(e.to_string()))?;
+
+    Ok(RoutineEventEvaluation {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        event_id: get_text(row, 1).parse().unwrap_or_default(),
+        routine_id: get_text(row, 2).parse().unwrap_or_default(),
+        decision,
+        reason: get_opt_text(row, 4),
+        details: get_json(row, 5),
+        sequence_num: get_i64(row, 6) as u32,
+        channel: get_text(row, 7),
+        content_preview: get_text(row, 8),
+        created_at: get_ts(row, 9),
+    })
+}
+
+pub(crate) fn row_to_routine_trigger_libsql(
+    row: &libsql::Row,
+) -> Result<RoutineTrigger, DatabaseError> {
+    let trigger_kind = get_text(row, 2)
+        .parse()
+        .map_err(|e: crate::error::RoutineError| DatabaseError::Serialization(e.to_string()))?;
+    let status = get_text(row, 5)
+        .parse()
+        .map_err(|e: crate::error::RoutineError| DatabaseError::Serialization(e.to_string()))?;
+    let decision = get_opt_text(row, 6)
+        .map(|value| {
+            value.parse().map_err(|e: crate::error::RoutineError| {
+                DatabaseError::Serialization(e.to_string())
+            })
+        })
+        .transpose()?;
+
+    Ok(RoutineTrigger {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        routine_id: get_text(row, 1).parse().unwrap_or_default(),
+        trigger_kind,
+        trigger_label: get_opt_text(row, 3),
+        due_at: get_ts(row, 4),
+        status,
+        decision,
+        active_key: get_opt_text(row, 7),
+        idempotency_key: get_text(row, 8),
+        claimed_by: get_opt_text(row, 9),
+        claimed_at: get_opt_ts(row, 10),
+        lease_expires_at: get_opt_ts(row, 11),
+        processed_at: get_opt_ts(row, 12),
+        error_message: get_opt_text(row, 13),
+        diagnostics: get_json(row, 14),
+        coalesced_count: get_i64(row, 15) as u32,
+        backlog_collapsed: get_i64(row, 16) != 0,
+        routine_config_version: get_i64(row, 17),
+        created_at: get_ts(row, 18),
     })
 }
 

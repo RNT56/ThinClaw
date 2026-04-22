@@ -262,7 +262,7 @@ fn static_model_cost(id: &str) -> Option<(Decimal, Decimal)> {
         "o1-mini" | "o1-mini-2024-09-12" => Some((dec!(0.0000011), dec!(0.0000044))),
 
         // Anthropic
-        "claude-opus-4-6" | "claude-opus-4-5" | "claude-opus-4-5-20251101" => {
+        "claude-opus-4-7" | "claude-opus-4-6" | "claude-opus-4-5" | "claude-opus-4-5-20251101" => {
             Some((dec!(0.000005), dec!(0.000025)))
         }
         "claude-opus-4"

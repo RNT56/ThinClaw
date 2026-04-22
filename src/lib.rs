@@ -82,6 +82,7 @@ pub mod qr_pairing;
 pub mod registry;
 pub mod safety;
 pub mod sandbox;
+pub mod sandbox_jobs;
 pub mod sandbox_types;
 pub mod secrets;
 #[cfg(feature = "repl")]

@@ -22,6 +22,7 @@ use crate::db::Database;
 use crate::llm::{CompletionRequest, LlmProvider, ToolCompletionRequest};
 use crate::orchestrator::auth::{TokenStore, worker_auth_middleware};
 use crate::orchestrator::job_manager::ContainerJobManager;
+use crate::sandbox_jobs::SandboxJobController;
 use crate::secrets::SecretsStore;
 use crate::worker::api::JobEventPayload;
 use crate::worker::api::{
@@ -32,7 +33,8 @@ use crate::worker::api::{
 /// A follow-up prompt queued for a Claude Code bridge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingPrompt {
-    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     pub done: bool,
 }
 
@@ -50,8 +52,6 @@ pub struct OrchestratorState {
     pub store: Option<Arc<dyn Database>>,
     /// Encrypted secrets store for credential injection into containers.
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
-    /// User ID for secret lookups (single-tenant, typically "default").
-    pub user_id: String,
 }
 
 /// The orchestrator's internal API server.
@@ -126,35 +126,32 @@ async fn get_job(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<JobDescription>, StatusCode> {
-    let handle = state
-        .job_manager
-        .get_handle(job_id)
-        .await
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let stored_ctx = if let Some(store) = state.store.as_ref() {
-        store.get_job(job_id).await.ok().flatten()
+    let spec = if let Some(handle) = state.job_manager.get_handle(job_id).await {
+        handle.spec
+    } else if let Some(store) = state.store.as_ref() {
+        store
+            .get_sandbox_job(job_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|record| record.spec)
+            .ok_or(StatusCode::NOT_FOUND)?
     } else {
-        None
+        return Err(StatusCode::NOT_FOUND);
     };
 
     Ok(Json(JobDescription {
-        title: format!("Job {}", job_id),
-        description: handle.task_description,
-        project_dir: handle.project_dir.map(|p| p.display().to_string()),
-        principal_id: stored_ctx.as_ref().map(|ctx| ctx.principal_id.clone()),
-        actor_id: stored_ctx.as_ref().and_then(|ctx| ctx.actor_id.clone()),
-        metadata: stored_ctx.as_ref().map(|ctx| ctx.metadata.clone()),
-        allowed_tools: stored_ctx.as_ref().and_then(|ctx| {
-            crate::tools::ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_tools")
-        }),
-        allowed_skills: stored_ctx.as_ref().and_then(|ctx| {
-            crate::tools::ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_skills")
-        }),
-        tool_profile: stored_ctx
-            .as_ref()
-            .and_then(|ctx| ctx.metadata.get("tool_profile"))
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
+        title: spec.title,
+        description: spec.description,
+        project_dir: spec.project_dir,
+        principal_id: Some(spec.principal_id),
+        actor_id: Some(spec.actor_id),
+        metadata: Some(spec.metadata),
+        allowed_tools: spec.allowed_tools,
+        allowed_skills: spec.allowed_skills,
+        tool_profile: spec.tool_profile,
+        interactive: spec.interactive,
+        idle_timeout_secs: Some(spec.idle_timeout_secs),
     }))
 }
 
@@ -272,14 +269,23 @@ async fn report_complete(
     }
 
     // Store the result and clean up the container
-    let result = crate::orchestrator::job_manager::CompletionResult {
-        status,
-        session_id: report.session_id.clone(),
-        success: report.success,
-        message: report.message.clone(),
-        iterations: report.iterations,
-    };
-    if let Err(e) = state.job_manager.complete_job(job_id, result).await {
+    let controller = SandboxJobController::new(
+        state.store.clone(),
+        Some(Arc::clone(&state.job_manager)),
+        state.job_event_tx.clone(),
+        Some(Arc::clone(&state.prompt_queue)),
+    );
+    if let Err(e) = controller
+        .finalize_job(
+            job_id,
+            &status,
+            report.success,
+            report.message.clone(),
+            report.session_id.clone(),
+            report.iterations,
+        )
+        .await
+    {
         tracing::error!(job_id = %job_id, "Failed to complete job cleanup: {}", e);
     }
 
@@ -380,6 +386,29 @@ async fn job_event_handler(
                     .cloned()
             }),
         },
+        "session_result" => SseEvent::JobSessionResult {
+            job_id: job_id_str,
+            status: payload
+                .data
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            session_id: payload
+                .data
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            success: payload
+                .data
+                .get("success")
+                .and_then(|value| value.as_bool()),
+            message: payload
+                .data
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        },
         "result" => {
             let status = payload
                 .data
@@ -472,12 +501,32 @@ async fn get_credentials_handler(
         tracing::error!("Credentials requested but no secrets store configured");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
+    let principal_id = if let Some(handle) = state.job_manager.get_handle(job_id).await {
+        handle.spec.principal_id
+    } else if let Some(store) = state.store.as_ref() {
+        store
+            .get_sandbox_job(job_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|job| job.spec.principal_id)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if principal_id.is_empty() {
+        tracing::error!(
+            job_id = %job_id,
+            "Credentials requested but sandbox job record is unavailable"
+        );
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     let mut credentials: Vec<CredentialResponse> = Vec::with_capacity(grants.len());
 
     for grant in &grants {
         let decrypted = secrets
-            .get_decrypted(&state.user_id, &grant.secret_name)
+            .get_decrypted(&principal_id, &grant.secret_name)
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -488,7 +537,7 @@ async fn get_credentials_handler(
             })?;
 
         // Record usage for audit trail
-        if let Ok(secret) = secrets.get(&state.user_id, &grant.secret_name).await
+        if let Ok(secret) = secrets.get(&principal_id, &grant.secret_name).await
             && let Err(e) = secrets.record_usage(secret.id).await
         {
             tracing::warn!(
@@ -551,7 +600,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
         }
     }
 
@@ -668,7 +716,7 @@ mod tests {
         {
             let mut q = state.prompt_queue.lock().await;
             q.entry(job_id).or_default().push_back(PendingPrompt {
-                content: "What is the status?".to_string(),
+                content: Some("What is the status?".to_string()),
                 done: false,
             });
         }
@@ -783,7 +831,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: Some(secrets_store),
-            user_id: "default".to_string(),
         };
 
         let router = OrchestratorApi::router(state);
@@ -818,7 +865,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
         };
 
         let job_id = Uuid::new_v4();
@@ -873,7 +919,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
         };
 
         let job_id = Uuid::new_v4();
@@ -921,7 +966,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
         };
 
         let job_id = Uuid::new_v4();
@@ -968,8 +1012,14 @@ mod tests {
                     state: crate::orchestrator::job_manager::ContainerState::Running,
                     mode: crate::orchestrator::job_manager::JobMode::Worker,
                     created_at: chrono::Utc::now(),
-                    project_dir: None,
-                    task_description: "test".to_string(),
+                    spec: crate::sandbox_jobs::SandboxJobSpec::new(
+                        "test",
+                        "test",
+                        "default",
+                        "default",
+                        None,
+                        crate::orchestrator::job_manager::JobMode::Worker,
+                    ),
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,

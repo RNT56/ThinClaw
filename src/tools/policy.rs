@@ -359,6 +359,23 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    fn resolve_from_layers(
+        persisted: Option<&ToolPolicyManager>,
+        toml: Option<&ToolPolicyManager>,
+        env_override: Option<&str>,
+    ) -> ToolPolicyManager {
+        let mut resolved = persisted.cloned().unwrap_or_else(ToolPolicyManager::new);
+        if let Some(toml) = toml {
+            resolved = toml.clone();
+        }
+        if let Some(raw) = env_override
+            && let Ok(Some(env_policy)) = ToolPolicyManager::from_env_override(raw)
+        {
+            resolved = env_policy;
+        }
+        resolved
+    }
+
     #[test]
     fn test_allow_all_default() {
         let policy = ToolAccessPolicy::default();
@@ -492,7 +509,7 @@ mod tests {
         let mut persisted = ToolPolicyManager::new();
         persisted.set_default(ToolAccessPolicy::deny(["shell"]));
 
-        let resolved = ToolPolicyManager::resolve_from_layers(Some(&persisted), None, None);
+        let resolved = resolve_from_layers(Some(&persisted), None, None);
         assert!(!resolved.is_allowed("shell", None, None));
         assert!(resolved.is_allowed("calculator", None, None));
     }
@@ -505,7 +522,7 @@ mod tests {
         let mut toml = ToolPolicyManager::new();
         toml.set_default(ToolAccessPolicy::allow_only(["calculator"]));
 
-        let resolved = ToolPolicyManager::resolve_from_layers(Some(&persisted), Some(&toml), None);
+        let resolved = resolve_from_layers(Some(&persisted), Some(&toml), None);
         assert!(!resolved.is_allowed("shell", None, None));
         assert!(resolved.is_allowed("calculator", None, None));
         assert!(!resolved.is_allowed("search", None, None));
@@ -534,8 +551,7 @@ mod tests {
         })
         .to_string();
 
-        let resolved =
-            ToolPolicyManager::resolve_from_layers(Some(&persisted), Some(&toml), Some(&env));
+        let resolved = resolve_from_layers(Some(&persisted), Some(&toml), Some(&env));
         assert!(resolved.is_allowed("shell", None, None));
         assert!(!resolved.is_allowed("calculator", None, None));
         assert!(resolved.is_allowed("search", Some("web"), None));
@@ -554,7 +570,9 @@ mod tests {
         let raw = toml::to_string(&settings).expect("serialize settings to toml");
         std::fs::write(&path, raw).expect("write toml");
 
-        let resolved = ToolPolicyManager::load_toml_override(&path).expect("parse toml override");
+        let resolved = ToolPolicyManager::load_toml_override(&path)
+            .expect("parse toml override")
+            .expect("tool policy override present");
         assert!(resolved.is_allowed("search", None, None));
         assert!(!resolved.is_allowed("search", Some("web"), None));
     }

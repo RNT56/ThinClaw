@@ -49,6 +49,8 @@ async fn start_test_server() -> (
         store: None,
         job_manager: None,
         prompt_queue: None,
+        context_manager: None,
+        scheduler: tokio::sync::RwLock::new(None),
         user_id: "test-user".to_string(),
         actor_id: "test-actor".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),

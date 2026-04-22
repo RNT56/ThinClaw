@@ -115,6 +115,17 @@ impl Scheduler {
         self
     }
 
+    fn persist_job_snapshot(&self, ctx: JobContext) {
+        if let Some(ref store) = self.store {
+            let store = Arc::clone(store);
+            tokio::spawn(async move {
+                if let Err(error) = store.save_job(&ctx).await {
+                    tracing::warn!(job_id = %ctx.job_id, "Failed to persist job snapshot: {}", error);
+                }
+            });
+        }
+    }
+
     /// Create, persist, and schedule a job in one shot.
     ///
     /// This is the preferred entry point for dispatching new jobs. It:
@@ -183,6 +194,7 @@ impl Scheduler {
         title: &str,
         description: &str,
         metadata: Option<serde_json::Value>,
+        routine_id: Uuid,
         routine_name: String,
         routine_run_id: String,
     ) -> Result<Uuid, JobError> {
@@ -221,7 +233,7 @@ impl Scheduler {
             })?;
         }
 
-        self.schedule_for_routine(job_id, routine_name, routine_run_id)
+        self.schedule_for_routine(job_id, routine_id, routine_name, routine_run_id)
             .await?;
         Ok(job_id)
     }
@@ -238,6 +250,7 @@ impl Scheduler {
         title: &str,
         description: &str,
         metadata: Option<serde_json::Value>,
+        routine_id: Uuid,
         routine_name: String,
         routine_run_id: String,
     ) -> Result<Uuid, JobError> {
@@ -281,7 +294,7 @@ impl Scheduler {
         }
 
         // Use the reserved schedule path (max_parallel_jobs + 1)
-        self.schedule_reserved_for_routine(job_id, routine_name, routine_run_id)
+        self.schedule_reserved_for_routine(job_id, routine_id, routine_name, routine_run_id)
             .await?;
         Ok(job_id)
     }
@@ -290,6 +303,7 @@ impl Scheduler {
     async fn schedule_reserved_for_routine(
         &self,
         job_id: Uuid,
+        routine_id: Uuid,
         routine_name: String,
         routine_run_id: String,
     ) -> Result<(), JobError> {
@@ -320,6 +334,9 @@ impl Scheduler {
                     id: job_id,
                     reason: s,
                 })?;
+            if let Ok(snapshot) = self.context_manager.get_context(job_id).await {
+                self.persist_job_snapshot(snapshot);
+            }
 
             let (tx, rx) = mpsc::channel(16);
 
@@ -334,6 +351,7 @@ impl Scheduler {
                 use_planning: self.config.use_planning,
                 sse_tx: self.sse_tx.clone(),
                 routine_name: Some(routine_name),
+                routine_id: Some(routine_id),
                 routine_run_id: Some(routine_run_id),
                 workspace: self.workspace.clone(),
                 cost_tracker: self.cost_tracker.clone(),
@@ -378,6 +396,7 @@ impl Scheduler {
     async fn schedule_for_routine(
         &self,
         job_id: Uuid,
+        routine_id: Uuid,
         routine_name: String,
         routine_run_id: String,
     ) -> Result<(), JobError> {
@@ -406,6 +425,9 @@ impl Scheduler {
                     id: job_id,
                     reason: s,
                 })?;
+            if let Ok(snapshot) = self.context_manager.get_context(job_id).await {
+                self.persist_job_snapshot(snapshot);
+            }
 
             let (tx, rx) = mpsc::channel(16);
 
@@ -420,6 +442,7 @@ impl Scheduler {
                 use_planning: self.config.use_planning,
                 sse_tx: self.sse_tx.clone(),
                 routine_name: Some(routine_name),
+                routine_id: Some(routine_id),
                 routine_run_id: Some(routine_run_id),
                 workspace: self.workspace.clone(),
                 cost_tracker: self.cost_tracker.clone(),
@@ -490,6 +513,9 @@ impl Scheduler {
                     id: job_id,
                     reason: s,
                 })?;
+            if let Ok(snapshot) = self.context_manager.get_context(job_id).await {
+                self.persist_job_snapshot(snapshot);
+            }
 
             // Create worker channel
             let (tx, rx) = mpsc::channel(16);
@@ -506,6 +532,7 @@ impl Scheduler {
                 use_planning: self.config.use_planning,
                 sse_tx: None,
                 routine_name: None,
+                routine_id: None,
                 routine_run_id: None,
                 workspace: self.workspace.clone(),
                 cost_tracker: self.cost_tracker.clone(),
@@ -807,22 +834,8 @@ impl Scheduler {
                     }
                 })
                 .await?;
-
-            // Persist cancellation (fire-and-forget)
-            if let Some(ref store) = self.store {
-                let store = store.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = store
-                        .update_job_status(
-                            job_id,
-                            JobState::Cancelled,
-                            Some("Stopped by scheduler"),
-                        )
-                        .await
-                    {
-                        tracing::warn!("Failed to persist cancellation for job {}: {}", job_id, e);
-                    }
-                });
+            if let Ok(snapshot) = self.context_manager.get_context(job_id).await {
+                self.persist_job_snapshot(snapshot);
             }
 
             tracing::info!("Stopped job {}", job_id);

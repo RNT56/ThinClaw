@@ -13,13 +13,18 @@ use std::time::Duration;
 use async_trait::async_trait;
 use uuid::Uuid;
 
+use crate::agent::Scheduler;
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
+use crate::history::SandboxJobRecord;
+use crate::sandbox_jobs::SandboxChildRegistry;
+use crate::sandbox_types::{
+    ContainerHandle, ContainerJobManager, CredentialGrant, JobMode, PendingPrompt, PromptQueue,
+};
 #[cfg(test)]
 use crate::sandbox_types::{ContainerJobConfig, TokenStore};
-use crate::sandbox_types::{ContainerJobManager, CredentialGrant, JobMode, PendingPrompt};
 use crate::secrets::SecretsStore;
 use crate::tools::execution_backend::{
     DockerSandboxExecutionBackend, ExecutionBackend, JobExecutionRequest, JobOrchestrationContext,
@@ -71,43 +76,223 @@ async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result
     }
 }
 
-async fn resolve_owned_job_id(
-    input: &str,
-    context_manager: &ContextManager,
+#[derive(Clone, Default)]
+struct SandboxJobLookup {
+    live: Option<ContainerHandle>,
+    stored: Option<SandboxJobRecord>,
+}
+
+impl SandboxJobLookup {
+    fn spec(&self) -> Option<&crate::sandbox_jobs::SandboxJobSpec> {
+        self.live
+            .as_ref()
+            .map(|handle| &handle.spec)
+            .or_else(|| self.stored.as_ref().map(|job| &job.spec))
+    }
+
+    fn status(&self) -> String {
+        if let Some(handle) = self.live.as_ref() {
+            return match handle.state {
+                crate::sandbox_types::ContainerState::Creating => "creating".to_string(),
+                crate::sandbox_types::ContainerState::Running => "running".to_string(),
+                crate::sandbox_types::ContainerState::Stopped => handle
+                    .completion_result
+                    .as_ref()
+                    .map(|result| result.status.clone())
+                    .or_else(|| self.stored.as_ref().map(|job| job.status.clone()))
+                    .unwrap_or_else(|| "completed".to_string()),
+                crate::sandbox_types::ContainerState::Failed => handle
+                    .completion_result
+                    .as_ref()
+                    .map(|result| result.status.clone())
+                    .unwrap_or_else(|| "failed".to_string()),
+            };
+        }
+        self.stored
+            .as_ref()
+            .map(|job| job.status.clone())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    fn created_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.live
+            .as_ref()
+            .map(|handle| handle.created_at)
+            .or_else(|| self.stored.as_ref().map(|job| job.created_at))
+    }
+
+    fn started_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.stored.as_ref().and_then(|job| job.started_at)
+    }
+
+    fn completed_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.stored.as_ref().and_then(|job| job.completed_at)
+    }
+
+    fn failure_reason(&self) -> Option<String> {
+        self.stored
+            .as_ref()
+            .and_then(|job| job.failure_reason.clone())
+            .or_else(|| {
+                self.live
+                    .as_ref()
+                    .and_then(|handle| handle.completion_result.as_ref())
+                    .and_then(|result| result.message.clone())
+            })
+    }
+
+    fn is_interactive(&self) -> bool {
+        self.spec().map(|spec| spec.interactive).unwrap_or(false)
+    }
+
+    fn accepts_prompts(&self) -> bool {
+        self.is_interactive()
+            && self
+                .live
+                .as_ref()
+                .map(|handle| {
+                    matches!(
+                        handle.state,
+                        crate::sandbox_types::ContainerState::Creating
+                            | crate::sandbox_types::ContainerState::Running
+                    )
+                })
+                .unwrap_or(false)
+    }
+}
+
+enum ResolvedOwnedJob {
+    Local {
+        job_id: Uuid,
+        ctx: JobContext,
+    },
+    Sandbox {
+        job_id: Uuid,
+        lookup: SandboxJobLookup,
+    },
+}
+
+async fn load_owned_sandbox_jobs(
+    job_manager: Option<&Arc<ContainerJobManager>>,
+    store: Option<&Arc<dyn Database>>,
     principal_id: &str,
     actor_id: &str,
-) -> Result<Uuid, ToolError> {
-    let owned_ids = context_manager
+) -> Result<std::collections::HashMap<Uuid, SandboxJobLookup>, ToolError> {
+    let mut jobs = std::collections::HashMap::<Uuid, SandboxJobLookup>::new();
+
+    if let Some(store) = store {
+        for job in store
+            .list_sandbox_jobs_for_actor(principal_id, actor_id)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?
+        {
+            let job_id = job.id;
+            jobs.entry(job_id).or_default().stored = Some(job);
+        }
+    }
+
+    if let Some(job_manager) = job_manager {
+        for handle in job_manager.list_jobs().await {
+            if handle.spec.principal_id == principal_id && handle.spec.actor_id == actor_id {
+                let job_id = handle.job_id;
+                jobs.entry(job_id).or_default().live = Some(handle);
+            }
+        }
+    }
+
+    Ok(jobs)
+}
+
+async fn load_owned_direct_jobs(
+    context_manager: &ContextManager,
+    store: Option<&Arc<dyn Database>>,
+    principal_id: &str,
+    actor_id: &str,
+) -> Result<std::collections::HashMap<Uuid, JobContext>, ToolError> {
+    let mut jobs = std::collections::HashMap::<Uuid, JobContext>::new();
+
+    if let Some(store) = store {
+        for job in store
+            .list_jobs_for_actor(principal_id, actor_id)
+            .await
+            .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?
+        {
+            jobs.insert(job.job_id, job);
+        }
+    }
+
+    for job_id in context_manager
         .all_jobs_for_actor(principal_id, actor_id)
-        .await;
+        .await
+    {
+        if let Ok(job_ctx) = context_manager.get_context(job_id).await {
+            jobs.insert(job_id, job_ctx);
+        }
+    }
+
+    Ok(jobs)
+}
+
+async fn resolve_owned_job_ref(
+    input: &str,
+    context_manager: &ContextManager,
+    job_manager: Option<&Arc<ContainerJobManager>>,
+    store: Option<&Arc<dyn Database>>,
+    principal_id: &str,
+    actor_id: &str,
+) -> Result<ResolvedOwnedJob, ToolError> {
+    let direct_jobs =
+        load_owned_direct_jobs(context_manager, store, principal_id, actor_id).await?;
+    let sandbox_jobs = load_owned_sandbox_jobs(job_manager, store, principal_id, actor_id).await?;
+
+    let mut matches = Vec::<ResolvedOwnedJob>::new();
 
     if let Ok(id) = Uuid::parse_str(input) {
-        return owned_ids
-            .into_iter()
-            .find(|owned| *owned == id)
-            .ok_or_else(|| ToolError::InvalidParameters("job not found".to_string()));
-    }
+        if let Some(job_ctx) = direct_jobs.get(&id).cloned() {
+            matches.push(ResolvedOwnedJob::Local {
+                job_id: id,
+                ctx: job_ctx,
+            });
+        }
+        if let Some(lookup) = sandbox_jobs.get(&id).cloned() {
+            matches.push(ResolvedOwnedJob::Sandbox { job_id: id, lookup });
+        }
+    } else {
+        if input.len() < 4 {
+            return Err(ToolError::InvalidParameters(
+                "job ID prefix must be at least 4 hex characters".to_string(),
+            ));
+        }
 
-    if input.len() < 4 {
-        return Err(ToolError::InvalidParameters(
-            "job ID prefix must be at least 4 hex characters".to_string(),
-        ));
+        let input_lower = input.to_lowercase();
+        for (job_id, job_ctx) in direct_jobs {
+            if job_id
+                .to_string()
+                .replace('-', "")
+                .starts_with(&input_lower)
+            {
+                matches.push(ResolvedOwnedJob::Local {
+                    job_id,
+                    ctx: job_ctx.clone(),
+                });
+            }
+        }
+        for (job_id, lookup) in sandbox_jobs {
+            if job_id
+                .to_string()
+                .replace('-', "")
+                .starts_with(&input_lower)
+            {
+                matches.push(ResolvedOwnedJob::Sandbox { job_id, lookup });
+            }
+        }
     }
-
-    let input_lower = input.to_lowercase();
-    let matches: Vec<Uuid> = owned_ids
-        .into_iter()
-        .filter(|id| id.to_string().replace('-', "").starts_with(&input_lower))
-        .collect();
 
     match matches.len() {
-        1 => Ok(matches[0]),
-        0 => Err(ToolError::InvalidParameters(format!(
-            "no owned job found matching prefix '{}'",
-            input
-        ))),
+        1 => Ok(matches.remove(0)),
+        0 => Err(ToolError::InvalidParameters("job not found".to_string())),
         n => Err(ToolError::InvalidParameters(format!(
-            "ambiguous prefix '{}' matches {} owned jobs, provide more characters",
+            "ambiguous prefix '{}' matches {} jobs, provide more characters",
             input, n
         ))),
     }
@@ -120,12 +305,17 @@ async fn resolve_owned_job_id(
 /// job via the ContextManager. The LLM never needs to know the difference.
 pub struct CreateJobTool {
     context_manager: Arc<ContextManager>,
+    scheduler: Option<Arc<Scheduler>>,
     job_manager: Option<Arc<ContainerJobManager>>,
     store: Option<Arc<dyn Database>>,
     /// Broadcast sender for job events (used to subscribe a monitor).
     event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, SseEvent)>>,
     /// Injection channel for pushing messages into the agent loop.
     inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
+    /// Follow-up prompt queue shared with the gateway/orchestrator.
+    prompt_queue: Option<PromptQueue>,
+    /// Parent-run registry for interactive sandbox child jobs.
+    sandbox_children: Option<Arc<SandboxChildRegistry>>,
     /// Encrypted secrets store for validating credential grants.
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
@@ -134,12 +324,20 @@ impl CreateJobTool {
     pub fn new(context_manager: Arc<ContextManager>) -> Self {
         Self {
             context_manager,
+            scheduler: None,
             job_manager: None,
             store: None,
             event_tx: None,
             inject_tx: None,
+            prompt_queue: None,
+            sandbox_children: None,
             secrets_store: None,
         }
+    }
+
+    pub fn with_scheduler(mut self, scheduler: Arc<Scheduler>) -> Self {
+        self.scheduler = Some(scheduler);
+        self
     }
 
     /// Inject sandbox dependencies so `create_job` delegates to Docker containers.
@@ -159,9 +357,16 @@ impl CreateJobTool {
         mut self,
         event_tx: tokio::sync::broadcast::Sender<(Uuid, SseEvent)>,
         inject_tx: tokio::sync::mpsc::Sender<IncomingMessage>,
+        prompt_queue: Option<PromptQueue>,
     ) -> Self {
         self.event_tx = Some(event_tx);
         self.inject_tx = Some(inject_tx);
+        self.prompt_queue = prompt_queue;
+        self
+    }
+
+    pub fn with_sandbox_children(mut self, sandbox_children: Arc<SandboxChildRegistry>) -> Self {
+        self.sandbox_children = Some(sandbox_children);
         self
     }
 
@@ -180,8 +385,11 @@ impl CreateJobTool {
             Arc::clone(&self.context_manager),
             self.job_manager.clone(),
             self.store.clone(),
+            self.scheduler.clone(),
             self.event_tx.clone(),
             self.inject_tx.clone(),
+            self.prompt_queue.clone(),
+            self.sandbox_children.clone(),
         ));
         if self.sandbox_enabled() {
             DockerSandboxExecutionBackend::with_job_orchestration(orchestration)
@@ -335,10 +543,28 @@ impl CreateJobTool {
                 description: description.to_string(),
                 principal_id: ctx.user_id.clone(),
                 actor_id: ctx.owner_actor_id().to_string(),
+                parent_job_id: Some(ctx.job_id),
                 wait: false,
                 explicit_project_dir: None,
                 mode: None,
+                metadata: ctx.metadata.clone(),
+                allowed_tools: crate::tools::ToolRegistry::metadata_string_list(
+                    &ctx.metadata,
+                    "allowed_tools",
+                ),
+                allowed_skills: crate::tools::ToolRegistry::metadata_string_list(
+                    &ctx.metadata,
+                    "allowed_skills",
+                ),
+                tool_profile: ctx
+                    .metadata
+                    .get("tool_profile")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
                 credential_grants: Vec::new(),
+                job_events_available: self.store.is_some(),
+                job_prompt_available: self.prompt_queue.is_some(),
+                job_status_available: true,
             })
             .await?;
         Ok(ToolOutput::success(
@@ -379,10 +605,28 @@ impl CreateJobTool {
                 description,
                 principal_id: ctx.user_id.clone(),
                 actor_id: ctx.owner_actor_id().to_string(),
+                parent_job_id: Some(ctx.job_id),
                 wait,
                 explicit_project_dir: explicit_dir,
                 mode: Some(mode),
+                metadata: ctx.metadata.clone(),
+                allowed_tools: crate::tools::ToolRegistry::metadata_string_list(
+                    &ctx.metadata,
+                    "allowed_tools",
+                ),
+                allowed_skills: crate::tools::ToolRegistry::metadata_string_list(
+                    &ctx.metadata,
+                    "allowed_skills",
+                ),
+                tool_profile: ctx
+                    .metadata
+                    .get("tool_profile")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
                 credential_grants,
+                job_events_available: self.store.is_some(),
+                job_prompt_available: self.prompt_queue.is_some(),
+                job_status_available: true,
             })
             .await?;
         Ok(ToolOutput::success(
@@ -600,11 +844,27 @@ impl Tool for CreateJobTool {
 /// Tool for listing jobs.
 pub struct ListJobsTool {
     context_manager: Arc<ContextManager>,
+    job_manager: Option<Arc<ContainerJobManager>>,
+    store: Option<Arc<dyn Database>>,
 }
 
 impl ListJobsTool {
     pub fn new(context_manager: Arc<ContextManager>) -> Self {
-        Self { context_manager }
+        Self {
+            context_manager,
+            job_manager: None,
+            store: None,
+        }
+    }
+
+    pub fn with_sandbox(
+        mut self,
+        job_manager: Option<Arc<ContainerJobManager>>,
+        store: Option<Arc<dyn Database>>,
+    ) -> Self {
+        self.job_manager = job_manager;
+        self.store = store;
+        self
     }
 }
 
@@ -624,8 +884,8 @@ impl Tool for ListJobsTool {
             "properties": {
                 "filter": {
                     "type": "string",
-                    "description": "Filter by status: 'active', 'completed', 'failed', 'all' (default: 'all')",
-                    "enum": ["active", "completed", "failed", "all"]
+                    "description": "Filter by status: 'active', 'completed', 'failed', 'cancelled', 'interrupted', 'stuck', or 'all' (default: 'all')",
+                    "enum": ["active", "completed", "failed", "cancelled", "interrupted", "stuck", "all"]
                 }
             }
         })
@@ -643,54 +903,120 @@ impl Tool for ListJobsTool {
             .and_then(|v| v.as_str())
             .unwrap_or("all");
         let actor_id = ctx.owner_actor_id();
-
-        let job_ids = match filter {
-            "active" => {
-                self.context_manager
-                    .active_jobs_for_actor(&ctx.user_id, actor_id)
-                    .await
-            }
-            _ => {
-                self.context_manager
-                    .all_jobs_for_actor(&ctx.user_id, actor_id)
-                    .await
-            }
-        };
-
+        let direct_jobs = load_owned_direct_jobs(
+            &self.context_manager,
+            self.store.as_ref(),
+            &ctx.user_id,
+            actor_id,
+        )
+        .await?;
         let mut jobs = Vec::new();
-        for job_id in job_ids {
-            if let Ok(ctx) = self.context_manager.get_context(job_id).await {
-                let include = match filter {
-                    "completed" => ctx.state == JobState::Completed,
-                    "failed" => ctx.state == JobState::Failed,
-                    "active" => ctx.state.is_active(),
-                    _ => true,
-                };
-
-                if include {
-                    jobs.push(serde_json::json!({
-                        "job_id": job_id.to_string(),
-                        "title": ctx.title,
-                        "status": format!("{:?}", ctx.state),
-                        "created_at": ctx.created_at.to_rfc3339()
-                    }));
+        let mut direct_total = 0usize;
+        let mut direct_pending = 0usize;
+        let mut direct_in_progress = 0usize;
+        let mut direct_completed = 0usize;
+        let mut direct_failed = 0usize;
+        let mut direct_cancelled = 0usize;
+        let mut direct_stuck = 0usize;
+        for (job_id, job_ctx) in direct_jobs {
+            direct_total += 1;
+            match job_ctx.state {
+                JobState::Pending => direct_pending += 1,
+                JobState::InProgress => direct_in_progress += 1,
+                JobState::Completed | JobState::Submitted | JobState::Accepted => {
+                    direct_completed += 1
                 }
+                JobState::Failed => direct_failed += 1,
+                JobState::Stuck => direct_stuck += 1,
+                JobState::Cancelled => direct_cancelled += 1,
+                JobState::Abandoned => direct_failed += 1,
+            }
+
+            let include = match filter {
+                "completed" => matches!(
+                    job_ctx.state,
+                    JobState::Completed | JobState::Submitted | JobState::Accepted
+                ),
+                "failed" => matches!(job_ctx.state, JobState::Failed | JobState::Abandoned),
+                "cancelled" => job_ctx.state == JobState::Cancelled,
+                "interrupted" => false,
+                "stuck" => job_ctx.state == JobState::Stuck,
+                "active" => job_ctx.state.is_active(),
+                _ => true,
+            };
+
+            if include {
+                jobs.push(serde_json::json!({
+                    "job_id": job_id.to_string(),
+                    "title": job_ctx.title,
+                    "status": job_ctx.state.to_string(),
+                    "created_at": job_ctx.created_at.to_rfc3339(),
+                    "kind": "local",
+                }));
             }
         }
 
-        let summary = self
-            .context_manager
-            .summary_for_actor(&ctx.user_id, actor_id)
-            .await;
+        let mut sandbox_total = 0usize;
+        let mut sandbox_pending = 0usize;
+        let mut sandbox_in_progress = 0usize;
+        let mut sandbox_completed = 0usize;
+        let mut sandbox_failed = 0usize;
+        let mut sandbox_cancelled = 0usize;
+        let mut sandbox_interrupted = 0usize;
+        let mut sandbox_stuck = 0usize;
+        for (job_id, lookup) in load_owned_sandbox_jobs(
+            self.job_manager.as_ref(),
+            self.store.as_ref(),
+            &ctx.user_id,
+            actor_id,
+        )
+        .await?
+        {
+            let status = lookup.status();
+            sandbox_total += 1;
+            match status.as_str() {
+                "creating" => sandbox_pending += 1,
+                "running" => sandbox_in_progress += 1,
+                "completed" => sandbox_completed += 1,
+                "failed" => sandbox_failed += 1,
+                "cancelled" => sandbox_cancelled += 1,
+                "interrupted" => sandbox_interrupted += 1,
+                "stuck" => sandbox_stuck += 1,
+                _ => {}
+            }
+            let include = match filter {
+                "completed" => status == "completed",
+                "failed" => status == "failed",
+                "cancelled" => status == "cancelled",
+                "interrupted" => status == "interrupted",
+                "stuck" => status == "stuck",
+                "active" => matches!(status.as_str(), "creating" | "running"),
+                _ => true,
+            };
+
+            if include && let Some(spec) = lookup.spec() {
+                jobs.push(serde_json::json!({
+                    "job_id": job_id.to_string(),
+                    "title": spec.title,
+                    "status": crate::sandbox_jobs::normalize_sandbox_ui_state(&status),
+                    "created_at": lookup.created_at().map(|value| value.to_rfc3339()),
+                    "kind": "sandbox",
+                    "runtime_mode": spec.mode.as_str(),
+                }));
+            }
+        }
 
         let result = serde_json::json!({
             "jobs": jobs,
             "summary": {
-                "total": summary.total,
-                "pending": summary.pending,
-                "in_progress": summary.in_progress,
-                "completed": summary.completed,
-                "failed": summary.failed
+                "total": direct_total + sandbox_total,
+                "pending": direct_pending + sandbox_pending,
+                "in_progress": direct_in_progress + sandbox_in_progress,
+                "completed": direct_completed + sandbox_completed,
+                "failed": direct_failed + sandbox_failed,
+                "cancelled": direct_cancelled + sandbox_cancelled,
+                "interrupted": sandbox_interrupted,
+                "stuck": direct_stuck + sandbox_stuck
             }
         });
 
@@ -705,11 +1031,27 @@ impl Tool for ListJobsTool {
 /// Tool for checking job status.
 pub struct JobStatusTool {
     context_manager: Arc<ContextManager>,
+    job_manager: Option<Arc<ContainerJobManager>>,
+    store: Option<Arc<dyn Database>>,
 }
 
 impl JobStatusTool {
     pub fn new(context_manager: Arc<ContextManager>) -> Self {
-        Self { context_manager }
+        Self {
+            context_manager,
+            job_manager: None,
+            store: None,
+        }
+    }
+
+    pub fn with_sandbox(
+        mut self,
+        job_manager: Option<Arc<ContainerJobManager>>,
+        store: Option<Arc<dyn Database>>,
+    ) -> Self {
+        self.job_manager = job_manager;
+        self.store = store;
+        self
     }
 }
 
@@ -742,42 +1084,49 @@ impl Tool for JobStatusTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let requester_id = ctx.user_id.clone();
-        let requester_actor_id = ctx.owner_actor_id().to_string();
-
         let job_id_str = require_str(&params, "job_id")?;
-        let job_id = resolve_owned_job_id(
+        let resolved = resolve_owned_job_ref(
             job_id_str,
             &self.context_manager,
-            &requester_id,
-            &requester_actor_id,
+            self.job_manager.as_ref(),
+            self.store.as_ref(),
+            &ctx.user_id,
+            ctx.owner_actor_id(),
         )
         .await?;
 
-        match self.context_manager.get_context(job_id).await {
-            Ok(job_ctx) => {
-                if job_ctx.user_id != requester_id || job_ctx.owner_actor_id() != requester_actor_id
-                {
-                    let result = serde_json::json!({
-                        "error": "Job not found".to_string()
-                    });
-                    return Ok(ToolOutput::success(result, start.elapsed()));
-                }
+        match resolved {
+            ResolvedOwnedJob::Local {
+                job_id,
+                ctx: job_ctx,
+            } => {
                 let result = serde_json::json!({
                     "job_id": job_id.to_string(),
                     "title": job_ctx.title,
                     "description": job_ctx.description,
-                    "status": format!("{:?}", job_ctx.state),
+                    "status": job_ctx.state.to_string(),
                     "created_at": job_ctx.created_at.to_rfc3339(),
                     "started_at": job_ctx.started_at.map(|t| t.to_rfc3339()),
                     "completed_at": job_ctx.completed_at.map(|t| t.to_rfc3339()),
-                    "actual_cost": job_ctx.actual_cost.to_string()
+                    "actual_cost": job_ctx.actual_cost.to_string(),
+                    "kind": "local",
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
-            Err(e) => {
+            ResolvedOwnedJob::Sandbox { job_id, lookup } => {
                 let result = serde_json::json!({
-                    "error": format!("Job not found: {}", e)
+                    "job_id": job_id.to_string(),
+                    "title": lookup.spec().map(|spec| spec.title.clone()),
+                    "description": lookup.spec().map(|spec| spec.description.clone()),
+                    "status": crate::sandbox_jobs::normalize_sandbox_ui_state(&lookup.status()),
+                    "created_at": lookup.created_at().map(|value| value.to_rfc3339()),
+                    "started_at": lookup.started_at().map(|value| value.to_rfc3339()),
+                    "completed_at": lookup.completed_at().map(|value| value.to_rfc3339()),
+                    "project_dir": lookup.spec().and_then(|spec| spec.project_dir.clone()),
+                    "runtime_mode": lookup.spec().map(|spec| spec.mode.as_str()),
+                    "interactive": lookup.spec().map(|spec| spec.interactive),
+                    "failure_reason": lookup.failure_reason(),
+                    "kind": "sandbox",
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
@@ -792,11 +1141,34 @@ impl Tool for JobStatusTool {
 /// Tool for canceling a job.
 pub struct CancelJobTool {
     context_manager: Arc<ContextManager>,
+    scheduler: Option<Arc<Scheduler>>,
+    job_manager: Option<Arc<ContainerJobManager>>,
+    store: Option<Arc<dyn Database>>,
 }
 
 impl CancelJobTool {
     pub fn new(context_manager: Arc<ContextManager>) -> Self {
-        Self { context_manager }
+        Self {
+            context_manager,
+            scheduler: None,
+            job_manager: None,
+            store: None,
+        }
+    }
+
+    pub fn with_scheduler(mut self, scheduler: Arc<Scheduler>) -> Self {
+        self.scheduler = Some(scheduler);
+        self
+    }
+
+    pub fn with_sandbox(
+        mut self,
+        job_manager: Option<Arc<ContainerJobManager>>,
+        store: Option<Arc<dyn Database>>,
+    ) -> Self {
+        self.job_manager = job_manager;
+        self.store = store;
+        self
     }
 }
 
@@ -829,30 +1201,61 @@ impl Tool for CancelJobTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let requester_id = ctx.user_id.clone();
-        let requester_actor_id = ctx.owner_actor_id().to_string();
-
         let job_id_str = require_str(&params, "job_id")?;
-        let job_id = resolve_owned_job_id(
+        let resolved = resolve_owned_job_ref(
             job_id_str,
             &self.context_manager,
-            &requester_id,
-            &requester_actor_id,
+            self.job_manager.as_ref(),
+            self.store.as_ref(),
+            &ctx.user_id,
+            ctx.owner_actor_id(),
         )
         .await?;
 
-        // Transition to cancelled state
-        match self
-            .context_manager
-            .update_context(job_id, |ctx| {
-                if ctx.user_id != requester_id || ctx.owner_actor_id() != requester_actor_id {
-                    return Err("Job not found".to_string());
+        match resolved {
+            ResolvedOwnedJob::Local {
+                job_id,
+                ctx: job_ctx,
+            } => {
+                if !job_ctx.state.is_active() {
+                    return Err(ToolError::ExecutionFailed(format!(
+                        "local job {} is no longer cancellable (status: {})",
+                        job_id, job_ctx.state
+                    )));
                 }
-                ctx.transition_to(JobState::Cancelled, Some("Cancelled by user".to_string()))
-            })
-            .await
-        {
-            Ok(Ok(())) => {
+
+                if let Some(scheduler) = self.scheduler.as_ref()
+                    && scheduler.is_running(job_id).await
+                {
+                    scheduler
+                        .stop(job_id)
+                        .await
+                        .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
+                } else if self.context_manager.get_context(job_id).await.is_ok() {
+                    self.context_manager
+                        .update_context(job_id, |job_ctx| {
+                            job_ctx.transition_to(
+                                JobState::Cancelled,
+                                Some("Cancelled by user".to_string()),
+                            )
+                        })
+                        .await
+                        .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?
+                        .map_err(ToolError::ExecutionFailed)?;
+
+                    if let Some(store) = self.store.as_ref()
+                        && let Ok(snapshot) = self.context_manager.get_context(job_id).await
+                        && let Err(error) = store.save_job(&snapshot).await
+                    {
+                        tracing::warn!(job_id = %job_id, "Failed to persist cancelled job: {}", error);
+                    }
+                } else {
+                    return Err(ToolError::ExecutionFailed(format!(
+                        "local job {} is no longer cancellable (status: {})",
+                        job_id, job_ctx.state
+                    )));
+                }
+
                 let result = serde_json::json!({
                     "job_id": job_id.to_string(),
                     "status": "cancelled",
@@ -860,15 +1263,28 @@ impl Tool for CancelJobTool {
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
-            Ok(Err(reason)) => {
+            ResolvedOwnedJob::Sandbox { job_id, lookup } => {
+                let status = lookup.status();
+                if !matches!(status.as_str(), "creating" | "running") {
+                    return Err(ToolError::ExecutionFailed(format!(
+                        "sandbox job {} is no longer cancellable (status: {})",
+                        job_id, status
+                    )));
+                }
+                let controller = crate::sandbox_jobs::SandboxJobController::new(
+                    self.store.clone(),
+                    self.job_manager.clone(),
+                    None,
+                    None,
+                );
+                controller
+                    .cancel_job(job_id, "Cancelled by user")
+                    .await
+                    .map_err(ToolError::ExecutionFailed)?;
                 let result = serde_json::json!({
-                    "error": format!("Cannot cancel job: {}", reason)
-                });
-                Ok(ToolOutput::success(result, start.elapsed()))
-            }
-            Err(e) => {
-                let result = serde_json::json!({
-                    "error": format!("Job not found: {}", e)
+                    "job_id": job_id.to_string(),
+                    "status": "cancelled",
+                    "message": "Job cancelled successfully"
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
@@ -896,13 +1312,19 @@ impl Tool for CancelJobTool {
 pub struct JobEventsTool {
     store: Arc<dyn Database>,
     context_manager: Arc<ContextManager>,
+    job_manager: Option<Arc<ContainerJobManager>>,
 }
 
 impl JobEventsTool {
-    pub fn new(store: Arc<dyn Database>, context_manager: Arc<ContextManager>) -> Self {
+    pub fn new(
+        store: Arc<dyn Database>,
+        context_manager: Arc<ContextManager>,
+        job_manager: Option<Arc<ContainerJobManager>>,
+    ) -> Self {
         Self {
             store,
             context_manager,
+            job_manager,
         }
     }
 }
@@ -948,33 +1370,19 @@ impl Tool for JobEventsTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
 
-        let job_id = resolve_owned_job_id(
+        let resolved = resolve_owned_job_ref(
             job_id_str,
             &self.context_manager,
+            self.job_manager.as_ref(),
+            Some(&self.store),
             &ctx.user_id,
             ctx.owner_actor_id(),
         )
         .await?;
-
-        // Verify the caller owns this job. A missing context is treated as
-        // unauthorized to prevent leaking events after process restarts.
-        let job_ctx = self
-            .context_manager
-            .get_context(job_id)
-            .await
-            .map_err(|_| {
-                ToolError::ExecutionFailed(format!(
-                    "job {} not found or context unavailable",
-                    job_id
-                ))
-            })?;
-
-        if job_ctx.user_id != ctx.user_id || job_ctx.owner_actor_id() != ctx.owner_actor_id() {
-            return Err(ToolError::ExecutionFailed(format!(
-                "job {} does not belong to current user",
-                job_id
-            )));
-        }
+        let (job_id, kind) = match resolved {
+            ResolvedOwnedJob::Sandbox { job_id, .. } => (job_id, "sandbox"),
+            ResolvedOwnedJob::Local { job_id, .. } => (job_id, "local"),
+        };
 
         const MAX_EVENT_LIMIT: i64 = 1000;
         let limit = params
@@ -1002,6 +1410,7 @@ impl Tool for JobEventsTool {
 
         let result = serde_json::json!({
             "job_id": job_id.to_string(),
+            "kind": kind,
             "total_events": events.len(),
             "returned": recent.len(),
             "events": recent,
@@ -1025,19 +1434,32 @@ impl Tool for JobEventsTool {
 pub struct JobPromptTool {
     prompt_queue: PromptQueue,
     context_manager: Arc<ContextManager>,
+    job_manager: Option<Arc<ContainerJobManager>>,
+    store: Option<Arc<dyn Database>>,
 }
-
-/// Type alias matching `crate::channels::web::server::PromptQueue`.
-pub type PromptQueue = Arc<
-    tokio::sync::Mutex<std::collections::HashMap<Uuid, std::collections::VecDeque<PendingPrompt>>>,
->;
 
 impl JobPromptTool {
     pub fn new(prompt_queue: PromptQueue, context_manager: Arc<ContextManager>) -> Self {
         Self {
             prompt_queue,
             context_manager,
+            job_manager: None,
+            store: None,
         }
+    }
+
+    pub fn with_sandbox(
+        mut self,
+        job_manager: Option<Arc<ContainerJobManager>>,
+        store: Option<Arc<dyn Database>>,
+    ) -> Self {
+        self.job_manager = job_manager;
+        self.store = store;
+        self
+    }
+
+    pub fn sandbox_enabled(&self) -> bool {
+        self.job_manager.is_some() || self.store.is_some()
     }
 }
 
@@ -1071,7 +1493,7 @@ impl Tool for JobPromptTool {
                                     and it should finish up. Default false."
                 }
             },
-            "required": ["job_id", "content"]
+            "required": ["job_id"]
         })
     }
 
@@ -1087,48 +1509,55 @@ impl Tool for JobPromptTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
 
-        let job_id = resolve_owned_job_id(
+        let resolved = resolve_owned_job_ref(
             job_id_str,
             &self.context_manager,
+            self.job_manager.as_ref(),
+            self.store.as_ref(),
             &ctx.user_id,
             ctx.owner_actor_id(),
         )
         .await?;
 
-        // Verify the caller owns this job. A missing context is treated as
-        // unauthorized to prevent sending prompts to jobs after process restarts.
-        let job_ctx = self
-            .context_manager
-            .get_context(job_id)
-            .await
-            .map_err(|_| {
-                ToolError::ExecutionFailed(format!(
-                    "job {} not found or context unavailable",
-                    job_id
-                ))
-            })?;
-
-        if job_ctx.user_id != ctx.user_id || job_ctx.owner_actor_id() != ctx.owner_actor_id() {
-            return Err(ToolError::ExecutionFailed(format!(
-                "job {} does not belong to current user",
-                job_id
-            )));
-        }
-
-        let content = params
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'content' parameter".into()))?;
-
         let done = params
             .get("done")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-
-        let prompt = PendingPrompt {
-            content: content.to_string(),
-            done,
+        let content = params
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if !done && content.as_deref().unwrap_or("").trim().is_empty() {
+            return Err(ToolError::InvalidParameters(
+                "missing 'content' parameter".into(),
+            ));
+        }
+        let job_id = match resolved {
+            ResolvedOwnedJob::Sandbox { job_id, lookup } => {
+                if !lookup.is_interactive() {
+                    return Err(ToolError::ExecutionFailed(format!(
+                        "job_prompt only supports interactive sandbox jobs ({} is non-interactive)",
+                        job_id
+                    )));
+                }
+                if !lookup.accepts_prompts() {
+                    return Err(ToolError::ExecutionFailed(format!(
+                        "sandbox job {} is no longer accepting prompts (status: {})",
+                        job_id,
+                        lookup.status()
+                    )));
+                }
+                job_id
+            }
+            ResolvedOwnedJob::Local { job_id, .. } => {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "job_prompt only supports sandbox jobs ({} is local)",
+                    job_id
+                )));
+            }
         };
+
+        let prompt = PendingPrompt { content, done };
 
         {
             let mut queue = self.prompt_queue.lock().await;
@@ -1245,8 +1674,15 @@ mod tests {
         let manager = Arc::new(ContextManager::new(5));
 
         // Create some jobs
-        manager.create_job("Job 1", "Desc 1").await.unwrap();
+        let job1 = manager.create_job("Job 1", "Desc 1").await.unwrap();
         manager.create_job("Job 2", "Desc 2").await.unwrap();
+        manager
+            .update_context(job1, |ctx| {
+                ctx.transition_to(JobState::Cancelled, Some("Cancelled in test".to_string()))
+            })
+            .await
+            .unwrap()
+            .unwrap();
 
         let tool = ListJobsTool::new(manager);
 
@@ -1256,6 +1692,10 @@ mod tests {
 
         let jobs = result.result.get("jobs").unwrap().as_array().unwrap();
         assert_eq!(jobs.len(), 2);
+        let summary = result.result.get("summary").unwrap();
+        assert_eq!(summary.get("cancelled").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(summary.get("failed").and_then(|v| v.as_u64()), Some(0));
+        assert_eq!(summary.get("interrupted").and_then(|v| v.as_u64()), Some(0));
     }
 
     #[tokio::test]
@@ -1275,6 +1715,86 @@ mod tests {
             result.result.get("title").unwrap().as_str().unwrap(),
             "Test Job"
         );
+    }
+
+    #[tokio::test]
+    async fn test_direct_jobs_remain_visible_after_context_cleanup_when_persisted() {
+        let (store, _guard) = crate::testing::test_db().await;
+        let manager = Arc::new(ContextManager::new(5));
+        let job_id = manager
+            .create_job_for_identity("household", "alex", "Persisted Job", "Description")
+            .await
+            .unwrap();
+        manager
+            .update_context(job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, Some("Started in test".to_string()))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        manager
+            .update_context(job_id, |ctx| {
+                ctx.transition_to(JobState::Completed, Some("Finished in test".to_string()))
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        let snapshot = manager.get_context(job_id).await.unwrap();
+        store.save_job(&snapshot).await.unwrap();
+        manager.remove_job(job_id).await.unwrap();
+
+        let actor_ctx = JobContext {
+            user_id: "household".to_string(),
+            principal_id: "household".to_string(),
+            actor_id: Some("alex".to_string()),
+            ..Default::default()
+        };
+
+        let list_tool =
+            ListJobsTool::new(Arc::clone(&manager)).with_sandbox(None, Some(store.clone()));
+        let list_result = list_tool
+            .execute(serde_json::json!({}), &actor_ctx)
+            .await
+            .unwrap();
+        let jobs = list_result
+            .result
+            .get("jobs")
+            .and_then(|value| value.as_array())
+            .expect("jobs array");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0]["job_id"], serde_json::json!(job_id.to_string()));
+        assert_eq!(jobs[0]["kind"], serde_json::json!("local"));
+
+        let status_tool =
+            JobStatusTool::new(Arc::clone(&manager)).with_sandbox(None, Some(store.clone()));
+        let status_result = status_tool
+            .execute(
+                serde_json::json!({
+                    "job_id": job_id.to_string(),
+                }),
+                &actor_ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            status_result.result["status"],
+            serde_json::json!("completed")
+        );
+        assert_eq!(status_result.result["kind"], serde_json::json!("local"));
+
+        let events_tool = JobEventsTool::new(store, manager, None);
+        let events_result = events_tool
+            .execute(
+                serde_json::json!({
+                    "job_id": job_id.to_string(),
+                }),
+                &actor_ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(events_result.result["kind"], serde_json::json!("local"));
+        assert_eq!(events_result.result["total_events"], serde_json::json!(0));
     }
 
     #[tokio::test]
@@ -1603,7 +2123,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_job_prompt_tool_queues_prompt() {
+    async fn test_job_prompt_tool_rejects_local_jobs() {
         let cm = Arc::new(ContextManager::new(5));
         let job_id = cm
             .create_job_for_user("default", "Test Job", "desc")
@@ -1621,18 +2141,16 @@ mod tests {
         });
 
         let ctx = JobContext::default();
-        let result = tool.execute(params, &ctx).await.unwrap();
-
-        assert_eq!(
-            result.result.get("status").unwrap().as_str().unwrap(),
-            "queued"
+        let err = tool.execute(params, &ctx).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("job_prompt only supports sandbox jobs"),
+            "expected local-job rejection, got: {}",
+            err
         );
 
         let q = queue.lock().await;
-        let prompts = q.get(&job_id).unwrap();
-        assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].content, "What's the status?");
-        assert!(!prompts[0].done);
+        assert!(q.get(&job_id).is_none());
     }
 
     #[tokio::test]
@@ -1862,8 +2380,10 @@ mod tests {
             .await
             .unwrap();
 
-        let result = resolve_owned_job_id(&alex_job.to_string(), &cm, "household", "sam").await;
+        let result =
+            resolve_owned_job_ref(&alex_job.to_string(), &cm, None, None, "household", "sam").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("job not found"));
+        let err = result.err().expect("expected job lookup to fail");
+        assert!(err.to_string().contains("job not found"));
     }
 }

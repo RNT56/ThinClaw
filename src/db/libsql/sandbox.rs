@@ -12,6 +12,15 @@ use super::{
 use crate::db::SandboxStore;
 use crate::error::DatabaseError;
 use crate::history::{JobEventRecord, SandboxJobRecord, SandboxJobSummary};
+use crate::sandbox_jobs::SandboxJobSpec;
+
+fn parse_job_mode(raw: &str) -> crate::sandbox_types::JobMode {
+    match raw {
+        "claude_code" => crate::sandbox_types::JobMode::ClaudeCode,
+        "codex_code" => crate::sandbox_types::JobMode::CodexCode,
+        _ => crate::sandbox_types::JobMode::Worker,
+    }
+}
 
 #[async_trait]
 impl SandboxStore for LibSqlBackend {
@@ -20,30 +29,42 @@ impl SandboxStore for LibSqlBackend {
         conn.execute(
             r#"
                 INSERT INTO agent_jobs (
-                    id, title, description, status, source, user_id, actor_id, project_dir,
-                    success, failure_reason, created_at, started_at, completed_at
-                ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                    id, title, description, status, source, user_id, principal_id, actor_id,
+                    project_dir, job_mode, metadata, success, failure_reason,
+                    created_at, started_at, completed_at, credential_grants
+                ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                 ON CONFLICT (id) DO UPDATE SET
+                    title = excluded.title,
+                    description = excluded.description,
                     status = excluded.status,
+                    principal_id = excluded.principal_id,
                     success = excluded.success,
                     failure_reason = excluded.failure_reason,
                     actor_id = excluded.actor_id,
+                    project_dir = excluded.project_dir,
+                    job_mode = excluded.job_mode,
+                    metadata = excluded.metadata,
                     started_at = excluded.started_at,
-                    completed_at = excluded.completed_at
+                    completed_at = excluded.completed_at,
+                    credential_grants = excluded.credential_grants
                 "#,
             params![
                 job.id.to_string(),
-                job.task.as_str(),
-                job.credential_grants_json.as_str(),
+                job.spec.title.as_str(),
+                job.spec.description.as_str(),
                 job.status.as_str(),
-                job.user_id.as_str(),
-                job.actor_id.as_str(),
-                job.project_dir.as_str(),
+                job.spec.principal_id.as_str(),
+                job.spec.principal_id.as_str(),
+                job.spec.actor_id.as_str(),
+                opt_text(job.spec.project_dir.as_deref()),
+                job.spec.mode.as_str(),
+                job.spec.persisted_metadata().to_string(),
                 job.success.map(|b| b as i64),
                 opt_text(job.failure_reason.as_deref()),
                 fmt_ts(&job.created_at),
                 fmt_opt_ts(&job.started_at),
                 fmt_opt_ts(&job.completed_at),
+                job.credential_grants_json.as_str(),
             ],
         )
         .await
@@ -56,8 +77,9 @@ impl SandboxStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, actor_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                SELECT id, title, description, status, user_id, principal_id, actor_id, project_dir,
+                       job_mode, metadata, success, failure_reason, created_at, started_at,
+                       completed_at, COALESCE(credential_grants, '[]')
                 FROM agent_jobs WHERE id = ?1 AND source = 'sandbox'
                 "#,
                 params![id.to_string()],
@@ -72,17 +94,22 @@ impl SandboxStore for LibSqlBackend {
         {
             Some(row) => Ok(Some(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
-                task: get_text(&row, 1),
-                credential_grants_json: get_text(&row, 2),
+                spec: SandboxJobSpec::from_persisted(
+                    get_text(&row, 1),
+                    get_text(&row, 2),
+                    get_text(&row, 5),
+                    get_text(&row, 6),
+                    get_opt_text(&row, 7),
+                    parse_job_mode(&get_text(&row, 8)),
+                    get_json(&row, 9),
+                ),
                 status: get_text(&row, 3),
-                user_id: get_text(&row, 4),
-                actor_id: get_text(&row, 5),
-                project_dir: get_text(&row, 6),
-                success: get_opt_bool(&row, 7),
-                failure_reason: get_opt_text(&row, 8),
-                created_at: get_ts(&row, 9),
-                started_at: get_opt_ts(&row, 10),
-                completed_at: get_opt_ts(&row, 11),
+                success: get_opt_bool(&row, 10),
+                failure_reason: get_opt_text(&row, 11),
+                created_at: get_ts(&row, 12),
+                started_at: get_opt_ts(&row, 13),
+                completed_at: get_opt_ts(&row, 14),
+                credential_grants_json: get_text(&row, 15),
             })),
             None => Ok(None),
         }
@@ -93,8 +120,9 @@ impl SandboxStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, actor_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                SELECT id, title, description, status, user_id, principal_id, actor_id, project_dir,
+                       job_mode, metadata, success, failure_reason, created_at, started_at,
+                       completed_at, COALESCE(credential_grants, '[]')
                 FROM agent_jobs WHERE source = 'sandbox'
                 ORDER BY created_at DESC
                 "#,
@@ -111,17 +139,22 @@ impl SandboxStore for LibSqlBackend {
         {
             jobs.push(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
-                task: get_text(&row, 1),
-                credential_grants_json: get_text(&row, 2),
+                spec: SandboxJobSpec::from_persisted(
+                    get_text(&row, 1),
+                    get_text(&row, 2),
+                    get_text(&row, 5),
+                    get_text(&row, 6),
+                    get_opt_text(&row, 7),
+                    parse_job_mode(&get_text(&row, 8)),
+                    get_json(&row, 9),
+                ),
                 status: get_text(&row, 3),
-                user_id: get_text(&row, 4),
-                actor_id: get_text(&row, 5),
-                project_dir: get_text(&row, 6),
-                success: get_opt_bool(&row, 7),
-                failure_reason: get_opt_text(&row, 8),
-                created_at: get_ts(&row, 9),
-                started_at: get_opt_ts(&row, 10),
-                completed_at: get_opt_ts(&row, 11),
+                success: get_opt_bool(&row, 10),
+                failure_reason: get_opt_text(&row, 11),
+                created_at: get_ts(&row, 12),
+                started_at: get_opt_ts(&row, 13),
+                completed_at: get_opt_ts(&row, 14),
+                credential_grants_json: get_text(&row, 15),
             });
         }
         Ok(jobs)
@@ -207,6 +240,7 @@ impl SandboxStore for LibSqlBackend {
                 "running" => summary.running += count,
                 "completed" => summary.completed += count,
                 "failed" => summary.failed += count,
+                "cancelled" => summary.cancelled += count,
                 "interrupted" => summary.interrupted += count,
                 "stuck" => summary.stuck += count,
                 _ => {}
@@ -223,8 +257,9 @@ impl SandboxStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, actor_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                SELECT id, title, description, status, user_id, principal_id, actor_id, project_dir,
+                       job_mode, metadata, success, failure_reason, created_at, started_at,
+                       completed_at, COALESCE(credential_grants, '[]')
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1
                 ORDER BY created_at DESC
                 "#,
@@ -241,17 +276,22 @@ impl SandboxStore for LibSqlBackend {
         {
             jobs.push(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
-                task: get_text(&row, 1),
-                credential_grants_json: get_text(&row, 2),
+                spec: SandboxJobSpec::from_persisted(
+                    get_text(&row, 1),
+                    get_text(&row, 2),
+                    get_text(&row, 5),
+                    get_text(&row, 6),
+                    get_opt_text(&row, 7),
+                    parse_job_mode(&get_text(&row, 8)),
+                    get_json(&row, 9),
+                ),
                 status: get_text(&row, 3),
-                user_id: get_text(&row, 4),
-                actor_id: get_text(&row, 5),
-                project_dir: get_text(&row, 6),
-                success: get_opt_bool(&row, 7),
-                failure_reason: get_opt_text(&row, 8),
-                created_at: get_ts(&row, 9),
-                started_at: get_opt_ts(&row, 10),
-                completed_at: get_opt_ts(&row, 11),
+                success: get_opt_bool(&row, 10),
+                failure_reason: get_opt_text(&row, 11),
+                created_at: get_ts(&row, 12),
+                started_at: get_opt_ts(&row, 13),
+                completed_at: get_opt_ts(&row, 14),
+                credential_grants_json: get_text(&row, 15),
             });
         }
         Ok(jobs)
@@ -284,6 +324,7 @@ impl SandboxStore for LibSqlBackend {
                 "running" => summary.running += count,
                 "completed" => summary.completed += count,
                 "failed" => summary.failed += count,
+                "cancelled" => summary.cancelled += count,
                 "interrupted" => summary.interrupted += count,
                 "stuck" => summary.stuck += count,
                 _ => {}

@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Timelike, Utc};
+use chrono::{Duration as ChronoDuration, Timelike, Utc};
 use regex::Regex;
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
@@ -21,7 +21,10 @@ use uuid::Uuid;
 use crate::agent::Scheduler;
 use crate::agent::outcomes;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_fire_for_routine,
+    NotifyConfig, Routine, RoutineAction, RoutineCatchUpMode, RoutineEvent, RoutineEventDecision,
+    RoutineEventEvaluation, RoutineEventStatus, RoutineRun, RoutineTrigger, RoutineTriggerDecision,
+    RoutineTriggerKind, RoutineTriggerStatus, RunStatus, Trigger, compile_event_trigger_pattern,
+    content_hash, next_fire_for_routine, routine_state_with_runtime_advance,
 };
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
 use crate::agent::{AgentRunArtifact, AgentRunStatus};
@@ -30,7 +33,7 @@ use crate::channels::web::types::SseEvent;
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
 use crate::db::Database;
-use crate::error::RoutineError;
+use crate::error::{DatabaseError, RoutineError};
 use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
 use crate::tools::ToolProfile;
 use crate::tools::execution_backend::routine_engine_runtime_descriptor;
@@ -45,7 +48,11 @@ pub struct RoutineEngine {
     /// Sender for notifications (routed to channel manager).
     notify_tx: mpsc::Sender<OutgoingResponse>,
     /// Compiled event regex cache: routine_id -> compiled regex.
-    event_cache: Arc<RwLock<Vec<(Uuid, Routine, Regex)>>>,
+    event_cache: Arc<RwLock<Vec<CachedEventRoutine>>>,
+    /// Last observed global event-cache version in the database.
+    event_cache_version: Arc<RwLock<i64>>,
+    /// When the in-memory event cache was last refreshed.
+    event_cache_refreshed_at: Arc<RwLock<Option<chrono::DateTime<Utc>>>>,
     /// Scheduler for dispatching jobs (FullJob mode).
     scheduler: Option<Arc<Scheduler>>,
     /// Optional SSE broadcast sender for emitting routine lifecycle events.
@@ -62,6 +69,18 @@ pub struct RoutineEngine {
     active_tasks: Arc<std::sync::Mutex<tokio::task::JoinSet<()>>>,
     /// User timezone (IANA) for active-hours checks. Populated from Settings.
     user_timezone: Option<String>,
+    /// Stable worker id used when claiming persisted event inbox items.
+    worker_id: String,
+}
+
+const EVENT_QUEUE_BATCH_LIMIT: i64 = 64;
+const EVENT_CONTENT_PREVIEW_LIMIT: usize = 200;
+const TRIGGER_QUEUE_BATCH_LIMIT: i64 = 64;
+
+#[derive(Clone)]
+struct CachedEventRoutine {
+    routine: Routine,
+    regex: Option<Regex>,
 }
 
 impl RoutineEngine {
@@ -80,12 +99,15 @@ impl RoutineEngine {
             workspace,
             notify_tx,
             event_cache: Arc::new(RwLock::new(Vec::new())),
+            event_cache_version: Arc::new(RwLock::new(0)),
+            event_cache_refreshed_at: Arc::new(RwLock::new(None)),
             scheduler,
             sse_tx: None,
             system_event_tx: None,
             subagent_executor: None,
             active_tasks: Arc::new(std::sync::Mutex::new(tokio::task::JoinSet::new())),
             user_timezone: None,
+            worker_id: Uuid::new_v4().to_string(),
         }
     }
 
@@ -116,26 +138,51 @@ impl RoutineEngine {
 
     /// Refresh the in-memory event trigger cache from DB.
     pub async fn refresh_event_cache(&self) {
+        let cache_version = self
+            .store
+            .get_routine_event_cache_version()
+            .await
+            .unwrap_or(0);
         match self.store.list_event_routines().await {
             Ok(routines) => {
                 let mut cache = Vec::new();
                 for routine in routines {
                     if let Trigger::Event { ref pattern, .. } = routine.trigger {
-                        match Regex::new(pattern) {
-                            Ok(re) => cache.push((routine.id, routine.clone(), re)),
-                            Err(e) => {
-                                tracing::warn!(
-                                    routine = %routine.name,
-                                    "Invalid event regex '{}': {}",
-                                    pattern, e
-                                );
+                        let regex = if pattern.trim().is_empty() {
+                            None
+                        } else {
+                            match compile_event_trigger_pattern(pattern) {
+                                Ok(re) => Some(re),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        routine = %routine.name,
+                                        "Invalid event regex '{}': {}",
+                                        pattern, e
+                                    );
+                                    continue;
+                                }
                             }
-                        }
+                        };
+                        cache.push(CachedEventRoutine {
+                            routine: routine.clone(),
+                            regex,
+                        });
                     }
                 }
+                cache.sort_by(|left, right| {
+                    right
+                        .routine
+                        .event_priority()
+                        .cmp(&left.routine.event_priority())
+                        .then_with(|| left.routine.created_at.cmp(&right.routine.created_at))
+                        .then_with(|| left.routine.name.cmp(&right.routine.name))
+                        .then_with(|| left.routine.id.cmp(&right.routine.id))
+                });
                 let count = cache.len();
                 *self.event_cache.write().await = cache;
-                tracing::debug!("Refreshed event cache: {} routines", count);
+                *self.event_cache_version.write().await = cache_version;
+                *self.event_cache_refreshed_at.write().await = Some(Utc::now());
+                tracing::debug!(cache_version, "Refreshed event cache: {} routines", count);
             }
             Err(e) => {
                 tracing::error!("Failed to refresh event cache: {}", e);
@@ -148,66 +195,40 @@ impl RoutineEngine {
     /// Called synchronously from the main loop after handle_message(). The actual
     /// execution is spawned async so this returns quickly.
     pub async fn check_event_triggers(&self, message: &IncomingMessage) -> usize {
+        self.ensure_event_cache_loaded().await;
+        let event = match self.enqueue_routine_event(message).await {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::error!("Failed to enqueue routine event: {}", error);
+                return 0;
+            }
+        };
+
         if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager()
             && manager.emergency_stop_active()
         {
-            tracing::warn!("Desktop autonomy emergency stop is active; skipping event routines");
+            tracing::warn!(
+                event_id = %event.id,
+                "Desktop autonomy emergency stop is active; leaving event queued"
+            );
             return 0;
         }
 
-        let cache = self.event_cache.read().await;
-        let mut fired = 0;
-
-        // Query the DB once for global concurrency — single source of truth.
-        let global_running = self
-            .store
-            .count_all_running_routine_runs()
-            .await
-            .unwrap_or(0);
-
-        for (_, routine, re) in cache.iter() {
-            // Channel filter
-            if let Trigger::Event {
-                channel: Some(ch), ..
-            } = &routine.trigger
-                && ch != &message.channel
-            {
-                continue;
+        match self.try_process_routine_event(event.id).await {
+            Ok(Some(fired)) => fired,
+            Ok(None) => 0,
+            Err(error) => {
+                tracing::error!(
+                    event_id = %event.id,
+                    "Failed to process routine event: {}",
+                    error
+                );
+                0
             }
-
-            // Regex match
-            if !re.is_match(&message.content) {
-                continue;
-            }
-
-            // Cooldown check
-            if !self.check_cooldown(routine) {
-                tracing::debug!(routine = %routine.name, "Skipped: cooldown active");
-                continue;
-            }
-
-            // Concurrent run check
-            if !self.check_concurrent(routine).await {
-                tracing::debug!(routine = %routine.name, "Skipped: max concurrent reached");
-                continue;
-            }
-
-            // Global capacity check (DB is the single source of truth)
-            if (global_running + fired as i64) >= self.config.max_concurrent_routines as i64 {
-                tracing::warn!(routine = %routine.name, "Skipped: global max concurrent reached");
-                continue;
-            }
-
-            let detail = truncate(&message.content, 200);
-            self.spawn_fire(routine.clone(), "event", Some(detail))
-                .await;
-            fired += 1;
         }
-
-        fired
     }
 
-    /// Check all due cron routines and fire them. Called by the cron ticker.
+    /// Check all due cron/system routines and fire them. Called by the cron ticker.
     pub async fn check_cron_triggers(&self) {
         if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager()
             && manager.emergency_stop_active()
@@ -216,94 +237,96 @@ impl RoutineEngine {
             return;
         }
 
-        let routines = match self.store.list_due_cron_routines().await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("Failed to load due cron routines: {}", e);
-                return;
-            }
+        if let Err(error) = self.enqueue_due_cron_triggers().await {
+            tracing::error!("Failed to enqueue due cron routines: {}", error);
+        }
+
+        let _ = self.drain_pending_trigger_queue().await;
+    }
+
+    async fn ensure_event_cache_loaded(&self) {
+        let cache_empty = self.event_cache.read().await.is_empty();
+        let ttl_expired = self
+            .event_cache_refreshed_at
+            .read()
+            .await
+            .as_ref()
+            .map(|ts| {
+                Utc::now().signed_duration_since(*ts).num_seconds()
+                    >= self.config.event_cache_ttl_secs as i64
+            })
+            .unwrap_or(true);
+        let version_changed = match self.store.get_routine_event_cache_version().await {
+            Ok(version) => version != *self.event_cache_version.read().await,
+            Err(_) => false,
         };
 
-        // Query the DB once for global concurrency — single source of truth.
-        let global_running = self
-            .store
-            .count_all_running_routine_runs()
-            .await
-            .unwrap_or(0);
-        let mut spawned_this_tick: i64 = 0;
-
-        for routine in routines {
-            if (global_running + spawned_this_tick) >= self.config.max_concurrent_routines as i64 {
-                tracing::warn!("Global max concurrent routines reached, skipping remaining");
-                break;
-            }
-
-            if !self.check_cooldown(&routine) {
-                continue;
-            }
-
-            if !self.check_concurrent(&routine).await {
-                continue;
-            }
-
-            let detail = match &routine.trigger {
-                Trigger::Cron { schedule } => Some(schedule.clone()),
-                Trigger::SystemEvent { schedule, .. } => schedule.clone(),
-                _ => None,
-            };
-
-            // SystemEvent trigger: inject message into heartbeat queue instead of
-            // running the routine's action. This is the cron→heartbeat bridge.
-            if let Trigger::SystemEvent { message, .. } = &routine.trigger {
-                if let Some(ref tx) = self.system_event_tx {
-                    let msg = IncomingMessage::new("heartbeat", "system_event", message)
-                        .with_metadata(serde_json::json!({
-                            "source": "system_event",
-                            "routine_name": routine.name,
-                        }));
-                    if let Err(e) = tx.send(msg).await {
-                        tracing::error!(
-                            routine = %routine.name,
-                            "Failed to inject system event into heartbeat queue: {}", e
-                        );
-                    } else {
-                        tracing::info!(
-                            routine = %routine.name,
-                            "Injected system event into heartbeat queue"
-                        );
-                        // Update runtime state only after the event was
-                        // actually enqueued; otherwise we would silently skip
-                        // a scheduled heartbeat on channel/backpressure errors.
-                        let next = next_fire_for_routine(
-                            &routine,
-                            self.user_timezone.as_deref(),
-                            Utc::now(),
-                        )
-                        .unwrap_or(None);
-                        let _ = self
-                            .store
-                            .update_routine_runtime(
-                                routine.id,
-                                Utc::now(),
-                                next,
-                                routine.run_count + 1,
-                                routine.consecutive_failures,
-                                &routine.state,
-                            )
-                            .await;
-                    }
-                } else {
-                    tracing::warn!(
-                        routine = %routine.name,
-                        "SystemEvent trigger but no system_event_tx — ignoring"
-                    );
-                }
-                continue;
-            }
-
-            self.spawn_fire(routine, "cron", detail).await;
-            spawned_this_tick += 1;
+        if cache_empty || ttl_expired || version_changed {
+            self.refresh_event_cache().await;
         }
+    }
+
+    fn claim_stale_before(&self) -> chrono::DateTime<Utc> {
+        Utc::now() - ChronoDuration::seconds(self.config.claim_lease_secs as i64)
+    }
+
+    async fn enqueue_routine_event(
+        &self,
+        message: &IncomingMessage,
+    ) -> Result<RoutineEvent, RoutineError> {
+        let identity = message.resolved_identity();
+        let event_type = message
+            .metadata
+            .get("event_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("message")
+            .to_string();
+        let idempotency_key = routine_event_idempotency_key(message, &identity, &event_type);
+        let diagnostics = serde_json::json!({
+            "message_id": message.id.to_string(),
+            "received_at": message.received_at.to_rfc3339(),
+            "content_preview": truncate(&message.content, EVENT_CONTENT_PREVIEW_LIMIT),
+            "thread_id": message.thread_id,
+            "attachment_count": message.attachments.len(),
+            "event_type": event_type,
+            "idempotency_key": idempotency_key,
+        });
+        let event = RoutineEvent {
+            id: Uuid::new_v4(),
+            principal_id: identity.principal_id.clone(),
+            actor_id: identity.actor_id.clone(),
+            channel: message.channel.clone(),
+            event_type,
+            raw_sender_id: identity.raw_sender_id.clone(),
+            conversation_scope_id: identity.conversation_scope_id.to_string(),
+            stable_external_conversation_key: identity.stable_external_conversation_key.clone(),
+            idempotency_key,
+            content: message.content.clone(),
+            content_hash: content_hash(&message.content).to_string(),
+            metadata: if message.metadata.is_null() {
+                serde_json::json!({})
+            } else {
+                message.metadata.clone()
+            },
+            status: RoutineEventStatus::Pending,
+            diagnostics,
+            claimed_by: None,
+            claimed_at: None,
+            lease_expires_at: None,
+            processed_at: None,
+            error_message: None,
+            matched_routines: 0,
+            fired_routines: 0,
+            attempt_count: 0,
+            created_at: Utc::now(),
+        };
+
+        self.store
+            .create_routine_event(&event)
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: error.to_string(),
+            })
     }
 
     /// Fire a routine manually (from tool call or CLI).
@@ -329,47 +352,783 @@ impl RoutineEngine {
             });
         }
 
-        let run_id = Uuid::new_v4();
-        let run = RoutineRun {
-            id: run_id,
-            routine_id: routine.id,
-            trigger_type: "manual".to_string(),
-            trigger_detail: None,
-            started_at: Utc::now(),
-            completed_at: None,
-            status: RunStatus::Running,
-            result_summary: None,
-            tokens_used: None,
-            job_id: None,
-            created_at: Utc::now(),
-        };
+        self.spawn_fire(routine, "manual", None, None).await
+    }
 
-        if let Err(e) = self.store.create_routine_run(&run).await {
-            return Err(RoutineError::Database {
-                reason: format!("failed to create run record: {e}"),
-            });
+    async fn enqueue_due_cron_triggers(&self) -> Result<(), RoutineError> {
+        let due_routines = self
+            .store
+            .list_due_cron_routines()
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: error.to_string(),
+            })?;
+        let now = Utc::now();
+
+        for routine in due_routines {
+            self.enqueue_due_routine_triggers(&routine, now).await?;
         }
 
-        // Execute inline for manual triggers (caller wants to wait)
-        let engine = EngineContext {
-            store: self.store.clone(),
-            llm: self.llm.clone(),
-            workspace: self.workspace.clone(),
-            notify_tx: self.notify_tx.clone(),
-            scheduler: self.scheduler.clone(),
-            sse_tx: self.sse_tx.clone(),
-            system_event_tx: self.system_event_tx.clone(),
-            subagent_executor: self.subagent_executor.clone(),
-            user_timezone: self.user_timezone.clone(),
+        Ok(())
+    }
+
+    async fn enqueue_due_routine_triggers(
+        &self,
+        routine: &Routine,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<(), RoutineError> {
+        let due_plan = due_slots_for_routine(routine, self.user_timezone.as_deref(), now)?;
+        if due_plan.due_times.is_empty() {
+            return Ok(());
+        }
+
+        let trigger_kind = trigger_kind_for_routine(routine);
+        for due_at in due_plan.due_times {
+            let active_key = Some(active_key_for_scheduled_trigger(
+                routine,
+                trigger_kind,
+                due_at,
+            ));
+            let trigger = RoutineTrigger {
+                id: Uuid::new_v4(),
+                routine_id: routine.id,
+                trigger_kind,
+                trigger_label: scheduled_trigger_label(routine),
+                due_at,
+                status: RoutineTriggerStatus::Pending,
+                decision: None,
+                active_key,
+                idempotency_key: scheduled_trigger_idempotency_key(
+                    routine,
+                    trigger_kind,
+                    due_at,
+                ),
+                claimed_by: None,
+                claimed_at: None,
+                lease_expires_at: None,
+                processed_at: None,
+                error_message: None,
+                diagnostics: serde_json::json!({
+                    "enqueued_at": now.to_rfc3339(),
+                    "catch_up_mode": catch_up_mode_label(routine.policy.catch_up_mode),
+                    "backlog_collapsed": due_plan.backlog_collapsed,
+                    "scheduled_due_at": due_at.to_rfc3339(),
+                    "config_version": routine.config_version,
+                }),
+                coalesced_count: 0,
+                backlog_collapsed: due_plan.backlog_collapsed,
+                routine_config_version: routine.config_version,
+                created_at: now,
+            };
+            self.store
+                .enqueue_routine_trigger(&trigger)
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
+        }
+
+        Ok(())
+    }
+
+    async fn drain_pending_trigger_queue(&self) -> usize {
+        let mut total_fired = 0usize;
+
+        loop {
+            let claimed = match self
+                .store
+                .claim_routine_triggers(
+                    &self.worker_id,
+                    self.claim_stale_before(),
+                    TRIGGER_QUEUE_BATCH_LIMIT,
+                )
+                .await
+            {
+                Ok(items) => items,
+                Err(error) => {
+                    tracing::error!("Failed to claim scheduled routine triggers: {}", error);
+                    break;
+                }
+            };
+
+            if claimed.is_empty() {
+                break;
+            }
+
+            let batch_len = claimed.len();
+            for trigger in claimed {
+                match self.process_claimed_trigger(trigger).await {
+                    Ok(fired) => total_fired += usize::from(fired),
+                    Err(error) => {
+                        tracing::error!("Failed to process scheduled routine trigger: {}", error);
+                    }
+                }
+            }
+
+            if batch_len < TRIGGER_QUEUE_BATCH_LIMIT as usize {
+                break;
+            }
+        }
+
+        total_fired
+    }
+
+    async fn process_claimed_trigger(&self, trigger: RoutineTrigger) -> Result<bool, RoutineError> {
+        let Some(routine) = self
+            .store
+            .get_routine(trigger.routine_id)
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: error.to_string(),
+            })?
+        else {
+            let diagnostics = serde_json::json!({
+                "decision": RoutineTriggerDecision::SkippedDisabled.to_string(),
+                "reason": "routine no longer exists",
+                "claimed_by": self.worker_id,
+            });
+            self.store
+                .complete_routine_trigger(
+                    trigger.id,
+                    Utc::now(),
+                    RoutineTriggerDecision::SkippedDisabled,
+                    &diagnostics,
+                )
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
+            return Ok(false);
         };
-        let routine_name = routine.name.clone();
 
-        self.spawn_tracked_task(&routine_name, async move {
-            execute_routine(engine, routine, run).await;
-        })
-        .map_err(|reason| RoutineError::ExecutionFailed { reason })?;
+        if !routine.enabled {
+            let diagnostics = serde_json::json!({
+                "decision": RoutineTriggerDecision::SkippedDisabled.to_string(),
+                "reason": "routine is disabled",
+                "claimed_by": self.worker_id,
+            });
+            self.store
+                .complete_routine_trigger(
+                    trigger.id,
+                    Utc::now(),
+                    RoutineTriggerDecision::SkippedDisabled,
+                    &diagnostics,
+                )
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
+            return Ok(false);
+        }
 
-        Ok(run_id)
+        let trigger_key = scheduled_run_trigger_key(&trigger);
+        if self
+            .store
+            .routine_run_exists_for_trigger_key(routine.id, &trigger_key)
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: error.to_string(),
+            })?
+        {
+            let diagnostics = serde_json::json!({
+                "decision": RoutineTriggerDecision::SkippedDuplicate.to_string(),
+                "reason": "a run already exists for this logical scheduled trigger",
+                "claimed_by": self.worker_id,
+                "idempotency_key": trigger.idempotency_key,
+            });
+            self.store
+                .complete_routine_trigger(
+                    trigger.id,
+                    Utc::now(),
+                    RoutineTriggerDecision::SkippedDuplicate,
+                    &diagnostics,
+                )
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
+            return Ok(false);
+        }
+
+        if matches!(routine.policy.catch_up_mode, RoutineCatchUpMode::Skip) {
+            let next_fire =
+                next_fire_for_routine(&routine, self.user_timezone.as_deref(), Utc::now())?;
+            self.reschedule_without_run(&routine, next_fire).await?;
+            let diagnostics = serde_json::json!({
+                "decision": RoutineTriggerDecision::SkippedCatchUp.to_string(),
+                "reason": "catch-up mode is skip; backlog was collapsed without execution",
+                "claimed_by": self.worker_id,
+                "backlog_collapsed": trigger.backlog_collapsed,
+                "next_fire_at": next_fire.map(|value| value.to_rfc3339()),
+            });
+            self.store
+                .complete_routine_trigger(
+                    trigger.id,
+                    Utc::now(),
+                    RoutineTriggerDecision::SkippedCatchUp,
+                    &diagnostics,
+                )
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
+            return Ok(false);
+        }
+
+        if !self.check_cooldown(&routine) {
+            let diagnostics = serde_json::json!({
+                "decision": RoutineTriggerDecision::DeferredCooldown.to_string(),
+                "reason": "routine cooldown is still active",
+                "claimed_by": self.worker_id,
+                "due_at": trigger.due_at.to_rfc3339(),
+            });
+            self.store
+                .release_routine_trigger(trigger.id, &diagnostics)
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
+            return Ok(false);
+        }
+
+        if !matches!(trigger.trigger_kind, RoutineTriggerKind::SystemEvent)
+            && !self.check_concurrent(&routine).await
+        {
+            let diagnostics = serde_json::json!({
+                "decision": RoutineTriggerDecision::DeferredConcurrency.to_string(),
+                "reason": "routine is already at max concurrent runs",
+                "claimed_by": self.worker_id,
+                "due_at": trigger.due_at.to_rfc3339(),
+            });
+            self.store
+                .release_routine_trigger(trigger.id, &diagnostics)
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
+            return Ok(false);
+        }
+
+        if !matches!(trigger.trigger_kind, RoutineTriggerKind::SystemEvent) {
+            let global_running = self
+                .store
+                .count_all_running_routine_runs()
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
+            if global_running >= self.config.max_concurrent_routines as i64 {
+                let diagnostics = serde_json::json!({
+                    "decision": RoutineTriggerDecision::DeferredGlobalCapacity.to_string(),
+                    "reason": "global routine capacity is currently full",
+                    "claimed_by": self.worker_id,
+                    "due_at": trigger.due_at.to_rfc3339(),
+                });
+                self.store
+                    .release_routine_trigger(trigger.id, &diagnostics)
+                    .await
+                    .map_err(|error| RoutineError::Database {
+                        reason: error.to_string(),
+                    })?;
+                return Ok(false);
+            }
+        }
+
+        match trigger.trigger_kind {
+            RoutineTriggerKind::Cron => {
+                let trigger_detail = trigger
+                    .trigger_label
+                    .clone()
+                    .unwrap_or_else(|| trigger.due_at.to_rfc3339());
+                let run_id = self
+                    .spawn_fire(
+                        routine.clone(),
+                        "cron",
+                        Some(trigger_detail),
+                        Some(trigger_key),
+                    )
+                    .await?;
+                let diagnostics = serde_json::json!({
+                    "decision": RoutineTriggerDecision::Fired.to_string(),
+                    "claimed_by": self.worker_id,
+                    "due_at": trigger.due_at.to_rfc3339(),
+                    "run_id": run_id.to_string(),
+                    "backlog_collapsed": trigger.backlog_collapsed,
+                    "coalesced_count": trigger.coalesced_count,
+                });
+                self.store
+                    .complete_routine_trigger(
+                        trigger.id,
+                        Utc::now(),
+                        RoutineTriggerDecision::Fired,
+                        &diagnostics,
+                    )
+                    .await
+                    .map_err(|error| RoutineError::Database {
+                        reason: error.to_string(),
+                    })?;
+                Ok(true)
+            }
+            RoutineTriggerKind::SystemEvent => {
+                if let Err(error) = self
+                    .dispatch_system_event(&routine, &trigger, &trigger_key)
+                    .await
+                {
+                    let diagnostics = serde_json::json!({
+                        "decision": RoutineTriggerDecision::DeferredGlobalCapacity.to_string(),
+                        "claimed_by": self.worker_id,
+                        "reason": error.to_string(),
+                        "due_at": trigger.due_at.to_rfc3339(),
+                    });
+                    self.store
+                        .release_routine_trigger(trigger.id, &diagnostics)
+                        .await
+                        .map_err(|store_error| RoutineError::Database {
+                            reason: store_error.to_string(),
+                        })?;
+                    return Ok(false);
+                }
+                let diagnostics = serde_json::json!({
+                    "decision": RoutineTriggerDecision::Fired.to_string(),
+                    "claimed_by": self.worker_id,
+                    "due_at": trigger.due_at.to_rfc3339(),
+                    "idempotency_key": trigger.idempotency_key,
+                });
+                self.store
+                    .complete_routine_trigger(
+                        trigger.id,
+                        Utc::now(),
+                        RoutineTriggerDecision::Fired,
+                        &diagnostics,
+                    )
+                    .await
+                    .map_err(|error| RoutineError::Database {
+                        reason: error.to_string(),
+                    })?;
+                Ok(true)
+            }
+        }
+    }
+
+    async fn dispatch_system_event(
+        &self,
+        routine: &Routine,
+        trigger: &RoutineTrigger,
+        trigger_key: &str,
+    ) -> Result<(), RoutineError> {
+        let Trigger::SystemEvent { message, .. } = &routine.trigger else {
+            return Err(RoutineError::ExecutionFailed {
+                reason: "scheduled system event queue item did not resolve to a system_event routine"
+                    .to_string(),
+            });
+        };
+        let tx = self
+            .system_event_tx
+            .as_ref()
+            .ok_or_else(|| RoutineError::ExecutionFailed {
+                reason: "system event queue is not available".to_string(),
+            })?;
+
+        let event_message = IncomingMessage::new("heartbeat", "system", message.clone())
+            .with_metadata(serde_json::json!({
+                "source": "system_event",
+                "routine_id": routine.id.to_string(),
+                "routine_name": routine.name,
+                "trigger_id": trigger.id.to_string(),
+                "trigger_key": trigger_key,
+                "scheduled_due_at": trigger.due_at.to_rfc3339(),
+            }));
+        tx.send(event_message)
+            .await
+            .map_err(|error| RoutineError::ExecutionFailed {
+                reason: format!("failed to enqueue system event: {error}"),
+            })?;
+
+        let now = Utc::now();
+        let next_fire = next_fire_for_routine(routine, self.user_timezone.as_deref(), now)?;
+        persist_routine_runtime_update(
+            &self.store,
+            routine.id,
+            now,
+            next_fire,
+            routine.run_count + 1,
+            0,
+            &routine.state,
+        )
+        .await
+        .map_err(|error| RoutineError::Database {
+            reason: error.to_string(),
+        })?;
+
+        Ok(())
+    }
+
+    async fn reschedule_without_run(
+        &self,
+        routine: &Routine,
+        next_fire_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<(), RoutineError> {
+        let mut updated = routine.clone();
+        updated.next_fire_at = next_fire_at;
+        self.store
+            .update_routine(&updated)
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: error.to_string(),
+            })
+    }
+
+    async fn try_process_routine_event(
+        &self,
+        event_id: Uuid,
+    ) -> Result<Option<usize>, RoutineError> {
+        let claimed = self
+            .store
+            .claim_routine_event(event_id, &self.worker_id, self.claim_stale_before())
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: error.to_string(),
+            })?;
+
+        let Some(event) = claimed else {
+            return Ok(None);
+        };
+
+        match self.process_claimed_event(event.clone()).await {
+            Ok(fired) => Ok(Some(fired)),
+            Err(error) => {
+                if let Err(store_error) = self
+                    .store
+                    .fail_routine_event(event.id, Utc::now(), &error.to_string())
+                    .await
+                {
+                    tracing::error!(
+                        event_id = %event.id,
+                        "Failed to mark routine event as failed: {}",
+                        store_error
+                    );
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn drain_pending_event_queue(&self) -> usize {
+        if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager()
+            && manager.emergency_stop_active()
+        {
+            tracing::warn!("Desktop autonomy emergency stop is active; skipping event inbox drain");
+            return 0;
+        }
+
+        self.ensure_event_cache_loaded().await;
+        let mut total_fired = 0usize;
+
+        loop {
+            let pending = match self
+                .store
+                .list_pending_routine_events(self.claim_stale_before(), EVENT_QUEUE_BATCH_LIMIT)
+                .await
+            {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::error!("Failed to load pending routine events: {}", error);
+                    break;
+                }
+            };
+
+            if pending.is_empty() {
+                break;
+            }
+
+            let batch_len = pending.len();
+            for event in pending {
+                match self.try_process_routine_event(event.id).await {
+                    Ok(Some(fired)) => total_fired += fired,
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::error!(
+                            event_id = %event.id,
+                            "Failed to drain pending routine event: {}",
+                            error
+                        );
+                    }
+                }
+            }
+
+            if batch_len < EVENT_QUEUE_BATCH_LIMIT as usize {
+                break;
+            }
+        }
+
+        total_fired
+    }
+
+    async fn process_claimed_event(&self, event: RoutineEvent) -> Result<usize, RoutineError> {
+        self.ensure_event_cache_loaded().await;
+
+        let cache = self.event_cache.read().await;
+        let total_event_routines = cache.len() as u32;
+        let global_running = self
+            .store
+            .count_all_running_routine_runs()
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: error.to_string(),
+            })?;
+
+        let now = Utc::now();
+        let content_preview = truncate(&event.content, EVENT_CONTENT_PREVIEW_LIMIT);
+        let mut owner_candidate_routines = 0u32;
+        let mut matched_routines = 0u32;
+        let mut fired_routines = 0u32;
+        let mut decision_counts = serde_json::Map::new();
+        let mut plans = Vec::new();
+        let mut has_deferred = false;
+
+        for cached in cache.iter() {
+            let routine = &cached.routine;
+            if routine.user_id != event.principal_id || routine.owner_actor_id() != event.actor_id {
+                continue;
+            }
+
+            owner_candidate_routines += 1;
+            let sequence_num = plans.len() as u32;
+            let age_secs = now.signed_duration_since(event.created_at).num_seconds().max(0) as u64;
+            let mut details = serde_json::json!({
+                "claimed_by": self.worker_id,
+                "event_age_secs": age_secs,
+                "event_type": event.event_type,
+                "content_hash": event.content_hash,
+            });
+
+            let Trigger::Event {
+                channel,
+                event_type,
+                actor,
+                metadata,
+                ..
+            } = &routine.trigger
+            else {
+                continue;
+            };
+
+            let (decision, reason, should_fire, trigger_key) = if age_secs
+                > routine.effective_event_max_age_secs(self.config.default_event_max_age_secs)
+            {
+                (
+                    RoutineEventDecision::SkippedExpired,
+                    Some("durably queued event exceeded the routine max age".to_string()),
+                    false,
+                    None,
+                )
+            } else if channel.as_ref().is_some_and(|value| value != &event.channel) {
+                (
+                    RoutineEventDecision::IgnoredChannel,
+                    Some(format!(
+                        "event channel '{}' does not match routine channel '{}'",
+                        event.channel,
+                        channel.as_deref().unwrap_or_default()
+                    )),
+                    false,
+                    None,
+                )
+            } else if event_type
+                .as_ref()
+                .is_some_and(|value| value != &event.event_type)
+            {
+                (
+                    RoutineEventDecision::IgnoredEventType,
+                    Some(format!(
+                        "event type '{}' does not match routine event type '{}'",
+                        event.event_type,
+                        event_type.as_deref().unwrap_or_default()
+                    )),
+                    false,
+                    None,
+                )
+            } else if actor.as_ref().is_some_and(|value| {
+                value != &event.actor_id && value != &event.raw_sender_id
+            }) {
+                (
+                    RoutineEventDecision::IgnoredActor,
+                    Some("event actor did not match the routine actor filter".to_string()),
+                    false,
+                    None,
+                )
+            } else if metadata
+                .as_ref()
+                .is_some_and(|expected| !metadata_contains_subset(expected, &event.metadata))
+            {
+                (
+                    RoutineEventDecision::IgnoredMetadata,
+                    Some("event metadata did not match the routine metadata filter".to_string()),
+                    false,
+                    None,
+                )
+            } else if cached
+                .regex
+                .as_ref()
+                .is_some_and(|regex| !regex.is_match(&event.content))
+            {
+                (
+                    RoutineEventDecision::IgnoredPattern,
+                    Some("pattern did not match event content".to_string()),
+                    false,
+                    None,
+                )
+            } else {
+                matched_routines += 1;
+                let candidate_trigger_key = event_run_trigger_key(&event);
+                if self
+                    .store
+                    .routine_run_exists_for_trigger_key(routine.id, &candidate_trigger_key)
+                    .await
+                    .map_err(|error| RoutineError::Database {
+                        reason: error.to_string(),
+                    })?
+                {
+                    (
+                        RoutineEventDecision::SkippedDuplicate,
+                        Some(
+                            "this event already produced a logical run for the routine"
+                                .to_string(),
+                        ),
+                        false,
+                        None,
+                    )
+                } else if !self.check_cooldown(routine) {
+                    (
+                        RoutineEventDecision::SkippedCooldown,
+                        Some("routine cooldown is still active".to_string()),
+                        false,
+                        None,
+                    )
+                } else if !self.check_concurrent(routine).await {
+                    has_deferred = true;
+                    (
+                        RoutineEventDecision::DeferredConcurrency,
+                        Some("routine is already at max concurrent runs".to_string()),
+                        false,
+                        None,
+                    )
+                } else if (global_running + fired_routines as i64)
+                    >= self.config.max_concurrent_routines as i64
+                {
+                    has_deferred = true;
+                    (
+                        RoutineEventDecision::DeferredGlobalCapacity,
+                        Some("global routine capacity is currently full".to_string()),
+                        false,
+                        None,
+                    )
+                } else {
+                    fired_routines += 1;
+                    (
+                        RoutineEventDecision::Fired,
+                        Some("event matched and the routine was dispatched".to_string()),
+                        true,
+                        Some(candidate_trigger_key),
+                    )
+                }
+            };
+
+            increment_decision_count(&mut decision_counts, decision);
+            if let Some(trigger_key) = &trigger_key {
+                details["trigger_key"] = serde_json::json!(trigger_key);
+            }
+            plans.push(EventEvaluationPlan {
+                routine: routine.clone(),
+                decision,
+                reason,
+                details,
+                should_fire,
+                sequence_num,
+                trigger_key,
+            });
+        }
+        drop(cache);
+
+        for plan in &plans {
+            let evaluation = RoutineEventEvaluation {
+                id: Uuid::new_v4(),
+                event_id: event.id,
+                routine_id: plan.routine.id,
+                decision: plan.decision,
+                reason: plan.reason.clone(),
+                details: plan.details.clone(),
+                sequence_num: plan.sequence_num,
+                channel: event.channel.clone(),
+                content_preview: content_preview.clone(),
+                created_at: Utc::now(),
+            };
+            self.store
+                .upsert_routine_event_evaluation(&evaluation)
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
+        }
+
+        let mut dispatch_error = None;
+        for plan in plans.iter().filter(|plan| plan.should_fire) {
+            let Some(trigger_key) = plan.trigger_key.clone() else {
+                continue;
+            };
+            if let Err(error) = self
+                .spawn_fire(
+                    plan.routine.clone(),
+                    "event",
+                    Some(content_preview.clone()),
+                    Some(trigger_key),
+                )
+                .await
+            {
+                dispatch_error = Some(error.to_string());
+                has_deferred = true;
+                break;
+            }
+        }
+
+        let diagnostics = serde_json::json!({
+            "channel": event.channel,
+            "event_type": event.event_type,
+            "content_preview": content_preview,
+            "owner_candidate_routines": owner_candidate_routines,
+            "identity_mismatch_count": total_event_routines.saturating_sub(owner_candidate_routines),
+            "evaluated_routines": plans.len(),
+            "matched_routines": matched_routines,
+            "fired_routines": fired_routines,
+            "decision_counts": decision_counts,
+            "claimed_by": self.worker_id,
+            "deferred": has_deferred,
+            "dispatch_error": dispatch_error,
+        });
+
+        if has_deferred {
+            self.store
+                .release_routine_event(event.id, &diagnostics)
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
+            return Ok(fired_routines as usize);
+        }
+
+        self.store
+            .complete_routine_event(
+                event.id,
+                Utc::now(),
+                matched_routines,
+                fired_routines,
+                &diagnostics,
+            )
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: error.to_string(),
+            })?;
+
+        Ok(fired_routines as usize)
     }
 
     /// Spawn a fire in a background task.
@@ -378,12 +1137,14 @@ impl RoutineEngine {
         routine: Routine,
         trigger_type: &str,
         trigger_detail: Option<String>,
-    ) {
+        trigger_key: Option<String>,
+    ) -> Result<Uuid, RoutineError> {
         let run = RoutineRun {
             id: Uuid::new_v4(),
             routine_id: routine.id,
             trigger_type: trigger_type.to_string(),
             trigger_detail,
+            trigger_key,
             started_at: Utc::now(),
             completed_at: None,
             status: RunStatus::Running,
@@ -392,6 +1153,13 @@ impl RoutineEngine {
             job_id: None,
             created_at: Utc::now(),
         };
+
+        self.store
+            .create_routine_run(&run)
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: format!("failed to create run record: {error}"),
+            })?;
 
         let engine = EngineContext {
             store: self.store.clone(),
@@ -405,19 +1173,15 @@ impl RoutineEngine {
             user_timezone: self.user_timezone.clone(),
         };
 
-        // Record the run in DB, then spawn execution (IC-018: tracked via JoinSet)
-        let store = self.store.clone();
         let routine_name = routine.name.clone();
-        let log_routine_name = routine_name.clone();
-        if let Err(reason) = self.spawn_tracked_task(&routine_name, async move {
-            if let Err(e) = store.create_routine_run(&run).await {
-                tracing::error!(routine = %routine.name, "Failed to record run: {}", e);
-                return;
-            }
-            execute_routine(engine, routine, run).await;
-        }) {
-            tracing::error!(routine = %log_routine_name, "{}", reason);
-        }
+        let run_id = run.id;
+        let run_for_task = run.clone();
+        self.spawn_tracked_task(&routine_name, async move {
+            execute_routine(engine, routine, run_for_task).await;
+        })
+        .map_err(|reason| RoutineError::ExecutionFailed { reason })?;
+
+        Ok(run_id)
     }
 
     /// IC-018: Abort all running routine tasks. Called on engine shutdown.
@@ -487,6 +1251,196 @@ impl RoutineEngine {
     }
 }
 
+struct EventEvaluationPlan {
+    routine: Routine,
+    decision: RoutineEventDecision,
+    reason: Option<String>,
+    details: serde_json::Value,
+    should_fire: bool,
+    sequence_num: u32,
+    trigger_key: Option<String>,
+}
+
+struct DueSlotPlan {
+    due_times: Vec<chrono::DateTime<Utc>>,
+    backlog_collapsed: bool,
+}
+
+fn due_slots_for_routine(
+    routine: &Routine,
+    user_timezone: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> Result<DueSlotPlan, RoutineError> {
+    let Some(first_due) = routine.next_fire_at else {
+        return Ok(DueSlotPlan {
+            due_times: Vec::new(),
+            backlog_collapsed: false,
+        });
+    };
+    if first_due > now {
+        return Ok(DueSlotPlan {
+            due_times: Vec::new(),
+            backlog_collapsed: false,
+        });
+    }
+
+    match routine.policy.catch_up_mode {
+        RoutineCatchUpMode::Skip | RoutineCatchUpMode::RunOnceNow => {
+            let backlog_collapsed =
+                next_fire_for_routine(routine, user_timezone, first_due)?.is_some_and(|next| next <= now);
+            Ok(DueSlotPlan {
+                due_times: vec![first_due],
+                backlog_collapsed,
+            })
+        }
+        RoutineCatchUpMode::Replay => {
+            let mut due_times = vec![first_due];
+            let mut cursor = first_due;
+            let mut backlog_collapsed = false;
+
+            while due_times.len() < TRIGGER_QUEUE_BATCH_LIMIT as usize {
+                let Some(next_due) = next_fire_for_routine(routine, user_timezone, cursor)? else {
+                    break;
+                };
+                if next_due > now {
+                    break;
+                }
+                due_times.push(next_due);
+                cursor = next_due;
+            }
+
+            if let Some(next_due) = next_fire_for_routine(routine, user_timezone, cursor)?
+                && next_due <= now
+            {
+                backlog_collapsed = true;
+            }
+
+            Ok(DueSlotPlan {
+                due_times,
+                backlog_collapsed,
+            })
+        }
+    }
+}
+
+fn trigger_kind_for_routine(routine: &Routine) -> RoutineTriggerKind {
+    match routine.trigger {
+        Trigger::SystemEvent { .. } => RoutineTriggerKind::SystemEvent,
+        _ => RoutineTriggerKind::Cron,
+    }
+}
+
+fn active_key_for_scheduled_trigger(
+    routine: &Routine,
+    trigger_kind: RoutineTriggerKind,
+    due_at: chrono::DateTime<Utc>,
+) -> String {
+    match routine.policy.catch_up_mode {
+        RoutineCatchUpMode::Replay => format!(
+            "routine:{}:{}:{}",
+            routine.id,
+            trigger_kind,
+            due_at.timestamp_millis()
+        ),
+        RoutineCatchUpMode::Skip | RoutineCatchUpMode::RunOnceNow => {
+            format!("routine:{}:{}", routine.id, trigger_kind)
+        }
+    }
+}
+
+fn scheduled_trigger_idempotency_key(
+    routine: &Routine,
+    trigger_kind: RoutineTriggerKind,
+    due_at: chrono::DateTime<Utc>,
+) -> String {
+    format!(
+        "routine:{}:{}:{}:v{}",
+        routine.id,
+        trigger_kind,
+        due_at.timestamp_millis(),
+        routine.config_version
+    )
+}
+
+fn scheduled_trigger_label(routine: &Routine) -> Option<String> {
+    match &routine.trigger {
+        Trigger::Cron { schedule } => Some(schedule.clone()),
+        Trigger::SystemEvent { message, .. } => Some(truncate(message, 120)),
+        _ => None,
+    }
+}
+
+fn scheduled_run_trigger_key(trigger: &RoutineTrigger) -> String {
+    format!("scheduled:{}", trigger.idempotency_key)
+}
+
+fn event_run_trigger_key(event: &RoutineEvent) -> String {
+    format!("event:{}", event.idempotency_key)
+}
+
+fn catch_up_mode_label(mode: RoutineCatchUpMode) -> &'static str {
+    match mode {
+        RoutineCatchUpMode::Skip => "skip",
+        RoutineCatchUpMode::RunOnceNow => "run_once_now",
+        RoutineCatchUpMode::Replay => "replay",
+    }
+}
+
+fn metadata_contains_subset(expected: &serde_json::Value, actual: &serde_json::Value) -> bool {
+    match (expected, actual) {
+        (serde_json::Value::Object(expected), serde_json::Value::Object(actual)) => {
+            expected.iter().all(|(key, value)| {
+                actual
+                    .get(key)
+                    .is_some_and(|actual_value| metadata_contains_subset(value, actual_value))
+            })
+        }
+        (serde_json::Value::Array(expected), serde_json::Value::Array(actual)) => expected
+            .iter()
+            .all(|expected_value| actual.iter().any(|actual_value| metadata_contains_subset(expected_value, actual_value))),
+        _ => expected == actual,
+    }
+}
+
+fn increment_decision_count(
+    counts: &mut serde_json::Map<String, serde_json::Value>,
+    decision: RoutineEventDecision,
+) {
+    let key = decision.to_string();
+    let next = counts
+        .get(&key)
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+        + 1;
+    counts.insert(key, serde_json::json!(next));
+}
+
+fn routine_event_idempotency_key(
+    message: &IncomingMessage,
+    identity: &crate::identity::ResolvedIdentity,
+    event_type: &str,
+) -> String {
+    let source_id = [
+        "message_id",
+        "external_message_id",
+        "gmail_message_id",
+        "imessage_guid",
+    ]
+    .iter()
+    .find_map(|key| message.metadata.get(key).and_then(|value| value.as_str()))
+    .map(str::to_string)
+    .unwrap_or_else(|| message.id.to_string());
+
+    format!(
+        "event:{}:{}:{}:{}:{}",
+        message.channel,
+        identity.principal_id,
+        identity.actor_id,
+        event_type,
+        source_id
+    )
+}
+
 /// Shared context passed to the execution function.
 struct EngineContext {
     store: Arc<dyn Database>,
@@ -511,6 +1465,47 @@ impl EngineContext {
             let _ = tx.send(event);
         }
     }
+}
+
+pub(crate) async fn persist_routine_runtime_update(
+    store: &Arc<dyn Database>,
+    routine_id: Uuid,
+    last_run_at: chrono::DateTime<Utc>,
+    next_fire_at: Option<chrono::DateTime<Utc>>,
+    run_count: u64,
+    consecutive_failures: u32,
+    state: &serde_json::Value,
+) -> Result<(), DatabaseError> {
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        match store
+            .update_routine_runtime(
+                routine_id,
+                last_run_at,
+                next_fire_at,
+                run_count,
+                consecutive_failures,
+                state,
+            )
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < 3 {
+                    tracing::warn!(
+                        routine_id = %routine_id,
+                        attempt,
+                        "Failed to persist routine runtime update; retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100 * attempt as u64)).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| DatabaseError::Query("unknown runtime update failure".to_string())))
 }
 
 /// IC-006: Spawn a periodic zombie reaper for routine runs.
@@ -648,17 +1643,25 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         let now = Utc::now();
         let next_fire =
             next_fire_for_routine(&routine, ctx.user_timezone.as_deref(), now).unwrap_or(None);
-        let _ = ctx
-            .store
-            .update_routine_runtime(
-                routine.id,
-                now,
-                next_fire,
-                routine.run_count + 1,
-                routine.consecutive_failures,
-                &routine.state,
-            )
-            .await;
+        let state = routine_state_with_runtime_advance(&routine.state, run.id, now);
+        if let Err(error) = persist_routine_runtime_update(
+            &ctx.store,
+            routine.id,
+            now,
+            next_fire,
+            routine.run_count + 1,
+            routine.consecutive_failures,
+            &state,
+        )
+        .await
+        {
+            tracing::error!(
+                routine = %routine.name,
+                run_id = %run.id,
+                "Failed to persist dispatched routine runtime state: {}",
+                error
+            );
+        }
         return;
     }
 
@@ -733,17 +1736,16 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         0
     };
 
-    if let Err(e) = ctx
-        .store
-        .update_routine_runtime(
-            routine.id,
-            now,
-            next_fire,
-            routine.run_count + 1,
-            new_failures,
-            &routine.state,
-        )
-        .await
+    if let Err(e) = persist_routine_runtime_update(
+        &ctx.store,
+        routine.id,
+        now,
+        next_fire,
+        routine.run_count + 1,
+        new_failures,
+        &routine.state,
+    )
+    .await
     {
         tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
     }
@@ -839,6 +1841,7 @@ async fn execute_as_subagent(
     // can finalize the routine_run on completion.
     let channel_metadata = serde_json::json!({
         "thread_id": "agent:main",
+        "routine_id": routine.id.to_string(),
         "routine_name": routine.name,
         "routine_run_id": run.id.to_string(),
         "reinject_result": false,
@@ -982,6 +1985,7 @@ async fn execute_full_job(
             title,
             description,
             Some(metadata),
+            routine.id,
             routine.name.clone(),
             run.id.to_string(),
         )
@@ -1293,6 +2297,7 @@ async fn execute_heartbeat(
             &title,
             &full_prompt,
             Some(metadata),
+            routine.id,
             routine.name.clone(),
             run.id.to_string(),
         )
@@ -1494,12 +2499,18 @@ pub fn spawn_cron_ticker(
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        engine.refresh_event_cache().await;
+        engine.drain_pending_event_queue().await;
+        engine.check_cron_triggers().await;
+
         let mut ticker = tokio::time::interval(interval);
-        // Skip immediate first tick
+        // Align the first timed tick to `interval` after the startup catch-up.
         ticker.tick().await;
 
         loop {
             ticker.tick().await;
+            engine.refresh_event_cache().await;
+            engine.drain_pending_event_queue().await;
             engine.check_cron_triggers().await;
             // IC-006: Zombie reaping is handled by the dedicated spawn_zombie_reaper
             // task (every 120s). The cron ticker only checks triggers.
@@ -1608,11 +2619,13 @@ mod tests {
             action,
             guardrails: crate::agent::routine::RoutineGuardrails::default(),
             notify: NotifyConfig::default(),
+            policy: Default::default(),
             last_run_at: None,
             next_fire_at: None,
             run_count: 0,
             consecutive_failures: 0,
             state: serde_json::json!({}),
+            config_version: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1744,5 +2757,275 @@ mod tests {
             (refreshed_next - due_at).num_milliseconds().abs() < 1_000,
             "next_fire_at should remain effectively unchanged"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn cron_ticker_checks_due_routines_immediately_on_startup() {
+        let (db, _tmp) = test_db().await;
+        let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "default",
+            Arc::clone(&db),
+        ));
+        let (notify_tx, _notify_rx) = mpsc::channel(4);
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            Arc::new(StubLlm::new("Review the deployment logs.")),
+            workspace,
+            notify_tx,
+            None,
+        ));
+
+        let mut routine = make_test_routine(
+            "startup-cron-catchup",
+            Trigger::Cron {
+                schedule: "0 */15 * * * * *".to_string(),
+            },
+            RoutineAction::Lightweight {
+                prompt: "Inspect deployment state".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 32,
+            },
+        );
+        routine.next_fire_at = Some(Utc::now() - ChronoDuration::minutes(1));
+        db.create_routine(&routine).await.unwrap();
+
+        let handle = spawn_cron_ticker(Arc::clone(&engine), Duration::from_secs(60));
+
+        let mut fired = false;
+        for _ in 0..20 {
+            let refreshed = db.get_routine(routine.id).await.unwrap().unwrap();
+            if refreshed.run_count > 0 {
+                fired = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        handle.abort();
+        assert!(
+            fired,
+            "due cron routine should be checked immediately without waiting for the first interval"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn skip_catch_up_collapses_overdue_cron_backlog_without_running() {
+        let (db, _tmp) = test_db().await;
+        let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "default",
+            Arc::clone(&db),
+        ));
+        let (notify_tx, _notify_rx) = mpsc::channel(4);
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            Arc::new(StubLlm::new("unused")),
+            workspace,
+            notify_tx,
+            None,
+        ));
+
+        let mut routine = make_test_routine(
+            "skip-catch-up",
+            Trigger::Cron {
+                schedule: "every 1h".to_string(),
+            },
+            RoutineAction::Lightweight {
+                prompt: "Should not run".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 32,
+            },
+        );
+        routine.policy.catch_up_mode = RoutineCatchUpMode::Skip;
+        routine.next_fire_at = Some(Utc::now() - ChronoDuration::days(90));
+        db.create_routine(&routine).await.unwrap();
+
+        engine.check_cron_triggers().await;
+
+        let refreshed = db.get_routine(routine.id).await.unwrap().unwrap();
+        assert_eq!(refreshed.run_count, 0);
+        assert!(refreshed.next_fire_at.is_some_and(|next| next > Utc::now()));
+        assert!(db.list_routine_runs(routine.id, 10).await.unwrap().is_empty());
+
+        let trigger = db
+            .list_routine_triggers(routine.id, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("scheduled trigger audit should be recorded");
+        assert_eq!(
+            trigger.decision,
+            Some(RoutineTriggerDecision::SkippedCatchUp)
+        );
+        assert!(trigger.backlog_collapsed);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn stale_durable_events_expire_without_firing_routines() {
+        let (db, _tmp) = test_db().await;
+        let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "default",
+            Arc::clone(&db),
+        ));
+        let (notify_tx, _notify_rx) = mpsc::channel(4);
+        let mut config = RoutineConfig::default();
+        config.default_event_max_age_secs = 60;
+
+        let engine = Arc::new(RoutineEngine::new(
+            config,
+            Arc::clone(&db),
+            Arc::new(StubLlm::new("unused")),
+            workspace,
+            notify_tx,
+            None,
+        ));
+
+        let mut routine = make_test_routine(
+            "stale-event",
+            Trigger::Event {
+                channel: Some("slack".to_string()),
+                event_type: Some("message".to_string()),
+                actor: None,
+                metadata: None,
+                pattern: "deploy".to_string(),
+                priority: 0,
+            },
+            RoutineAction::Lightweight {
+                prompt: "Should not run".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 32,
+            },
+        );
+        routine.policy.max_event_age_secs = Some(60);
+        db.create_routine(&routine).await.unwrap();
+        engine.refresh_event_cache().await;
+
+        let event = RoutineEvent {
+            id: Uuid::new_v4(),
+            principal_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            channel: "slack".to_string(),
+            event_type: "message".to_string(),
+            raw_sender_id: "default".to_string(),
+            conversation_scope_id: Uuid::new_v4().to_string(),
+            stable_external_conversation_key: "test://stale-event".to_string(),
+            idempotency_key: "stale-event-idempotency".to_string(),
+            content: "deploy".to_string(),
+            content_hash: content_hash("deploy").to_string(),
+            metadata: serde_json::json!({}),
+            status: RoutineEventStatus::Pending,
+            diagnostics: serde_json::json!({"content_preview": "deploy"}),
+            claimed_by: None,
+            claimed_at: None,
+            lease_expires_at: None,
+            processed_at: None,
+            error_message: None,
+            matched_routines: 0,
+            fired_routines: 0,
+            attempt_count: 0,
+            created_at: Utc::now() - ChronoDuration::days(90),
+        };
+        db.create_routine_event(&event).await.unwrap();
+
+        let fired = engine.drain_pending_event_queue().await;
+        assert_eq!(fired, 0);
+        assert!(db.list_routine_runs(routine.id, 10).await.unwrap().is_empty());
+
+        let refreshed_event = db
+            .list_routine_events_for_actor("default", "default", 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.idempotency_key == "stale-event-idempotency")
+            .expect("durable event should remain queryable");
+        assert_eq!(refreshed_event.status, RoutineEventStatus::Processed);
+
+        let evaluation = db
+            .list_routine_event_evaluations_for_event(refreshed_event.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("event evaluation should be recorded");
+        assert_eq!(evaluation.decision, RoutineEventDecision::SkippedExpired);
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn structured_event_filters_and_idempotency_suppress_duplicates() {
+        let (db, _tmp) = test_db().await;
+        let workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "default",
+            Arc::clone(&db),
+        ));
+        let (notify_tx, _notify_rx) = mpsc::channel(4);
+
+        let engine = Arc::new(RoutineEngine::new(
+            RoutineConfig::default(),
+            Arc::clone(&db),
+            Arc::new(StubLlm::new("structured event fired")),
+            workspace,
+            notify_tx,
+            None,
+        ));
+
+        let mut routine = make_test_routine(
+            "structured-event",
+            Trigger::Event {
+                channel: Some("slack".to_string()),
+                event_type: Some("reaction_added".to_string()),
+                actor: Some("actor-a".to_string()),
+                metadata: Some(serde_json::json!({"tag": "deploy", "flags": ["urgent"]})),
+                pattern: "".to_string(),
+                priority: 50,
+            },
+            RoutineAction::Lightweight {
+                prompt: "Inspect the structured event".to_string(),
+                context_paths: Vec::new(),
+                max_tokens: 32,
+            },
+        );
+        routine.actor_id = "actor-a".to_string();
+        db.create_routine(&routine).await.unwrap();
+        engine.refresh_event_cache().await;
+
+        let identity = crate::identity::ResolvedIdentity {
+            principal_id: "default".to_string(),
+            actor_id: "actor-a".to_string(),
+            conversation_scope_id: Uuid::new_v4(),
+            conversation_kind: crate::identity::ConversationKind::Direct,
+            raw_sender_id: "actor-a".to_string(),
+            stable_external_conversation_key: "test://structured-event".to_string(),
+        };
+        let first = IncomingMessage::new("slack", "default", "ignored")
+            .with_identity(identity.clone())
+            .with_metadata(serde_json::json!({
+                "event_type": "reaction_added",
+                "message_id": "structured-1",
+                "tag": "deploy",
+                "flags": ["urgent", "audit"],
+            }));
+        let second = IncomingMessage::new("slack", "default", "ignored")
+            .with_identity(identity)
+            .with_metadata(serde_json::json!({
+                "event_type": "reaction_added",
+                "message_id": "structured-1",
+                "tag": "deploy",
+                "flags": ["urgent", "audit"],
+            }));
+
+        assert_eq!(engine.check_event_triggers(&first).await, 1);
+        assert_eq!(engine.check_event_triggers(&second).await, 0);
+
+        let runs = db.list_routine_runs(routine.id, 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].trigger_key.as_deref(), Some("event:event:slack:default:actor-a:reaction_added:structured-1"));
     }
 }

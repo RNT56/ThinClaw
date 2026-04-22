@@ -156,7 +156,7 @@ impl SetupWizard {
     ) -> Option<String> {
         let mapped = match provider_slug {
             "openai" => Some("gpt-4o-mini"),
-            "anthropic" => Some("claude-3-5-haiku-latest"),
+            "anthropic" => Some("claude-sonnet-4-6"),
             "gemini" => Some("gemini-2.5-flash-lite"),
             "minimax" => Some("MiniMax-M2.5-highspeed"),
             "cohere" => Some("command-r7b-12-2024"),

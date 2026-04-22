@@ -46,12 +46,17 @@ pub struct JobDescription {
     pub allowed_skills: Option<Vec<String>>,
     #[serde(default)]
     pub tool_profile: Option<String>,
+    #[serde(default)]
+    pub interactive: bool,
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
 }
 
 /// Completion result from the orchestrator (proxied from the real LLM).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyCompletionRequest {
     pub messages: Vec<ChatMessage>,
+    #[serde(default)]
     pub context_documents: Vec<String>,
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
@@ -72,6 +77,7 @@ pub struct ProxyCompletionResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
+    #[serde(default)]
     pub context_documents: Vec<String>,
     pub tools: Vec<ToolDefinition>,
     pub model: Option<String>,
@@ -113,7 +119,8 @@ pub struct JobEventPayload {
 /// Response from the prompt polling endpoint.
 #[derive(Debug, Deserialize)]
 pub struct PromptResponse {
-    pub content: String,
+    #[serde(default)]
+    pub content: Option<String>,
     #[serde(default)]
     pub done: bool,
 }

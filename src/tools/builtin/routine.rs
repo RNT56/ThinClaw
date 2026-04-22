@@ -16,8 +16,9 @@ use uuid::Uuid;
 
 use crate::agent::outcomes;
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, canonicalize_schedule_expr,
-    next_schedule_fire_for_user,
+    NotifyConfig, Routine, RoutineAction, RoutineCatchUpMode, RoutineGuardrails, RoutinePolicy,
+    Trigger, canonicalize_schedule_expr, next_fire_for_routine, next_schedule_fire_for_user,
+    validate_event_trigger,
 };
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
@@ -29,6 +30,69 @@ use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 pub struct RoutineCreateTool {
     store: Arc<dyn Database>,
     engine: Arc<RoutineEngine>,
+}
+
+fn parse_catch_up_mode(
+    value: Option<&serde_json::Value>,
+    current: RoutineCatchUpMode,
+) -> Result<RoutineCatchUpMode, ToolError> {
+    let Some(value) = value else {
+        return Ok(current);
+    };
+    let Some(raw) = value.as_str() else {
+        return Err(ToolError::InvalidParameters(
+            "catch_up_mode must be a string".to_string(),
+        ));
+    };
+    match raw {
+        "skip" => Ok(RoutineCatchUpMode::Skip),
+        "run_once_now" => Ok(RoutineCatchUpMode::RunOnceNow),
+        "replay" => Ok(RoutineCatchUpMode::Replay),
+        other => Err(ToolError::InvalidParameters(format!(
+            "unknown catch_up_mode: {other}"
+        ))),
+    }
+}
+
+fn parse_max_event_age(
+    value: Option<&serde_json::Value>,
+    current: Option<u64>,
+) -> Result<Option<u64>, ToolError> {
+    let Some(value) = value else {
+        return Ok(current);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| {
+            ToolError::InvalidParameters("max_event_age_secs must be an integer".to_string())
+        })
+}
+
+fn routine_policy_from_params(params: &serde_json::Value) -> Result<RoutinePolicy, ToolError> {
+    Ok(RoutinePolicy {
+        catch_up_mode: parse_catch_up_mode(params.get("catch_up_mode"), RoutineCatchUpMode::RunOnceNow)?,
+        max_event_age_secs: parse_max_event_age(params.get("max_event_age_secs"), None)?,
+    })
+}
+
+fn updated_routine_policy(
+    current: &RoutinePolicy,
+    params: &serde_json::Value,
+) -> Result<RoutinePolicy, ToolError> {
+    Ok(RoutinePolicy {
+        catch_up_mode: parse_catch_up_mode(
+            params.get("catch_up_mode"),
+            current.catch_up_mode,
+        )?,
+        max_event_age_secs: parse_max_event_age(
+            params.get("max_event_age_secs"),
+            current.max_event_age_secs,
+        )?,
+    })
 }
 
 impl RoutineCreateTool {
@@ -82,6 +146,31 @@ impl Tool for RoutineCreateTool {
                     "type": "string",
                     "description": "Optional channel filter for event trigger (e.g. 'telegram')"
                 },
+                "event_type": {
+                    "type": "string",
+                    "description": "Optional structured event type filter (defaults to channel-specific 'message')"
+                },
+                "event_actor": {
+                    "type": "string",
+                    "description": "Optional actor/raw-sender filter for event triggers"
+                },
+                "event_metadata": {
+                    "type": "object",
+                    "description": "Optional metadata subset that must be present on the event payload"
+                },
+                "event_priority": {
+                    "type": "integer",
+                    "description": "Optional priority for event triggers. Higher numbers evaluate first when multiple routines match the same message."
+                },
+                "catch_up_mode": {
+                    "type": "string",
+                    "enum": ["skip", "run_once_now", "replay"],
+                    "description": "How overdue scheduled routines behave after downtime. Defaults to 'run_once_now'."
+                },
+                "max_event_age_secs": {
+                    "type": "integer",
+                    "description": "Maximum age for replaying durably-ingested event triggers before they expire."
+                },
                 "prompt": {
                     "type": "string",
                     "description": "The prompt/instructions for the routine"
@@ -122,6 +211,7 @@ impl Tool for RoutineCreateTool {
         let trigger_type = require_str(&params, "trigger_type")?;
 
         let prompt = require_str(&params, "prompt")?;
+        let mut event_warnings = Vec::new();
 
         // Build trigger
         let trigger = match trigger_type {
@@ -154,16 +244,50 @@ impl Tool for RoutineCreateTool {
                             "event trigger requires 'event_pattern'".to_string(),
                         )
                     })?;
-                // Validate regex
-                regex::Regex::new(pattern)
-                    .map_err(|e| ToolError::InvalidParameters(format!("invalid regex: {e}")))?;
                 let channel = params
                     .get("event_channel")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let event_type = params
+                    .get("event_type")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let actor = params
+                    .get("event_actor")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let metadata = params
+                    .get("event_metadata")
+                    .cloned()
+                    .filter(|value| !value.is_null());
+                let priority = params
+                    .get("event_priority")
+                    .and_then(|v| v.as_i64())
+                    .map(|value| {
+                        i32::try_from(value).map_err(|_| {
+                            ToolError::InvalidParameters(
+                                "event_priority must be a 32-bit integer".to_string(),
+                            )
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or(0);
+                event_warnings = validate_event_trigger(
+                    channel.as_deref(),
+                    event_type.as_deref(),
+                    actor.as_deref(),
+                    metadata.as_ref(),
+                    pattern,
+                    priority,
+                )
+                .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
                 Trigger::Event {
                     channel,
-                    pattern: pattern.to_string(),
+                    event_type,
+                    actor,
+                    metadata,
+                    pattern: pattern.trim().to_string(),
+                    priority,
                 }
             }
             "webhook" => Trigger::Webhook {
@@ -232,15 +356,9 @@ impl Tool for RoutineCreateTool {
             .get("cooldown_secs")
             .and_then(|v| v.as_u64())
             .unwrap_or(300);
+        let policy = routine_policy_from_params(&params)?;
 
-        // Compute next fire time for cron
-        let next_fire = if let Trigger::Cron { ref schedule } = trigger {
-            next_schedule_fire_for_user(schedule, &ctx.user_id, None).unwrap_or(None)
-        } else {
-            None
-        };
-
-        let routine = Routine {
+        let mut routine = Routine {
             id: Uuid::new_v4(),
             name: name.to_string(),
             description: description.to_string(),
@@ -255,14 +373,18 @@ impl Tool for RoutineCreateTool {
                 dedup_window: None,
             },
             notify: NotifyConfig::default(),
+            policy,
             last_run_at: None,
-            next_fire_at: next_fire,
+            next_fire_at: None,
             run_count: 0,
             consecutive_failures: 0,
             state: serde_json::json!({}),
+            config_version: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
+        routine.next_fire_at =
+            next_fire_for_routine(&routine, None, Utc::now()).unwrap_or(None);
 
         self.store
             .create_routine(&routine)
@@ -279,6 +401,7 @@ impl Tool for RoutineCreateTool {
             "name": routine.name,
             "trigger_type": routine.trigger.type_tag(),
             "next_fire_at": routine.next_fire_at.map(|t| t.to_rfc3339()),
+            "warnings": event_warnings,
             "status": "created",
         });
 
@@ -413,6 +536,39 @@ impl Tool for RoutineUpdateTool {
                 "description": {
                     "type": "string",
                     "description": "New description"
+                },
+                "event_pattern": {
+                    "type": "string",
+                    "description": "New regex pattern for event-triggered routines"
+                },
+                "event_channel": {
+                    "type": ["string", "null"],
+                    "description": "Updated channel filter for event-triggered routines. Use null to match all channels."
+                },
+                "event_type": {
+                    "type": ["string", "null"],
+                    "description": "Updated structured event type filter. Use null to match all event types."
+                },
+                "event_actor": {
+                    "type": ["string", "null"],
+                    "description": "Updated actor/raw-sender filter. Use null to match all actors."
+                },
+                "event_metadata": {
+                    "type": ["object", "null"],
+                    "description": "Updated metadata subset filter for event-triggered routines."
+                },
+                "event_priority": {
+                    "type": "integer",
+                    "description": "Updated priority for event-triggered routines. Higher numbers evaluate first."
+                },
+                "catch_up_mode": {
+                    "type": "string",
+                    "enum": ["skip", "run_once_now", "replay"],
+                    "description": "Updated catch-up mode for scheduled routines."
+                },
+                "max_event_age_secs": {
+                    "type": ["integer", "null"],
+                    "description": "Updated max replay age for durably-ingested event triggers. Use null to clear."
                 }
             },
             "required": ["name"]
@@ -428,6 +584,7 @@ impl Tool for RoutineUpdateTool {
 
         let name = require_str(&params, "name")?;
         let actor_id = ctx.owner_actor_id();
+        let mut event_warnings = Vec::new();
 
         let mut routine = self
             .store
@@ -458,17 +615,137 @@ impl Tool for RoutineUpdateTool {
             }
         }
 
+        let has_event_updates = params.get("event_pattern").is_some()
+            || params.get("event_channel").is_some()
+            || params.get("event_type").is_some()
+            || params.get("event_actor").is_some()
+            || params.get("event_metadata").is_some()
+            || params.get("event_priority").is_some();
+        if params.get("schedule").is_some() && has_event_updates {
+            return Err(ToolError::InvalidParameters(
+                "schedule and event trigger updates are mutually exclusive".to_string(),
+            ));
+        }
+
         if let Some(raw_schedule) = params.get("schedule").and_then(|v| v.as_str()) {
             let schedule = canonicalize_schedule_expr(raw_schedule)
                 .map_err(|e| ToolError::InvalidParameters(format!("invalid schedule: {e}")))?;
             next_schedule_fire_for_user(&schedule, &ctx.user_id, None)
                 .map_err(|e| ToolError::InvalidParameters(format!("invalid schedule: {e}")))?;
 
-            routine.trigger = Trigger::Cron {
-                schedule: schedule.clone(),
+            match &mut routine.trigger {
+                Trigger::SystemEvent {
+                    schedule: current_schedule,
+                    ..
+                } => {
+                    *current_schedule = Some(schedule.clone());
+                }
+                _ => {
+                    routine.trigger = Trigger::Cron {
+                        schedule: schedule.clone(),
+                    };
+                }
+            }
+            routine.next_fire_at = next_fire_for_routine(&routine, None, Utc::now()).unwrap_or(None);
+        }
+
+        if has_event_updates {
+            let (current_channel, current_pattern, current_priority) = match &routine.trigger {
+                Trigger::Event {
+                    channel,
+                    pattern,
+                    priority,
+                    ..
+                } => (channel.clone(), Some(pattern.clone()), *priority),
+                _ => (None, None, 0),
             };
-            routine.next_fire_at =
-                next_schedule_fire_for_user(&schedule, &ctx.user_id, None).unwrap_or(None);
+
+            let pattern = if let Some(value) = params.get("event_pattern") {
+                value.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "event_pattern must be a string when provided".to_string(),
+                    )
+                })?
+            } else {
+                current_pattern.ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "event_pattern is required when converting a routine to an event trigger"
+                            .to_string(),
+                    )
+                })?
+            };
+
+            let channel = match params.get("event_channel") {
+                Some(value) if value.is_null() => None,
+                Some(value) => Some(value.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "event_channel must be a string or null".to_string(),
+                    )
+                })?),
+                None => current_channel,
+            };
+
+            let priority = match params.get("event_priority").and_then(|v| v.as_i64()) {
+                Some(value) => i32::try_from(value).map_err(|_| {
+                    ToolError::InvalidParameters(
+                        "event_priority must be a 32-bit integer".to_string(),
+                    )
+                })?,
+                None => current_priority,
+            };
+            let event_type = match params.get("event_type") {
+                Some(value) if value.is_null() => None,
+                Some(value) => Some(value.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                    ToolError::InvalidParameters("event_type must be a string or null".to_string())
+                })?),
+                None => match &routine.trigger {
+                    Trigger::Event { event_type, .. } => event_type.clone(),
+                    _ => None,
+                },
+            };
+            let actor = match params.get("event_actor") {
+                Some(value) if value.is_null() => None,
+                Some(value) => Some(value.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                    ToolError::InvalidParameters(
+                        "event_actor must be a string or null".to_string(),
+                    )
+                })?),
+                None => match &routine.trigger {
+                    Trigger::Event { actor, .. } => actor.clone(),
+                    _ => None,
+                },
+            };
+            let metadata = match params.get("event_metadata") {
+                Some(value) if value.is_null() => None,
+                Some(value) => Some(value.clone()),
+                None => match &routine.trigger {
+                    Trigger::Event { metadata, .. } => metadata.clone(),
+                    _ => None,
+                },
+            };
+
+            event_warnings = validate_event_trigger(
+                channel.as_deref(),
+                event_type.as_deref(),
+                actor.as_deref(),
+                metadata.as_ref(),
+                &pattern,
+                priority,
+            )
+            .map_err(|e| ToolError::InvalidParameters(e.to_string()))?;
+            routine.trigger = Trigger::Event {
+                channel,
+                event_type,
+                actor,
+                metadata,
+                pattern: pattern.trim().to_string(),
+                priority,
+            };
+            routine.next_fire_at = None;
+        }
+
+        if params.get("catch_up_mode").is_some() || params.get("max_event_age_secs").is_some() {
+            routine.policy = updated_routine_policy(&routine.policy, &params)?;
         }
 
         self.store
@@ -489,6 +766,7 @@ impl Tool for RoutineUpdateTool {
             "enabled": routine.enabled,
             "trigger_type": routine.trigger.type_tag(),
             "next_fire_at": routine.next_fire_at.map(|t| t.to_rfc3339()),
+            "warnings": event_warnings,
             "status": "updated",
         });
 
@@ -675,6 +953,25 @@ impl Tool for RoutineHistoryTool {
             "routine": name,
             "total_runs": routine.run_count,
             "runs": run_list,
+            "recent_event_checks": if matches!(routine.trigger, Trigger::Event { .. }) {
+                self.store
+                    .list_routine_event_evaluations(routine.id, limit)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed(format!("failed to list event checks: {e}")))?
+                    .into_iter()
+                    .map(|evaluation| serde_json::json!({
+                        "event_id": evaluation.event_id.to_string(),
+                        "decision": evaluation.decision.to_string(),
+                        "reason": evaluation.reason,
+                        "sequence_num": evaluation.sequence_num,
+                        "channel": evaluation.channel,
+                        "content_preview": evaluation.content_preview,
+                        "created_at": evaluation.created_at.to_rfc3339(),
+                    }))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            },
         });
 
         Ok(ToolOutput::success(result, start.elapsed()))

@@ -728,6 +728,8 @@ mod tests {
             store: None,
             job_manager: None,
             prompt_queue: None,
+            context_manager: None,
+            scheduler: tokio::sync::RwLock::new(None),
             user_id: "test".to_string(),
             actor_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),

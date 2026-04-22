@@ -277,16 +277,51 @@ impl ClaudeBridgeRuntime {
             }
         };
 
+        if !job.interactive {
+            self.client
+                .report_complete(&CompletionReport {
+                    status: Some("completed".to_string()),
+                    session_id: session_id.clone(),
+                    success: true,
+                    message: Some("Claude Code session completed".to_string()),
+                    iterations: 1,
+                })
+                .await?;
+            return Ok(());
+        }
+
         // Follow-up loop: poll for prompts, resume Claude sessions
         let mut iteration = 1u32;
+        let idle_timeout = Duration::from_secs(
+            job.idle_timeout_secs
+                .unwrap_or(crate::sandbox_jobs::DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS),
+        );
+        let mut idle_deadline = tokio::time::Instant::now() + idle_timeout;
         loop {
+            if tokio::time::Instant::now() >= idle_deadline {
+                self.client
+                    .report_complete(&CompletionReport {
+                        status: Some("interrupted".to_string()),
+                        session_id: session_id.clone(),
+                        success: false,
+                        message: Some("Interactive idle timeout".to_string()),
+                        iterations: iteration,
+                    })
+                    .await?;
+                return Ok(());
+            }
+
             // Poll for a follow-up prompt (2 second intervals)
             match self.poll_for_prompt().await {
                 Ok(Some(prompt)) => {
-                    if prompt.done {
+                    idle_deadline = tokio::time::Instant::now() + idle_timeout;
+                    if prompt.done && prompt.content.is_none() {
                         tracing::info!(job_id = %self.config.job_id, "Orchestrator signaled done");
                         break;
                     }
+                    let Some(prompt_content) = prompt.content.as_deref() else {
+                        continue;
+                    };
                     iteration += 1;
                     let _ = self
                         .client
@@ -301,9 +336,21 @@ impl ClaudeBridgeRuntime {
                         "Got follow-up prompt, resuming session"
                     );
                     if let Err(e) = self
-                        .run_claude_session(&prompt.content, session_id.as_deref(), &extra_env)
+                        .run_claude_session(prompt_content, session_id.as_deref(), &extra_env)
                         .await
                     {
+                        if prompt.done {
+                            self.client
+                                .report_complete(&CompletionReport {
+                                    status: Some("error".to_string()),
+                                    session_id: session_id.clone(),
+                                    success: false,
+                                    message: Some(format!("Claude Code failed: {}", e)),
+                                    iterations: iteration,
+                                })
+                                .await?;
+                            return Ok(());
+                        }
                         tracing::error!(
                             job_id = %self.config.job_id,
                             "Follow-up Claude session failed: {}", e
@@ -316,6 +363,8 @@ impl ClaudeBridgeRuntime {
                             }),
                         )
                         .await;
+                    } else if prompt.done {
+                        break;
                     }
                 }
                 Ok(None) => {
@@ -475,7 +524,7 @@ impl ClaudeBridgeRuntime {
 
             // Report result event
             self.report_event(
-                "result",
+                "session_result",
                 &serde_json::json!({
                     "status": "error",
                     "success": false,
@@ -493,7 +542,7 @@ impl ClaudeBridgeRuntime {
 
         // Report successful result
         self.report_event(
-            "result",
+            "session_result",
             &serde_json::json!({
                 "status": "completed",
                 "success": true,
@@ -624,7 +673,7 @@ fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
             }
 
             payloads.push(JobEventPayload {
-                event_type: "result".to_string(),
+                event_type: "session_result".to_string(),
                 data: serde_json::json!({
                     "status": if is_error { "error" } else { "completed" },
                     "success": !is_error,

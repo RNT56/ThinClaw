@@ -314,6 +314,7 @@ impl TestHarnessBuilder {
             routing_policy: None,
             model_override: None,
             restart_requested: Arc::new(AtomicBool::new(false)),
+            sandbox_children: None,
         };
 
         TestHarness {

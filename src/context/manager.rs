@@ -286,6 +286,7 @@ impl ContextManager {
                 crate::context::JobState::Failed => summary.failed += 1,
                 crate::context::JobState::Stuck => summary.stuck += 1,
                 crate::context::JobState::Cancelled => summary.cancelled += 1,
+                crate::context::JobState::Abandoned => summary.failed += 1,
             }
         }
 
@@ -308,6 +309,7 @@ impl ContextManager {
                 crate::context::JobState::Failed => summary.failed += 1,
                 crate::context::JobState::Stuck => summary.stuck += 1,
                 crate::context::JobState::Cancelled => summary.cancelled += 1,
+                crate::context::JobState::Abandoned => summary.failed += 1,
             }
         }
 
@@ -340,6 +342,7 @@ impl ContextManager {
                 crate::context::JobState::Failed => summary.failed += 1,
                 crate::context::JobState::Stuck => summary.stuck += 1,
                 crate::context::JobState::Cancelled => summary.cancelled += 1,
+                crate::context::JobState::Abandoned => summary.failed += 1,
             }
         }
 

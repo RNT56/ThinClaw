@@ -8,15 +8,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
 use crate::sandbox::connect_docker;
+use crate::sandbox_jobs::SandboxJobSpec;
 
 /// Which mode a sandbox container runs in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobMode {
     /// Standard ThinClaw worker with proxied LLM calls.
     Worker,
@@ -80,6 +82,8 @@ pub struct ContainerJobConfig {
     pub codex_code_memory_limit_mb: u64,
     /// Host directory containing Codex auth/config files to mount read-only.
     pub codex_code_home_dir: PathBuf,
+    /// Default idle timeout for interactive sandbox jobs (seconds).
+    pub interactive_idle_timeout_secs: u64,
 }
 
 impl Default for ContainerJobConfig {
@@ -101,6 +105,7 @@ impl Default for ContainerJobConfig {
             codex_code_model: "gpt-5.3-codex".to_string(),
             codex_code_memory_limit_mb: 4096,
             codex_code_home_dir: crate::config::CodexCodeConfig::default().home_dir,
+            interactive_idle_timeout_secs: crate::sandbox_jobs::DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS,
         }
     }
 }
@@ -133,8 +138,7 @@ pub struct ContainerHandle {
     pub state: ContainerState,
     pub mode: JobMode,
     pub created_at: DateTime<Utc>,
-    pub project_dir: Option<PathBuf>,
-    pub task_description: String,
+    pub spec: SandboxJobSpec,
     /// Last status message reported by the worker (iteration count, progress, etc.).
     pub last_worker_status: Option<String>,
     /// Which iteration the worker is on (updated via status reports).
@@ -259,6 +263,10 @@ impl ContainerJobManager {
 
     pub fn codex_code_enabled(&self) -> bool {
         self.config.codex_code_enabled
+    }
+
+    pub fn interactive_idle_timeout_secs(&self) -> u64 {
+        self.config.interactive_idle_timeout_secs
     }
 
     /// Update Claude Code settings at runtime (called by the settings API).
@@ -407,11 +415,11 @@ impl ContainerJobManager {
     pub async fn create_job(
         &self,
         job_id: Uuid,
-        task: &str,
-        project_dir: Option<PathBuf>,
-        mode: JobMode,
+        spec: SandboxJobSpec,
         credential_grants: Vec<CredentialGrant>,
     ) -> Result<String, OrchestratorError> {
+        let mode = spec.mode;
+        let project_dir = spec.project_dir.as_ref().map(PathBuf::from);
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
 
@@ -427,8 +435,7 @@ impl ContainerJobManager {
             state: ContainerState::Creating,
             mode,
             created_at: Utc::now(),
-            project_dir: project_dir.clone(),
-            task_description: task.to_string(),
+            spec,
             last_worker_status: None,
             worker_iteration: 0,
             completion_result: None,
@@ -924,8 +931,14 @@ mod tests {
                     state: ContainerState::Running,
                     mode: JobMode::Worker,
                     created_at: chrono::Utc::now(),
-                    project_dir: None,
-                    task_description: "test job".to_string(),
+                    spec: SandboxJobSpec::new(
+                        "test job",
+                        "test job",
+                        "default",
+                        "default",
+                        None,
+                        JobMode::Worker,
+                    ),
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,

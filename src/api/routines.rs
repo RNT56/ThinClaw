@@ -125,10 +125,28 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
             },
         ),
         crate::agent::routine::Trigger::Event {
-            pattern, channel, ..
+            pattern,
+            channel,
+            event_type,
+            actor,
+            priority,
+            ..
         } => {
             let ch = channel.as_deref().unwrap_or("any");
-            ("event".to_string(), format!("on {} /{}/", ch, pattern))
+            let event_label = event_type.as_deref().unwrap_or("message");
+            let actor_label = actor
+                .as_deref()
+                .map(|value| format!(" actor {}", value))
+                .unwrap_or_default();
+            let summary = if *priority == 0 {
+                format!("on {} {}{} /{}/", ch, event_label, actor_label, pattern)
+            } else {
+                format!(
+                    "on {} {}{} /{}/ (prio {})",
+                    ch, event_label, actor_label, pattern, priority
+                )
+            };
+            ("event".to_string(), summary)
         }
         crate::agent::routine::Trigger::Webhook { path, .. } => {
             let p = path.as_deref().unwrap_or("/");
@@ -139,7 +157,16 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
             let sched = schedule.as_deref().unwrap_or("on-demand");
             ("system_event".to_string(), {
                 let truncated: String = message.chars().take(40).collect();
-                format!("event: {} ({})", truncated, sched)
+                format!(
+                    "event: {} ({}, {})",
+                    truncated,
+                    sched,
+                    match r.policy.catch_up_mode {
+                        crate::agent::routine::RoutineCatchUpMode::Skip => "skip",
+                        crate::agent::routine::RoutineCatchUpMode::RunOnceNow => "run once",
+                        crate::agent::routine::RoutineCatchUpMode::Replay => "replay",
+                    }
+                )
             })
         }
     };

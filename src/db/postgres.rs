@@ -12,7 +12,10 @@ use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use crate::agent::BrokenTool;
-use crate::agent::routine::{Routine, RoutineRun, RunStatus};
+use crate::agent::routine::{
+    Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
+    RoutineTriggerDecision, RunStatus,
+};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
@@ -595,6 +598,10 @@ impl JobStore for PgBackend {
         self.store.get_job(id).await
     }
 
+    async fn list_jobs_for_user(&self, user_id: &str) -> Result<Vec<JobContext>, DatabaseError> {
+        self.store.list_jobs_for_user(user_id).await
+    }
+
     async fn update_job_status(
         &self,
         id: Uuid,
@@ -604,6 +611,10 @@ impl JobStore for PgBackend {
         self.store
             .update_job_status(id, status, failure_reason)
             .await
+    }
+
+    async fn abandon_active_direct_jobs(&self, reason: &str) -> Result<u64, DatabaseError> {
+        self.store.abandon_active_direct_jobs(reason).await
     }
 
     async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError> {
@@ -776,6 +787,10 @@ impl RoutineStore for PgBackend {
         self.store.list_event_routines().await
     }
 
+    async fn get_routine_event_cache_version(&self) -> Result<i64, DatabaseError> {
+        self.store.get_routine_event_cache_version().await
+    }
+
     async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         self.store.list_due_cron_routines().await
     }
@@ -859,6 +874,173 @@ impl RoutineStore for PgBackend {
 
     async fn delete_all_routine_runs(&self) -> Result<u64, DatabaseError> {
         self.store.delete_all_routine_runs().await
+    }
+
+    async fn create_routine_event(
+        &self,
+        event: &RoutineEvent,
+    ) -> Result<RoutineEvent, DatabaseError> {
+        self.store.create_routine_event(event).await
+    }
+
+    async fn claim_routine_event(
+        &self,
+        id: Uuid,
+        worker_id: &str,
+        stale_before: DateTime<Utc>,
+    ) -> Result<Option<RoutineEvent>, DatabaseError> {
+        self.store
+            .claim_routine_event(id, worker_id, stale_before)
+            .await
+    }
+
+    async fn release_routine_event(
+        &self,
+        id: Uuid,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store.release_routine_event(id, diagnostics).await
+    }
+
+    async fn list_pending_routine_events(
+        &self,
+        stale_before: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<RoutineEvent>, DatabaseError> {
+        self.store
+            .list_pending_routine_events(stale_before, limit)
+            .await
+    }
+
+    async fn complete_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        matched_routines: u32,
+        fired_routines: u32,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .complete_routine_event(
+                id,
+                processed_at,
+                matched_routines,
+                fired_routines,
+                diagnostics,
+            )
+            .await
+    }
+
+    async fn fail_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .fail_routine_event(id, processed_at, error_message)
+            .await
+    }
+
+    async fn list_routine_events_for_actor(
+        &self,
+        user_id: &str,
+        actor_id: &str,
+        limit: i64,
+    ) -> Result<Vec<RoutineEvent>, DatabaseError> {
+        self.store
+            .list_routine_events_for_actor(user_id, actor_id, limit)
+            .await
+    }
+
+    async fn upsert_routine_event_evaluation(
+        &self,
+        evaluation: &RoutineEventEvaluation,
+    ) -> Result<(), DatabaseError> {
+        self.store.upsert_routine_event_evaluation(evaluation).await
+    }
+
+    async fn list_routine_event_evaluations_for_event(
+        &self,
+        event_id: Uuid,
+    ) -> Result<Vec<RoutineEventEvaluation>, DatabaseError> {
+        self.store
+            .list_routine_event_evaluations_for_event(event_id)
+            .await
+    }
+
+    async fn list_routine_event_evaluations(
+        &self,
+        routine_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<RoutineEventEvaluation>, DatabaseError> {
+        self.store
+            .list_routine_event_evaluations(routine_id, limit)
+            .await
+    }
+
+    async fn routine_run_exists_for_trigger_key(
+        &self,
+        routine_id: Uuid,
+        trigger_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .routine_run_exists_for_trigger_key(routine_id, trigger_key)
+            .await
+    }
+
+    async fn enqueue_routine_trigger(&self, trigger: &RoutineTrigger) -> Result<(), DatabaseError> {
+        self.store.enqueue_routine_trigger(trigger).await
+    }
+
+    async fn claim_routine_triggers(
+        &self,
+        worker_id: &str,
+        stale_before: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<RoutineTrigger>, DatabaseError> {
+        self.store
+            .claim_routine_triggers(worker_id, stale_before, limit)
+            .await
+    }
+
+    async fn release_routine_trigger(
+        &self,
+        id: Uuid,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store.release_routine_trigger(id, diagnostics).await
+    }
+
+    async fn complete_routine_trigger(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        decision: RoutineTriggerDecision,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .complete_routine_trigger(id, processed_at, decision, diagnostics)
+            .await
+    }
+
+    async fn fail_routine_trigger(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .fail_routine_trigger(id, processed_at, error_message)
+            .await
+    }
+
+    async fn list_routine_triggers(
+        &self,
+        routine_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<RoutineTrigger>, DatabaseError> {
+        self.store.list_routine_triggers(routine_id, limit).await
     }
 }
 

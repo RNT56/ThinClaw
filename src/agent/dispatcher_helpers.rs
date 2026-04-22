@@ -355,6 +355,7 @@ mod tests {
             routing_policy: None,
             model_override: None,
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sandbox_children: None,
         };
 
         Agent::new(

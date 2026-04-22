@@ -150,6 +150,8 @@ async fn start_ui_gateway(
         store: Some(db),
         job_manager: None,
         prompt_queue: None,
+        context_manager: None,
+        scheduler: tokio::sync::RwLock::new(None),
         user_id: user_id.to_string(),
         actor_id: actor_id.to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),

@@ -366,6 +366,17 @@ pub enum SseEvent {
     },
     #[serde(rename = "job_status")]
     JobStatus { job_id: String, message: String },
+    #[serde(rename = "job_session_result")]
+    JobSessionResult {
+        job_id: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        success: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     #[serde(rename = "job_result")]
     JobResult {
         job_id: String,
@@ -483,6 +494,7 @@ impl SseEvent {
             SseEvent::JobToolUse { .. } => "job_tool_use",
             SseEvent::JobToolResult { .. } => "job_tool_result",
             SseEvent::JobStatus { .. } => "job_status",
+            SseEvent::JobSessionResult { .. } => "job_session_result",
             SseEvent::JobResult { .. } => "job_result",
             SseEvent::ExtensionStatus { .. } => "extension_status",
             SseEvent::ChannelStatusChange { .. } => "channel_status_change",
@@ -594,6 +606,8 @@ pub struct JobSummaryResponse {
     pub in_progress: usize,
     pub completed: usize,
     pub failed: usize,
+    pub cancelled: usize,
+    pub interrupted: usize,
     pub stuck: usize,
 }
 
@@ -626,6 +640,8 @@ pub struct JobDetailResponse {
     pub job_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unknown_job_mode_raw: Option<String>,
+    #[serde(default)]
+    pub interactive: bool,
     pub transitions: Vec<TransitionInfo>,
 }
 
@@ -1104,12 +1120,17 @@ pub struct RoutineDetailResponse {
     pub action: serde_json::Value,
     pub guardrails: serde_json::Value,
     pub notify: serde_json::Value,
+    pub policy: serde_json::Value,
     pub last_run_at: Option<String>,
     pub next_fire_at: Option<String>,
     pub run_count: u64,
     pub consecutive_failures: u32,
     pub created_at: String,
     pub recent_runs: Vec<RoutineRunInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_event_checks: Vec<RoutineEventCheckInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_trigger_checks: Vec<RoutineTriggerCheckInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1121,6 +1142,54 @@ pub struct RoutineRunInfo {
     pub status: String,
     pub result_summary: Option<String>,
     pub tokens_used: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineEventCheckInfo {
+    pub id: Uuid,
+    pub event_id: Uuid,
+    pub decision: String,
+    pub reason: Option<String>,
+    pub details: serde_json::Value,
+    pub sequence_num: u32,
+    pub channel: String,
+    pub content_preview: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineTriggerCheckInfo {
+    pub id: Uuid,
+    pub trigger_kind: String,
+    pub due_at: String,
+    pub status: String,
+    pub decision: Option<String>,
+    pub claimed_by: Option<String>,
+    pub processed_at: Option<String>,
+    pub coalesced_count: u32,
+    pub backlog_collapsed: bool,
+    pub diagnostics: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineEventActivityInfo {
+    pub id: Uuid,
+    pub channel: String,
+    pub content_preview: String,
+    pub status: String,
+    pub created_at: String,
+    pub processed_at: Option<String>,
+    pub matched_routines: u32,
+    pub fired_routines: u32,
+    pub error_message: Option<String>,
+    pub diagnostics: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineEventActivityResponse {
+    pub events: Vec<RoutineEventActivityInfo>,
 }
 
 // --- Settings ---

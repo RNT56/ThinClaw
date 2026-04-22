@@ -47,6 +47,7 @@ pub(crate) mod todo;
 mod tts;
 mod vision;
 
+pub use crate::sandbox_types::PromptQueue;
 pub use agent_control::{AgentThinkTool, EmitUserMessageTool};
 pub use agent_management::{
     CreateAgentTool, ListAgentsTool, MessageAgentTool, RemoveAgentTool, UpdateAgentTool,
@@ -73,7 +74,6 @@ pub use homeassistant::HomeAssistantTool;
 pub use http::HttpTool;
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
-    PromptQueue,
 };
 pub use json::JsonTool;
 pub use learning_tools::{

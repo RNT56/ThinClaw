@@ -15,6 +15,21 @@ use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState, StateTransition};
 #[cfg(feature = "postgres")]
 use crate::error::DatabaseError;
+use crate::sandbox_jobs::SandboxJobSpec;
+
+#[cfg(feature = "postgres")]
+fn job_failure_reason(ctx: &JobContext) -> Option<String> {
+    if matches!(
+        ctx.state,
+        JobState::Failed | JobState::Stuck | JobState::Cancelled | JobState::Abandoned
+    ) {
+        ctx.transitions
+            .last()
+            .and_then(|transition| transition.reason.clone())
+    } else {
+        None
+    }
+}
 
 /// Record for an LLM call to be persisted.
 #[derive(Debug, Clone)]
@@ -800,15 +815,16 @@ impl Store {
         let max_tokens = ctx.max_tokens.min(i64::MAX as u64) as i64;
         let transitions = serde_json::to_value(&ctx.transitions)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        let failure_reason = job_failure_reason(ctx);
 
         conn.execute(
             r#"
             INSERT INTO agent_jobs (
                 id, conversation_id, title, description, category, status, source, user_id, principal_id, actor_id,
                 budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
-                actual_cost, total_tokens_used, max_tokens, metadata, transitions,
+                actual_cost, total_tokens_used, max_tokens, metadata, transitions, failure_reason,
                 repair_attempts, created_at, started_at, completed_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
             ON CONFLICT (id) DO UPDATE SET
                 title = EXCLUDED.title,
                 description = EXCLUDED.description,
@@ -824,6 +840,7 @@ impl Store {
                 max_tokens = EXCLUDED.max_tokens,
                 metadata = EXCLUDED.metadata,
                 transitions = EXCLUDED.transitions,
+                failure_reason = EXCLUDED.failure_reason,
                 repair_attempts = EXCLUDED.repair_attempts,
                 started_at = EXCLUDED.started_at,
                 completed_at = EXCLUDED.completed_at
@@ -849,6 +866,7 @@ impl Store {
                 &max_tokens,
                 &ctx.metadata,
                 &transitions,
+                &failure_reason,
                 &(ctx.repair_attempts as i32),
                 &ctx.created_at,
                 &ctx.started_at,
@@ -871,7 +889,7 @@ impl Store {
                        budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
                        actual_cost, total_tokens_used, max_tokens, metadata, transitions,
                        repair_attempts, created_at, started_at, completed_at
-                FROM agent_jobs WHERE id = $1
+                FROM agent_jobs WHERE id = $1 AND source = 'direct'
                 "#,
                 &[&id],
             )
@@ -938,6 +956,91 @@ impl Store {
         .await?;
 
         Ok(())
+    }
+
+    /// Mark any in-flight direct jobs from a previous process as abandoned.
+    pub async fn abandon_active_direct_jobs(&self, reason: &str) -> Result<u64, DatabaseError> {
+        let conn = self.conn().await?;
+        let count = conn
+            .execute(
+                r#"
+                UPDATE agent_jobs
+                SET status = 'abandoned',
+                    failure_reason = COALESCE(NULLIF(failure_reason, ''), $1),
+                    completed_at = COALESCE(completed_at, NOW())
+                WHERE source = 'direct'
+                  AND status IN ('pending', 'in_progress', 'stuck')
+                "#,
+                &[&reason],
+            )
+            .await?;
+        Ok(count)
+    }
+
+    /// List all direct jobs for a principal.
+    pub async fn list_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<JobContext>, DatabaseError> {
+        let conn = self.conn().await?;
+
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, conversation_id, title, description, category, status, user_id, principal_id, actor_id,
+                       budget_amount, budget_token, bid_amount, estimated_cost, estimated_time_secs,
+                       actual_cost, total_tokens_used, max_tokens, metadata, transitions,
+                       repair_attempts, created_at, started_at, completed_at
+                FROM agent_jobs
+                WHERE user_id = $1 AND source = 'direct'
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id],
+            )
+            .await?;
+
+        let mut jobs = Vec::with_capacity(rows.len());
+        for row in rows {
+            let status_str: String = row.get("status");
+            let state = parse_job_state(&status_str);
+            let estimated_time_secs: Option<i32> = row.get("estimated_time_secs");
+            let transitions_json: serde_json::Value = row.get("transitions");
+            let transitions = serde_json::from_value::<Vec<StateTransition>>(transitions_json)
+                .unwrap_or_default();
+            let metadata: serde_json::Value = row.get("metadata");
+
+            jobs.push(JobContext {
+                job_id: row.get("id"),
+                state,
+                user_id: row.get::<_, String>("user_id"),
+                principal_id: row.get::<_, String>("principal_id"),
+                actor_id: row.get("actor_id"),
+                conversation_id: row.get("conversation_id"),
+                title: row.get("title"),
+                description: row.get("description"),
+                category: row.get("category"),
+                budget: row.get("budget_amount"),
+                budget_token: row.get("budget_token"),
+                bid_amount: row.get("bid_amount"),
+                estimated_cost: row.get("estimated_cost"),
+                estimated_duration: estimated_time_secs
+                    .map(|seconds| std::time::Duration::from_secs(seconds as u64)),
+                actual_cost: row
+                    .get::<_, Option<Decimal>>("actual_cost")
+                    .unwrap_or_default(),
+                total_tokens_used: row.get::<_, i64>("total_tokens_used").max(0) as u64,
+                max_tokens: row.get::<_, i64>("max_tokens").max(0) as u64,
+                repair_attempts: row.get::<_, i32>("repair_attempts") as u32,
+                created_at: row.get("created_at"),
+                started_at: row.get("started_at"),
+                completed_at: row.get("completed_at"),
+                transitions,
+                metadata,
+                extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
+            });
+        }
+
+        Ok(jobs)
     }
 
     /// Mark job as stuck.
@@ -1137,18 +1240,14 @@ impl Store {
 #[derive(Debug, Clone)]
 pub struct SandboxJobRecord {
     pub id: Uuid,
-    pub task: String,
+    pub spec: SandboxJobSpec,
     pub status: String,
-    pub user_id: String,
-    pub actor_id: String,
-    pub project_dir: String,
     pub success: Option<bool>,
     pub failure_reason: Option<String>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     /// Serialized JSON of `Vec<CredentialGrant>` for restart support.
-    /// Stored in the `description` column of `agent_jobs` (unused for sandbox jobs).
     pub credential_grants_json: String,
 }
 
@@ -1160,6 +1259,7 @@ pub struct SandboxJobSummary {
     pub running: usize,
     pub completed: usize,
     pub failed: usize,
+    pub cancelled: usize,
     pub interrupted: usize,
     pub stuck: usize,
 }
@@ -1172,30 +1272,42 @@ impl Store {
         conn.execute(
             r#"
             INSERT INTO agent_jobs (
-                id, title, description, status, source, user_id, actor_id, project_dir,
-                success, failure_reason, created_at, started_at, completed_at
-            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11, $12)
+                id, title, description, status, source, user_id, principal_id, actor_id,
+                project_dir, job_mode, metadata, success, failure_reason,
+                created_at, started_at, completed_at, credential_grants
+            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (id) DO UPDATE SET
+                title = EXCLUDED.title,
+                description = EXCLUDED.description,
                 status = EXCLUDED.status,
+                principal_id = EXCLUDED.principal_id,
                 success = EXCLUDED.success,
                 failure_reason = EXCLUDED.failure_reason,
                 actor_id = EXCLUDED.actor_id,
+                project_dir = EXCLUDED.project_dir,
+                job_mode = EXCLUDED.job_mode,
+                metadata = EXCLUDED.metadata,
                 started_at = EXCLUDED.started_at,
-                completed_at = EXCLUDED.completed_at
+                completed_at = EXCLUDED.completed_at,
+                credential_grants = EXCLUDED.credential_grants
             "#,
             &[
                 &job.id,
-                &job.task,
-                &job.credential_grants_json,
+                &job.spec.title,
+                &job.spec.description,
                 &job.status,
-                &job.user_id,
-                &job.actor_id,
-                &job.project_dir,
+                &job.spec.principal_id,
+                &job.spec.principal_id,
+                &job.spec.actor_id,
+                &job.spec.project_dir,
+                &job.spec.mode.as_str(),
+                &job.spec.persisted_metadata(),
                 &job.success,
                 &job.failure_reason,
                 &job.created_at,
                 &job.started_at,
                 &job.completed_at,
+                &job.credential_grants_json,
             ],
         )
         .await?;
@@ -1211,8 +1323,9 @@ impl Store {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id, title, description, status, user_id, actor_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                SELECT id, title, description, status, user_id, principal_id, actor_id, project_dir,
+                       job_mode, metadata, success, failure_reason, created_at, started_at,
+                       completed_at, COALESCE(credential_grants, '[]') AS credential_grants
                 FROM agent_jobs WHERE id = $1 AND source = 'sandbox'
                 "#,
                 &[&id],
@@ -1221,19 +1334,26 @@ impl Store {
 
         Ok(row.map(|r| SandboxJobRecord {
             id: r.get("id"),
-            task: r.get("title"),
+            spec: SandboxJobSpec::from_persisted(
+                r.get::<_, String>("title"),
+                r.get::<_, String>("description"),
+                r.get::<_, String>("principal_id"),
+                r.get::<_, String>("actor_id"),
+                r.get::<_, Option<String>>("project_dir"),
+                match r.get::<_, String>("job_mode").as_str() {
+                    "claude_code" => crate::sandbox_types::JobMode::ClaudeCode,
+                    "codex_code" => crate::sandbox_types::JobMode::CodexCode,
+                    _ => crate::sandbox_types::JobMode::Worker,
+                },
+                r.get::<_, serde_json::Value>("metadata"),
+            ),
             status: r.get("status"),
-            user_id: r.get("user_id"),
-            actor_id: r.get("actor_id"),
-            project_dir: r
-                .get::<_, Option<String>>("project_dir")
-                .unwrap_or_default(),
             success: r.get("success"),
             failure_reason: r.get("failure_reason"),
             created_at: r.get("created_at"),
             started_at: r.get("started_at"),
             completed_at: r.get("completed_at"),
-            credential_grants_json: r.get::<_, String>("description"),
+            credential_grants_json: r.get::<_, String>("credential_grants"),
         }))
     }
 
@@ -1243,8 +1363,9 @@ impl Store {
         let rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, actor_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                SELECT id, title, description, status, user_id, principal_id, actor_id, project_dir,
+                       job_mode, metadata, success, failure_reason, created_at, started_at,
+                       completed_at, COALESCE(credential_grants, '[]') AS credential_grants
                 FROM agent_jobs WHERE source = 'sandbox'
                 ORDER BY created_at DESC
                 "#,
@@ -1256,19 +1377,26 @@ impl Store {
             .iter()
             .map(|r| SandboxJobRecord {
                 id: r.get("id"),
-                task: r.get("title"),
+                spec: SandboxJobSpec::from_persisted(
+                    r.get::<_, String>("title"),
+                    r.get::<_, String>("description"),
+                    r.get::<_, String>("principal_id"),
+                    r.get::<_, String>("actor_id"),
+                    r.get::<_, Option<String>>("project_dir"),
+                    match r.get::<_, String>("job_mode").as_str() {
+                        "claude_code" => crate::sandbox_types::JobMode::ClaudeCode,
+                        "codex_code" => crate::sandbox_types::JobMode::CodexCode,
+                        _ => crate::sandbox_types::JobMode::Worker,
+                    },
+                    r.get::<_, serde_json::Value>("metadata"),
+                ),
                 status: r.get("status"),
-                user_id: r.get("user_id"),
-                actor_id: r.get("actor_id"),
-                project_dir: r
-                    .get::<_, Option<String>>("project_dir")
-                    .unwrap_or_default(),
                 success: r.get("success"),
                 failure_reason: r.get("failure_reason"),
                 created_at: r.get("created_at"),
                 started_at: r.get("started_at"),
                 completed_at: r.get("completed_at"),
-                credential_grants_json: r.get::<_, String>("description"),
+                credential_grants_json: r.get::<_, String>("credential_grants"),
             })
             .collect())
     }
@@ -1282,8 +1410,9 @@ impl Store {
         let rows = conn
             .query(
                 r#"
-                SELECT id, title, description, status, user_id, actor_id, project_dir,
-                       success, failure_reason, created_at, started_at, completed_at
+                SELECT id, title, description, status, user_id, principal_id, actor_id, project_dir,
+                       job_mode, metadata, success, failure_reason, created_at, started_at,
+                       completed_at, COALESCE(credential_grants, '[]') AS credential_grants
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
                 ORDER BY created_at DESC
                 "#,
@@ -1295,19 +1424,26 @@ impl Store {
             .iter()
             .map(|r| SandboxJobRecord {
                 id: r.get("id"),
-                task: r.get("title"),
+                spec: SandboxJobSpec::from_persisted(
+                    r.get::<_, String>("title"),
+                    r.get::<_, String>("description"),
+                    r.get::<_, String>("principal_id"),
+                    r.get::<_, String>("actor_id"),
+                    r.get::<_, Option<String>>("project_dir"),
+                    match r.get::<_, String>("job_mode").as_str() {
+                        "claude_code" => crate::sandbox_types::JobMode::ClaudeCode,
+                        "codex_code" => crate::sandbox_types::JobMode::CodexCode,
+                        _ => crate::sandbox_types::JobMode::Worker,
+                    },
+                    r.get::<_, serde_json::Value>("metadata"),
+                ),
                 status: r.get("status"),
-                user_id: r.get("user_id"),
-                actor_id: r.get("actor_id"),
-                project_dir: r
-                    .get::<_, Option<String>>("project_dir")
-                    .unwrap_or_default(),
                 success: r.get("success"),
                 failure_reason: r.get("failure_reason"),
                 created_at: r.get("created_at"),
                 started_at: r.get("started_at"),
                 completed_at: r.get("completed_at"),
-                credential_grants_json: r.get::<_, String>("description"),
+                credential_grants_json: r.get::<_, String>("credential_grants"),
             })
             .collect())
     }
@@ -1336,6 +1472,7 @@ impl Store {
                 "running" => summary.running += c,
                 "completed" => summary.completed += c,
                 "failed" => summary.failed += c,
+                "cancelled" => summary.cancelled += c,
                 "interrupted" => summary.interrupted += c,
                 "stuck" => summary.stuck += c,
                 _ => {}
@@ -1431,6 +1568,7 @@ impl Store {
                 "running" => summary.running += c,
                 "completed" => summary.completed += c,
                 "failed" => summary.failed += c,
+                "cancelled" => summary.cancelled += c,
                 "interrupted" => summary.interrupted += c,
                 "stuck" => summary.stuck += c,
                 _ => {}
@@ -1549,11 +1687,32 @@ impl Store {
 
 #[cfg(feature = "postgres")]
 use crate::agent::routine::{
-    NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
+    NotifyConfig, Routine, RoutineAction, RoutineEvent, RoutineEventDecision,
+    RoutineEventEvaluation, RoutineEventStatus, RoutineGuardrails, RoutinePolicy, RoutineRun,
+    RoutineTrigger, RoutineTriggerDecision, RoutineTriggerKind, RoutineTriggerStatus, RunStatus,
+    Trigger,
 };
 
 #[cfg(feature = "postgres")]
 impl Store {
+    async fn bump_routine_event_cache_version(
+        &self,
+        conn: &tokio_postgres::Client,
+    ) -> Result<(), DatabaseError> {
+        conn.execute(
+            r#"
+            INSERT INTO settings (user_id, key, value, updated_at)
+            VALUES ('system', 'routine.event_cache_version', '1', NOW())
+            ON CONFLICT (user_id, key) DO UPDATE
+            SET value = (COALESCE(NULLIF(settings.value, ''), '0')::BIGINT + 1)::TEXT,
+                updated_at = EXCLUDED.updated_at
+            "#,
+            &[],
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Create a new routine.
     pub async fn create_routine(&self, routine: &Routine) -> Result<(), DatabaseError> {
         let conn = self.conn().await?;
@@ -1564,6 +1723,8 @@ impl Store {
         let cooldown_secs = routine.guardrails.cooldown.as_secs() as i32;
         let max_concurrent = routine.guardrails.max_concurrent as i32;
         let dedup_window_secs = routine.guardrails.dedup_window.map(|d| d.as_secs() as i32);
+        let policy_config = serde_json::to_value(&routine.policy)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
         conn.execute(
             r#"
@@ -1572,13 +1733,13 @@ impl Store {
                 trigger_type, trigger_config, action_type, action_config,
                 cooldown_secs, max_concurrent, dedup_window_secs,
                 notify_channel, notify_user, notify_on_success, notify_on_failure, notify_on_attention,
-                state, next_fire_at, created_at, updated_at
+                policy_config, state, next_fire_at, config_version, created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6,
                 $7, $8, $9, $10,
                 $11, $12, $13,
                 $14, $15, $16, $17, $18,
-                $19, $20, $21, $22
+                $19, $20, $21, $22, $23, $24
             )
             "#,
             &[
@@ -1600,13 +1761,16 @@ impl Store {
                 &routine.notify.on_success,
                 &routine.notify.on_failure,
                 &routine.notify.on_attention,
+                &policy_config,
                 &routine.state,
                 &routine.next_fire_at,
+                &routine.config_version,
                 &routine.created_at,
                 &routine.updated_at,
             ],
         )
         .await?;
+        self.bump_routine_event_cache_version(&conn).await?;
 
         Ok(())
     }
@@ -1660,6 +1824,20 @@ impl Store {
         rows.iter().map(row_to_routine).collect()
     }
 
+    pub async fn get_routine_event_cache_version(&self) -> Result<i64, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT value FROM settings WHERE user_id = 'system' AND key = 'routine.event_cache_version'",
+                &[],
+            )
+            .await?;
+        Ok(row
+            .and_then(|row| row.try_get::<_, String>("value").ok())
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(0))
+    }
+
     /// List all enabled cron/system_event routines whose next_fire_at <= now.
     pub async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         let conn = self.conn().await?;
@@ -1689,6 +1867,8 @@ impl Store {
         let cooldown_secs = routine.guardrails.cooldown.as_secs() as i32;
         let max_concurrent = routine.guardrails.max_concurrent as i32;
         let dedup_window_secs = routine.guardrails.dedup_window.map(|d| d.as_secs() as i32);
+        let policy_config = serde_json::to_value(&routine.policy)
+            .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
         conn.execute(
             r#"
@@ -1699,7 +1879,8 @@ impl Store {
                 cooldown_secs = $10, max_concurrent = $11, dedup_window_secs = $12,
                 notify_channel = $13, notify_user = $14,
                 notify_on_success = $15, notify_on_failure = $16, notify_on_attention = $17,
-                state = $18, next_fire_at = $19,
+                policy_config = $18, state = $19, next_fire_at = $20,
+                config_version = config_version + 1,
                 updated_at = now()
             WHERE id = $1
             "#,
@@ -1721,11 +1902,13 @@ impl Store {
                 &routine.notify.on_success,
                 &routine.notify.on_failure,
                 &routine.notify.on_attention,
+                &policy_config,
                 &routine.state,
                 &routine.next_fire_at,
             ],
         )
         .await?;
+        self.bump_routine_event_cache_version(&conn).await?;
         Ok(())
     }
 
@@ -1767,6 +1950,9 @@ impl Store {
         let count = conn
             .execute("DELETE FROM routines WHERE id = $1", &[&id])
             .await?;
+        if count > 0 {
+            self.bump_routine_event_cache_version(&conn).await?;
+        }
         Ok(count > 0)
     }
 
@@ -1779,15 +1965,16 @@ impl Store {
         conn.execute(
             r#"
             INSERT INTO routine_runs (
-                id, routine_id, trigger_type, trigger_detail,
+                id, routine_id, trigger_type, trigger_detail, trigger_key,
                 started_at, status, job_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
             &[
                 &run.id,
                 &run.routine_id,
                 &run.trigger_type,
                 &run.trigger_detail,
+                &run.trigger_key,
                 &run.started_at,
                 &status,
                 &run.job_id,
@@ -1922,6 +2109,527 @@ impl Store {
         let count = conn.execute("DELETE FROM routine_runs", &[]).await?;
         Ok(count)
     }
+
+    pub async fn create_routine_event(
+        &self,
+        event: &RoutineEvent,
+    ) -> Result<RoutineEvent, DatabaseError> {
+        let conn = self.conn().await?;
+        let status = event.status.to_string();
+        let conversation_scope_id = event
+            .conversation_scope_id
+            .parse::<Uuid>()
+            .map_err(|error| DatabaseError::Serialization(error.to_string()))?;
+        conn.execute(
+            r#"
+            INSERT INTO routine_event_inbox (
+                id, principal_id, actor_id, channel, event_type, raw_sender_id,
+                conversation_scope_id, stable_external_conversation_key, idempotency_key,
+                content, content_hash, metadata, status, diagnostics,
+                claimed_by, claimed_at, lease_expires_at, processed_at, error_message,
+                matched_routines, fired_routines, attempt_count, created_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9,
+                $10, $11, $12, $13, $14,
+                $15, $16, $17, $18, $19,
+                $20, $21, $22, $23
+            )
+            ON CONFLICT (idempotency_key) DO NOTHING
+            "#,
+            &[
+                &event.id,
+                &event.principal_id,
+                &event.actor_id,
+                &event.channel,
+                &event.event_type,
+                &event.raw_sender_id,
+                &conversation_scope_id,
+                &event.stable_external_conversation_key,
+                &event.idempotency_key,
+                &event.content,
+                &event.content_hash,
+                &event.metadata,
+                &status,
+                &event.diagnostics,
+                &event.claimed_by,
+                &event.claimed_at,
+                &event.lease_expires_at,
+                &event.processed_at,
+                &event.error_message,
+                &(event.matched_routines as i32),
+                &(event.fired_routines as i32),
+                &(event.attempt_count as i32),
+                &event.created_at,
+            ],
+        )
+        .await?;
+        let row = conn
+            .query_one(
+                "SELECT * FROM routine_event_inbox WHERE idempotency_key = $1",
+                &[&event.idempotency_key],
+            )
+            .await?;
+        row_to_routine_event(&row)
+    }
+
+    pub async fn claim_routine_event(
+        &self,
+        id: Uuid,
+        worker_id: &str,
+        stale_before: DateTime<Utc>,
+    ) -> Result<Option<RoutineEvent>, DatabaseError> {
+        let conn = self.conn().await?;
+        let now = Utc::now();
+        let lease_expires_at = now + now.signed_duration_since(stale_before);
+        let row = conn
+            .query_opt(
+                r#"
+                WITH claimed AS (
+                    UPDATE routine_event_inbox
+                    SET status = 'processing',
+                        claimed_by = $2,
+                        claimed_at = NOW(),
+                        lease_expires_at = $4,
+                        attempt_count = attempt_count + 1,
+                        error_message = NULL
+                    WHERE id = $1
+                      AND (
+                        status = 'pending'
+                        OR (
+                            status = 'processing'
+                            AND (
+                                (lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
+                                OR (claimed_at IS NOT NULL AND claimed_at < $3)
+                            )
+                        )
+                      )
+                    RETURNING *
+                )
+                SELECT * FROM claimed
+                "#,
+                &[&id, &worker_id, &stale_before, &lease_expires_at],
+            )
+            .await?;
+        row.map(|row| row_to_routine_event(&row)).transpose()
+    }
+
+    pub async fn release_routine_event(
+        &self,
+        id: Uuid,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE routine_event_inbox
+            SET status = 'pending',
+                diagnostics = $2,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                processed_at = NULL
+            WHERE id = $1
+            "#,
+            &[&id, diagnostics],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_pending_routine_events(
+        &self,
+        stale_before: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<RoutineEvent>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT * FROM routine_event_inbox
+                WHERE status = 'pending'
+                   OR (
+                        status = 'processing'
+                        AND (
+                            (lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
+                            OR (claimed_at IS NOT NULL AND claimed_at < $1)
+                        )
+                   )
+                ORDER BY created_at ASC
+                LIMIT $2
+                "#,
+                &[&stale_before, &limit],
+            )
+            .await?;
+        rows.iter().map(row_to_routine_event).collect()
+    }
+
+    pub async fn complete_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        matched_routines: u32,
+        fired_routines: u32,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE routine_event_inbox
+            SET status = 'processed',
+                processed_at = $2,
+                matched_routines = $3,
+                fired_routines = $4,
+                diagnostics = $5,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                error_message = NULL
+            WHERE id = $1
+            "#,
+            &[
+                &id,
+                &processed_at,
+                &(matched_routines as i32),
+                &(fired_routines as i32),
+                diagnostics,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn fail_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE routine_event_inbox
+            SET status = 'failed',
+                processed_at = $2,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                error_message = $3
+            WHERE id = $1
+            "#,
+            &[&id, &processed_at, &error_message],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_routine_events_for_actor(
+        &self,
+        user_id: &str,
+        actor_id: &str,
+        limit: i64,
+    ) -> Result<Vec<RoutineEvent>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT * FROM routine_event_inbox
+                WHERE principal_id = $1 AND actor_id = $2
+                ORDER BY created_at DESC
+                LIMIT $3
+                "#,
+                &[&user_id, &actor_id, &limit],
+            )
+            .await?;
+        rows.iter().map(row_to_routine_event).collect()
+    }
+
+    pub async fn upsert_routine_event_evaluation(
+        &self,
+        evaluation: &RoutineEventEvaluation,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let decision = evaluation.decision.to_string();
+        conn.execute(
+            r#"
+            INSERT INTO routine_event_evaluations (
+                id, event_id, routine_id, decision, reason, details, sequence_num,
+                channel, content_preview, created_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+            )
+            ON CONFLICT (event_id, routine_id) DO UPDATE
+            SET decision = EXCLUDED.decision,
+                reason = EXCLUDED.reason,
+                details = EXCLUDED.details,
+                sequence_num = EXCLUDED.sequence_num,
+                channel = EXCLUDED.channel,
+                content_preview = EXCLUDED.content_preview
+            "#,
+            &[
+                &evaluation.id,
+                &evaluation.event_id,
+                &evaluation.routine_id,
+                &decision,
+                &evaluation.reason,
+                &evaluation.details,
+                &(evaluation.sequence_num as i32),
+                &evaluation.channel,
+                &evaluation.content_preview,
+                &evaluation.created_at,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_routine_event_evaluations_for_event(
+        &self,
+        event_id: Uuid,
+    ) -> Result<Vec<RoutineEventEvaluation>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT * FROM routine_event_evaluations
+                WHERE event_id = $1
+                ORDER BY sequence_num ASC
+                "#,
+                &[&event_id],
+            )
+            .await?;
+        rows.iter().map(row_to_routine_event_evaluation).collect()
+    }
+
+    pub async fn list_routine_event_evaluations(
+        &self,
+        routine_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<RoutineEventEvaluation>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT * FROM routine_event_evaluations
+                WHERE routine_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                "#,
+                &[&routine_id, &limit],
+            )
+            .await?;
+        rows.iter().map(row_to_routine_event_evaluation).collect()
+    }
+
+    pub async fn routine_run_exists_for_trigger_key(
+        &self,
+        routine_id: Uuid,
+        trigger_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                "SELECT COUNT(*) AS cnt FROM routine_runs WHERE routine_id = $1 AND trigger_key = $2 AND status != 'failed'",
+                &[&routine_id, &trigger_key],
+            )
+            .await?;
+        Ok(row.get::<_, i64>("cnt") > 0)
+    }
+
+    pub async fn enqueue_routine_trigger(
+        &self,
+        trigger: &RoutineTrigger,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let decision = trigger.decision.map(|value| value.to_string());
+        conn.execute(
+            r#"
+            INSERT INTO routine_trigger_queue (
+                id, routine_id, trigger_kind, trigger_label, due_at, status, decision,
+                active_key, idempotency_key, claimed_by, claimed_at, lease_expires_at,
+                processed_at, error_message, diagnostics, coalesced_count, backlog_collapsed,
+                routine_config_version, created_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, $11, $12,
+                $13, $14, $15, $16, $17,
+                $18, $19
+            )
+            ON CONFLICT (active_key) WHERE active_key IS NOT NULL DO UPDATE
+            SET due_at = GREATEST(routine_trigger_queue.due_at, EXCLUDED.due_at),
+                diagnostics = EXCLUDED.diagnostics,
+                coalesced_count = routine_trigger_queue.coalesced_count + 1,
+                backlog_collapsed = routine_trigger_queue.backlog_collapsed OR EXCLUDED.backlog_collapsed,
+                routine_config_version = EXCLUDED.routine_config_version
+            "#,
+            &[
+                &trigger.id,
+                &trigger.routine_id,
+                &trigger.trigger_kind.to_string(),
+                &trigger.trigger_label,
+                &trigger.due_at,
+                &trigger.status.to_string(),
+                &decision,
+                &trigger.active_key,
+                &trigger.idempotency_key,
+                &trigger.claimed_by,
+                &trigger.claimed_at,
+                &trigger.lease_expires_at,
+                &trigger.processed_at,
+                &trigger.error_message,
+                &trigger.diagnostics,
+                &(trigger.coalesced_count as i32),
+                &trigger.backlog_collapsed,
+                &trigger.routine_config_version,
+                &trigger.created_at,
+            ],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn claim_routine_triggers(
+        &self,
+        worker_id: &str,
+        stale_before: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<RoutineTrigger>, DatabaseError> {
+        let conn = self.conn().await?;
+        let now = Utc::now();
+        let lease_expires_at = now + now.signed_duration_since(stale_before);
+        let rows = conn
+            .query(
+                r#"
+                WITH candidates AS (
+                    SELECT id
+                    FROM routine_trigger_queue
+                    WHERE status = 'pending'
+                       OR (
+                            status = 'processing'
+                            AND (
+                                (lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
+                                OR (claimed_at IS NOT NULL AND claimed_at < $2)
+                            )
+                       )
+                    ORDER BY due_at ASC, created_at ASC
+                    LIMIT $3
+                ),
+                claimed AS (
+                    UPDATE routine_trigger_queue
+                    SET status = 'processing',
+                        claimed_by = $1,
+                        claimed_at = NOW(),
+                        lease_expires_at = $4,
+                        error_message = NULL
+                    WHERE id IN (SELECT id FROM candidates)
+                    RETURNING *
+                )
+                SELECT * FROM claimed
+                ORDER BY due_at ASC, created_at ASC
+                "#,
+                &[&worker_id, &stale_before, &limit, &lease_expires_at],
+            )
+            .await?;
+        rows.iter().map(row_to_routine_trigger).collect()
+    }
+
+    pub async fn release_routine_trigger(
+        &self,
+        id: Uuid,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE routine_trigger_queue
+            SET status = 'pending',
+                diagnostics = $2,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                processed_at = NULL,
+                error_message = NULL
+            WHERE id = $1
+            "#,
+            &[&id, diagnostics],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn complete_routine_trigger(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        decision: RoutineTriggerDecision,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let decision = decision.to_string();
+        conn.execute(
+            r#"
+            UPDATE routine_trigger_queue
+            SET status = 'processed',
+                decision = $3,
+                processed_at = $2,
+                diagnostics = $4,
+                active_key = NULL,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                error_message = NULL
+            WHERE id = $1
+            "#,
+            &[&id, &processed_at, &decision, diagnostics],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn fail_routine_trigger(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE routine_trigger_queue
+            SET status = 'failed',
+                processed_at = $2,
+                active_key = NULL,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                error_message = $3
+            WHERE id = $1
+            "#,
+            &[&id, &processed_at, &error_message],
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_routine_triggers(
+        &self,
+        routine_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<RoutineTrigger>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT * FROM routine_trigger_queue
+                WHERE routine_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                "#,
+                &[&routine_id, &limit],
+            )
+            .await?;
+        rows.iter().map(row_to_routine_trigger).collect()
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -1933,11 +2641,15 @@ fn row_to_routine(row: &tokio_postgres::Row) -> Result<Routine, DatabaseError> {
     let cooldown_secs: i32 = row.get("cooldown_secs");
     let max_concurrent: i32 = row.get("max_concurrent");
     let dedup_window_secs: Option<i32> = row.get("dedup_window_secs");
+    let policy_config: serde_json::Value = row
+        .try_get("policy_config")
+        .unwrap_or_else(|_| serde_json::json!({}));
 
     let trigger = Trigger::from_db(&trigger_type, trigger_config)
         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
     let action = RoutineAction::from_db(&action_type, action_config)
         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+    let policy = serde_json::from_value::<RoutinePolicy>(policy_config).unwrap_or_default();
 
     Ok(Routine {
         id: row.get("id"),
@@ -1964,11 +2676,13 @@ fn row_to_routine(row: &tokio_postgres::Row) -> Result<Routine, DatabaseError> {
             on_failure: row.get("notify_on_failure"),
             on_success: row.get("notify_on_success"),
         },
+        policy,
         last_run_at: row.get("last_run_at"),
         next_fire_at: row.get("next_fire_at"),
         run_count: row.get::<_, i64>("run_count") as u64,
         consecutive_failures: row.get::<_, i32>("consecutive_failures") as u32,
         state: row.get("state"),
+        config_version: row.try_get::<_, i64>("config_version").unwrap_or(1),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
@@ -1986,12 +2700,124 @@ fn row_to_routine_run(row: &tokio_postgres::Row) -> Result<RoutineRun, DatabaseE
         routine_id: row.get("routine_id"),
         trigger_type: row.get("trigger_type"),
         trigger_detail: row.get("trigger_detail"),
+        trigger_key: row.try_get("trigger_key").ok().flatten(),
         started_at: row.get("started_at"),
         completed_at: row.get("completed_at"),
         status,
         result_summary: row.get("result_summary"),
         tokens_used: row.get("tokens_used"),
         job_id: row.get("job_id"),
+        created_at: row.get("created_at"),
+    })
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_routine_event(row: &tokio_postgres::Row) -> Result<RoutineEvent, DatabaseError> {
+    let status_str: String = row.get("status");
+    let status: RoutineEventStatus = status_str
+        .parse()
+        .map_err(|e: crate::error::RoutineError| DatabaseError::Serialization(e.to_string()))?;
+
+    Ok(RoutineEvent {
+        id: row.get("id"),
+        principal_id: row.get("principal_id"),
+        actor_id: row.get("actor_id"),
+        channel: row.get("channel"),
+        event_type: row
+            .try_get::<_, Option<String>>("event_type")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "message".to_string()),
+        raw_sender_id: row.get("raw_sender_id"),
+        conversation_scope_id: row.get::<_, Uuid>("conversation_scope_id").to_string(),
+        stable_external_conversation_key: row.get("stable_external_conversation_key"),
+        idempotency_key: row
+            .try_get::<_, Option<String>>("idempotency_key")
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| row.get::<_, Uuid>("id").to_string()),
+        content: row.get("content"),
+        content_hash: row.get("content_hash"),
+        metadata: row.get("metadata"),
+        status,
+        diagnostics: row.get("diagnostics"),
+        claimed_by: row.get("claimed_by"),
+        claimed_at: row.get("claimed_at"),
+        lease_expires_at: row.try_get("lease_expires_at").ok().flatten(),
+        processed_at: row.get("processed_at"),
+        error_message: row.get("error_message"),
+        matched_routines: row.get::<_, i32>("matched_routines") as u32,
+        fired_routines: row.get::<_, i32>("fired_routines") as u32,
+        attempt_count: row.try_get::<_, i32>("attempt_count").unwrap_or(0) as u32,
+        created_at: row.get("created_at"),
+    })
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_routine_event_evaluation(
+    row: &tokio_postgres::Row,
+) -> Result<RoutineEventEvaluation, DatabaseError> {
+    let decision_str: String = row.get("decision");
+    let decision: RoutineEventDecision = decision_str
+        .parse()
+        .map_err(|e: crate::error::RoutineError| DatabaseError::Serialization(e.to_string()))?;
+
+    Ok(RoutineEventEvaluation {
+        id: row.get("id"),
+        event_id: row.get("event_id"),
+        routine_id: row.get("routine_id"),
+        decision,
+        reason: row.get("reason"),
+        details: row
+            .try_get("details")
+            .unwrap_or_else(|_| serde_json::json!({})),
+        sequence_num: row.get::<_, i32>("sequence_num") as u32,
+        channel: row.get("channel"),
+        content_preview: row.get("content_preview"),
+        created_at: row.get("created_at"),
+    })
+}
+
+#[cfg(feature = "postgres")]
+fn row_to_routine_trigger(row: &tokio_postgres::Row) -> Result<RoutineTrigger, DatabaseError> {
+    let trigger_kind: RoutineTriggerKind = row
+        .get::<_, String>("trigger_kind")
+        .parse()
+        .map_err(|e: crate::error::RoutineError| DatabaseError::Serialization(e.to_string()))?;
+    let status: RoutineTriggerStatus = row
+        .get::<_, String>("status")
+        .parse()
+        .map_err(|e: crate::error::RoutineError| DatabaseError::Serialization(e.to_string()))?;
+    let decision = row
+        .try_get::<_, Option<String>>("decision")
+        .ok()
+        .flatten()
+        .map(|value| {
+            value.parse().map_err(|e: crate::error::RoutineError| {
+                DatabaseError::Serialization(e.to_string())
+            })
+        })
+        .transpose()?;
+
+    Ok(RoutineTrigger {
+        id: row.get("id"),
+        routine_id: row.get("routine_id"),
+        trigger_kind,
+        trigger_label: row.get("trigger_label"),
+        due_at: row.get("due_at"),
+        status,
+        decision,
+        active_key: row.get("active_key"),
+        idempotency_key: row.get("idempotency_key"),
+        claimed_by: row.get("claimed_by"),
+        claimed_at: row.get("claimed_at"),
+        lease_expires_at: row.get("lease_expires_at"),
+        processed_at: row.get("processed_at"),
+        error_message: row.get("error_message"),
+        diagnostics: row.get("diagnostics"),
+        coalesced_count: row.get::<_, i32>("coalesced_count") as u32,
+        backlog_collapsed: row.get("backlog_collapsed"),
+        routine_config_version: row.get("routine_config_version"),
         created_at: row.get("created_at"),
     })
 }
@@ -4002,6 +4828,7 @@ fn parse_job_state(s: &str) -> JobState {
         "failed" => JobState::Failed,
         "stuck" => JobState::Stuck,
         "cancelled" => JobState::Cancelled,
+        "abandoned" => JobState::Abandoned,
         _ => JobState::Pending,
     }
 }

@@ -167,16 +167,6 @@ Work independently to complete this job. Report when done."#,
         match result {
             Ok(Ok((output, iterations))) => {
                 tracing::info!("Worker completed job {} successfully", self.config.job_id);
-                self.post_event(
-                    "result",
-                    serde_json::json!({
-                        "status": "completed",
-                        "success": true,
-                        "message": truncate(&output, 2000),
-                        "iterations": iterations,
-                    }),
-                )
-                .await;
                 self.client
                     .report_complete(&CompletionReport {
                         status: Some("completed".to_string()),
@@ -189,16 +179,6 @@ Work independently to complete this job. Report when done."#,
             }
             Ok(Err(e)) => {
                 tracing::error!("Worker failed for job {}: {}", self.config.job_id, e);
-                self.post_event(
-                    "result",
-                    serde_json::json!({
-                        "status": "error",
-                        "success": false,
-                        "message": format!("Execution failed: {}", e),
-                        "iterations": 0,
-                    }),
-                )
-                .await;
                 self.client
                     .report_complete(&CompletionReport {
                         status: Some("error".to_string()),
@@ -211,16 +191,6 @@ Work independently to complete this job. Report when done."#,
             }
             Err(_) => {
                 tracing::warn!("Worker timed out for job {}", self.config.job_id);
-                self.post_event(
-                    "result",
-                    serde_json::json!({
-                        "status": "error",
-                        "success": false,
-                        "message": "Execution timed out",
-                        "iterations": 0,
-                    }),
-                )
-                .await;
                 self.client
                     .report_complete(&CompletionReport {
                         status: Some("error".to_string()),
@@ -243,6 +213,7 @@ Work independently to complete this job. Report when done."#,
     ) -> Result<(String, u32), WorkerError> {
         let max_iterations = self.config.max_iterations;
         let mut last_output = String::new();
+        let mut finish_requested = false;
 
         // Load tool definitions
         reason_ctx.available_tools = self
@@ -297,7 +268,9 @@ Work independently to complete this job. Report when done."#,
             }
 
             // Poll for follow-up prompts from the user
-            self.poll_and_inject_prompt(reason_ctx).await;
+            if self.poll_and_inject_prompt(reason_ctx).await {
+                finish_requested = true;
+            }
 
             // Refresh tools (in case WASM tools were built)
             reason_ctx.available_tools = self
@@ -358,7 +331,7 @@ Work independently to complete this job. Report when done."#,
                         )
                         .await;
 
-                        if crate::util::llm_signals_completion(&response) {
+                        if finish_requested || crate::util::llm_signals_completion(&response) {
                             if last_output.is_empty() {
                                 last_output = response.clone();
                             }
@@ -587,28 +560,31 @@ Work independently to complete this job. Report when done."#,
 
     /// Poll the orchestrator for a follow-up prompt. If one is available,
     /// inject it as a user message into the reasoning context.
-    async fn poll_and_inject_prompt(&self, reason_ctx: &mut ReasoningContext) {
+    async fn poll_and_inject_prompt(&self, reason_ctx: &mut ReasoningContext) -> bool {
         match self.client.poll_prompt().await {
             Ok(Some(prompt)) => {
-                tracing::info!(
-                    "Received follow-up prompt: {}",
-                    truncate(&prompt.content, 100)
-                );
+                let content = prompt.content.unwrap_or_else(|| {
+                    "Please wrap up now, summarize what you completed, and finish this job."
+                        .to_string()
+                });
+                tracing::info!("Received follow-up prompt: {}", truncate(&content, 100));
                 self.post_event(
                     "message",
                     serde_json::json!({
                         "role": "user",
-                        "content": truncate(&prompt.content, 2000),
+                        "content": truncate(&content, 2000),
                     }),
                 )
                 .await;
-                reason_ctx.messages.push(ChatMessage::user(&prompt.content));
+                reason_ctx.messages.push(ChatMessage::user(&content));
+                return prompt.done;
             }
             Ok(None) => {}
             Err(e) => {
                 tracing::debug!("Failed to poll for prompt: {}", e);
             }
         }
+        false
     }
 
     fn job_allowed_tools(&self) -> Option<&[String]> {

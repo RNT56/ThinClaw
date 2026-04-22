@@ -115,14 +115,49 @@ impl CodexBridgeRuntime {
             }
         };
 
+        if !job.interactive {
+            self.client
+                .report_complete(&CompletionReport {
+                    status: Some("completed".to_string()),
+                    session_id: session_id.clone(),
+                    success: true,
+                    message: Some("Codex session completed".to_string()),
+                    iterations: 1,
+                })
+                .await?;
+            return Ok(());
+        }
+
         let mut iteration = 1u32;
+        let idle_timeout = Duration::from_secs(
+            job.idle_timeout_secs
+                .unwrap_or(crate::sandbox_jobs::DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS),
+        );
+        let mut idle_deadline = tokio::time::Instant::now() + idle_timeout;
         loop {
+            if tokio::time::Instant::now() >= idle_deadline {
+                self.client
+                    .report_complete(&CompletionReport {
+                        status: Some("interrupted".to_string()),
+                        session_id: session_id.clone(),
+                        success: false,
+                        message: Some("Interactive idle timeout".to_string()),
+                        iterations: iteration,
+                    })
+                    .await?;
+                return Ok(());
+            }
+
             match poll_for_prompt(&self.client).await {
                 Ok(Some(prompt)) => {
-                    if prompt.done {
+                    idle_deadline = tokio::time::Instant::now() + idle_timeout;
+                    if prompt.done && prompt.content.is_none() {
                         tracing::info!(job_id = %self.config.job_id, "Orchestrator signaled done");
                         break;
                     }
+                    let Some(prompt_content) = prompt.content.as_deref() else {
+                        continue;
+                    };
 
                     iteration += 1;
                     let _ = self
@@ -134,9 +169,21 @@ impl CodexBridgeRuntime {
                         })
                         .await;
                     if let Err(e) = self
-                        .run_codex_session(&prompt.content, session_id.as_deref(), &extra_env)
+                        .run_codex_session(prompt_content, session_id.as_deref(), &extra_env)
                         .await
                     {
+                        if prompt.done {
+                            self.client
+                                .report_complete(&CompletionReport {
+                                    status: Some("error".to_string()),
+                                    session_id: session_id.clone(),
+                                    success: false,
+                                    message: Some(format!("Codex CLI failed: {}", e)),
+                                    iterations: iteration,
+                                })
+                                .await?;
+                            return Ok(());
+                        }
                         tracing::error!(
                             job_id = %self.config.job_id,
                             "Follow-up Codex session failed: {}", e
@@ -148,6 +195,8 @@ impl CodexBridgeRuntime {
                             }),
                         )
                         .await;
+                    } else if prompt.done {
+                        break;
                     }
                 }
                 Ok(None) => {
@@ -278,7 +327,7 @@ impl CodexBridgeRuntime {
         if !status.success() {
             let code = status.code().unwrap_or(-1);
             self.report_event(
-                "result",
+                "session_result",
                 &serde_json::json!({
                     "status": "error",
                     "success": false,
@@ -295,7 +344,7 @@ impl CodexBridgeRuntime {
         }
 
         self.report_event(
-            "result",
+            "session_result",
             &serde_json::json!({
                 "status": "completed",
                 "success": true,
@@ -317,8 +366,6 @@ fn codex_args(model: &str, prompt: &str, resume_session_id: Option<&str>) -> Vec
     let mut args = vec![
         "exec".to_string(),
         "--json".to_string(),
-        "--ask-for-approval".to_string(),
-        "never".to_string(),
         "--sandbox".to_string(),
         CODEX_SANDBOX_MODE.to_string(),
         "--skip-git-repo-check".to_string(),
@@ -640,11 +687,11 @@ mod tests {
 
         assert!(
             args.windows(2)
-                .any(|pair| pair == ["--ask-for-approval", "never"])
+                .any(|pair| pair == ["--sandbox", CODEX_SANDBOX_MODE])
         );
         assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--sandbox", CODEX_SANDBOX_MODE])
+            !args.iter().any(|arg| arg == "--ask-for-approval"),
+            "the bridge should avoid removed approval flags and rely on the current CLI contract"
         );
         assert!(
             !args.iter().any(|arg| arg == "--full-auto"),

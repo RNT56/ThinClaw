@@ -272,6 +272,7 @@ pub(crate) async fn sse_event_visible_to_identity(
         | SseEvent::JobToolUse { job_id, .. }
         | SseEvent::JobToolResult { job_id, .. }
         | SseEvent::JobStatus { job_id, .. }
+        | SseEvent::JobSessionResult { job_id, .. }
         | SseEvent::JobResult { job_id, .. } => {
             sandbox_job_event_visible_to_identity(store, identity, job_id).await
         }
@@ -568,6 +569,8 @@ mod tests {
             store,
             job_manager: None,
             prompt_queue: None,
+            context_manager: None,
+            scheduler: tokio::sync::RwLock::new(None),
             user_id: user_id.to_string(),
             actor_id: actor_id.to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),

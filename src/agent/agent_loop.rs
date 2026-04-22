@@ -32,6 +32,7 @@ use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
+use crate::sandbox_jobs::SandboxChildRegistry;
 use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -134,6 +135,8 @@ pub struct AgentDeps {
     pub model_override: Option<crate::tools::builtin::SharedModelOverride>,
     /// Restart flag shared with `main` so `/restart` can relaunch foreground runs too.
     pub restart_requested: Arc<AtomicBool>,
+    /// Tracks interactive sandbox child jobs spawned by a parent agent run.
+    pub sandbox_children: Option<Arc<SandboxChildRegistry>>,
 }
 
 /// The main agent that coordinates all components.
@@ -448,6 +451,23 @@ impl Agent {
     /// background tasks without entering the message-receive loop.
     /// The returned handle must be passed to `shutdown_background()` on exit.
     pub async fn start_background_tasks(&self) -> BackgroundTasksHandle {
+        if let Some(ref store) = self.deps.store {
+            match store
+                .abandon_active_direct_jobs(
+                    "Local job was orphaned when the agent process stopped; restart it manually if still needed",
+                )
+                .await
+            {
+                Ok(count) if count > 0 => {
+                    tracing::info!("Marked {} stale direct jobs as abandoned on startup", count);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!("Failed to mark stale direct jobs as abandoned: {}", error);
+                }
+            }
+        }
+
         // ── Self-repair ─────────────────────────────────────────────────
         let mut repair = DefaultSelfRepair::new(
             self.context_manager.clone(),
@@ -1958,11 +1978,13 @@ async fn upsert_heartbeat_routine(
                     action,
                     guardrails,
                     notify,
+                    policy: Default::default(),
                     last_run_at: None,
                     next_fire_at: None,
                     run_count: 0,
                     consecutive_failures: 0,
                     state: serde_json::json!({}),
+                    config_version: 1,
                     created_at: chrono::Utc::now(),
                     updated_at: chrono::Utc::now(),
                 };

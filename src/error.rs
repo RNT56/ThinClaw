@@ -402,6 +402,9 @@ pub enum RoutineError {
     #[error("Invalid cron expression: {reason}")]
     InvalidCron { reason: String },
 
+    #[error("Invalid event pattern: {reason}")]
+    InvalidEventPattern { reason: String },
+
     #[error("Unknown run status: {status}")]
     UnknownRunStatus { status: String },
 

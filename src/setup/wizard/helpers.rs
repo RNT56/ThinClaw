@@ -45,6 +45,10 @@ pub(super) fn mask_password_in_url(url: &str) -> String {
 pub(super) async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
         (
+            "claude-opus-4-7".into(),
+            "Claude Opus 4.7 (recommended flagship)".into(),
+        ),
+        (
             "claude-opus-4-6".into(),
             "Claude Opus 4.6 (latest flagship)".into(),
         ),

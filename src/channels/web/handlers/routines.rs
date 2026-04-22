@@ -15,6 +15,12 @@ use crate::channels::web::identity_helpers::{GatewayRequestIdentity, gateway_ide
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
+async fn refresh_event_cache_if_present(state: &GatewayState) {
+    if let Some(ref engine) = state.routine_engine {
+        engine.refresh_event_cache().await;
+    }
+}
+
 pub(crate) async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -75,6 +81,48 @@ pub(crate) async fn routines_summary_handler(
     }))
 }
 
+pub(crate) async fn routines_events_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+) -> Result<Json<RoutineEventActivityResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let events = store
+        .list_routine_events_for_actor(
+            &request_identity.principal_id,
+            &request_identity.actor_id,
+            50,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let items = events
+        .into_iter()
+        .map(|event| RoutineEventActivityInfo {
+            id: event.id,
+            channel: event.channel,
+            content_preview: event
+                .diagnostics
+                .get("content_preview")
+                .and_then(|value| value.as_str())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| truncate_for_ui(&event.content)),
+            status: event.status.to_string(),
+            created_at: event.created_at.to_rfc3339(),
+            processed_at: event.processed_at.map(|ts| ts.to_rfc3339()),
+            matched_routines: event.matched_routines,
+            fired_routines: event.fired_routines,
+            error_message: event.error_message,
+            diagnostics: event.diagnostics,
+        })
+        .collect();
+
+    Ok(Json(RoutineEventActivityResponse { events: items }))
+}
+
 pub(crate) async fn routines_detail_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -114,8 +162,60 @@ pub(crate) async fn routines_detail_handler(
             status: format!("{:?}", run.status),
             result_summary: run.result_summary.clone(),
             tokens_used: run.tokens_used,
+            job_id: run.job_id,
         })
         .collect();
+
+    let recent_event_checks = if matches!(
+        routine.trigger,
+        crate::agent::routine::Trigger::Event { .. }
+    ) {
+        store
+            .list_routine_event_evaluations(routine_id, 20)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .map(|evaluation| RoutineEventCheckInfo {
+                id: evaluation.id,
+                event_id: evaluation.event_id,
+                decision: evaluation.decision.to_string(),
+                reason: evaluation.reason,
+                details: evaluation.details,
+                sequence_num: evaluation.sequence_num,
+                channel: evaluation.channel,
+                content_preview: evaluation.content_preview,
+                created_at: evaluation.created_at.to_rfc3339(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let recent_trigger_checks = if matches!(
+        routine.trigger,
+        crate::agent::routine::Trigger::Cron { .. }
+            | crate::agent::routine::Trigger::SystemEvent { .. }
+    ) {
+        store
+            .list_routine_triggers(routine_id, 20)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .map(|trigger| RoutineTriggerCheckInfo {
+                id: trigger.id,
+                trigger_kind: trigger.trigger_kind.to_string(),
+                due_at: trigger.due_at.to_rfc3339(),
+                status: trigger.status.to_string(),
+                decision: trigger.decision.map(|decision| decision.to_string()),
+                claimed_by: trigger.claimed_by,
+                processed_at: trigger.processed_at.map(|ts| ts.to_rfc3339()),
+                coalesced_count: trigger.coalesced_count,
+                backlog_collapsed: trigger.backlog_collapsed,
+                diagnostics: trigger.diagnostics,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     Ok(Json(RoutineDetailResponse {
         id: routine.id,
@@ -126,12 +226,15 @@ pub(crate) async fn routines_detail_handler(
         action: serde_json::to_value(&routine.action).unwrap_or_default(),
         guardrails: serde_json::to_value(&routine.guardrails).unwrap_or_default(),
         notify: serde_json::to_value(&routine.notify).unwrap_or_default(),
+        policy: serde_json::to_value(&routine.policy).unwrap_or_default(),
         last_run_at: routine.last_run_at.map(|dt| dt.to_rfc3339()),
         next_fire_at: routine.next_fire_at.map(|dt| dt.to_rfc3339()),
         run_count: routine.run_count,
         consecutive_failures: routine.consecutive_failures,
         created_at: routine.created_at.to_rfc3339(),
         recent_runs,
+        recent_event_checks,
+        recent_trigger_checks,
     }))
 }
 
@@ -159,37 +262,15 @@ pub(crate) async fn routines_trigger_handler(
         return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
     }
 
-    let prompt = match &routine.action {
-        crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
-        crate::agent::routine::RoutineAction::FullJob {
-            title, description, ..
-        } => format!("{}: {}", title, description),
-        crate::agent::routine::RoutineAction::Heartbeat { prompt, .. } => prompt
-            .clone()
-            .unwrap_or_else(|| "Heartbeat check".to_string()),
-        crate::agent::routine::RoutineAction::ExperimentCampaign { project_id, .. } => {
-            format!("Run experiment campaign for project {project_id}")
-        }
-    };
-
-    let content = format!("[routine:{}] {}", routine.name, prompt);
-    let mut msg = IncomingMessage::new("gateway", &request_identity.principal_id, content);
-    msg = msg.with_identity(gateway_identity(
-        &request_identity.principal_id,
-        &request_identity.actor_id,
-        None,
-    ));
-
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
+    let engine = state.routine_engine.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
+        "Routine engine not available".to_string(),
     ))?;
 
-    tx.send(msg).await.map_err(|_| {
+    engine.fire_manual(routine_id).await.map_err(|error| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Channel closed".to_string(),
+            format!("Failed to trigger routine: {error}"),
         )
     })?;
 
@@ -241,6 +322,7 @@ pub(crate) async fn routines_toggle_handler(
     if !routine.enabled {
         let _ = outcomes::observe_routine_state_change(store, &routine, "routine_disabled").await;
     }
+    refresh_event_cache_if_present(state.as_ref()).await;
 
     Ok(Json(serde_json::json!({
         "status": if routine.enabled { "enabled" } else { "disabled" },
@@ -279,6 +361,7 @@ pub(crate) async fn routines_delete_handler(
 
     if deleted {
         let _ = outcomes::observe_routine_state_change(store, &routine, "routine_deleted").await;
+        refresh_event_cache_if_present(state.as_ref()).await;
         Ok(Json(serde_json::json!({
             "status": "deleted",
             "routine_id": routine_id,
@@ -327,6 +410,7 @@ pub(crate) async fn routines_runs_handler(
             status: format!("{:?}", run.status),
             result_summary: run.result_summary.clone(),
             tokens_used: run.tokens_used,
+            job_id: run.job_id,
         })
         .collect();
 
@@ -527,10 +611,28 @@ pub(crate) fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo
             },
         ),
         crate::agent::routine::Trigger::Event {
-            pattern, channel, ..
+            pattern,
+            channel,
+            event_type,
+            actor,
+            priority,
+            ..
         } => {
             let ch = channel.as_deref().unwrap_or("any");
-            ("event".to_string(), format!("on {} /{}/", ch, pattern))
+            let event_label = event_type.as_deref().unwrap_or("message");
+            let actor_label = actor
+                .as_deref()
+                .map(|value| format!(" actor {}", value))
+                .unwrap_or_default();
+            let summary = if *priority == 0 {
+                format!("on {} {}{} /{}/", ch, event_label, actor_label, pattern)
+            } else {
+                format!(
+                    "on {} {}{} /{}/ (prio {})",
+                    ch, event_label, actor_label, pattern, priority
+                )
+            };
+            ("event".to_string(), summary)
         }
         crate::agent::routine::Trigger::Webhook { path, .. } => {
             let p = path.as_deref().unwrap_or("/");
@@ -541,7 +643,16 @@ pub(crate) fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo
             let sched = schedule.as_deref().unwrap_or("on-demand");
             (
                 "system_event".to_string(),
-                format!("event: {} ({})", &message[..message.len().min(40)], sched),
+                format!(
+                    "event: {} ({}, {})",
+                    &message[..message.len().min(40)],
+                    sched,
+                    match r.policy.catch_up_mode {
+                        crate::agent::routine::RoutineCatchUpMode::Skip => "skip",
+                        crate::agent::routine::RoutineCatchUpMode::RunOnceNow => "run once",
+                        crate::agent::routine::RoutineCatchUpMode::Replay => "replay",
+                    }
+                ),
             )
         }
     };
@@ -574,5 +685,15 @@ pub(crate) fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo
         run_count: r.run_count,
         consecutive_failures: r.consecutive_failures,
         status: status.to_string(),
+    }
+}
+
+fn truncate_for_ui(content: &str) -> String {
+    const MAX_PREVIEW: usize = 200;
+    if content.len() <= MAX_PREVIEW {
+        content.to_string()
+    } else {
+        let end = crate::util::floor_char_boundary(content, MAX_PREVIEW);
+        format!("{}...", &content[..end])
     }
 }

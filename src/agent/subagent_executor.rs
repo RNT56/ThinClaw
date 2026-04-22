@@ -34,7 +34,10 @@ use uuid::Uuid;
 use crate::agent::learning::{
     ImprovementClass, LearningEvent as RuntimeLearningEvent, LearningOrchestrator, RiskTier,
 };
-use crate::agent::routine::RunStatus;
+use crate::agent::routine::{
+    RunStatus, routine_state_has_runtime_advance_for_run, routine_state_with_runtime_advance,
+};
+use crate::agent::routine_engine::persist_routine_runtime_update;
 use crate::channels::web::types::SseEvent;
 use crate::channels::{ChannelManager, StatusUpdate};
 use crate::config::SkillsConfig;
@@ -1171,6 +1174,84 @@ impl SubagentExecutor {
                             success = %subagent_result.success,
                             "Finalized routine run from subagent"
                         );
+                    }
+
+                    let routine_actor = parent_identity
+                        .as_ref()
+                        .map(|identity| identity.actor_id.as_str())
+                        .or(actor_id.as_deref())
+                        .unwrap_or(parent_user_id.as_str());
+                    let routine = ch_meta
+                        .get("routine_id")
+                        .and_then(|value| value.as_str())
+                        .and_then(|value| Uuid::parse_str(value).ok());
+                    let mut resolved_routine = None;
+                    if let Some(routine_id) = routine {
+                        if let Ok(Some(found)) = store.get_routine(routine_id).await
+                            && found.user_id == parent_user_id
+                            && found.owner_actor_id() == routine_actor
+                        {
+                            resolved_routine = Some(found);
+                        }
+                    }
+                    if resolved_routine.is_none()
+                        && let Ok(Some(found)) = store
+                            .get_routine_by_name_for_actor(
+                                &parent_user_id,
+                                routine_actor,
+                                routine_name,
+                            )
+                            .await
+                    {
+                        resolved_routine = Some(found);
+                    }
+                    if let Some(routine) = resolved_routine {
+                        let completed_at = chrono::Utc::now();
+                        let runtime_already_advanced =
+                            routine_state_has_runtime_advance_for_run(&routine.state, run_id);
+                        let next_fire_at = if runtime_already_advanced {
+                            routine.next_fire_at
+                        } else {
+                            crate::agent::routine::next_fire_for_routine(
+                                &routine,
+                                None,
+                                completed_at,
+                            )
+                            .unwrap_or(routine.next_fire_at)
+                        };
+                        let run_count = if runtime_already_advanced {
+                            routine.run_count
+                        } else {
+                            routine.run_count + 1
+                        };
+                        let consecutive_failures = if run_status == RunStatus::Failed {
+                            routine.consecutive_failures + 1
+                        } else {
+                            0
+                        };
+                        let state = routine_state_with_runtime_advance(
+                            &routine.state,
+                            run_id,
+                            completed_at,
+                        );
+                        if let Err(error) = persist_routine_runtime_update(
+                            store,
+                            routine.id,
+                            completed_at,
+                            next_fire_at,
+                            run_count,
+                            consecutive_failures,
+                            &state,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                routine = %routine.name,
+                                run_id = %run_id_str,
+                                "Failed to update routine runtime after subagent finalization: {}",
+                                error
+                            );
+                        }
                     }
                 }
 

@@ -29,6 +29,8 @@ pub enum JobState {
     Stuck,
     /// Job was cancelled.
     Cancelled,
+    /// Job was orphaned by process loss and now needs manual restart or retry.
+    Abandoned,
 }
 
 impl JobState {
@@ -48,13 +50,18 @@ impl JobState {
             // From Submitted
             (Submitted, Accepted) | (Submitted, Failed) |
             // From Stuck (can recover or fail)
-            (Stuck, InProgress) | (Stuck, Failed) | (Stuck, Cancelled)
+            (Stuck, InProgress) | (Stuck, Failed) | (Stuck, Cancelled) | (Stuck, Abandoned) |
+            // From Pending/InProgress if the process dies and work cannot be resumed
+            (Pending, Abandoned) | (InProgress, Abandoned)
         )
     }
 
     /// Check if this is a terminal state.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Accepted | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Accepted | Self::Failed | Self::Cancelled | Self::Abandoned
+        )
     }
 
     /// Check if the job is active (not terminal).
@@ -74,6 +81,7 @@ impl std::fmt::Display for JobState {
             Self::Failed => "failed",
             Self::Stuck => "stuck",
             Self::Cancelled => "cancelled",
+            Self::Abandoned => "abandoned",
         };
         write!(f, "{}", s)
     }
@@ -260,7 +268,11 @@ impl JobContext {
             JobState::InProgress if self.started_at.is_none() => {
                 self.started_at = Some(Utc::now());
             }
-            JobState::Completed | JobState::Accepted | JobState::Failed | JobState::Cancelled => {
+            JobState::Completed
+            | JobState::Accepted
+            | JobState::Failed
+            | JobState::Cancelled
+            | JobState::Abandoned => {
                 self.completed_at = Some(Utc::now());
             }
             _ => {}

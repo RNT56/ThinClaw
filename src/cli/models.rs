@@ -137,7 +137,7 @@ fn known_models() -> Vec<ModelInfo> {
             supports_streaming: true,
         },
         ModelInfo {
-            name: "claude-sonnet-4-20250514".to_string(),
+            name: "claude-opus-4-7".to_string(),
             provider: "anthropic".to_string(),
             context_window: Some(200_000),
             max_output: Some(64_000),
@@ -146,10 +146,10 @@ fn known_models() -> Vec<ModelInfo> {
             supports_streaming: true,
         },
         ModelInfo {
-            name: "claude-3-5-haiku-20241022".to_string(),
+            name: "claude-sonnet-4-6".to_string(),
             provider: "anthropic".to_string(),
             context_window: Some(200_000),
-            max_output: Some(8_192),
+            max_output: Some(64_000),
             supports_vision: true,
             supports_tools: true,
             supports_streaming: true,

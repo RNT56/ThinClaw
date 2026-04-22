@@ -294,8 +294,8 @@ impl SetupWizard {
 
         if self.is_quick_setup() {
             let options = [("Claude Code Worker", false), ("Codex Worker", false)];
-            let selected = select_many("Select coding workers to enable", &options)
-                .map_err(SetupError::Io)?;
+            let selected =
+                select_many("Select coding workers to enable", &options).map_err(SetupError::Io)?;
 
             let enable_claude = selected.contains(&0);
             let enable_codex = selected.contains(&1);
@@ -503,7 +503,9 @@ impl SetupWizard {
         if prompt_enable {
             if !confirm("Enable Codex sandbox?", false).map_err(SetupError::Io)? {
                 self.settings.codex_code_enabled = false;
-                print_info("Codex disabled. You can turn it on later with CODEX_CODE_ENABLED=true.");
+                print_info(
+                    "Codex disabled. You can turn it on later with CODEX_CODE_ENABLED=true.",
+                );
                 return Ok(());
             }
         }

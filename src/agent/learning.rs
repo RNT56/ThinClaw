@@ -4875,11 +4875,13 @@ mod tests {
                 on_success: true,
                 ..crate::agent::routine::NotifyConfig::default()
             },
+            policy: Default::default(),
             last_run_at: None,
             next_fire_at: None,
             run_count: 0,
             consecutive_failures: 0,
             state: serde_json::json!({}),
+            config_version: 1,
             created_at: now,
             updated_at: now,
         };

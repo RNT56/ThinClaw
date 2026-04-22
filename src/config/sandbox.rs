@@ -19,6 +19,8 @@ pub struct SandboxModeConfig {
     pub cpu_shares: u32,
     /// Docker image for the sandbox.
     pub image: String,
+    /// Idle timeout in seconds for interactive sandbox jobs.
+    pub interactive_idle_timeout_secs: u64,
     /// Whether to auto-pull the image if not found.
     pub auto_pull_image: bool,
     /// Additional domains to allow through the network proxy.
@@ -34,6 +36,7 @@ impl Default for SandboxModeConfig {
             memory_limit_mb: 2048,
             cpu_shares: 1024,
             image: "thinclaw-worker:latest".to_string(),
+            interactive_idle_timeout_secs: crate::sandbox_jobs::DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS,
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
         }
@@ -55,6 +58,10 @@ impl SandboxModeConfig {
             memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", db.memory_limit_mb)?,
             cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", db.cpu_shares)?,
             image: parse_string_env("SANDBOX_IMAGE", db.image.clone())?,
+            interactive_idle_timeout_secs: parse_optional_env(
+                "SANDBOX_INTERACTIVE_IDLE_TIMEOUT_SECS",
+                db.interactive_idle_timeout_secs,
+            )?,
             auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", db.auto_pull_image)?,
             extra_allowed_domains: extra_domains,
         })

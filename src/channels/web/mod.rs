@@ -319,6 +319,8 @@ impl GatewayChannel {
             store: None,
             job_manager: None,
             prompt_queue: None,
+            context_manager: None,
+            scheduler: tokio::sync::RwLock::new(None),
             user_id: config.user_id.clone(),
             actor_id: config
                 .actor_id
@@ -363,6 +365,8 @@ impl GatewayChannel {
             store: self.state.store.clone(),
             job_manager: self.state.job_manager.clone(),
             prompt_queue: self.state.prompt_queue.clone(),
+            context_manager: self.state.context_manager.clone(),
+            scheduler: tokio::sync::RwLock::new(None),
             user_id: self.state.user_id.clone(),
             actor_id: self.state.actor_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
@@ -381,6 +385,11 @@ impl GatewayChannel {
             secrets_store: self.state.secrets_store.clone(),
             channel_manager: self.state.channel_manager.clone(),
         };
+        if let Ok(existing_scheduler) = self.state.scheduler.try_read()
+            && let Ok(mut next_scheduler) = new_state.scheduler.try_write()
+        {
+            *next_scheduler = existing_scheduler.clone();
+        }
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
     }
@@ -443,6 +452,15 @@ impl GatewayChannel {
         >,
     ) -> Self {
         self.rebuild_state(|s| s.prompt_queue = Some(pq));
+        self
+    }
+
+    /// Inject the direct-job context manager for local job visibility APIs.
+    pub fn with_context_manager(
+        mut self,
+        context_manager: Arc<crate::context::ContextManager>,
+    ) -> Self {
+        self.rebuild_state(|s| s.context_manager = Some(context_manager));
         self
     }
 
