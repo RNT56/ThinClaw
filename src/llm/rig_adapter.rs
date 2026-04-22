@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use rig::OneOrMany;
 use rig::completion::{
-    AssistantContent, CompletionModel, CompletionRequest as RigRequest, Document as RigDocument,
+    AssistantContent, CompletionModel, CompletionRequest as RigRequest,
     ToolDefinition as RigToolDefinition, Usage as RigUsage,
 };
 use rig::message::{
@@ -18,7 +18,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::error::LlmError;
 use crate::llm::costs;
@@ -548,11 +548,12 @@ fn build_rig_request(
         provider: "rig".to_string(),
         reason: format!("Failed to build chat history: {}", e),
     })?;
+    let preamble = merge_ephemeral_context_into_preamble(preamble, context_documents);
 
     Ok(RigRequest {
         preamble,
         chat_history,
-        documents: convert_context_documents(context_documents),
+        documents: Vec::new(),
         tools,
         temperature: temperature.map(|t| t as f64),
         max_tokens: max_tokens.map(|t| t as u64),
@@ -561,25 +562,33 @@ fn build_rig_request(
     })
 }
 
-fn convert_context_documents(context_documents: Vec<String>) -> Vec<RigDocument> {
-    context_documents
+fn merge_ephemeral_context_into_preamble(
+    preamble: Option<String>,
+    context_documents: Vec<String>,
+) -> Option<String> {
+    let ephemeral_context = context_documents
         .into_iter()
-        .enumerate()
-        .filter_map(|(index, text)| {
+        .filter_map(|text| {
             let text = text.trim().to_string();
             if text.is_empty() {
                 return None;
             }
-            Some(RigDocument {
-                id: format!("context-{}", index + 1),
-                text,
-                additional_props: HashMap::from([(
-                    "source".to_string(),
-                    "ephemeral_context".to_string(),
-                )]),
-            })
+            Some(text)
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    match (
+        preamble
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        ephemeral_context.is_empty(),
+    ) {
+        (Some(preamble), true) => Some(preamble),
+        (Some(preamble), false) => Some(format!("{preamble}\n\n{ephemeral_context}")),
+        (None, false) => Some(ephemeral_context),
+        (None, true) => None,
+    }
 }
 
 /// Convert a ThinkingConfig into provider-specific additional_params JSON.
@@ -1189,7 +1198,7 @@ mod tests {
     }
 
     #[test]
-    fn build_rig_request_preserves_context_documents() {
+    fn build_rig_request_merges_context_documents_into_preamble() {
         let request = build_rig_request(
             Some("Stable preamble".to_string()),
             vec![RigMessage::user("hello")],
@@ -1205,17 +1214,11 @@ mod tests {
         )
         .expect("rig request should build");
 
-        assert_eq!(request.preamble.as_deref(), Some("Stable preamble"));
-        assert_eq!(request.documents.len(), 2);
-        assert_eq!(request.documents[0].id, "context-1");
-        assert_eq!(
-            request.documents[0]
-                .additional_props
-                .get("source")
-                .map(String::as_str),
-            Some("ephemeral_context")
-        );
-        assert!(request.documents[1].text.contains("Skill Expansion"));
+        let preamble = request.preamble.as_deref().unwrap_or_default();
+        assert!(preamble.contains("Stable preamble"));
+        assert!(preamble.contains("External Memory Recall"));
+        assert!(preamble.contains("Skill Expansion"));
+        assert!(request.documents.is_empty());
     }
 
     #[test]

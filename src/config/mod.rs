@@ -536,12 +536,40 @@ pub async fn refresh_secrets(secrets: &dyn crate::secrets::SecretsStore, user_id
     count
 }
 
+async fn provider_secret_from_store(
+    user_id: &str,
+    secret_name: &str,
+    secrets: Option<&Arc<dyn SecretsStore + Send + Sync>>,
+) -> Option<String> {
+    if let Some(store) = secrets
+        && let Ok(secret) = store.get_decrypted(user_id, secret_name).await
+    {
+        let value = secret.expose().trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn provider_secret_from_os_secure_store(secret_name: &str) -> Option<String> {
+    if let Some(value) = crate::platform::secure_store::get_api_key(secret_name).await
+        && !value.trim().is_empty()
+    {
+        return Some(value);
+    }
+
+    None
+}
+
 /// Resolve a provider credential using the same precedence as the WebUI and runtime.
 ///
 /// Resolution order:
 /// 1. Env/overlay (`optional_env`)
-/// 2. OS secure store
-/// 3. Encrypted secrets store
+/// 2. On macOS: encrypted secrets store
+/// 3. On other platforms: OS secure store, then encrypted secrets store
 /// 4. Provider-specific legacy env aliases
 pub async fn resolve_provider_secret_value(
     user_id: &str,
@@ -555,19 +583,19 @@ pub async fn resolve_provider_secret_value(
         return Some(value);
     }
 
-    if let Some(value) = crate::platform::secure_store::get_api_key(secret_name).await
-        && !value.trim().is_empty()
-    {
+    #[cfg(target_os = "macos")]
+    if let Some(value) = provider_secret_from_store(user_id, secret_name, secrets).await {
         return Some(value);
     }
 
-    if let Some(store) = secrets
-        && let Ok(secret) = store.get_decrypted(user_id, secret_name).await
-    {
-        let value = secret.expose().trim().to_string();
-        if !value.is_empty() {
-            return Some(value);
-        }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(value) = provider_secret_from_os_secure_store(secret_name).await {
+        return Some(value);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    if let Some(value) = provider_secret_from_store(user_id, secret_name, secrets).await {
+        return Some(value);
     }
 
     match env_key {

@@ -226,6 +226,14 @@ impl RuntimeLlmProvider {
                 budget_utilization: None,
                 last_user_message,
                 advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
+                primary_provider_preferences: normalized_provider_pool_order(
+                    &snapshot.providers,
+                    ProviderModelRole::Primary,
+                ),
+                cheap_provider_preferences: normalized_provider_pool_order(
+                    &snapshot.providers,
+                    ProviderModelRole::Cheap,
+                ),
             };
 
             if let Ok(guard) = self.manager.route_planner.read() {
@@ -1440,6 +1448,14 @@ impl LlmRuntimeManager {
             budget_utilization: None,
             last_user_message,
             advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
+            primary_provider_preferences: normalized_provider_pool_order(
+                &snapshot.providers,
+                ProviderModelRole::Primary,
+            ),
+            cheap_provider_preferences: normalized_provider_pool_order(
+                &snapshot.providers,
+                ProviderModelRole::Cheap,
+            ),
         };
 
         self.route_planner

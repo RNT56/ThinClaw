@@ -186,8 +186,8 @@ impl ChatMessage {
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
     pub messages: Vec<ChatMessage>,
-    /// Ephemeral context fragments that should be passed as provider-side
-    /// documents instead of folded into the stable system preamble.
+    /// Ephemeral text context fragments kept separate from the stable prompt
+    /// snapshot and merged into the provider request at send time.
     pub context_documents: Vec<String>,
     /// Optional per-request model override.
     pub model: Option<String>,
@@ -227,7 +227,7 @@ impl CompletionRequest {
         self
     }
 
-    /// Set ephemeral context documents to pass alongside the chat history.
+    /// Set ephemeral text context to pass alongside the chat history.
     pub fn with_context_documents(mut self, documents: Vec<String>) -> Self {
         self.context_documents = documents
             .into_iter()
@@ -309,8 +309,8 @@ pub struct ToolResult {
 #[derive(Debug, Clone)]
 pub struct ToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
-    /// Ephemeral context fragments that should be passed as provider-side
-    /// documents instead of folded into the stable system preamble.
+    /// Ephemeral text context fragments kept separate from the stable prompt
+    /// snapshot and merged into the provider request at send time.
     pub context_documents: Vec<String>,
     pub tools: Vec<ToolDefinition>,
     /// Optional per-request model override.

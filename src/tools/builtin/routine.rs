@@ -64,17 +64,17 @@ fn parse_max_event_age(
     if value.is_null() {
         return Ok(None);
     }
-    value
-        .as_u64()
-        .map(Some)
-        .ok_or_else(|| {
-            ToolError::InvalidParameters("max_event_age_secs must be an integer".to_string())
-        })
+    value.as_u64().map(Some).ok_or_else(|| {
+        ToolError::InvalidParameters("max_event_age_secs must be an integer".to_string())
+    })
 }
 
 fn routine_policy_from_params(params: &serde_json::Value) -> Result<RoutinePolicy, ToolError> {
     Ok(RoutinePolicy {
-        catch_up_mode: parse_catch_up_mode(params.get("catch_up_mode"), RoutineCatchUpMode::RunOnceNow)?,
+        catch_up_mode: parse_catch_up_mode(
+            params.get("catch_up_mode"),
+            RoutineCatchUpMode::RunOnceNow,
+        )?,
         max_event_age_secs: parse_max_event_age(params.get("max_event_age_secs"), None)?,
     })
 }
@@ -84,10 +84,7 @@ fn updated_routine_policy(
     params: &serde_json::Value,
 ) -> Result<RoutinePolicy, ToolError> {
     Ok(RoutinePolicy {
-        catch_up_mode: parse_catch_up_mode(
-            params.get("catch_up_mode"),
-            current.catch_up_mode,
-        )?,
+        catch_up_mode: parse_catch_up_mode(params.get("catch_up_mode"), current.catch_up_mode)?,
         max_event_age_secs: parse_max_event_age(
             params.get("max_event_age_secs"),
             current.max_event_age_secs,
@@ -383,8 +380,7 @@ impl Tool for RoutineCreateTool {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        routine.next_fire_at =
-            next_fire_for_routine(&routine, None, Utc::now()).unwrap_or(None);
+        routine.next_fire_at = next_fire_for_routine(&routine, None, Utc::now()).unwrap_or(None);
 
         self.store
             .create_routine(&routine)
@@ -646,7 +642,8 @@ impl Tool for RoutineUpdateTool {
                     };
                 }
             }
-            routine.next_fire_at = next_fire_for_routine(&routine, None, Utc::now()).unwrap_or(None);
+            routine.next_fire_at =
+                next_fire_for_routine(&routine, None, Utc::now()).unwrap_or(None);
         }
 
         if has_event_updates {
@@ -706,9 +703,7 @@ impl Tool for RoutineUpdateTool {
             let actor = match params.get("event_actor") {
                 Some(value) if value.is_null() => None,
                 Some(value) => Some(value.as_str().map(|s| s.to_string()).ok_or_else(|| {
-                    ToolError::InvalidParameters(
-                        "event_actor must be a string or null".to_string(),
-                    )
+                    ToolError::InvalidParameters("event_actor must be a string or null".to_string())
                 })?),
                 None => match &routine.trigger {
                     Trigger::Event { actor, .. } => actor.clone(),

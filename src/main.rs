@@ -446,6 +446,8 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    #[cfg(feature = "docker-sandbox")]
+    let runtime_secrets_store = components.secrets_store.clone();
     let config = components.config;
 
     // ── Tunnel setup ───────────────────────────────────────────────────
@@ -508,27 +510,27 @@ async fn main() -> anyhow::Result<()> {
     let container_job_manager: Option<Arc<ContainerJobManager>> = if config.sandbox.enabled {
         let token_store = TokenStore::new();
 
-        // Resolve Claude Code API key: env var > OS secure store > (OAuth fallback in config)
-        let claude_code_api_key = match std::env::var("ANTHROPIC_API_KEY").ok() {
-            Some(key) => Some(key),
-            None => {
-                // Check the OS secure store for the API key stored by the wizard
-                thinclaw::platform::secure_store::get_api_key(
-                    thinclaw::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
-                )
-                .await
-            }
-        };
+        // On macOS, prefer the encrypted secrets store and treat the OS keychain
+        // as the root trust anchor (master key) plus a legacy migration fallback.
+        let claude_code_api_key = resolve_container_provider_api_key(
+            "default",
+            "ANTHROPIC_API_KEY",
+            "llm_anthropic_api_key",
+            "anthropic",
+            thinclaw::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
+            &runtime_secrets_store,
+        )
+        .await;
 
-        let codex_code_api_key = match std::env::var("OPENAI_API_KEY").ok() {
-            Some(key) => Some(key),
-            None => {
-                thinclaw::platform::secure_store::get_api_key(
-                    thinclaw::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
-                )
-                .await
-            }
-        };
+        let codex_code_api_key = resolve_container_provider_api_key(
+            "default",
+            "OPENAI_API_KEY",
+            "llm_openai_api_key",
+            "openai",
+            thinclaw::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
+            &runtime_secrets_store,
+        )
+        .await;
 
         let job_config = ContainerJobConfig {
             image: config.sandbox.image.clone(),
@@ -568,7 +570,7 @@ async fn main() -> anyhow::Result<()> {
             job_event_tx: job_event_tx.clone(),
             prompt_queue: Arc::clone(&prompt_queue),
             store: components.db.clone(),
-            secrets_store: components.secrets_store.clone(),
+            secrets_store: runtime_secrets_store.clone(),
         };
 
         tokio::spawn(async move {

@@ -129,6 +129,10 @@ pub struct RoutePlannerInput {
     pub last_user_message: Option<String>,
     /// Optional advisor escalation prompt override (AdvisorExecutor mode).
     pub advisor_escalation_prompt: Option<String>,
+    /// Ordered primary-provider preferences derived from user settings.
+    pub primary_provider_preferences: Vec<String>,
+    /// Ordered cheap-provider preferences derived from user settings.
+    pub cheap_provider_preferences: Vec<String>,
 }
 
 /// How to handle post-response quality escalation.
@@ -301,7 +305,7 @@ impl RouteScorer {
         }
 
         // ── Dimension scores ───────────────────────────────────
-        let quality = model_quality_tier_for_candidate(candidate);
+        let quality = quality_score_for_candidate(candidate, capabilities);
         let mut cost = cost_score(candidate.cost_per_m_usd);
         if candidate.cost_stale {
             // Penalize stale dynamic pricing so fresh-priced candidates win ties.
@@ -334,38 +338,35 @@ impl RouteScorer {
     }
 }
 
-/// Quality tier lookup by model target.
-fn model_quality_tier(target: &str) -> f64 {
-    let lower = target.to_lowercase();
-    // Check model family patterns
-    if lower.contains("opus") {
-        0.95
-    } else if lower.contains("gpt-4o") && !lower.contains("mini") {
-        0.90
-    } else if lower.contains("sonnet") || (lower.contains("gemini-2") && lower.contains("pro")) {
-        0.85
-    } else if lower.contains("flash") && !lower.contains("lite") {
-        0.60
-    } else if lower.contains("haiku")
-        || lower.contains("gpt-4o-mini")
-        || lower.contains("4o-mini")
-        || lower == "cheap"
-    {
-        0.50
-    } else if lower.contains("flash-lite") {
-        0.35
-    } else if lower == "primary" {
-        0.85 // assume primary is a quality model
-    } else {
-        0.50 // unknown
+fn quality_score_for_candidate(
+    candidate: &RouteCandidate,
+    capabilities: &ProviderCapabilities,
+) -> f64 {
+    if let Some(compat) = candidate_model_compat(candidate) {
+        return compat.routing_quality_score();
     }
+
+    crate::config::model_compat::estimate_routing_quality(
+        capabilities.supports_streaming,
+        capabilities.supports_tools,
+        capabilities.supports_vision,
+        capabilities.supports_thinking,
+        None,
+        None,
+        capabilities.max_context_tokens,
+        None,
+        candidate.cost_per_m_usd,
+    )
 }
 
-fn model_quality_tier_for_candidate(candidate: &RouteCandidate) -> f64 {
-    if let Some(model_id) = candidate.model_id.as_deref() {
-        return model_quality_tier(model_id);
-    }
-    model_quality_tier(&candidate.target)
+fn candidate_model_compat(
+    candidate: &RouteCandidate,
+) -> Option<crate::config::model_compat::ModelCompat> {
+    candidate
+        .model_id
+        .as_deref()
+        .or_else(|| candidate.target.rsplit_once('/').map(|(_, model)| model))
+        .and_then(crate::config::model_compat::find_model)
 }
 
 /// Cost score: cheaper is higher (inverted, normalized 0–1).
@@ -623,7 +624,11 @@ impl RoutePlanner {
     // -- AdvisorExecutor (new) --
 
     fn plan_advisor_executor(&self, input: &RoutePlannerInput) -> RouteDecision {
-        let evaluation = self.evaluate_candidates(input, |_candidate| 0.0, None);
+        let evaluation = self.evaluate_candidates(
+            input,
+            |candidate| advisor_executor_lane_bias(candidate, input),
+            None,
+        );
         let executor = evaluation
             .ranked
             .iter()
@@ -645,8 +650,11 @@ impl RoutePlanner {
             vision: false,
             extended_thinking: false,
         };
-        let advisor_evaluation =
-            self.evaluate_candidates(&advisor_input, |_candidate| 0.0, Some(&["primary"]));
+        let advisor_evaluation = self.evaluate_candidates(
+            &advisor_input,
+            |candidate| primary_lane_bias(candidate, &input.primary_provider_preferences),
+            Some(&["primary"]),
+        );
         let advisor = advisor_evaluation.ranked.first().cloned();
         let advisor_identity = preferred_lane_identity_candidate(
             &advisor_evaluation.ranked,
@@ -1136,6 +1144,43 @@ fn preferred_lane_identity_candidate(
         .or_else(|| candidates.iter().find(matches_role).cloned())
 }
 
+fn advisor_executor_lane_bias(candidate: &RouteCandidate, input: &RoutePlannerInput) -> f64 {
+    if candidate.target == "cheap" || candidate.target.ends_with("@cheap") {
+        return cheap_lane_bias(candidate, &input.cheap_provider_preferences);
+    }
+    if candidate.target == "primary" || candidate.target.ends_with("@primary") {
+        return primary_lane_bias(candidate, &input.primary_provider_preferences);
+    }
+    0.0
+}
+
+fn primary_lane_bias(candidate: &RouteCandidate, preferences: &[String]) -> f64 {
+    provider_preference_bias(candidate.provider_slug.as_deref(), preferences, 0.08)
+}
+
+fn cheap_lane_bias(candidate: &RouteCandidate, preferences: &[String]) -> f64 {
+    provider_preference_bias(candidate.provider_slug.as_deref(), preferences, 0.10)
+}
+
+fn provider_preference_bias(
+    provider_slug: Option<&str>,
+    preferences: &[String],
+    top_bias: f64,
+) -> f64 {
+    let Some(provider_slug) = provider_slug else {
+        return 0.0;
+    };
+    let Some(index) = preferences.iter().position(|entry| entry == provider_slug) else {
+        return 0.0;
+    };
+    match index {
+        0 => top_bias,
+        1 => top_bias * 0.5,
+        2 => top_bias * 0.25,
+        _ => 0.0,
+    }
+}
+
 fn merge_complexity(a: TaskComplexity, b: TaskComplexity) -> TaskComplexity {
     match (a, b) {
         (TaskComplexity::Complex, _) | (_, TaskComplexity::Complex) => TaskComplexity::Complex,
@@ -1416,6 +1461,8 @@ mod tests {
             budget_utilization: None,
             last_user_message: None,
             advisor_escalation_prompt: None,
+            primary_provider_preferences: Vec::new(),
+            cheap_provider_preferences: Vec::new(),
         }
     }
 
@@ -1681,6 +1728,69 @@ mod tests {
         assert_eq!(decision.advisor_target.as_deref(), Some("openai@primary"));
     }
 
+    #[test]
+    fn advisor_executor_biases_toward_configured_primary_and_cheap_providers() {
+        let p = planner();
+        let mut input = default_input();
+        input.routing_mode = RoutingMode::AdvisorExecutor;
+        input.primary_provider_preferences = vec!["openai".to_string(), "anthropic".to_string()];
+        input.cheap_provider_preferences = vec!["openai".to_string(), "anthropic".to_string()];
+        input.candidates = vec![
+            RouteCandidate::new("openai@primary", Some(6.0))
+                .with_identity(
+                    Some("openai".to_string()),
+                    Some("unknown-primary".to_string()),
+                )
+                .with_health(Some(0.9))
+                .with_capabilities(crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_streaming: Some(true),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    ..Default::default()
+                }),
+            RouteCandidate::new("anthropic@primary", Some(6.0))
+                .with_identity(
+                    Some("anthropic".to_string()),
+                    Some("unknown-primary-alt".to_string()),
+                )
+                .with_health(Some(1.0))
+                .with_capabilities(crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_streaming: Some(true),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    ..Default::default()
+                }),
+            RouteCandidate::new("openai@cheap", Some(3.0))
+                .with_identity(
+                    Some("openai".to_string()),
+                    Some("unknown-cheap".to_string()),
+                )
+                .with_health(Some(0.9))
+                .with_capabilities(crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_streaming: Some(true),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    ..Default::default()
+                }),
+            RouteCandidate::new("anthropic@cheap", Some(3.0))
+                .with_identity(
+                    Some("anthropic".to_string()),
+                    Some("unknown-cheap-alt".to_string()),
+                )
+                .with_health(Some(1.0))
+                .with_capabilities(crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_streaming: Some(true),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    ..Default::default()
+                }),
+        ];
+
+        let decision = p.plan(&input, None);
+        assert_eq!(decision.executor_target.as_deref(), Some("openai@cheap"));
+        assert_eq!(decision.advisor_target.as_deref(), Some("openai@primary"));
+    }
+
     // -- Policy --
 
     #[test]
@@ -1839,15 +1949,20 @@ mod tests {
         );
     }
 
-    // -- Quality tiers --
+    // -- Quality scoring --
 
     #[test]
-    fn quality_tier_known_models() {
-        assert!(model_quality_tier("opus") > 0.9);
-        assert!(model_quality_tier("sonnet") > 0.8);
-        assert!(model_quality_tier("haiku") < 0.6);
-        assert!(model_quality_tier("primary") > 0.8);
-        assert!(model_quality_tier("cheap") < 0.6);
+    fn quality_score_uses_model_compat_data() {
+        let caps = ProviderCapabilities::default();
+        let gpt_54 = RouteCandidate::new("openai@primary", Some(17.5))
+            .with_identity(Some("openai".to_string()), Some("gpt-5.4".to_string()));
+        let gpt_54_mini = RouteCandidate::new("openai@cheap", Some(5.25))
+            .with_identity(Some("openai".to_string()), Some("gpt-5.4-mini".to_string()));
+
+        assert!(
+            quality_score_for_candidate(&gpt_54, &caps)
+                > quality_score_for_candidate(&gpt_54_mini, &caps)
+        );
     }
 
     #[test]

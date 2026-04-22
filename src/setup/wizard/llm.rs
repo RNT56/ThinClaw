@@ -774,14 +774,32 @@ impl SetupWizard {
     }
 
     async fn has_provider_secret(&mut self, env_var: &str, secret_name: &str) -> bool {
-        std::env::var(env_var).is_ok()
-            || crate::platform::secure_store::get_api_key(secret_name)
-                .await
-                .is_some()
-            || self.has_saved_secret(secret_name).await
+        if std::env::var(env_var).is_ok() {
+            return true;
+        }
+
+        #[cfg(target_os = "macos")]
+        if self.has_saved_secret(secret_name).await {
+            return true;
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        if crate::platform::secure_store::get_api_key(secret_name)
+            .await
+            .is_some()
+        {
+            return true;
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        if self.has_saved_secret(secret_name).await {
+            return true;
+        }
+
+        false
     }
 
-    async fn resolve_provider_secret_value(
+    pub(super) async fn resolve_provider_secret_value(
         &mut self,
         env_var: &str,
         secret_name: &str,
@@ -792,12 +810,24 @@ impl SetupWizard {
             return Some(value);
         }
 
+        #[cfg(target_os = "macos")]
+        if let Ok(ctx) = self.init_secrets_context().await
+            && let Ok(secret) = ctx.get_secret(secret_name).await
+        {
+            let value = secret.expose_secret().trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
         if let Some(value) = crate::platform::secure_store::get_api_key(secret_name).await
             && !value.trim().is_empty()
         {
             return Some(value);
         }
 
+        #[cfg(not(target_os = "macos"))]
         if let Ok(ctx) = self.init_secrets_context().await
             && let Ok(secret) = ctx.get_secret(secret_name).await
         {

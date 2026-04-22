@@ -19,6 +19,8 @@ use thinclaw::channels::wasm::{
 };
 use thinclaw::config::Config;
 use thinclaw::pairing::PairingStore;
+#[cfg(all(feature = "docker-sandbox", target_os = "macos"))]
+use thinclaw::secrets::CreateSecretParams;
 use thinclaw::secrets::SecretsStore;
 
 const STARTUP_SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
@@ -219,6 +221,66 @@ pub(crate) async fn run_codex_bridge(
         .run()
         .await
         .map_err(|e| anyhow::anyhow!("Codex bridge failed: {}", e))
+}
+
+#[cfg(feature = "docker-sandbox")]
+pub(crate) async fn resolve_container_provider_api_key(
+    user_id: &str,
+    env_key: &str,
+    provider_secret_name: &str,
+    provider_slug: &str,
+    legacy_keychain_account: &str,
+    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
+) -> Option<String> {
+    if let Ok(value) = std::env::var(env_key)
+        && !value.trim().is_empty()
+    {
+        return Some(value);
+    }
+
+    if let Some(store) = secrets_store
+        && let Ok(secret) = store.get_decrypted(user_id, provider_secret_name).await
+    {
+        let value = secret.expose().trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = provider_slug;
+
+    if let Some(value) = thinclaw::platform::secure_store::get_api_key(legacy_keychain_account)
+        .await
+        .filter(|value| !value.trim().is_empty())
+    {
+        #[cfg(target_os = "macos")]
+        if let Some(store) = secrets_store {
+            let params = CreateSecretParams::new(provider_secret_name, value.clone())
+                .with_provider(provider_slug.to_string());
+            match store.create(user_id, params).await {
+                Ok(_) => {
+                    tracing::info!(
+                        legacy_keychain_account,
+                        provider_secret_name,
+                        "Migrated legacy macOS sandbox API key into the encrypted secrets store"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        legacy_keychain_account,
+                        provider_secret_name,
+                        error = %error,
+                        "Failed to migrate legacy macOS sandbox API key into the encrypted secrets store"
+                    );
+                }
+            }
+        }
+
+        return Some(value);
+    }
+
+    None
 }
 
 /// Start managed tunnel if configured and no static URL is already set.

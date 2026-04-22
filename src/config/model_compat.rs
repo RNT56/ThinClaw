@@ -60,6 +60,90 @@ impl ModelCompat {
                 + (output_tokens as f64 / 1_000_000.0) * output_price,
         )
     }
+
+    /// Routing quality score derived from structured compatibility metadata.
+    pub fn routing_quality_score(&self) -> f64 {
+        estimate_routing_quality(
+            Some(self.supports_streaming),
+            Some(self.supports_tools),
+            Some(self.supports_vision),
+            Some(self.supports_thinking),
+            Some(self.supports_json_mode),
+            Some(self.supports_system_prompt),
+            Some(self.context_window),
+            Some(self.max_output_tokens),
+            total_price_per_m(self.input_price_per_m, self.output_price_per_m),
+        )
+    }
+}
+
+/// Estimate a routing quality score from structured model metadata.
+///
+/// This returns a concrete score for every input shape so routing never falls
+/// back to an "unknown/generic" bucket.
+pub fn estimate_routing_quality(
+    supports_streaming: Option<bool>,
+    supports_tools: Option<bool>,
+    supports_vision: Option<bool>,
+    supports_thinking: Option<bool>,
+    supports_json_mode: Option<bool>,
+    supports_system_prompt: Option<bool>,
+    context_window: Option<u32>,
+    max_output_tokens: Option<u32>,
+    total_price_per_m: Option<f64>,
+) -> f64 {
+    let mut score = 0.16;
+    score += bool_signal(supports_streaming, 0.04, 0.02);
+    score += bool_signal(supports_tools, 0.12, 0.03);
+    score += bool_signal(supports_vision, 0.06, 0.01);
+    score += bool_signal(supports_thinking, 0.14, 0.03);
+    score += bool_signal(supports_json_mode, 0.05, 0.02);
+    score += bool_signal(supports_system_prompt, 0.03, 0.02);
+    score += normalized_log_range(
+        context_window.map(|value| value as f64),
+        8_000.0,
+        1_000_000.0,
+    ) * 0.18;
+    score += normalized_log_range(
+        max_output_tokens.map(|value| value as f64),
+        2_048.0,
+        128_000.0,
+    ) * 0.10;
+    score += normalized_log_range(total_price_per_m, 0.10, 40.0) * 0.10;
+    score.clamp(0.05, 0.99)
+}
+
+fn bool_signal(value: Option<bool>, yes_weight: f64, unknown_weight: f64) -> f64 {
+    match value {
+        Some(true) => yes_weight,
+        Some(false) => 0.0,
+        None => unknown_weight,
+    }
+}
+
+fn normalized_log_range(value: Option<f64>, min: f64, max: f64) -> f64 {
+    let Some(value) = value.filter(|value| *value > 0.0) else {
+        return 0.5;
+    };
+    let clamped = value.clamp(min, max);
+    let min_ln = min.ln();
+    let max_ln = max.ln();
+    if (max_ln - min_ln).abs() < f64::EPSILON {
+        return 1.0;
+    }
+    ((clamped.ln() - min_ln) / (max_ln - min_ln)).clamp(0.0, 1.0)
+}
+
+fn total_price_per_m(
+    input_price_per_m: Option<f64>,
+    output_price_per_m: Option<f64>,
+) -> Option<f64> {
+    match (input_price_per_m, output_price_per_m) {
+        (Some(input), Some(output)) => Some(input + output),
+        (Some(input), None) => Some(input),
+        (None, Some(output)) => Some(output),
+        (None, None) => None,
+    }
 }
 
 /// Build the known model compatibility database.
@@ -276,5 +360,31 @@ mod tests {
         assert!(!model.supports_vision);
         assert!(!model.supports_tools);
         assert!(!model.supports_system_prompt);
+    }
+
+    #[test]
+    fn test_routing_quality_score_orders_known_models() {
+        let opus = find_model("claude-opus-4-7")
+            .unwrap()
+            .routing_quality_score();
+        let gpt_54 = find_model("gpt-5.4").unwrap().routing_quality_score();
+        let gpt_54_mini = find_model("gpt-5.4-mini").unwrap().routing_quality_score();
+        let pi_ai = find_model("pi-ai").unwrap().routing_quality_score();
+
+        assert!(gpt_54 > gpt_54_mini);
+        assert!(opus > pi_ai);
+        assert!(gpt_54_mini > pi_ai);
+        assert!((0.0..=1.0).contains(&opus));
+        assert!((0.0..=1.0).contains(&gpt_54));
+    }
+
+    #[test]
+    fn test_estimate_routing_quality_never_returns_unknown_bucket() {
+        let score = estimate_routing_quality(None, None, None, None, None, None, None, None, None);
+        assert!((0.0..=1.0).contains(&score));
+        assert_ne!(
+            score, 0.5,
+            "fallback quality should not collapse to a generic unknown score"
+        );
     }
 }

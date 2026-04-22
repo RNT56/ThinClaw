@@ -358,21 +358,42 @@ impl SetupWizard {
         crate::setup::prompts::print_blank_line();
 
         // Check existing auth sources
+        let api_key_storage_label = if cfg!(target_os = "macos") {
+            format!(
+                "ThinClaw's encrypted secrets store (protected by {})",
+                crate::platform::secure_store::display_name()
+            )
+        } else {
+            crate::platform::secure_store::display_name().to_string()
+        };
         let env_api_key = std::env::var("ANTHROPIC_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty());
         let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some();
-
-        let keychain_api_key = crate::platform::secure_store::get_api_key(
-            crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
-        )
-        .await
-        .filter(|value| !value.trim().is_empty());
+        let saved_api_key = self
+            .resolve_provider_secret_value("ANTHROPIC_API_KEY", ANTHROPIC_PROVIDER_SECRET_NAME)
+            .await
+            .filter(|value| !value.trim().is_empty());
+        let keychain_api_key = if cfg!(target_os = "macos") && saved_api_key.is_some() {
+            None
+        } else {
+            crate::platform::secure_store::get_api_key(
+                crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
+            )
+            .await
+            .filter(|value| !value.trim().is_empty())
+        };
 
         if let Some(api_key) = env_api_key.as_deref() {
             print_success("✓ ANTHROPIC_API_KEY found in the environment. Using it now.");
             self.maybe_link_claude_code_api_key_to_anthropic_provider(api_key)
                 .await?;
+        } else if saved_api_key.is_some() {
+            print_success(&format!(
+                "✓ Anthropic API key found in {}. Using it now.",
+                api_key_storage_label
+            ));
+            self.enable_anthropic_provider_for_claude_code_key();
         } else if let Some(api_key) = keychain_api_key.as_deref() {
             print_success(&format!(
                 "✓ Anthropic API key found in the {}. Using it now.",
@@ -387,15 +408,15 @@ impl SetupWizard {
             print_info("No existing auth found. Claude Code containers need one of these:");
             print_info(&format!(
                 "  1. Anthropic API key (stored securely in {})",
-                crate::platform::secure_store::display_name()
+                api_key_storage_label
             ));
             print_info("  2. OAuth session from 'claude login' on this machine");
             crate::setup::prompts::print_blank_line();
 
             if confirm(
                 &format!(
-                    "Do you want to store an Anthropic API key in the {}?",
-                    crate::platform::secure_store::display_name()
+                    "Do you want to store an Anthropic API key in {}?",
+                    api_key_storage_label
                 ),
                 true,
             )
@@ -404,6 +425,101 @@ impl SetupWizard {
                 let api_key = input("Anthropic API key (sk-ant-...)").map_err(SetupError::Io)?;
 
                 if api_key.starts_with("sk-ant-") {
+                    #[cfg(target_os = "macos")]
+                    {
+                        if let Ok(ctx) = self.init_secrets_context().await {
+                            match ctx
+                                .save_secret(
+                                    ANTHROPIC_PROVIDER_SECRET_NAME,
+                                    &SecretString::from(api_key.clone()),
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    print_success(&format!(
+                                        "API key encrypted and saved in {}.",
+                                        api_key_storage_label
+                                    ));
+                                    print_info(
+                                        "It will be decrypted at runtime using the master key from the OS secure store.",
+                                    );
+                                    self.enable_anthropic_provider_for_claude_code_key();
+                                }
+                                Err(e) => {
+                                    print_error(&format!(
+                                        "Failed to save to {}: {}",
+                                        api_key_storage_label, e
+                                    ));
+                                    print_info(
+                                        "Falling back to the OS secure store for compatibility.",
+                                    );
+                                    match crate::platform::secure_store::store_api_key(
+                                        crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
+                                        &api_key,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            print_success(&format!(
+                                                "API key stored securely in the {}.",
+                                                crate::platform::secure_store::display_name()
+                                            ));
+                                            print_info(
+                                                "It will be injected into Claude Code containers at runtime.",
+                                            );
+                                            self.maybe_link_claude_code_api_key_to_anthropic_provider(&api_key)
+                                                .await?;
+                                        }
+                                        Err(store_error) => {
+                                            print_error(&format!(
+                                                "Failed to store in {}: {}",
+                                                crate::platform::secure_store::display_name(),
+                                                store_error
+                                            ));
+                                            print_info(
+                                                "You can set ANTHROPIC_API_KEY in your environment instead.",
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            print_info(
+                                "Encrypted secrets storage is unavailable right now, so ThinClaw will use the OS secure store instead.",
+                            );
+                            match crate::platform::secure_store::store_api_key(
+                                crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
+                                &api_key,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    print_success(&format!(
+                                        "API key stored securely in the {}.",
+                                        crate::platform::secure_store::display_name()
+                                    ));
+                                    print_info(
+                                        "It will be injected into Claude Code containers at runtime.",
+                                    );
+                                    self.maybe_link_claude_code_api_key_to_anthropic_provider(
+                                        &api_key,
+                                    )
+                                    .await?;
+                                }
+                                Err(e) => {
+                                    print_error(&format!(
+                                        "Failed to store in {}: {}",
+                                        crate::platform::secure_store::display_name(),
+                                        e
+                                    ));
+                                    print_info(
+                                        "You can set ANTHROPIC_API_KEY in your environment instead.",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
                     match crate::platform::secure_store::store_api_key(
                         crate::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
                         &api_key,
@@ -516,14 +632,30 @@ impl SetupWizard {
         print_info("═══ Codex Authentication ═══");
         crate::setup::prompts::print_blank_line();
 
+        let api_key_storage_label = if cfg!(target_os = "macos") {
+            format!(
+                "ThinClaw's encrypted secrets store (protected by {})",
+                crate::platform::secure_store::display_name()
+            )
+        } else {
+            crate::platform::secure_store::display_name().to_string()
+        };
         let env_api_key = std::env::var("OPENAI_API_KEY")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let keychain_api_key = crate::platform::secure_store::get_api_key(
-            crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
-        )
-        .await
-        .filter(|value| !value.trim().is_empty());
+        let saved_api_key = self
+            .resolve_provider_secret_value("OPENAI_API_KEY", OPENAI_PROVIDER_SECRET_NAME)
+            .await
+            .filter(|value| !value.trim().is_empty());
+        let keychain_api_key = if cfg!(target_os = "macos") && saved_api_key.is_some() {
+            None
+        } else {
+            crate::platform::secure_store::get_api_key(
+                crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
+            )
+            .await
+            .filter(|value| !value.trim().is_empty())
+        };
         let auth_path = crate::config::CodexCodeConfig::resolved_auth_file_path();
         let has_auth_file = auth_path.is_file();
 
@@ -531,6 +663,12 @@ impl SetupWizard {
             print_success("✓ OPENAI_API_KEY found in the environment. Using it now.");
             self.maybe_link_codex_code_api_key_to_openai_provider(api_key)
                 .await?;
+        } else if saved_api_key.is_some() {
+            print_success(&format!(
+                "✓ OpenAI API key found in {}. Using it now.",
+                api_key_storage_label
+            ));
+            self.enable_openai_provider_for_codex_code_key();
         } else if let Some(api_key) = keychain_api_key.as_deref() {
             print_success(&format!(
                 "✓ OpenAI API key found in the {}. Using it now.",
@@ -545,15 +683,15 @@ impl SetupWizard {
             print_info("No existing auth found. Codex containers need one of these:");
             print_info(&format!(
                 "  1. OpenAI API key (stored securely in {})",
-                crate::platform::secure_store::display_name()
+                api_key_storage_label
             ));
             print_info(&format!("  2. Codex auth file at {}", auth_path.display()));
             crate::setup::prompts::print_blank_line();
 
             if confirm(
                 &format!(
-                    "Do you want to store an OpenAI API key in the {}?",
-                    crate::platform::secure_store::display_name()
+                    "Do you want to store an OpenAI API key in {}?",
+                    api_key_storage_label
                 ),
                 true,
             )
@@ -561,6 +699,101 @@ impl SetupWizard {
             {
                 let api_key = input("OpenAI API key (sk-...)").map_err(SetupError::Io)?;
                 if api_key.starts_with("sk-") {
+                    #[cfg(target_os = "macos")]
+                    {
+                        if let Ok(ctx) = self.init_secrets_context().await {
+                            match ctx
+                                .save_secret(
+                                    OPENAI_PROVIDER_SECRET_NAME,
+                                    &SecretString::from(api_key.clone()),
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    print_success(&format!(
+                                        "API key encrypted and saved in {}.",
+                                        api_key_storage_label
+                                    ));
+                                    print_info(
+                                        "It will be decrypted at runtime using the master key from the OS secure store.",
+                                    );
+                                    self.enable_openai_provider_for_codex_code_key();
+                                }
+                                Err(e) => {
+                                    print_error(&format!(
+                                        "Failed to save to {}: {}",
+                                        api_key_storage_label, e
+                                    ));
+                                    print_info(
+                                        "Falling back to the OS secure store for compatibility.",
+                                    );
+                                    match crate::platform::secure_store::store_api_key(
+                                        crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
+                                        &api_key,
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => {
+                                            print_success(&format!(
+                                                "API key stored securely in the {}.",
+                                                crate::platform::secure_store::display_name()
+                                            ));
+                                            print_info(
+                                                "It will be injected into Codex containers at runtime.",
+                                            );
+                                            self.maybe_link_codex_code_api_key_to_openai_provider(
+                                                &api_key,
+                                            )
+                                            .await?;
+                                        }
+                                        Err(store_error) => {
+                                            print_error(&format!(
+                                                "Failed to store in {}: {}",
+                                                crate::platform::secure_store::display_name(),
+                                                store_error
+                                            ));
+                                            print_info(
+                                                "You can set OPENAI_API_KEY in your environment instead.",
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            print_info(
+                                "Encrypted secrets storage is unavailable right now, so ThinClaw will use the OS secure store instead.",
+                            );
+                            match crate::platform::secure_store::store_api_key(
+                                crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
+                                &api_key,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    print_success(&format!(
+                                        "API key stored securely in the {}.",
+                                        crate::platform::secure_store::display_name()
+                                    ));
+                                    print_info(
+                                        "It will be injected into Codex containers at runtime.",
+                                    );
+                                    self.maybe_link_codex_code_api_key_to_openai_provider(&api_key)
+                                        .await?;
+                                }
+                                Err(e) => {
+                                    print_error(&format!(
+                                        "Failed to store in {}: {}",
+                                        crate::platform::secure_store::display_name(),
+                                        e
+                                    ));
+                                    print_info(
+                                        "You can set OPENAI_API_KEY in your environment instead.",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
                     match crate::platform::secure_store::store_api_key(
                         crate::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
                         &api_key,

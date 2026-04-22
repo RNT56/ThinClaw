@@ -356,13 +356,13 @@ impl RoutineEngine {
     }
 
     async fn enqueue_due_cron_triggers(&self) -> Result<(), RoutineError> {
-        let due_routines = self
-            .store
-            .list_due_cron_routines()
-            .await
-            .map_err(|error| RoutineError::Database {
-                reason: error.to_string(),
-            })?;
+        let due_routines =
+            self.store
+                .list_due_cron_routines()
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
         let now = Utc::now();
 
         for routine in due_routines {
@@ -398,11 +398,7 @@ impl RoutineEngine {
                 status: RoutineTriggerStatus::Pending,
                 decision: None,
                 active_key,
-                idempotency_key: scheduled_trigger_idempotency_key(
-                    routine,
-                    trigger_kind,
-                    due_at,
-                ),
+                idempotency_key: scheduled_trigger_idempotency_key(routine, trigger_kind, due_at),
                 claimed_by: None,
                 claimed_at: None,
                 lease_expires_at: None,
@@ -610,13 +606,13 @@ impl RoutineEngine {
         }
 
         if !matches!(trigger.trigger_kind, RoutineTriggerKind::SystemEvent) {
-            let global_running = self
-                .store
-                .count_all_running_routine_runs()
-                .await
-                .map_err(|error| RoutineError::Database {
-                    reason: error.to_string(),
-                })?;
+            let global_running =
+                self.store
+                    .count_all_running_routine_runs()
+                    .await
+                    .map_err(|error| RoutineError::Database {
+                        reason: error.to_string(),
+                    })?;
             if global_running >= self.config.max_concurrent_routines as i64 {
                 let diagnostics = serde_json::json!({
                     "decision": RoutineTriggerDecision::DeferredGlobalCapacity.to_string(),
@@ -718,8 +714,9 @@ impl RoutineEngine {
     ) -> Result<(), RoutineError> {
         let Trigger::SystemEvent { message, .. } = &routine.trigger else {
             return Err(RoutineError::ExecutionFailed {
-                reason: "scheduled system event queue item did not resolve to a system_event routine"
-                    .to_string(),
+                reason:
+                    "scheduled system event queue item did not resolve to a system_event routine"
+                        .to_string(),
             });
         };
         let tx = self
@@ -869,13 +866,13 @@ impl RoutineEngine {
 
         let cache = self.event_cache.read().await;
         let total_event_routines = cache.len() as u32;
-        let global_running = self
-            .store
-            .count_all_running_routine_runs()
-            .await
-            .map_err(|error| RoutineError::Database {
-                reason: error.to_string(),
-            })?;
+        let global_running =
+            self.store
+                .count_all_running_routine_runs()
+                .await
+                .map_err(|error| RoutineError::Database {
+                    reason: error.to_string(),
+                })?;
 
         let now = Utc::now();
         let content_preview = truncate(&event.content, EVENT_CONTENT_PREVIEW_LIMIT);
@@ -894,7 +891,10 @@ impl RoutineEngine {
 
             owner_candidate_routines += 1;
             let sequence_num = plans.len() as u32;
-            let age_secs = now.signed_duration_since(event.created_at).num_seconds().max(0) as u64;
+            let age_secs = now
+                .signed_duration_since(event.created_at)
+                .num_seconds()
+                .max(0) as u64;
             let mut details = serde_json::json!({
                 "claimed_by": self.worker_id,
                 "event_age_secs": age_secs,
@@ -922,7 +922,10 @@ impl RoutineEngine {
                     false,
                     None,
                 )
-            } else if channel.as_ref().is_some_and(|value| value != &event.channel) {
+            } else if channel
+                .as_ref()
+                .is_some_and(|value| value != &event.channel)
+            {
                 (
                     RoutineEventDecision::IgnoredChannel,
                     Some(format!(
@@ -947,9 +950,10 @@ impl RoutineEngine {
                     false,
                     None,
                 )
-            } else if actor.as_ref().is_some_and(|value| {
-                value != &event.actor_id && value != &event.raw_sender_id
-            }) {
+            } else if actor
+                .as_ref()
+                .is_some_and(|value| value != &event.actor_id && value != &event.raw_sender_id)
+            {
                 (
                     RoutineEventDecision::IgnoredActor,
                     Some("event actor did not match the routine actor filter".to_string()),
@@ -991,8 +995,7 @@ impl RoutineEngine {
                     (
                         RoutineEventDecision::SkippedDuplicate,
                         Some(
-                            "this event already produced a logical run for the routine"
-                                .to_string(),
+                            "this event already produced a logical run for the routine".to_string(),
                         ),
                         false,
                         None,
@@ -1286,8 +1289,8 @@ fn due_slots_for_routine(
 
     match routine.policy.catch_up_mode {
         RoutineCatchUpMode::Skip | RoutineCatchUpMode::RunOnceNow => {
-            let backlog_collapsed =
-                next_fire_for_routine(routine, user_timezone, first_due)?.is_some_and(|next| next <= now);
+            let backlog_collapsed = next_fire_for_routine(routine, user_timezone, first_due)?
+                .is_some_and(|next| next <= now);
             Ok(DueSlotPlan {
                 due_times: vec![first_due],
                 backlog_collapsed,
@@ -1395,9 +1398,13 @@ fn metadata_contains_subset(expected: &serde_json::Value, actual: &serde_json::V
                     .is_some_and(|actual_value| metadata_contains_subset(value, actual_value))
             })
         }
-        (serde_json::Value::Array(expected), serde_json::Value::Array(actual)) => expected
-            .iter()
-            .all(|expected_value| actual.iter().any(|actual_value| metadata_contains_subset(expected_value, actual_value))),
+        (serde_json::Value::Array(expected), serde_json::Value::Array(actual)) => {
+            expected.iter().all(|expected_value| {
+                actual
+                    .iter()
+                    .any(|actual_value| metadata_contains_subset(expected_value, actual_value))
+            })
+        }
         _ => expected == actual,
     }
 }
@@ -1433,11 +1440,7 @@ fn routine_event_idempotency_key(
 
     format!(
         "event:{}:{}:{}:{}:{}",
-        message.channel,
-        identity.principal_id,
-        identity.actor_id,
-        event_type,
-        source_id
+        message.channel, identity.principal_id, identity.actor_id, event_type, source_id
     )
 }
 
@@ -2850,7 +2853,12 @@ mod tests {
         let refreshed = db.get_routine(routine.id).await.unwrap().unwrap();
         assert_eq!(refreshed.run_count, 0);
         assert!(refreshed.next_fire_at.is_some_and(|next| next > Utc::now()));
-        assert!(db.list_routine_runs(routine.id, 10).await.unwrap().is_empty());
+        assert!(
+            db.list_routine_runs(routine.id, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         let trigger = db
             .list_routine_triggers(routine.id, 10)
@@ -2936,7 +2944,12 @@ mod tests {
 
         let fired = engine.drain_pending_event_queue().await;
         assert_eq!(fired, 0);
-        assert!(db.list_routine_runs(routine.id, 10).await.unwrap().is_empty());
+        assert!(
+            db.list_routine_runs(routine.id, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
 
         let refreshed_event = db
             .list_routine_events_for_actor("default", "default", 10)
@@ -3026,6 +3039,9 @@ mod tests {
 
         let runs = db.list_routine_runs(routine.id, 10).await.unwrap();
         assert_eq!(runs.len(), 1);
-        assert_eq!(runs[0].trigger_key.as_deref(), Some("event:event:slack:default:actor-a:reaction_added:structured-1"));
+        assert_eq!(
+            runs[0].trigger_key.as_deref(),
+            Some("event:event:slack:default:actor-a:reaction_added:structured-1")
+        );
     }
 }

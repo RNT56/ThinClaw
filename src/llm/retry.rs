@@ -36,15 +36,21 @@ use crate::llm::provider::{
 /// See also `circuit_breaker::is_transient()` which answers a different
 /// question: "does this error indicate the backend is degraded?"
 pub(crate) fn is_retryable(err: &LlmError) -> bool {
-    matches!(
-        err,
-        LlmError::RequestFailed { .. }
-            | LlmError::RateLimited { .. }
-            | LlmError::InvalidResponse { .. }
-            | LlmError::SessionRenewalFailed { .. }
-            | LlmError::Http(_)
-            | LlmError::Io(_)
-    )
+    match err {
+        LlmError::RequestFailed { reason, .. } => !is_deterministic_request_failure(reason),
+        LlmError::RateLimited { .. }
+        | LlmError::InvalidResponse { .. }
+        | LlmError::SessionRenewalFailed { .. }
+        | LlmError::Http(_)
+        | LlmError::Io(_) => true,
+        _ => false,
+    }
+}
+
+fn is_deterministic_request_failure(reason: &str) -> bool {
+    let normalized = reason.trim().to_ascii_lowercase();
+    normalized.contains("message conversion error")
+        || normalized.contains("only supports pdf documents")
 }
 
 /// Calculate exponential backoff delay with random jitter.
@@ -301,6 +307,10 @@ mod tests {
         assert!(is_retryable(&LlmError::RequestFailed {
             provider: "p".into(),
             reason: "err".into(),
+        }));
+        assert!(!is_retryable(&LlmError::RequestFailed {
+            provider: "p".into(),
+            reason: "Message conversion error: Anthropic only supports PDF documents".into(),
         }));
         assert!(is_retryable(&LlmError::RateLimited {
             provider: "p".into(),

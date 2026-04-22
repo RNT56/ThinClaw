@@ -1230,6 +1230,38 @@ impl Tool for MemoryDeleteTool {
                         e
                     ))
                 })?;
+
+            if workspace.user_id() != "default" {
+                let default_workspace = workspace.scoped_clone("default", workspace.agent_id());
+                let should_finalize_default = match default_workspace
+                    .read(crate::workspace::paths::BOOTSTRAP)
+                    .await
+                {
+                    Ok(doc) => !crate::agent::heartbeat::is_effectively_empty(&doc.content),
+                    Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => false,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to inspect default BOOTSTRAP.md while finalizing bootstrap: {}",
+                            e
+                        );
+                        false
+                    }
+                };
+
+                if should_finalize_default
+                    && let Err(e) = default_workspace
+                        .write(
+                            crate::workspace::paths::BOOTSTRAP,
+                            "<!-- bootstrap completed -->",
+                        )
+                        .await
+                {
+                    tracing::warn!(
+                        "Failed to mirror BOOTSTRAP.md completion into default workspace: {}",
+                        e
+                    );
+                }
+            }
         } else {
             workspace
                 .delete(path)
@@ -1463,6 +1495,45 @@ mod session_search_smoke_tests {
                 .is_some()
         );
         assert!(summarizer.calls() >= 1);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_completion_also_finalizes_default_workspace() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let base_workspace = Arc::new(Workspace::new_with_db("default", Arc::clone(&db)));
+        base_workspace
+            .seed_if_empty(Some("ThinClaw"), Some("balanced"))
+            .await
+            .expect("seed default workspace");
+
+        let user_workspace = base_workspace.scoped_clone("user-42", None);
+        user_workspace
+            .seed_if_empty(Some("ThinClaw"), Some("balanced"))
+            .await
+            .expect("seed user workspace");
+
+        let tool = MemoryDeleteTool::new(Arc::clone(&base_workspace));
+        let ctx = JobContext::with_user("user-42", "chat", "bootstrap-finish");
+        tool.execute(
+            serde_json::json!({
+                "path": crate::workspace::paths::BOOTSTRAP
+            }),
+            &ctx,
+        )
+        .await
+        .expect("memory_delete should finalize bootstrap");
+
+        let user_bootstrap = user_workspace
+            .read(crate::workspace::paths::BOOTSTRAP)
+            .await
+            .expect("user bootstrap should still exist as sentinel");
+        let default_bootstrap = base_workspace
+            .read(crate::workspace::paths::BOOTSTRAP)
+            .await
+            .expect("default bootstrap should still exist as sentinel");
+
+        assert_eq!(user_bootstrap.content, "<!-- bootstrap completed -->");
+        assert_eq!(default_bootstrap.content, "<!-- bootstrap completed -->");
     }
 
     #[tokio::test]
