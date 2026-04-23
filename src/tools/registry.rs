@@ -20,21 +20,23 @@ use crate::secrets::SecretsStore;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
+#[cfg(feature = "browser")]
+use crate::tools::builtin::{AgentBrowserTool, BrowserTool};
 use crate::tools::builtin::{
-    AgentBrowserTool, AgentThinkTool, AppleMailTool, ApplyPatchTool, BrowserTool, CancelJobTool,
-    CanvasTool, ClarifyTool, CreateAgentTool, CreateJobTool, DesktopAutonomyTool, DeviceInfoTool,
-    EchoTool, EmitUserMessageTool, ExecuteCodeTool, ExternalMemoryRecallTool,
-    ExternalMemoryStatusTool, GrepTool, HomeAssistantTool, HttpTool, JobEventsTool, JobPromptTool,
-    JobStatusTool, JsonTool, LearningFeedbackTool, LearningHistoryTool, LearningOutcomesTool,
-    LearningProposalReviewTool, LearningStatusTool, ListAgentsTool, ListDirTool, ListJobsTool,
-    LlmListModelsTool, LlmSelectTool, MemoryDeleteTool, MemoryReadTool, MemorySearchTool,
-    MemoryTreeTool, MemoryWriteTool, MessageAgentTool, MoaTool, ProcessTool, PromptManageTool,
-    PromptQueue, ReadFileTool, RemoveAgentTool, SearchFilesTool, SendMessageTool,
-    SessionSearchTool, SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool,
-    SkillInstallTool, SkillListTool, SkillManageTool, SkillReadTool, SkillReloadTool,
-    SkillRemoveTool, SkillSearchTool, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool,
-    VisionAnalyzeTool, WriteFileTool,
+    AgentThinkTool, AppleMailTool, ApplyPatchTool, CancelJobTool, CanvasTool, ClarifyTool,
+    CreateAgentTool, CreateJobTool, DesktopAutonomyTool, DeviceInfoTool, EchoTool,
+    EmitUserMessageTool, ExecuteCodeTool, ExternalMemoryRecallTool, ExternalMemoryStatusTool,
+    GrepTool, HomeAssistantTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
+    LearningFeedbackTool, LearningHistoryTool, LearningOutcomesTool, LearningProposalReviewTool,
+    LearningStatusTool, ListAgentsTool, ListDirTool, ListJobsTool, LlmListModelsTool,
+    LlmSelectTool, MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool,
+    MemoryWriteTool, MessageAgentTool, MoaTool, ProcessTool, PromptManageTool, PromptQueue,
+    ReadFileTool, RemoveAgentTool, SearchFilesTool, SendMessageTool, SessionSearchTool,
+    SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, SkillInstallTool,
+    SkillListTool, SkillManageTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
+    SkillSearchTool, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
+    ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool, VisionAnalyzeTool,
+    WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDescriptor, ToolDomain, ToolExecutionLane, ToolProfile};
@@ -509,36 +511,46 @@ impl ToolRegistry {
         // Browser tool with user-local profile dir.
         // Attach Docker Chromium config when the env var is set, so the tool
         // can fall back to a containerised browser when no local Chrome exists.
-        let browser_profile = dirs::data_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("thinclaw")
-            .join("browser-profile");
-        let browser_tool: Arc<dyn Tool> = if browser_backend.eq_ignore_ascii_case("agent_browser")
-            || browser_backend.eq_ignore_ascii_case("agent-browser")
+        #[cfg(feature = "browser")]
         {
-            tracing::info!("Registering browser tool with agent-browser backend");
-            Arc::new(AgentBrowserTool::new())
-        } else if cloud_browser_provider.is_some() {
-            tracing::info!(
-                provider = cloud_browser_provider.unwrap_or("auto"),
-                "Registering browser tool with managed cloud-browser support"
-            );
-            Arc::new(BrowserTool::new_with_cloud(
-                browser_profile,
-                cloud_browser_provider.map(std::borrow::ToOwned::to_owned),
-            ))
-        } else if std::env::var("BROWSER_DOCKER").is_ok() {
-            let docker_config = crate::sandbox::docker_chromium::DockerChromiumConfig::from_env();
-            tracing::info!(
-                image = %docker_config.image,
-                port = docker_config.debug_port,
-                "Docker Chromium fallback enabled for browser tool"
-            );
-            Arc::new(BrowserTool::new_with_docker(browser_profile, docker_config))
-        } else {
-            Arc::new(BrowserTool::new(browser_profile))
-        };
-        self.register_sync(browser_tool);
+            let browser_profile = dirs::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("thinclaw")
+                .join("browser-profile");
+            let browser_tool: Arc<dyn Tool> = if browser_backend
+                .eq_ignore_ascii_case("agent_browser")
+                || browser_backend.eq_ignore_ascii_case("agent-browser")
+            {
+                tracing::info!("Registering browser tool with agent-browser backend");
+                Arc::new(AgentBrowserTool::new())
+            } else if cloud_browser_provider.is_some() {
+                tracing::info!(
+                    provider = cloud_browser_provider.unwrap_or("auto"),
+                    "Registering browser tool with managed cloud-browser support"
+                );
+                Arc::new(BrowserTool::new_with_cloud(
+                    browser_profile,
+                    cloud_browser_provider.map(std::borrow::ToOwned::to_owned),
+                ))
+            } else if std::env::var("BROWSER_DOCKER").is_ok() {
+                let docker_config =
+                    crate::sandbox::docker_chromium::DockerChromiumConfig::from_env();
+                tracing::info!(
+                    image = %docker_config.image,
+                    port = docker_config.debug_port,
+                    "Docker Chromium fallback enabled for browser tool"
+                );
+                Arc::new(BrowserTool::new_with_docker(browser_profile, docker_config))
+            } else {
+                Arc::new(BrowserTool::new(browser_profile))
+            };
+            self.register_sync(browser_tool);
+        }
+        #[cfg(not(feature = "browser"))]
+        {
+            let _ = (browser_backend, cloud_browser_provider);
+            tracing::debug!("Browser tool not available (build without 'browser' feature)");
+        }
 
         // Agent control tools (thinking + user messaging)
         self.register_sync(Arc::new(AgentThinkTool));
@@ -1393,7 +1405,7 @@ mod tests {
     #[tokio::test]
     async fn test_register_and_get() {
         let registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool)).await;
+        registry.register_builtin(Arc::new(EchoTool)).await;
 
         assert!(registry.has("echo").await);
         assert!(registry.get("echo").await.is_some());
@@ -1403,7 +1415,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_tools() {
         let registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool)).await;
+        registry.register_builtin(Arc::new(EchoTool)).await;
 
         let tools = registry.list().await;
         assert!(tools.contains(&"echo".to_string()));
@@ -1412,7 +1424,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_definitions() {
         let registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool)).await;
+        registry.register_builtin(Arc::new(EchoTool)).await;
 
         let defs = registry.tool_definitions().await;
         assert_eq!(defs.len(), 1);
@@ -1422,7 +1434,7 @@ mod tests {
     #[tokio::test]
     async fn consult_advisor_survives_restricted_and_explicit_only_profiles() {
         let registry = ToolRegistry::new();
-        registry.register(Arc::new(EchoTool)).await;
+        registry.register_builtin(Arc::new(EchoTool)).await;
         registry.register_sync(Arc::new(crate::tools::builtin::advisor::ConsultAdvisorTool));
         let defs = registry.tool_definitions().await;
 
@@ -1444,12 +1456,14 @@ mod tests {
             .await;
 
         assert!(restricted.iter().any(|tool| tool.name == "consult_advisor"));
-        assert!(!restricted.iter().any(|tool| tool.name == "echo"));
+        // EchoTool has read_only() metadata → safe read-only orchestrator → allowed under Restricted
+        assert!(restricted.iter().any(|tool| tool.name == "echo"));
         assert!(
             explicit_only
                 .iter()
                 .any(|tool| tool.name == "consult_advisor")
         );
+        // ExplicitOnly only allows coordination tools; echo is not one
         assert!(!explicit_only.iter().any(|tool| tool.name == "echo"));
     }
 

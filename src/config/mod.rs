@@ -42,9 +42,11 @@ use crate::settings::Settings;
 pub use self::agent::AgentConfig;
 pub(crate) use self::agent::resolve_personality_pack_from_settings;
 pub use self::builder::BuilderModeConfig;
+#[cfg(feature = "nostr")]
+pub use self::channels::NostrConfig;
 pub use self::channels::{
     BlueBubblesChannelConfig, ChannelsConfig, CliConfig, DiscordChannelConfig, GatewayConfig,
-    HttpConfig, NostrConfig, SignalConfig, SlackChannelConfig, TelegramConfig,
+    HttpConfig, SignalConfig, SlackChannelConfig, TelegramConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
 pub use self::desktop_autonomy::DesktopAutonomyConfig;
@@ -371,7 +373,7 @@ async fn collect_injected_secrets(
     // `env_key_name` (env var the config resolver reads).
     let catalog = crate::config::provider_catalog::catalog();
     for (slug, endpoint) in catalog {
-        match secrets.get_decrypted(user_id, endpoint.secret_name).await {
+        match secrets.get_decrypted(user_id, &endpoint.secret_name).await {
             Ok(decrypted) => {
                 injected.insert(
                     endpoint.env_key_name.to_string(),

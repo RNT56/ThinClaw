@@ -11,6 +11,25 @@ It also includes a few runtime conveniences that matter in real deployments:
 - automatic live runtime reload when those watched credentials change
 - Anthropic-compatible prompt caching hints when the active provider supports them
 
+## Quick Start (Recommended)
+
+The fastest way to get started is [OpenRouter](https://openrouter.ai) — one API
+key gives you access to 300+ models from Anthropic, OpenAI, Google, Meta, and
+more.
+
+1. Get a key at [openrouter.ai/keys](https://openrouter.ai/keys)
+2. Add to your `.env`:
+
+```env
+OPENROUTER_API_KEY=sk-or-...
+```
+
+3. Run `thinclaw onboard` — OpenRouter is the first (recommended) option.
+
+That's it. ThinClaw auto-resolves the base URL, default model, and routing
+configuration. You can add direct provider keys later for lower latency or
+cost optimization.
+
 ## Provider Overview
 
 ### Native Backends

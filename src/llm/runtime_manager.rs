@@ -2013,7 +2013,7 @@ fn suggest_provider_cheap_model(slug: &str, primary_model: Option<&str>) -> Opti
 
 fn default_model_for_runtime_slug(slug: &str) -> Option<&'static str> {
     crate::config::provider_catalog::endpoint_for(slug)
-        .map(|endpoint| endpoint.default_model)
+        .map(|endpoint| endpoint.default_model.as_str())
         .or(match slug {
             "ollama" => Some("llama3"),
             "openai_compatible" => Some("default"),

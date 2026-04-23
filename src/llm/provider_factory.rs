@@ -320,7 +320,7 @@ fn create_provider_for_catalog_entry_with_api_key(
     let api_key_str = if let Some(api_key_override) = api_key_override {
         Some(api_key_override.to_string())
     } else {
-        crate::config::helpers::optional_env(endpoint.env_key_name)
+        crate::config::helpers::optional_env(&endpoint.env_key_name)
             .map_err(|e| LlmError::RequestFailed {
                 provider: provider_slug.to_string(),
                 reason: format!("Failed to read env var '{}': {}", endpoint.env_key_name, e),
@@ -345,7 +345,7 @@ fn create_provider_for_catalog_entry_with_api_key(
 
             use rig::providers::openai;
             let client: openai::CompletionsClient = openai::Client::builder()
-                .base_url(endpoint.base_url)
+                .base_url(&endpoint.base_url)
                 .api_key(&key)
                 .http_headers(runtime_extra_headers())
                 .build()
@@ -390,7 +390,7 @@ fn create_provider_for_catalog_entry_with_api_key(
 
             use rig::providers::openai;
             let client: openai::CompletionsClient = openai::Client::builder()
-                .base_url(endpoint.base_url)
+                .base_url(&endpoint.base_url)
                 .api_key(&key)
                 .http_headers(runtime_extra_headers())
                 .build()
@@ -511,7 +511,7 @@ fn create_provider_variants_for_catalog_entry(
             }
         })?;
     let api_keys =
-        resolve_catalog_api_keys(provider_slug, endpoint.env_key_name, providers_settings)?;
+        resolve_catalog_api_keys(provider_slug, &endpoint.env_key_name, providers_settings)?;
     if api_keys.is_empty() {
         return Ok(vec![ProviderLeaseEntry::new(
             create_provider_for_catalog_entry(provider_slug, model)?,

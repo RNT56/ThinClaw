@@ -434,10 +434,17 @@ impl SetupWizard {
                     self.settings.notifications.preferred_channel = Some("web".to_string());
                     self.settings.notifications.recipient = Some("default".to_string());
                 } else {
-                    let normalized =
-                        crate::channels::nostr_runtime::normalize_public_key(&recipient)
-                            .map_err(SetupError::Config)?;
-                    self.settings.notifications.recipient = Some(normalized);
+                    #[cfg(feature = "nostr")]
+                    {
+                        let normalized =
+                            crate::channels::nostr_runtime::normalize_public_key(&recipient)
+                                .map_err(SetupError::Config)?;
+                        self.settings.notifications.recipient = Some(normalized);
+                    }
+                    #[cfg(not(feature = "nostr"))]
+                    {
+                        self.settings.notifications.recipient = Some(recipient);
+                    }
                 }
             }
             _ => {

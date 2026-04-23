@@ -21,6 +21,7 @@ pub mod llama_cpp;
 pub mod llm_hooks;
 pub mod llms_txt;
 pub mod model_guidance;
+pub mod model_metadata_sync;
 pub mod pricing_sync;
 pub mod prompt_stack;
 mod provider;

@@ -108,7 +108,7 @@ pub(crate) async fn run_memory_command(
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let embeddings = config.embeddings.create_provider();
+    let embeddings = config.embeddings.create_provider().await;
 
     // Warn if libSQL backend is used with non-1536 embedding dimension.
     if config.database.backend == thinclaw::config::DatabaseBackend::LibSql

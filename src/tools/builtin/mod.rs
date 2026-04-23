@@ -6,8 +6,11 @@ pub mod llm_tools;
 mod agent_control;
 pub mod agent_management;
 mod apple_mail;
+#[cfg(feature = "browser")]
 mod browser;
+#[cfg(feature = "browser")]
 mod browser_a11y;
+#[cfg(feature = "browser")]
 mod browser_cloud;
 mod camera_capture;
 mod canvas;
@@ -30,6 +33,7 @@ mod learning_tools;
 mod location;
 mod memory;
 mod moa;
+#[cfg(feature = "nostr")]
 mod nostr_actions;
 pub(crate) mod process;
 pub mod routine;
@@ -53,7 +57,9 @@ pub use agent_management::{
     CreateAgentTool, ListAgentsTool, MessageAgentTool, RemoveAgentTool, UpdateAgentTool,
 };
 pub use apple_mail::AppleMailTool;
+#[cfg(feature = "browser")]
 pub use browser::BrowserTool;
+#[cfg(feature = "browser")]
 pub use browser_a11y::AgentBrowserTool;
 pub use camera_capture::CameraCaptureTool;
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};
@@ -89,6 +95,7 @@ pub use memory::{
     SessionSearchTool,
 };
 pub use moa::MoaTool;
+#[cfg(feature = "nostr")]
 pub use nostr_actions::NostrActionsTool;
 pub use process::{ProcessTool, SharedProcessRegistry, start_reaper};
 pub use routine::{

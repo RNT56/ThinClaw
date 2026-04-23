@@ -535,9 +535,12 @@ pub async fn start_server(
         .route(
             "/api/providers/{slug}/key",
             axum::routing::delete(providers_delete_key_handler),
-        )
+        );
+    #[cfg(feature = "nostr")]
+    let protected = protected
         .route("/api/nostr/key", post(nostr_save_key_handler))
-        .route("/api/nostr/key", delete(nostr_delete_key_handler))
+        .route("/api/nostr/key", delete(nostr_delete_key_handler));
+    let protected = protected
         .route(
             "/api/webchat/presentation",
             get(webchat_presentation_handler),
@@ -976,6 +979,8 @@ mod tests {
             cheap_model: None,
             suggested_primary_model: Some("gemini-2.5-flash".to_string()),
             suggested_cheap_model: Some("gemini-2.5-flash-lite".to_string()),
+            setup_url: None,
+            tier: None,
         };
         let previous_slots = crate::settings::ProviderModelSlots {
             primary: Some("gemini-3.1-flash-live-preview".to_string()),
@@ -1020,6 +1025,8 @@ mod tests {
             cheap_model: Some("gemini-2.5-flash-lite-preview".to_string()),
             suggested_primary_model: Some("gemini-2.5-flash".to_string()),
             suggested_cheap_model: Some("gemini-2.5-flash-lite".to_string()),
+            setup_url: None,
+            tier: None,
         };
         let previous_slots = crate::settings::ProviderModelSlots {
             primary: Some("gemini-1.5-pro".to_string()),

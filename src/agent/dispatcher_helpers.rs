@@ -606,7 +606,9 @@ mod tests {
         use crate::tools::builtin::EchoTool;
 
         let registry = ToolRegistry::new();
-        registry.register(std::sync::Arc::new(EchoTool)).await;
+        registry
+            .register_builtin(std::sync::Arc::new(EchoTool))
+            .await;
 
         let safety = SafetyLayer::new(&SafetyConfig {
             max_output_length: 100_000,

@@ -32,6 +32,10 @@ pub(crate) struct ProviderInfo {
     pub(crate) oauth_source_label: Option<String>,
     #[serde(default)]
     pub(crate) oauth_source_location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) setup_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tier: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -74,6 +78,10 @@ pub(crate) struct ProviderConfigEntry {
     pub(crate) cheap_model: Option<String>,
     pub(crate) suggested_primary_model: Option<String>,
     pub(crate) suggested_cheap_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) setup_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tier: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -269,12 +277,12 @@ pub(crate) async fn providers_list_handler(
     entries.sort_by_key(|(slug, _)| *slug);
 
     for (slug, endpoint) in entries {
-        let has_env = crate::config::helpers::optional_env(endpoint.env_key_name)
+        let has_env = crate::config::helpers::optional_env(&endpoint.env_key_name)
             .ok()
             .flatten()
             .is_some();
         let has_secret = if let Some(ss) = secrets {
-            ss.exists(&request_identity.principal_id, endpoint.secret_name)
+            ss.exists(&request_identity.principal_id, &endpoint.secret_name)
                 .await
                 .unwrap_or(false)
         } else {
@@ -308,6 +316,8 @@ pub(crate) async fn providers_list_handler(
             oauth_available: oauth.available,
             oauth_source_label: oauth.source_label,
             oauth_source_location: oauth.source_location,
+            setup_url: endpoint.setup_url.clone(),
+            tier: endpoint.tier.clone(),
         });
     }
 
@@ -336,6 +346,8 @@ pub(crate) async fn providers_list_handler(
         oauth_available: false,
         oauth_source_label: None,
         oauth_source_location: None,
+        setup_url: None,
+        tier: None,
     });
 
     let bedrock_has_key = crate::config::helpers::optional_env("BEDROCK_API_KEY")
@@ -377,6 +389,8 @@ pub(crate) async fn providers_list_handler(
         oauth_available: false,
         oauth_source_label: None,
         oauth_source_location: None,
+        setup_url: None,
+        tier: None,
     });
 
     providers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
@@ -472,24 +486,24 @@ pub(crate) async fn build_routing_provider_entries(
     entries.sort_by_key(|(slug, _)| *slug);
 
     for (slug, endpoint) in entries {
-        let has_env = crate::config::helpers::optional_env(endpoint.env_key_name)
+        let has_env = crate::config::helpers::optional_env(&endpoint.env_key_name)
             .ok()
             .flatten()
             .is_some();
-        let has_secret = secret_exists(secrets, user_id, endpoint.secret_name).await;
+        let has_secret = secret_exists(secrets, user_id, &endpoint.secret_name).await;
         let auth_mode = provider_auth_mode(providers_settings, slug);
         let oauth = provider_oauth_ui_state(slug);
         let primary_model = provider_primary_model_for_slug(
             settings,
             providers_settings,
             slug,
-            endpoint.default_model,
+            &endpoint.default_model,
         );
         let cheap_model = provider_cheap_model_for_slug(
             settings,
             providers_settings,
             slug,
-            endpoint.default_model,
+            &endpoint.default_model,
         );
         providers.push(ProviderConfigEntry {
             slug: (*slug).to_string(),
@@ -533,7 +547,9 @@ pub(crate) async fn build_routing_provider_entries(
             suggested_primary_model: primary_model
                 .or_else(|| Some(endpoint.default_model.to_string())),
             suggested_cheap_model: cheap_model
-                .or_else(|| suggested_cheap_model_for_slug(slug, endpoint.default_model)),
+                .or_else(|| suggested_cheap_model_for_slug(slug, &endpoint.default_model)),
+            setup_url: endpoint.setup_url.clone(),
+            tier: endpoint.tier.clone(),
         });
     }
 
@@ -670,6 +686,8 @@ fn synthetic_provider_entry(
         ),
         suggested_primary_model: Some(default_model.to_string()),
         suggested_cheap_model: suggested_cheap_model_for_slug(slug, default_model),
+        setup_url: None,
+        tier: None,
     }
 }
 
@@ -736,16 +754,15 @@ fn provider_cheap_model_for_slug(
 }
 
 fn suggested_cheap_model_for_slug(slug: &str, default_model: &str) -> Option<String> {
-    match slug {
-        "openai" => Some("gpt-4o-mini".to_string()),
-        "anthropic" => Some("claude-sonnet-4-6".to_string()),
-        "gemini" => Some("gemini-2.5-flash-lite".to_string()),
-        "minimax" => Some("MiniMax-M2.5-highspeed".to_string()),
-        "cohere" => Some("command-r7b-12-2024".to_string()),
-        "openrouter" => Some("openai/gpt-4o-mini".to_string()),
-        "tinfoil" => Some("kimi-k2-5".to_string()),
-        _ if !default_model.is_empty() => Some(default_model.to_string()),
-        _ => None,
+    if let Some(endpoint) = crate::config::provider_catalog::endpoint_for(slug) {
+        if let Some(ref cheap) = endpoint.suggested_cheap_model {
+            return Some(cheap.clone());
+        }
+    }
+    if !default_model.is_empty() {
+        Some(default_model.to_string())
+    } else {
+        None
     }
 }
 
@@ -921,8 +938,8 @@ async fn discover_provider_models(
                     user_id,
                     slug,
                     settings,
-                    endpoint.env_key_name,
-                    endpoint.secret_name,
+                    &endpoint.env_key_name,
+                    &endpoint.secret_name,
                     secrets,
                 )
                 .await
@@ -947,8 +964,8 @@ async fn discover_provider_models(
                     user_id,
                     slug,
                     settings,
-                    endpoint.env_key_name,
-                    endpoint.secret_name,
+                    &endpoint.env_key_name,
+                    &endpoint.secret_name,
                     secrets,
                 )
                 .await;
@@ -961,7 +978,7 @@ async fn discover_provider_models(
                         api_key.ok_or_else(missing_credentials)?
                     ));
                     Ok(discovery
-                        .discover_openai_compatible(endpoint.base_url, auth.as_deref())
+                        .discover_openai_compatible(&endpoint.base_url, auth.as_deref())
                         .await)
                 }
             }
@@ -1278,11 +1295,11 @@ fn fallback_provider_model_options(
         }
     }
 
-    for (static_id, _label) in static_fallback_models(slug) {
-        if seen.insert(static_id.to_string()) {
+    for (static_id, label) in static_fallback_models(slug) {
+        if seen.insert(static_id.clone()) {
             models.push(ProviderModelOption {
-                id: static_id.to_string(),
-                label: static_id.to_string(),
+                id: static_id,
+                label,
                 context_length: None,
                 source: "curated".to_string(),
                 recommended_primary: false,
@@ -1306,81 +1323,162 @@ fn fallback_provider_model_options(
     models
 }
 
-fn static_fallback_models(slug: &str) -> Vec<(&'static str, &'static str)> {
+fn static_fallback_models(slug: &str) -> Vec<(String, String)> {
+    let dynamic: Vec<(String, String)> = crate::config::model_compat::models_by_provider(slug)
+        .into_iter()
+        .map(|model| {
+            let label = if model.display_name.trim().is_empty() {
+                model.model_id.clone()
+            } else {
+                model.display_name
+            };
+            (model.model_id, label)
+        })
+        .collect();
+    if !dynamic.is_empty() {
+        return dynamic;
+    }
+
     match slug {
         "anthropic" => vec![
-            ("claude-opus-4-7", "Claude Opus 4.7 (recommended)"),
-            ("claude-opus-4-6", "Claude Opus 4.6 (latest)"),
-            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
-            ("claude-opus-4-5", "Claude Opus 4.5"),
-            ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
-            ("claude-haiku-4-5", "Claude Haiku 4.5 (fast)"),
+            (
+                "claude-opus-4-7".to_string(),
+                "Claude Opus 4.7 (recommended)".to_string(),
+            ),
+            (
+                "claude-opus-4-6".to_string(),
+                "Claude Opus 4.6 (latest)".to_string(),
+            ),
+            (
+                "claude-sonnet-4-6".to_string(),
+                "Claude Sonnet 4.6".to_string(),
+            ),
+            ("claude-opus-4-5".to_string(), "Claude Opus 4.5".to_string()),
+            (
+                "claude-sonnet-4-5".to_string(),
+                "Claude Sonnet 4.5".to_string(),
+            ),
+            (
+                "claude-haiku-4-5".to_string(),
+                "Claude Haiku 4.5 (fast)".to_string(),
+            ),
         ],
         "openai" => vec![
-            ("gpt-5.3-codex", "GPT-5.3 Codex (latest)"),
-            ("gpt-5.2-codex", "GPT-5.2 Codex"),
-            ("gpt-5.2", "GPT-5.2"),
-            ("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini (fast)"),
-            ("gpt-5", "GPT-5"),
-            ("gpt-5-mini", "GPT-5 Mini"),
-            ("gpt-4.1", "GPT-4.1"),
-            ("gpt-4.1-mini", "GPT-4.1 Mini"),
-            ("o4-mini", "o4-mini (fast reasoning)"),
-            ("o3", "o3 (reasoning)"),
+            (
+                "gpt-5.3-codex".to_string(),
+                "GPT-5.3 Codex (latest)".to_string(),
+            ),
+            ("gpt-5.2-codex".to_string(), "GPT-5.2 Codex".to_string()),
+            ("gpt-5.2".to_string(), "GPT-5.2".to_string()),
+            (
+                "gpt-5.1-codex-mini".to_string(),
+                "GPT-5.1 Codex Mini (fast)".to_string(),
+            ),
+            ("gpt-5".to_string(), "GPT-5".to_string()),
+            ("gpt-5-mini".to_string(), "GPT-5 Mini".to_string()),
+            ("gpt-4.1".to_string(), "GPT-4.1".to_string()),
+            ("gpt-4.1-mini".to_string(), "GPT-4.1 Mini".to_string()),
+            (
+                "o4-mini".to_string(),
+                "o4-mini (fast reasoning)".to_string(),
+            ),
+            ("o3".to_string(), "o3 (reasoning)".to_string()),
         ],
         "gemini" => vec![
-            ("gemini-2.5-pro", "Gemini 2.5 Pro"),
-            ("gemini-2.5-flash", "Gemini 2.5 Flash"),
-            ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite"),
+            ("gemini-2.5-pro".to_string(), "Gemini 2.5 Pro".to_string()),
+            (
+                "gemini-2.5-flash".to_string(),
+                "Gemini 2.5 Flash".to_string(),
+            ),
+            (
+                "gemini-2.5-flash-lite".to_string(),
+                "Gemini 2.5 Flash Lite".to_string(),
+            ),
         ],
         "groq" => vec![
-            ("llama-3.3-70b-versatile", "Llama 3.3 70B"),
-            ("llama-3.1-8b-instant", "Llama 3.1 8B Instant"),
+            (
+                "llama-3.3-70b-versatile".to_string(),
+                "Llama 3.3 70B".to_string(),
+            ),
+            (
+                "llama-3.1-8b-instant".to_string(),
+                "Llama 3.1 8B Instant".to_string(),
+            ),
         ],
         "mistral" => vec![
-            ("mistral-large-latest", "Mistral Large"),
-            ("mistral-small-latest", "Mistral Small"),
+            (
+                "mistral-large-latest".to_string(),
+                "Mistral Large".to_string(),
+            ),
+            (
+                "mistral-small-latest".to_string(),
+                "Mistral Small".to_string(),
+            ),
         ],
-        "xai" => vec![("grok-3", "Grok 3"), ("grok-3-mini", "Grok 3 Mini")],
+        "xai" => vec![
+            ("grok-3".to_string(), "Grok 3".to_string()),
+            ("grok-3-mini".to_string(), "Grok 3 Mini".to_string()),
+        ],
         "deepseek" => vec![
-            ("deepseek-chat", "DeepSeek Chat"),
-            ("deepseek-reasoner", "DeepSeek Reasoner"),
+            ("deepseek-chat".to_string(), "DeepSeek Chat".to_string()),
+            (
+                "deepseek-reasoner".to_string(),
+                "DeepSeek Reasoner".to_string(),
+            ),
         ],
         "openrouter" => vec![
             (
-                "anthropic/claude-sonnet-4-20250514",
-                "Claude Sonnet 4 (via OR)",
+                "anthropic/claude-sonnet-4-20250514".to_string(),
+                "Claude Sonnet 4 (via OR)".to_string(),
             ),
-            ("openai/gpt-5.3-codex", "GPT-5.3 Codex (via OR)"),
-            ("google/gemini-2.5-flash", "Gemini 2.5 Flash (via OR)"),
+            (
+                "openai/gpt-5.3-codex".to_string(),
+                "GPT-5.3 Codex (via OR)".to_string(),
+            ),
+            (
+                "google/gemini-2.5-flash".to_string(),
+                "Gemini 2.5 Flash (via OR)".to_string(),
+            ),
         ],
         "together" => vec![
             (
-                "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-                "Llama 3.3 70B Turbo",
+                "meta-llama/Llama-3.3-70B-Instruct-Turbo".to_string(),
+                "Llama 3.3 70B Turbo".to_string(),
             ),
             (
-                "meta-llama/Llama-3.1-8B-Instruct-Turbo",
-                "Llama 3.1 8B Turbo",
+                "meta-llama/Llama-3.1-8B-Instruct-Turbo".to_string(),
+                "Llama 3.1 8B Turbo".to_string(),
             ),
         ],
-        "cerebras" => vec![("llama-3.3-70b", "Llama 3.3 70B")],
-        "nvidia" => vec![("meta/llama-3.3-70b-instruct", "Llama 3.3 70B")],
+        "cerebras" => vec![("llama-3.3-70b".to_string(), "Llama 3.3 70B".to_string())],
+        "nvidia" => vec![(
+            "meta/llama-3.3-70b-instruct".to_string(),
+            "Llama 3.3 70B".to_string(),
+        )],
         "minimax" => vec![
-            ("MiniMax-M2.7", "MiniMax M2.7"),
-            ("MiniMax-M2.5", "MiniMax M2.5"),
-            ("MiniMax-M2.5-highspeed", "MiniMax M2.5 Highspeed"),
-            ("MiniMax-M2.1", "MiniMax M2.1"),
-            ("MiniMax-M2.1-highspeed", "MiniMax M2.1 Highspeed"),
-            ("MiniMax-M2", "MiniMax M2"),
+            ("MiniMax-M2.7".to_string(), "MiniMax M2.7".to_string()),
+            ("MiniMax-M2.5".to_string(), "MiniMax M2.5".to_string()),
+            (
+                "MiniMax-M2.5-highspeed".to_string(),
+                "MiniMax M2.5 Highspeed".to_string(),
+            ),
+            ("MiniMax-M2.1".to_string(), "MiniMax M2.1".to_string()),
+            (
+                "MiniMax-M2.1-highspeed".to_string(),
+                "MiniMax M2.1 Highspeed".to_string(),
+            ),
+            ("MiniMax-M2".to_string(), "MiniMax M2".to_string()),
         ],
         "cohere" => vec![
-            ("command-a-03-2025", "Command A"),
-            ("command-r-plus-08-2024", "Command R+"),
-            ("command-r-08-2024", "Command R"),
-            ("command-r7b-12-2024", "Command R7B"),
+            ("command-a-03-2025".to_string(), "Command A".to_string()),
+            (
+                "command-r-plus-08-2024".to_string(),
+                "Command R+".to_string(),
+            ),
+            ("command-r-08-2024".to_string(), "Command R".to_string()),
+            ("command-r7b-12-2024".to_string(), "Command R7B".to_string()),
         ],
-        "tinfoil" => vec![("kimi-k2-5", "Kimi K2.5")],
+        "tinfoil" => vec![("kimi-k2-5".to_string(), "Kimi K2.5".to_string())],
         _ => vec![],
     }
 }
@@ -2091,9 +2189,9 @@ impl ProviderCredentialSpec {
 fn provider_credential_spec(slug: &str) -> Option<ProviderCredentialSpec> {
     if let Some(endpoint) = crate::config::provider_catalog::endpoint_for(slug) {
         return Some(ProviderCredentialSpec::ApiKey {
-            display_name: endpoint.display_name,
-            secret_name: endpoint.secret_name,
-            default_model: endpoint.default_model,
+            display_name: endpoint.display_name.as_str(),
+            secret_name: endpoint.secret_name.as_str(),
+            default_model: endpoint.default_model.as_str(),
         });
     }
 

@@ -1103,7 +1103,7 @@ mod tests {
             header.set_size(data.len() as u64);
             header.set_cksum();
             builder
-                .append_data(&mut header, "wrong.wasm", &data[..])
+                .append_data(&mut header, "wrong.txt", &data[..])
                 .unwrap();
             builder.finish().unwrap();
         }

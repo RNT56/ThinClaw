@@ -12,6 +12,7 @@ pub mod learning;
 pub mod logs;
 pub mod mcp;
 pub mod memory;
+#[cfg(feature = "nostr")]
 pub mod nostr;
 pub mod pairing;
 pub mod projects;
@@ -30,6 +31,7 @@ pub(crate) use learning::*;
 pub(crate) use logs::*;
 pub(crate) use mcp::*;
 pub(crate) use memory::*;
+#[cfg(feature = "nostr")]
 pub(crate) use nostr::*;
 pub(crate) use pairing::*;
 pub(crate) use projects::*;

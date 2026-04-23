@@ -400,6 +400,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | OpenAI embeddings | ✅ | ✅ | |
 | Gemini embeddings | ✅ | ✅ | `EmbeddingConfig::gemini()` ([`src/llm/embeddings.rs`](src/llm/embeddings.rs)) |
 | Local embeddings | ✅ | ✅ | `EmbeddingConfig::local()` + Ollama support ([`src/llm/embeddings.rs`](src/llm/embeddings.rs)) |
+| Bedrock embeddings | ❌ | ✅ | `BedrockEmbeddings` — Titan Text Embeddings V2 via AWS SDK `invoke_model()`, feature-gated behind `--features bedrock` ([`src/workspace/embeddings.rs`](src/workspace/embeddings.rs)) |
 | SQLite-vec backend | ✅ | ✅ | `SqliteVecConfig` with vec0 virtual table SQL, distance metrics ([`src/workspace/sqlite_vec.rs`](src/workspace/sqlite_vec.rs)) |
 | LanceDB backend | ✅ | ✅ | `LanceDbConfig` with Arrow schema, S3/local URI support ([`src/workspace/lancedb.rs`](src/workspace/lancedb.rs)) |
 | QMD backend | ✅ | ✅ | `QmdConfig` with product quantization, codebook sizing ([`src/workspace/qmd.rs`](src/workspace/qmd.rs)) |
@@ -905,6 +906,7 @@ running inside Scrappy.
 **LLM & Inference**
 - ✅ Gemini embeddings — `EmbeddingConfig::gemini()` ([`src/llm/embeddings.rs`](src/llm/embeddings.rs))
 - ✅ Local embeddings (on-device) — `EmbeddingConfig::local()` + Ollama support ([`src/llm/embeddings.rs`](src/llm/embeddings.rs))
+- ✅ Bedrock embeddings — `BedrockEmbeddings` Titan Text Embeddings V2 via AWS SDK, feature-gated `--features bedrock` ([`src/workspace/embeddings.rs`](src/workspace/embeddings.rs))
 - ✅ AWS Bedrock provider — native Mantle OpenAI-compatible path with legacy proxy fallback ([`src/llm/provider_factory.rs`](src/llm/provider_factory.rs), [`src/channels/web/server.rs`](src/channels/web/server.rs))
 - ✅ Google Gemini provider — AI Studio adapter with system instruction + generation config ([`src/llm/gemini.rs`](src/llm/gemini.rs))
 - ✅ Anthropic 1M context beta header — `ExtendedContextConfig` ([`src/llm/extended_context.rs`](src/llm/extended_context.rs))

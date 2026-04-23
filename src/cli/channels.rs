@@ -248,6 +248,7 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
                     }
                 }
                 "nostr" => {
+                    #[cfg(feature = "nostr")]
                     if let Some(nostr) = resolved.channels.nostr.as_ref() {
                         let channel = crate::channels::NostrChannel::new(nostr.clone())?;
                         let runtime = channel.runtime();
@@ -311,6 +312,15 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
                                 )
                             );
                         }
+                    }
+                    #[cfg(not(feature = "nostr"))]
+                    {
+                        println!(
+                            "{}",
+                            branding.warn(
+                                "Nostr support not compiled into this build (--features nostr)"
+                            )
+                        );
                     }
                 }
                 "telegram" => {

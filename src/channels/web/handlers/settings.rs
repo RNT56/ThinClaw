@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
 };
 
+#[cfg(feature = "nostr")]
 use crate::channels::web::handlers::nostr::reconcile_nostr_runtime;
 use crate::channels::web::handlers::providers::reload_llm_runtime;
 use crate::channels::web::identity_helpers::GatewayRequestIdentity;
@@ -360,6 +361,7 @@ pub(crate) async fn settings_set_handler(
     }
 
     if is_nostr_settings_key(&key) {
+        #[cfg(feature = "nostr")]
         reconcile_nostr_runtime(state.as_ref(), &request_identity.principal_id)
             .await
             .map_err(|err| {
@@ -477,6 +479,7 @@ pub(crate) async fn settings_delete_handler(
     }
 
     if is_nostr_settings_key(&key) {
+        #[cfg(feature = "nostr")]
         reconcile_nostr_runtime(state.as_ref(), &request_identity.principal_id)
             .await
             .map_err(|err| {
@@ -582,6 +585,7 @@ pub(crate) async fn settings_import_handler(
     })?;
 
     if settings.keys().any(|key| is_nostr_settings_key(key)) {
+        #[cfg(feature = "nostr")]
         reconcile_nostr_runtime(state.as_ref(), &request_identity.principal_id)
             .await
             .map_err(|err| {

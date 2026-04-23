@@ -189,6 +189,22 @@ You can run ThinClaw:
 
 Code-backed local default: the gateway listens on port `3000` unless you configure otherwise.
 
+## Build Profiles
+
+ThinClaw uses Cargo feature flags to control binary size and capabilities.
+The default build (`light`) is lean; opt into more with `--features`:
+
+| Profile | Command | What It Adds |
+|---|---|---|
+| **light** (default) | `cargo build` | PostgreSQL, libSQL, HTML-to-Markdown, doc extraction, timezones |
+| **full** | `cargo build --features full` | + web gateway, REPL, tunnel, Docker sandbox, browser, Nostr |
+| **desktop** | `cargo build --features desktop` | libSQL, HTML-to-Markdown, doc extraction, REPL, timezones |
+| **minimal** | `cargo build --no-default-features --features libsql` | Single DB backend, nothing else |
+
+Additional opt-in flags not included in `full`: `voice`, `bedrock`, `bundled-wasm`.
+
+Full details, custom combinations, and CI matrix: [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md)
+
 ## Terminal Skins
 
 Local terminal clients use the active CLI skin for palette, prompt symbol, tool labels, boot art, and human-readable command presentation. The WebUI now follows the active CLI skin by default and can optionally override it with a dedicated WebUI skin.
@@ -234,11 +250,13 @@ Use the deep docs before relying on a surface for sensitive workflows:
 Start here, then go deeper by topic:
 
 - [docs/README.md](docs/README.md): audience-first docs index
+- [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md): build profiles, feature flags, and `full` vs `--all-features`
 - [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): standalone, service, remote, and gateway deployment
 - [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md): reckless desktop autonomy profile, bootstrap, launcher, canaries, and rollback
 - [docs/IDENTITY_AND_PERSONALITY.md](docs/IDENTITY_AND_PERSONALITY.md): personality packs, identity stack, and `/personality`
 - [docs/MEMORY_AND_GROWTH.md](docs/MEMORY_AND_GROWTH.md): continuity, memory, compaction, and growth surfaces
 - [docs/RESEARCH_AND_EXPERIMENTS.md](docs/RESEARCH_AND_EXPERIMENTS.md): research tab, experiments, runners, campaigns, and GPU clouds
+- [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md): complete reference for all `thinclaw` terminal commands
 - [docs/SURFACES_AND_COMMANDS.md](docs/SURFACES_AND_COMMANDS.md): shared cross-surface vocabulary
 - [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md): provider setup and routing
 - [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md): native vs WASM channel model

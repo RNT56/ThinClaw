@@ -3,7 +3,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+#[cfg(feature = "nostr")]
 use nostr_sdk::ToBech32;
+#[cfg(feature = "nostr")]
 use nostr_sdk::prelude::Keys;
 use secrecy::{ExposeSecret, SecretString};
 
@@ -65,6 +67,7 @@ impl SetupWizard {
         });
     }
 
+    #[cfg(feature = "nostr")]
     async fn configure_nostr_channel(
         &mut self,
         secrets: Option<&SecretsContext>,
@@ -504,6 +507,7 @@ impl SetupWizard {
                     print_success("BlueBubbles is ready as your primary channel.");
                 }
             }
+            #[cfg(feature = "nostr")]
             "nostr" => {
                 let secrets = self.init_secrets_context().await.ok();
                 if self.configure_nostr_channel(secrets.as_ref(), true).await? {
@@ -514,6 +518,13 @@ impl SetupWizard {
                         "a valid private key and owner public key are required",
                     );
                 }
+            }
+            #[cfg(not(feature = "nostr"))]
+            "nostr" => {
+                self.quick_channel_install_failure(
+                    "Nostr",
+                    "this build was compiled without Nostr support (--features nostr)",
+                );
             }
             #[cfg(target_os = "macos")]
             "imessage" => {
@@ -1062,21 +1073,29 @@ impl SetupWizard {
 
         // Nostr channel
         if enable_nostr {
-            crate::setup::prompts::print_blank_line();
-            print_info("Nostr connects to relay servers to receive and send messages.");
-            crate::setup::prompts::print_blank_line();
-            if self
-                .configure_nostr_channel(secrets.as_ref(), false)
-                .await?
+            #[cfg(feature = "nostr")]
             {
-                print_success("Nostr channel configured");
-            } else {
+                crate::setup::prompts::print_blank_line();
+                print_info("Nostr connects to relay servers to receive and send messages.");
+                crate::setup::prompts::print_blank_line();
+                if self
+                    .configure_nostr_channel(secrets.as_ref(), false)
+                    .await?
+                {
+                    print_success("Nostr channel configured");
+                } else {
+                    self.settings.channels.nostr_enabled = false;
+                    self.settings.channels.nostr_owner_pubkey = None;
+                    self.settings.channels.nostr_social_dm_enabled = false;
+                    print_warning(
+                        "Nostr channel was left disabled because the key or owner configuration was incomplete.",
+                    );
+                }
+            }
+            #[cfg(not(feature = "nostr"))]
+            {
+                print_warning("Nostr support is not available in this build (--features nostr).");
                 self.settings.channels.nostr_enabled = false;
-                self.settings.channels.nostr_owner_pubkey = None;
-                self.settings.channels.nostr_social_dm_enabled = false;
-                print_warning(
-                    "Nostr channel was left disabled because the key or owner configuration was incomplete.",
-                );
             }
         } else {
             self.settings.channels.nostr_enabled = false;

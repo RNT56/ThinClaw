@@ -1008,6 +1008,16 @@ mod tests {
             false,
         );
 
+        // Pre-create the assistant thread so the side thread we create next
+        // does not get promoted to assistant by the fallback logic.
+        crate::channels::web::identity_helpers::get_or_create_gateway_assistant_conversation(
+            store.as_ref(),
+            "user-1",
+            "actor-1",
+        )
+        .await
+        .expect("pre-create assistant thread");
+
         let Json(info) = chat_new_thread_handler(
             State(Arc::clone(&state)),
             identity.clone(),

@@ -154,18 +154,10 @@ impl SetupWizard {
         provider_slug: &str,
         primary_model: Option<&str>,
     ) -> Option<String> {
-        let mapped = match provider_slug {
-            "openai" => Some("gpt-4o-mini"),
-            "anthropic" => Some("claude-sonnet-4-6"),
-            "gemini" => Some("gemini-2.5-flash-lite"),
-            "minimax" => Some("MiniMax-M2.5-highspeed"),
-            "cohere" => Some("command-r7b-12-2024"),
-            "openrouter" => Some("openai/gpt-4o-mini"),
-            "tinfoil" => Some("kimi-k2-5"),
-            _ => None,
-        };
+        let candidate = crate::config::provider_catalog::endpoint_for(provider_slug)
+            .and_then(|ep| ep.suggested_cheap_model.as_deref());
 
-        if let Some(candidate) = mapped
+        if let Some(candidate) = candidate
             && primary_model != Some(candidate)
         {
             return Some(candidate.to_string());
@@ -444,10 +436,10 @@ impl SetupWizard {
                     crate::config::provider_catalog::endpoint_for(&cheap_provider_slug)
                 {
                     let has_provider_key = self
-                        .has_provider_secret(endpoint.env_key_name, endpoint.secret_name)
+                        .has_provider_secret(&endpoint.env_key_name, &endpoint.secret_name)
                         .await;
 
-                    if std::env::var(endpoint.env_key_name).is_ok() {
+                    if std::env::var(&endpoint.env_key_name).is_ok() {
                         crate::setup::prompts::print_blank_line();
                         print_success(&format!(
                             "✓ {} API key found in environment ({}).",
@@ -471,11 +463,11 @@ impl SetupWizard {
 
                         self.setup_additional_api_key_provider(
                             &cheap_provider_slug,
-                            endpoint.env_key_name,
-                            endpoint.secret_name,
+                            &endpoint.env_key_name,
+                            &endpoint.secret_name,
                             &format!("{} API key", endpoint.display_name),
                             &format!("https://console.{}", cheap_provider_slug),
-                            endpoint.display_name,
+                            &endpoint.display_name,
                         )
                         .await?;
                     }
@@ -560,6 +552,7 @@ impl SetupWizard {
         print_info("Choose the provider ThinClaw should be ready for after onboarding.");
         crate::setup::prompts::print_blank_line();
         let options = &[
+            "OpenRouter       - 200+ models, one API key (recommended easiest setup)",
             "Anthropic        - Claude models (add credentials later)",
             "OpenAI           - GPT models (add credentials later)",
             "Gemini           - Google Gemini via AI Studio (add credentials later)",
@@ -567,55 +560,54 @@ impl SetupWizard {
             "Ollama           - local models, no API key needed",
             "AWS Bedrock      - add credentials later",
             "llama.cpp        - local llama.cpp OpenAI-compatible server",
-            "OpenRouter       - OpenAI-compatible endpoint with a later API key",
             "OpenAI-compatible - custom endpoint (base URL set now, auth optional later)",
         ];
         let choice = select_one("Provider", options).map_err(SetupError::Io)?;
 
         match choice {
             0 => {
-                self.settings.llm_backend = Some("anthropic".to_string());
-                self.settings.providers.primary = Some("anthropic".to_string());
-                self.ensure_provider_enabled("anthropic");
-                self.ensure_provider_slot_defaults("anthropic");
-            }
-            1 => {
-                self.settings.llm_backend = Some("openai".to_string());
-                self.settings.providers.primary = Some("openai".to_string());
-                self.ensure_provider_enabled("openai");
-                self.ensure_provider_slot_defaults("openai");
-            }
-            2 => {
-                self.settings.llm_backend = Some("gemini".to_string());
-                self.settings.providers.primary = Some("gemini".to_string());
-                self.ensure_provider_enabled("gemini");
-                self.ensure_provider_slot_defaults("gemini");
-            }
-            3 => {
-                self.settings.llm_backend = Some("tinfoil".to_string());
-                self.settings.providers.primary = Some("tinfoil".to_string());
-                self.ensure_provider_enabled("tinfoil");
-                self.ensure_provider_slot_defaults("tinfoil");
-            }
-            4 => {
-                self.setup_ollama()?;
-            }
-            5 => {
-                self.settings.llm_backend = Some("bedrock".to_string());
-                self.settings.providers.primary = Some("bedrock".to_string());
-                self.ensure_provider_enabled("bedrock");
-                self.ensure_provider_slot_defaults("bedrock");
-            }
-            6 => {
-                self.setup_llama_cpp()?;
-            }
-            7 => {
                 self.settings.llm_backend = Some("openai_compatible".to_string());
                 self.settings.openai_compatible_base_url =
                     Some("https://openrouter.ai/api/v1".to_string());
                 self.settings.providers.primary = Some("openrouter".to_string());
                 self.ensure_provider_enabled("openrouter");
                 self.ensure_provider_slot_defaults("openrouter");
+            }
+            1 => {
+                self.settings.llm_backend = Some("anthropic".to_string());
+                self.settings.providers.primary = Some("anthropic".to_string());
+                self.ensure_provider_enabled("anthropic");
+                self.ensure_provider_slot_defaults("anthropic");
+            }
+            2 => {
+                self.settings.llm_backend = Some("openai".to_string());
+                self.settings.providers.primary = Some("openai".to_string());
+                self.ensure_provider_enabled("openai");
+                self.ensure_provider_slot_defaults("openai");
+            }
+            3 => {
+                self.settings.llm_backend = Some("gemini".to_string());
+                self.settings.providers.primary = Some("gemini".to_string());
+                self.ensure_provider_enabled("gemini");
+                self.ensure_provider_slot_defaults("gemini");
+            }
+            4 => {
+                self.settings.llm_backend = Some("tinfoil".to_string());
+                self.settings.providers.primary = Some("tinfoil".to_string());
+                self.ensure_provider_enabled("tinfoil");
+                self.ensure_provider_slot_defaults("tinfoil");
+            }
+            5 => {
+                self.setup_ollama()?;
+            }
+            6 => {
+                self.settings.llm_backend = Some("bedrock".to_string());
+                self.settings.providers.primary = Some("bedrock".to_string());
+                self.ensure_provider_enabled("bedrock");
+                self.ensure_provider_slot_defaults("bedrock");
+            }
+            7 => {
+                self.setup_llama_cpp()?;
             }
             8 => {
                 self.settings.llm_backend = Some("openai_compatible".to_string());
@@ -719,6 +711,7 @@ impl SetupWizard {
         crate::setup::prompts::print_blank_line();
 
         let options = &[
+            "OpenRouter       - 200+ models, one API key (recommended easiest setup)",
             "Anthropic        - Claude models (direct API key)",
             "OpenAI           - GPT models (direct API key)",
             "Gemini           - Google Gemini via AI Studio API key",
@@ -726,21 +719,20 @@ impl SetupWizard {
             "Ollama           - local models, no API key needed",
             "AWS Bedrock      - AWS-hosted models via native API key",
             "llama.cpp        - local llama.cpp OpenAI-compatible server",
-            "OpenRouter       - 200+ models with one API key",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
         ];
 
         let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
 
         match choice {
-            0 => self.setup_anthropic().await?,
-            1 => self.setup_openai().await?,
-            2 => self.setup_gemini().await?,
-            3 => self.setup_tinfoil().await?,
-            4 => self.setup_ollama()?,
-            5 => self.setup_bedrock().await?,
-            6 => self.setup_llama_cpp()?,
-            7 => self.setup_openrouter().await?,
+            0 => self.setup_openrouter().await?,
+            1 => self.setup_anthropic().await?,
+            2 => self.setup_openai().await?,
+            3 => self.setup_gemini().await?,
+            4 => self.setup_tinfoil().await?,
+            5 => self.setup_ollama()?,
+            6 => self.setup_bedrock().await?,
+            7 => self.setup_llama_cpp()?,
             8 => self.setup_openai_compatible().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
@@ -892,13 +884,19 @@ impl SetupWizard {
             return match endpoint.api_style {
                 crate::config::provider_catalog::ApiStyle::Anthropic => {
                     let api_key = self
-                        .resolve_provider_secret_value(endpoint.env_key_name, endpoint.secret_name)
+                        .resolve_provider_secret_value(
+                            &endpoint.env_key_name,
+                            &endpoint.secret_name,
+                        )
                         .await;
                     fetch_anthropic_models(api_key.as_deref()).await
                 }
                 crate::config::provider_catalog::ApiStyle::OpenAi => {
                     let api_key = self
-                        .resolve_provider_secret_value(endpoint.env_key_name, endpoint.secret_name)
+                        .resolve_provider_secret_value(
+                            &endpoint.env_key_name,
+                            &endpoint.secret_name,
+                        )
                         .await;
                     fetch_openai_models(api_key.as_deref()).await
                 }
@@ -912,7 +910,10 @@ impl SetupWizard {
                 }
                 crate::config::provider_catalog::ApiStyle::OpenAiCompatible => {
                     let api_key = self
-                        .resolve_provider_secret_value(endpoint.env_key_name, endpoint.secret_name)
+                        .resolve_provider_secret_value(
+                            &endpoint.env_key_name,
+                            &endpoint.secret_name,
+                        )
                         .await
                         .or_else(|| {
                             if provider_slug == "openrouter" {
@@ -959,7 +960,7 @@ impl SetupWizard {
                     } else {
                         let auth_header = api_key.as_ref().map(|key| format!("Bearer {key}"));
                         let mut models = fetch_openai_compatible_models(
-                            endpoint.base_url,
+                            &endpoint.base_url,
                             auth_header.as_deref(),
                             vec![(
                                 endpoint.default_model.to_string(),
@@ -1055,7 +1056,7 @@ impl SetupWizard {
             ("openai", "OPENAI_API_KEY", "llm_openai_api_key"),
             ("gemini", "GEMINI_API_KEY", "gemini"),
             ("tinfoil", "TINFOIL_API_KEY", "llm_tinfoil_api_key"),
-            ("openrouter", "LLM_API_KEY", "llm_compatible_api_key"),
+            ("openrouter", "OPENROUTER_API_KEY", "llm_compatible_api_key"),
             ("openai_compatible", "LLM_API_KEY", "llm_compatible_api_key"),
         ] {
             if !self
@@ -1617,14 +1618,19 @@ impl SetupWizard {
 
     /// OpenRouter provider setup: pre-configured OpenAI-compatible endpoint.
     ///
-    /// Sets the base URL to `https://openrouter.ai/api/v1` and delegates
-    /// API key collection to `setup_api_key_provider` with a display name
-    /// override so messages say "OpenRouter" instead of "openai_compatible".
+    /// Sets the base URL to `https://openrouter.ai/api/v1` and routes
+    /// through the catalog-native `OPENROUTER_API_KEY` env var. The primary
+    /// provider is set to `"openrouter"` (not `"openai_compatible"`) so the
+    /// routing system can track it distinctly.
     pub(super) async fn setup_openrouter(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("openai_compatible".to_string());
         self.settings.openai_compatible_base_url = Some("https://openrouter.ai/api/v1".to_string());
+        self.sync_primary_provider_settings("openrouter");
+        self.ensure_provider_slot_defaults("openrouter");
+
         self.setup_api_key_provider(
-            "openai_compatible",
-            "LLM_API_KEY",
+            "openrouter",
+            "OPENROUTER_API_KEY",
             "llm_compatible_api_key",
             "OpenRouter API key",
             "https://openrouter.ai/settings/keys",
@@ -1998,9 +2004,9 @@ impl SetupWizard {
                             crate::config::provider_catalog::ApiStyle::Ollama
                         )
                 })
-                .map(|(slug, ep)| (*slug, ep))
+                .map(|(slug, ep)| (slug.as_str(), ep))
                 .collect();
-        available.sort_by_key(|(slug, _)| *slug);
+        available.sort_by_key(|(slug, _): &(&str, _)| *slug);
 
         let mut fallback_slugs: Vec<String> = Vec::new();
 
@@ -2009,9 +2015,9 @@ impl SetupWizard {
             print_info("Available fallback providers:");
             for (i, (slug, ep)) in available.iter().enumerate() {
                 // Check if key already exists
-                let has_env = std::env::var(ep.env_key_name).is_ok();
+                let has_env = std::env::var(&ep.env_key_name).is_ok();
                 let has_saved = self
-                    .has_provider_secret(ep.env_key_name, ep.secret_name)
+                    .has_provider_secret(&ep.env_key_name, &ep.secret_name)
                     .await;
                 let status = if has_env || has_saved { " ✅" } else { "" };
                 print_info(&format!(
@@ -2039,9 +2045,9 @@ impl SetupWizard {
             let (slug, endpoint) = available[idx];
 
             // Check if key is already available
-            let has_env = std::env::var(endpoint.env_key_name).is_ok();
+            let has_env = std::env::var(&endpoint.env_key_name).is_ok();
             let has_saved = self
-                .has_provider_secret(endpoint.env_key_name, endpoint.secret_name)
+                .has_provider_secret(&endpoint.env_key_name, &endpoint.secret_name)
                 .await;
 
             if has_env {
@@ -2061,11 +2067,11 @@ impl SetupWizard {
 
                 self.setup_additional_api_key_provider(
                     slug,
-                    endpoint.env_key_name,
-                    endpoint.secret_name,
+                    &endpoint.env_key_name,
+                    &endpoint.secret_name,
                     &format!("{} API key", endpoint.display_name),
                     &format!("https://console.{slug}"),
-                    endpoint.display_name,
+                    &endpoint.display_name,
                 )
                 .await?;
             }

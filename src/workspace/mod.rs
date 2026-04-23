@@ -55,6 +55,8 @@ mod workspace_core;
 
 pub use chunker::{ChunkConfig, ChunkingStrategy, chunk, chunk_document};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
+#[cfg(feature = "bedrock")]
+pub use embeddings::BedrockEmbeddings;
 pub use embeddings::{EmbeddingProvider, MockEmbeddings, OllamaEmbeddings, OpenAiEmbeddings};
 #[cfg(feature = "postgres")]
 pub use repository::Repository;

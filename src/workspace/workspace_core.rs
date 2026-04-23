@@ -1784,6 +1784,11 @@ mod tests {
     use super::*;
     use crate::identity::{ConversationKind, ResolvedIdentity};
 
+    /// Tests that manipulate the process-global `THINCLAW_HOME` environment
+    /// variable must hold this mutex to prevent races under parallel `cargo test`.
+    #[cfg(feature = "libsql")]
+    static THINCLAW_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[cfg(feature = "libsql")]
     fn test_identity(actor_id: &str) -> ResolvedIdentity {
         ResolvedIdentity {
@@ -1877,6 +1882,7 @@ Know when to stay silent.
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn seed_if_empty_migrates_main_workspace_legacy_soul_into_home() {
+        let _lock = THINCLAW_HOME_LOCK.lock().unwrap();
         let (db, _temp_dir) = crate::testing::test_db().await;
         let temp_home = tempfile::tempdir().expect("temp home");
         let previous_home = std::env::var_os("THINCLAW_HOME");
@@ -1915,6 +1921,7 @@ Know when to stay silent.
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn seed_if_empty_migrates_agent_workspace_legacy_soul_into_local_overlay() {
+        let _lock = THINCLAW_HOME_LOCK.lock().unwrap();
         let (db, _temp_dir) = crate::testing::test_db().await;
         let temp_home = tempfile::tempdir().expect("temp home");
         let previous_home = std::env::var_os("THINCLAW_HOME");

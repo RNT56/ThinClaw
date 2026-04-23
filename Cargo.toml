@@ -127,7 +127,7 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "36", features = ["component-model"] }
+wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"] }
 wasmtime-wasi = "36"  # WASI support for component model
 wasmparser = "0.220"  # WASM binary parsing for validation
 
@@ -166,8 +166,8 @@ lru = "0.16.3"
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 sysinfo = "0.38.2"
-nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"] }
-chromiumoxide = "0.9.1"
+nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }
+chromiumoxide = { version = "0.9.1", optional = true }
 ratatui = "0.30.0"
 unicode-width = "0.2.2"
 textwrap = "0.16.2"
@@ -179,7 +179,7 @@ pdf-extract = { version = "0.7", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 # Timezone handling
-chrono-tz = "0.10"
+chrono-tz = { version = "0.10", optional = true }
 iana-time-zone = "0.1"
 
 # PostgreSQL TLS (feature gated, pulled in by postgres feature)
@@ -189,6 +189,11 @@ rustls-native-certs = { version = "0.8", optional = true }
 
 # QR code rendering for terminal pairing
 qrcode = "0.14"
+
+# AWS Bedrock (native InvokeModel API for embeddings, opt-in via --features bedrock)
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+aws-smithy-types = { version = "1", optional = true }
 
 # Audio capture for voice wake word detection (headless mode only)
 cpal = { version = "0.15", optional = true }
@@ -224,20 +229,25 @@ serde_json = "1"
 # Default: lightweight build — core agent + databases + HTML/doc tools.
 # Use --features full for everything. See docs/BUILD_PROFILES.md
 default = ["light"]
-# Lightweight build — no web gateway, no tunnel, no Docker, no voice.
+# Lightweight build — no web gateway, no tunnel, no Docker, no voice,
+# no local browser, no nostr. Saves ~65 MB of binary size vs full.
 light = [
     "postgres",
     "libsql",
     "html-to-markdown",
     "document-extraction",
+    "timezones",
 ]
 # Desktop embedding (Tauri/Scrappy) — minimal footprint
-desktop = ["libsql", "html-to-markdown", "document-extraction", "repl"]
+desktop = ["libsql", "html-to-markdown", "document-extraction", "repl", "timezones"]
 # Individual runtime modules (can be combined with light)
 web-gateway = []
 repl = []
 tunnel = []
 docker-sandbox = []
+browser = ["dep:chromiumoxide"]
+nostr = ["dep:nostr-sdk"]
+timezones = ["dep:chrono-tz"]
 # Everything — full-featured agent with all capabilities
 full = [
     "light",
@@ -245,6 +255,8 @@ full = [
     "repl",
     "tunnel",
     "docker-sandbox",
+    "browser",
+    "nostr",
 ]
 postgres = [
     "dep:deadpool-postgres",
@@ -269,6 +281,8 @@ bundled-wasm = []
 # Voice wake word detection — adds cpal for audio capture.
 # Only enable for headless/remote mode; in desktop mode Scrappy owns the mic.
 voice = ["dep:cpal"]
+# AWS Bedrock embeddings — adds aws-config + aws-sdk-bedrockruntime.
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 
 [[test]]
 name = "html_to_markdown"
@@ -286,6 +300,7 @@ harness = false
 [profile.dist]
 inherits = "release"
 lto = "thin"
+strip = "symbols"
 
 # Config for 'dist'
 [workspace.metadata.dist]

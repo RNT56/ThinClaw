@@ -497,7 +497,7 @@ impl AppBuilder {
         );
 
         // Create embeddings provider using the unified method
-        let embeddings = self.config.embeddings.create_provider();
+        let embeddings = self.config.embeddings.create_provider().await;
 
         // Warn if libSQL backend is used with non-1536 embedding dimension.
         if self.config.database.backend == crate::config::DatabaseBackend::LibSql

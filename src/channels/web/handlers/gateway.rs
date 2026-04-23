@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::{Json, extract::State, http::StatusCode};
+#[cfg(feature = "nostr")]
 use nostr_sdk::{ToBech32, prelude::Keys};
 
 use crate::channels::web::identity_helpers::GatewayRequestIdentity;
@@ -214,16 +215,44 @@ fn build_nostr_setup_status(
         missing_fields.push("private_key".to_string());
     }
 
+    #[cfg(feature = "nostr")]
     let resolved = crate::config::ChannelsConfig::resolve_nostr(settings)
         .ok()
         .flatten();
+    #[cfg(feature = "nostr")]
     let owner_configured = resolved
         .as_ref()
         .and_then(|config| config.owner_pubkey.as_ref())
         .is_some();
+    #[cfg(not(feature = "nostr"))]
+    let owner_configured = false;
     if enabled && private_key.is_some() && !owner_configured {
         missing_fields.push("owner_pubkey".to_string());
     }
+
+    #[cfg(feature = "nostr")]
+    let social_dm_enabled = resolved
+        .as_ref()
+        .map(|config| config.social_dm_enabled)
+        .unwrap_or(settings.channels.nostr_social_dm_enabled);
+    #[cfg(not(feature = "nostr"))]
+    let social_dm_enabled = settings.channels.nostr_social_dm_enabled;
+
+    #[cfg(feature = "nostr")]
+    let relay_count = resolved
+        .as_ref()
+        .map(|config| config.relays.len())
+        .or_else(|| {
+            diagnostics
+                .and_then(|value| value.get("relay_count"))
+                .and_then(|value| value.as_u64())
+                .map(|value| value as usize)
+        });
+    #[cfg(not(feature = "nostr"))]
+    let relay_count = diagnostics
+        .and_then(|value| value.get("relay_count"))
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize);
 
     let mut status = PartialChannelSetupStatus {
         enabled,
@@ -234,19 +263,8 @@ fn build_nostr_setup_status(
         owner_configured,
         tool_ready: enabled && private_key.is_some(),
         control_ready: enabled && private_key.is_some() && owner_configured,
-        social_dm_enabled: resolved
-            .as_ref()
-            .map(|config| config.social_dm_enabled)
-            .unwrap_or(settings.channels.nostr_social_dm_enabled),
-        relay_count: resolved
-            .as_ref()
-            .map(|config| config.relays.len())
-            .or_else(|| {
-                diagnostics
-                    .and_then(|value| value.get("relay_count"))
-                    .and_then(|value| value.as_u64())
-                    .map(|value| value as usize)
-            }),
+        social_dm_enabled,
+        relay_count,
         connected_relay_count: diagnostics
             .and_then(|value| value.get("connected_relay_count"))
             .and_then(|value| value.as_u64())
@@ -273,6 +291,7 @@ fn build_nostr_setup_status(
 
     if status.public_key_hex.is_none() || status.public_key_npub.is_none() {
         if let Some(secret) = private_key.as_deref() {
+            #[cfg(feature = "nostr")]
             match Keys::parse(secret) {
                 Ok(keys) => {
                     let public_key_hex = keys.public_key().to_hex();
@@ -295,9 +314,14 @@ fn build_nostr_setup_status(
                     }
                 }
             }
+            #[cfg(not(feature = "nostr"))]
+            {
+                let _ = secret;
+            }
         }
     }
 
+    #[cfg(feature = "nostr")]
     if (status.owner_pubkey_hex.is_none() || status.owner_pubkey_npub.is_none())
         && let Some(owner) = resolved
             .as_ref()
@@ -418,6 +442,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 #[cfg(test)]
+#[cfg(feature = "nostr")]
 mod tests {
     use super::build_nostr_setup_status;
 

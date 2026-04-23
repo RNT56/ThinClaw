@@ -291,7 +291,7 @@ impl Tool for LlmSelectTool {
 
         // Check if API key is available for this provider
         if let Some(endpoint) = endpoint {
-            let env_key = endpoint.env_key_name;
+            let env_key = &endpoint.env_key_name;
             let has_key = crate::config::helpers::optional_env(env_key)
                 .ok()
                 .flatten()
@@ -425,7 +425,7 @@ impl Tool for LlmListModelsTool {
             crate::config::provider_catalog::catalog()
                 .iter()
                 .map(|(slug, endpoint)| {
-                    let has_key = crate::config::helpers::optional_env(endpoint.env_key_name)
+                    let has_key = crate::config::helpers::optional_env(&endpoint.env_key_name)
                         .ok()
                         .flatten()
                         .is_some();

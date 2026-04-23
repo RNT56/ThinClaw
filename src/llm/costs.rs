@@ -211,9 +211,25 @@ pub fn model_cost_with_source(model_id: &str) -> Option<(Decimal, Decimal, CostS
         return Some((input, output, CostSource::Dynamic));
     }
 
-    // 2. Fall back to static pricing table
+    // 2. Check the local model compat catalog before the hardcoded table.
+    if let Some(model) = crate::config::model_compat::find_model(model_id)
+        && let (Some(input), Some(output)) = (model.pricing_input, model.pricing_output)
+        && let (Some(input), Some(output)) = (
+            pricing_per_m_to_per_token(input),
+            pricing_per_m_to_per_token(output),
+        )
+    {
+        return Some((input, output, CostSource::Static));
+    }
+
+    // 3. Fall back to static pricing table
     let id = normalize_model_id(model_id);
     static_model_cost(&id).map(|(input, output)| (input, output, CostSource::Static))
+}
+
+fn pricing_per_m_to_per_token(price_per_m: f64) -> Option<Decimal> {
+    let per_m: Decimal = price_per_m.to_string().parse().ok()?;
+    Some(per_m / Decimal::from(1_000_000u64))
 }
 
 /// Static pricing table — hardcoded per-model rates.

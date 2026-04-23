@@ -17,8 +17,8 @@ use thinclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, DiscordChannel, GatewayChannel, HttpChannel, NostrChannel, ReplChannel,
-        SignalChannel, TuiChannel, WebhookServer, WebhookServerConfig,
+        ChannelManager, DiscordChannel, GatewayChannel, HttpChannel, ReplChannel, SignalChannel,
+        TuiChannel, WebhookServer, WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
     },
@@ -619,11 +619,14 @@ async fn main() -> anyhow::Result<()> {
 
     let channels = Arc::new(ChannelManager::new());
     let mut channel_names: Vec<String> = Vec::new();
-    let mut nostr_channel: Option<NostrChannel> = None;
+    #[cfg(feature = "nostr")]
+    let mut nostr_channel: Option<thinclaw::channels::NostrChannel> = None;
+    #[cfg(feature = "nostr")]
     let mut nostr_runtime = None;
 
+    #[cfg(feature = "nostr")]
     if let Some(ref nostr_config) = config.channels.nostr {
-        match NostrChannel::new(nostr_config.clone()) {
+        match thinclaw::channels::NostrChannel::new(nostr_config.clone()) {
             Ok(channel) => {
                 nostr_runtime = Some(channel.runtime());
                 nostr_channel = Some(channel);
@@ -724,6 +727,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Add Nostr channel if configured and not CLI-only mode.
+    #[cfg(feature = "nostr")]
     if !cli.cli_only
         && let Some(nostr_channel) = nostr_channel.take()
         && let Some(ref nostr_config) = config.channels.nostr
@@ -1005,6 +1009,7 @@ async fn main() -> anyhow::Result<()> {
         },
     )));
 
+    #[cfg(feature = "nostr")]
     if let Some(runtime) = nostr_runtime {
         components
             .tools

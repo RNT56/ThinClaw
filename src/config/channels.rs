@@ -14,7 +14,10 @@ pub struct ChannelsConfig {
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
+    #[cfg(feature = "nostr")]
     pub nostr: Option<NostrConfig>,
+    #[cfg(not(feature = "nostr"))]
+    pub nostr: Option<()>,
     pub telegram: Option<TelegramConfig>,
     pub slack: Option<SlackChannelConfig>,
     pub discord: Option<DiscordChannelConfig>,
@@ -109,6 +112,7 @@ pub struct SignalConfig {
 }
 
 /// Nostr channel configuration.
+#[cfg(feature = "nostr")]
 #[derive(Debug, Clone)]
 pub struct NostrConfig {
     /// Nostr private key in hex or bech32 (nsec) format.
@@ -244,7 +248,10 @@ impl ChannelsConfig {
             http,
             gateway,
             signal,
+            #[cfg(feature = "nostr")]
             nostr: Self::resolve_nostr(settings)?,
+            #[cfg(not(feature = "nostr"))]
+            nostr: None,
             wasm_channels_dir: optional_env("WASM_CHANNELS_DIR")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_channels_dir),
@@ -281,6 +288,7 @@ impl ChannelsConfig {
         })
     }
 
+    #[cfg(feature = "nostr")]
     pub(crate) fn resolve_nostr(settings: &Settings) -> Result<Option<NostrConfig>, ConfigError> {
         let enabled = parse_bool_env("NOSTR_ENABLED", settings.channels.nostr_enabled)?;
         let private_key =
@@ -866,9 +874,12 @@ impl ChannelsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "nostr")]
     use crate::config::helpers::lock_env;
+    #[cfg(feature = "nostr")]
     use secrecy::ExposeSecret;
 
+    #[cfg(feature = "nostr")]
     fn clear_nostr_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
@@ -883,6 +894,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "nostr")]
     fn resolve_nostr_accepts_secret_key_alias() {
         let _guard = lock_env();
         clear_nostr_env();
@@ -903,6 +915,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "nostr")]
     fn resolve_nostr_honors_enabled_flag() {
         let _guard = lock_env();
         clear_nostr_env();
@@ -923,6 +936,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "nostr")]
     fn resolve_nostr_migrates_single_legacy_allow_from_entry_to_owner() {
         let _guard = lock_env();
         clear_nostr_env();

@@ -34,6 +34,7 @@ Use these as the current documentation authority before updating surrounding doc
 | Identity packs and session personality | `docs/IDENTITY_AND_PERSONALITY.md` |
 | Memory, continuity, and growth vocabulary | `docs/MEMORY_AND_GROWTH.md` |
 | Research, experiments, and remote runners | `docs/RESEARCH_AND_EXPERIMENTS.md` |
+| Terminal commands (`thinclaw run`, etc.) | `docs/CLI_REFERENCE.md` |
 | Shared surface command vocabulary | `docs/SURFACES_AND_COMMANDS.md` |
 | Setup and onboarding | `src/setup/README.md` |
 | Deployment and remote access | `docs/DEPLOYMENT.md` |
@@ -44,6 +45,7 @@ Use these as the current documentation authority before updating surrounding doc
 | Security and network model | `src/NETWORK_SECURITY.md` |
 | LLM provider catalog | `src/config/provider_catalog.rs` |
 | LLM provider user guide | `docs/LLM_PROVIDERS.md` |
+| Build profiles and feature flags | `docs/BUILD_PROFILES.md` |
 | Feature-tracking changes | `FEATURE_PARITY.md` |
 
 When these docs disagree with broad overview docs, code and canonical docs win.

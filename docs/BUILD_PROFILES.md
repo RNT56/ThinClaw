@@ -36,7 +36,8 @@ thinclaw
 
 Everything in `light` **plus**: web gateway (browser UI with SSE/WebSocket), REPL mode
 (interactive terminal with boot screen), tunnel providers (Tailscale/Cloudflare),
-Docker sandbox (container isolation for untrusted code).
+Docker sandbox (container isolation for untrusted code), browser automation
+(Chromium-based), and Nostr protocol integration.
 
 Best for: Full production deployments with web UI and all channel support.
 
@@ -83,10 +84,13 @@ cargo build --features light,tunnel
 # Light + voice wake word detection
 cargo build --features light,voice
 
+# Light + AWS Bedrock embeddings
+cargo build --features light,bedrock
+
 # Embed WASM extensions into binary (air-gapped deploy)
 cargo build --features full,bundled-wasm
 
-# All features including voice
+# All features including voice, Bedrock, and bundled WASM
 cargo build --all-features
 ```
 
@@ -98,12 +102,17 @@ cargo build --all-features
 | `libsql` | Embedded libSQL/Turso database | libsql |
 | `html-to-markdown` | Web page → markdown conversion | html-to-markdown-rs, readabilityrs |
 | `document-extraction` | PDF/DOCX/PPTX/XLSX text extraction | pdf-extract, zip |
+| `timezones` | Timezone handling via chrono-tz | chrono-tz |
 | `web-gateway` | HTTP web UI + API server | (uses axum, already a base dep) |
 | `repl` | Interactive REPL mode + boot screen | (no extra deps) |
 | `tunnel` | VPN tunnel integration | (uses tailscale binary externally) |
 | `docker-sandbox` | Docker container sandboxing | (uses bollard, already a base dep) |
+| `browser` | Chromium-based browser automation | chromiumoxide |
+| `nostr` | Nostr protocol integration (NIP-04, NIP-59) | nostr-sdk |
 | `bundled-wasm` | Embed all WASM extensions in binary | (compile-time includes, +6-13 MB) |
 | `voice` | Voice wake word detection | cpal (audio capture) |
+| `bedrock` | AWS Bedrock Titan embeddings | aws-config, aws-sdk-bedrockruntime |
+| `integration` | Gate for integration tests | (no extra deps) |
 
 Linux note: the default `light` profile does not include `voice`, so a normal
 Linux build does not need ALSA development headers. If you opt into
@@ -112,10 +121,26 @@ Linux build does not need ALSA development headers. If you opt into
 ## Profile Composition
 
 ```
-light = postgres + libsql + html-to-markdown + document-extraction
-desktop = libsql + html-to-markdown + document-extraction + repl
-full = light + web-gateway + repl + tunnel + docker-sandbox
+light    = postgres + libsql + html-to-markdown + document-extraction + timezones
+desktop  = libsql + html-to-markdown + document-extraction + repl + timezones
+full     = light + web-gateway + repl + tunnel + docker-sandbox + browser + nostr
 ```
+
+## `full` vs `--all-features`
+
+`full` is the production-ready profile with all runtime modules. `--all-features`
+enables everything in `full` **plus** niche/platform-specific capabilities that most
+users don't need:
+
+| Extra flag (not in `full`) | Why it's opt-in |
+|---|---|
+| `voice` | Adds `cpal` for audio capture; only for headless/remote mode. Requires ALSA headers on Linux. |
+| `bedrock` | Adds AWS SDK deps; only useful with an AWS account for Bedrock Titan embeddings. |
+| `bundled-wasm` | Embeds all WASM extensions into the binary (+6-13 MB); only for air-gapped deploys. |
+| `integration` | Gate for integration tests; not a runtime capability. |
+
+Use `full` for production. Use `--all-features` for CI test coverage or when you
+specifically need one of the extras above.
 
 ## CI/CD
 

@@ -57,7 +57,9 @@ mod http;
 #[cfg(target_os = "macos")]
 mod imessage;
 mod manager;
+#[cfg(feature = "nostr")]
 mod nostr;
+#[cfg(feature = "nostr")]
 pub(crate) mod nostr_runtime;
 pub mod reaction_machine;
 mod repl;
@@ -83,6 +85,7 @@ pub use http::HttpChannel;
 #[cfg(target_os = "macos")]
 pub use imessage::{IMessageChannel, IMessageConfig, IMessageDiagnostic};
 pub use manager::ChannelManager;
+#[cfg(feature = "nostr")]
 pub use nostr::NostrChannel;
 pub use repl::ReplChannel;
 pub use self_message::{SelfMessageConfig, TrustedMetadata};

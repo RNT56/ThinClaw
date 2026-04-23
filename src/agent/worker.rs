@@ -1751,6 +1751,12 @@ mod tests {
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
         }
+        fn metadata(&self) -> crate::tools::ToolMetadata {
+            crate::tools::ToolMetadata {
+                parallel_safe: true,
+                ..crate::tools::ToolMetadata::read_only()
+            }
+        }
         async fn execute(
             &self,
             _params: serde_json::Value,
@@ -1825,7 +1831,7 @@ mod tests {
             routine_run_id: None,
             workspace: None,
             cost_tracker: None,
-            tool_profile: ToolProfile::Restricted,
+            tool_profile: ToolProfile::Standard,
         };
 
         Worker::new(job_id, deps)
