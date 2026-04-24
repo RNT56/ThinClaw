@@ -1,3 +1,5 @@
+#![cfg(feature = "browser")]
+
 mod db_contract {
     #[path = "../db_contract/fixtures.rs"]
     pub mod fixtures;

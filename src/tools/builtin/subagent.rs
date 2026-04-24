@@ -14,7 +14,6 @@ use crate::agent::subagent_executor::{
     SubagentTaskPacket, SubagentToolMode,
 };
 use crate::context::JobContext;
-use crate::tools::ToolProfile;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 // ── SpawnSubagentTool ─────────────────────────────────────────────────
@@ -206,14 +205,7 @@ impl Tool for SpawnSubagentTool {
         let tool_profile = params
             .get("tool_profile")
             .and_then(|v| v.as_str())
-            .map(|value| match value {
-                "standard" => Ok(ToolProfile::Standard),
-                "restricted" => Ok(ToolProfile::Restricted),
-                "explicit_only" => Ok(ToolProfile::ExplicitOnly),
-                other => Err(ToolError::InvalidParameters(format!(
-                    "Invalid tool_profile '{other}'"
-                ))),
-            })
+            .map(|value| value.parse().map_err(ToolError::InvalidParameters))
             .transpose()?;
 
         let wait = params.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);

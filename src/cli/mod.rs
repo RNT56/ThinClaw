@@ -33,6 +33,7 @@ pub mod oauth_defaults;
 mod pairing;
 mod registry;
 mod reset;
+mod secrets;
 #[cfg(feature = "repl")]
 mod service;
 pub mod session_export;
@@ -64,6 +65,7 @@ pub use models::{ModelCommand, run_model_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use reset::{ResetCommand, run_reset_command};
+pub use secrets::{SecretsCommand, run_secrets_command};
 #[cfg(feature = "repl")]
 pub use service::{ServiceCommand, run_service_command};
 pub use sessions::{SessionCommand, run_sessions_command};
@@ -72,7 +74,7 @@ pub use tool::{ToolCommand, run_tool_command};
 pub use trajectory::{TrajectoryCommand, run_trajectory_command};
 pub use update::{UpdateCommand, run_update_command};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::setup::{GuideTopic, UiMode};
 
@@ -109,6 +111,23 @@ pub struct Cli {
     pub no_onboard: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum LinuxReadinessCliProfile {
+    Server,
+    DesktopGnome,
+    AllFeatures,
+}
+
+impl From<LinuxReadinessCliProfile> for crate::platform::LinuxReadinessProfile {
+    fn from(value: LinuxReadinessCliProfile) -> Self {
+        match value {
+            LinuxReadinessCliProfile::Server => Self::Server,
+            LinuxReadinessCliProfile::DesktopGnome => Self::DesktopGnome,
+            LinuxReadinessCliProfile::AllFeatures => Self::AllFeatures,
+        }
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum Command {
@@ -139,6 +158,10 @@ pub enum Command {
 
     /// Fully reset ThinClaw state so onboarding can start fresh
     Reset(ResetCommand),
+
+    /// Manage encrypted user/API secrets
+    #[command(subcommand)]
+    Secrets(SecretsCommand),
 
     /// Manage configuration settings
     #[command(subcommand)]
@@ -215,10 +238,18 @@ pub enum Command {
     },
 
     /// Probe external dependencies and validate configuration
-    Doctor,
+    Doctor {
+        /// Linux readiness profile to evaluate
+        #[arg(long, value_enum, default_value_t = LinuxReadinessCliProfile::Server)]
+        profile: LinuxReadinessCliProfile,
+    },
 
     /// Show system health and diagnostics
-    Status,
+    Status {
+        /// Linux readiness profile to summarize
+        #[arg(long, value_enum, default_value_t = LinuxReadinessCliProfile::Server)]
+        profile: LinuxReadinessCliProfile,
+    },
 
     /// Query and filter logs
     #[command(subcommand)]
@@ -349,7 +380,19 @@ mod tests {
         let cli = Cli::try_parse_from(["thinclaw", "--debug", "status"])
             .expect("parse cli with global debug flag");
         assert!(cli.debug);
-        assert!(matches!(cli.command, Some(Command::Status)));
+        assert!(matches!(cli.command, Some(Command::Status { .. })));
+    }
+
+    #[test]
+    fn test_linux_readiness_profile_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "doctor", "--profile", "desktop-gnome"])
+            .expect("parse doctor profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Doctor {
+                profile: LinuxReadinessCliProfile::DesktopGnome
+            })
+        ));
     }
 
     #[test]

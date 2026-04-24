@@ -216,9 +216,17 @@ impl CredentialInjector {
                 return Err(InjectionError::AccessDenied(mapping.secret_name.clone()));
             }
 
-            // Get the decrypted secret
+            // Resolve the credential through the audited runtime injection path.
             let secret = store
-                .get_decrypted(user_id, &mapping.secret_name)
+                .get_for_injection(
+                    user_id,
+                    &mapping.secret_name,
+                    crate::secrets::SecretAccessContext::new(
+                        "wasm.credential_injector",
+                        "http_credential_injection",
+                    )
+                    .target(host, ""),
+                )
                 .await
                 .map_err(|e| match e {
                     SecretError::NotFound(name) => InjectionError::SecretNotFound(name),

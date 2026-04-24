@@ -8,6 +8,7 @@ This page is the operator-facing overview for ThinClaw's research workspace, exp
 - research projects, runners, and campaigns
 - experiment and opportunity review
 - GPU cloud launch helpers and lease/reissue flows
+- Phase 1 `AgentEnv` rollouts for eval and SFT data collection
 
 ## Enablement
 
@@ -34,6 +35,17 @@ Use the research stack when you want ThinClaw to manage benchmarked, repeatable 
 - `Runners`: execution backends, images, env grants, and GPU requirements
 - `Campaigns`: active and historical campaign runs, trial details, and lease commands
 - `GPU Clouds`: quick-launch helpers for external GPU providers
+
+## AgentEnv Phase 1
+
+The `src/agent/env/` framework packages ThinClaw's normal multi-turn agent loop as a reusable rollout environment.
+
+- `AgentLoopEnv` sends synthetic `IncomingMessage` turns through `Agent::handle_message_external`
+- `EnvRunner::evaluate` runs scripted episodes and stores `agent_env` run artifacts
+- `EnvRunner::collect_sft_jsonl` exports positive trajectories as chat-format JSONL
+- `EnvRunner::serve_openai_compatible` exposes `/v1/chat/completions` for external eval harnesses
+
+This tranche intentionally stops at eval and SFT collection. Exact token IDs, logprobs, and managed RL training infrastructure are deferred until trajectory collection is stable.
 
 ## Candidate Generation And Run History
 
@@ -70,6 +82,7 @@ The research stack now uses the shared execution/runtime hardening path more con
 ## Relationship To Other Surfaces
 
 - Use [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md) for durable memory, recall, learning, and prompt mutation
+- Use [AGENT_ENV.md](AGENT_ENV.md) for the eval/SFT environment API
 - Use [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md) for shared cross-surface command vocabulary
 - Use [DEPLOYMENT.md](DEPLOYMENT.md) for service mode, remote execution, and operator setup details
 

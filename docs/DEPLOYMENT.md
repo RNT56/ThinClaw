@@ -28,8 +28,8 @@ For onboarding details, use [../src/setup/README.md](../src/setup/README.md). Fo
 - Code-backed default gateway port: `3000`
 - Local default gateway URL: `http://127.0.0.1:3000`
 - Remote access is opt-in through host/bind settings, not the default
-- Source builds default to the `light` feature set, which does **not** include the web gateway, tunnel support, or Docker sandbox
-- If you need the gateway from source, build with `--features full` or explicitly add `web-gateway`
+- Source builds default to the `light` feature set, which includes the local gateway but does **not** include ACP, tunnel support, Docker sandbox, browser automation, or Nostr
+- If you need the full production/runtime surface from source, build with `--features full`
 - Desktop autonomy is a separate privileged operator mode; enabling it grants host-level app/UI/screen control and managed build promotion/rollback
 
 ## Fast Local Path
@@ -88,11 +88,14 @@ The default source build is intentionally lightweight:
 cargo build --release
 ```
 
-That default maps to the `light` feature set and excludes:
+That default maps to the `light` feature set. The local gateway is available by
+default; the profile excludes:
 
-- web gateway
+- ACP integration
 - tunnel integrations
 - Docker sandbox
+- browser automation
+- Nostr
 
 If you want the full operator-facing runtime from source:
 
@@ -103,7 +106,7 @@ cargo build --release --features full
 If you want a more selective source build, combine features explicitly:
 
 ```bash
-cargo build --release --features "light web-gateway repl"
+cargo build --release --features "light browser repl"
 ```
 
 Relevant reference:
@@ -256,7 +259,7 @@ GATEWAY_AUTH_TOKEN=replace-with-a-long-random-token
 Notes:
 
 - `3000` is the code-backed default
-- using a different port, including `18789`, is fine if your deployment wants that
+- using a different port is fine if your deployment intentionally sets `GATEWAY_PORT`
 - do not expose the gateway to the public internet without an intentional security layer
 
 For safer remote access, prefer:
@@ -382,6 +385,20 @@ For remote mode, Scrappy needs the ThinClaw gateway URL and auth token. The gate
 
 Docker is optional and only matters if you want Docker-backed sandbox execution or container-based deployment. It is not required for a basic ThinClaw install.
 
+The deployment Dockerfile intentionally builds the `full` profile by default:
+
+```bash
+docker build --build-arg BUILD_FEATURES=full -t thinclaw:latest .
+docker run --env-file deploy/.env -p 3000:3000 thinclaw:latest
+```
+
+Use `BUILD_FEATURES=light` only when you want a smaller image without the full
+runtime integrations:
+
+```bash
+docker build --build-arg BUILD_FEATURES=light -t thinclaw:light .
+```
+
 Other optional external dependencies include:
 
 - Signal CLI
@@ -414,7 +431,7 @@ Canonical references:
 
 Check:
 
-- you built or installed a runtime that includes the web gateway
+- you are running a current build; the local gateway is part of the default `light` profile
 - ThinClaw is actually running
 - you did not override `GATEWAY_PORT`
 - the gateway is enabled for the current deployment
@@ -430,9 +447,10 @@ Check:
 - you are using the correct host address
 - your network path is private or explicitly secured
 
-### The source build runs but has no gateway
+### The source build runs but is missing full-runtime integrations
 
-You probably built the default `light` profile. Rebuild with:
+The default `light` profile includes the gateway but not browser automation,
+tunnels, Docker sandbox jobs, Nostr, or ACP. Rebuild with:
 
 ```bash
 cargo build --release --features full

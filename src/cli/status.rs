@@ -9,7 +9,9 @@ use crate::settings::Settings;
 use crate::terminal_branding::TerminalBranding;
 
 /// Run the status command, printing system health info.
-pub async fn run_status_command() -> anyhow::Result<()> {
+pub async fn run_status_command(
+    linux_profile: crate::platform::LinuxReadinessProfile,
+) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     let settings = Settings::default();
 
@@ -156,6 +158,24 @@ pub async fn run_status_command() -> anyhow::Result<()> {
             println!("{} enabled / {} configured", enabled, total);
         }
         Err(_) => println!("none configured"),
+    }
+
+    // Linux readiness
+    print!("{}", branding.muted("  Linux ready   "));
+    let linux = crate::platform::linux_readiness_report(linux_profile).await;
+    println!(
+        "{} pass / {} fail / {} skip ({})",
+        linux.passed(),
+        linux.failed(),
+        linux.skipped(),
+        linux.profile.as_str()
+    );
+    for probe in linux
+        .probes
+        .iter()
+        .filter(|probe| probe.status == crate::platform::LinuxProbeStatus::Fail)
+    {
+        println!("    {}: {}", probe.label, probe.detail);
     }
 
     // Config path

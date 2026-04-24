@@ -1636,7 +1636,7 @@ impl DesktopAutonomyManager {
 
     async fn platform_bootstrap_prerequisites(&self) -> DesktopBootstrapPrerequisites {
         let mut checks = Vec::new();
-        let notes = Vec::new();
+        let mut notes = Vec::new();
         let mut blocking_reason = None;
 
         match self.bridge_backend() {
@@ -1758,7 +1758,7 @@ impl DesktopAutonomyManager {
                     blocking_reason.get_or_insert_with(|| "unsupported_display_stack".to_string());
                     checks.push(failed_check(
                         "display_stack",
-                        "Linux reckless desktop currently requires a GNOME/X11 desktop session with DISPLAY set"
+                        "Linux reckless desktop currently requires a logged-in GNOME on X11 session with DISPLAY set. KDE and Wayland are unsupported for this release; choose 'GNOME on Xorg' at login."
                             .to_string(),
                         display_evidence,
                     ));
@@ -1808,6 +1808,10 @@ impl DesktopAutonomyManager {
                         }
                     }
                 }
+                notes.push(
+                    "Ubuntu/Debian desktop prerequisites: sudo apt install python3 python3-gi python3-pyatspi libreoffice libreoffice-script-provider-python evolution evolution-data-server-bin xdotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick at-spi2-core libglib2.0-bin"
+                        .to_string(),
+                );
                 for (name, module) in [("pyatspi_module", "pyatspi"), ("pygobject_module", "gi")] {
                     match run_cmd(
                         Command::new("python3")
@@ -1984,14 +1988,8 @@ impl DesktopAutonomyManager {
         };
 
         if matches!(self.bridge_backend(), DesktopBridgeBackend::LinuxPython) {
-            let current_user = std::env::var("USER")
-                .ok()
-                .or_else(|| std::env::var("LOGNAME").ok())
-                .unwrap_or_default();
-            if current_user != username {
-                bootstrap.blocking_reason = Some("unsupported_deployment_mode".to_string());
-                return Ok(bootstrap);
-            }
+            bootstrap.blocking_reason = Some("unsupported_deployment_mode".to_string());
+            return Ok(bootstrap);
         }
 
         let exists = self.user_exists(&username).await?;

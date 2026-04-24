@@ -85,3 +85,50 @@ ThinClaw's extension story is one of deliberate separation:
 - MCP where ecosystem reach is worth an operator-trusted boundary
 
 That separation is a feature, not a documentation inconvenience.
+
+## Skill Provenance vs Trust
+
+Skills now expose two different concepts on purpose:
+
+- `trust`: the hard authority ceiling (`installed` vs `trusted`)
+- `source_tier`: ecosystem/display provenance (`builtin`, `official`, `trusted`, `community`, `unvetted`)
+
+Only `trust` participates in tool attenuation and safety decisions. `source_tier` is informational and should not be used as an authorization signal.
+
+## User Tool Fast Path
+
+ThinClaw now has a lightweight operator-trusted tool drop-in path at `~/.thinclaw/user-tools/`.
+
+- Each `*.toml` file in that directory is discovered at startup.
+- `kind = "shell"` wraps a command template and exposes placeholder parameters such as `{input}` as a real agent tool.
+- `kind = "wasm"` loads a local WASM tool file through the existing WASM runtime instead of inventing a parallel sandbox.
+- `kind = "mcp_proxy"` creates a narrow alias over an already-registered tool, which is useful for pre-binding or simplifying MCP-backed workflows.
+
+This fast path is intentionally separate from `~/.thinclaw/tools/`, which remains the WASM tool install directory.
+
+Shell user tools inherit the same workspace/safety defaults as the local dev-tool registration path:
+
+- sandboxed workspaces keep a filesystem boundary
+- project mode keeps the working directory pinned
+- unrestricted mode remains unrestricted
+
+Example:
+
+```toml
+name = "cargo-check-quick"
+description = "Run cargo check in the current workspace"
+kind = "shell"
+command = "cargo check --message-format short"
+approval = "auto_approved"
+```
+
+## Agent-Facing Memory Setup
+
+The agent-facing learning surface now includes:
+
+- `external_memory_setup`
+- `external_memory_status`
+- `external_memory_recall`
+- `external_memory_off`
+
+These tools are operator-trusted settings/configuration flows layered on top of the existing external-memory provider runtime.

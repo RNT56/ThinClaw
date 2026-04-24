@@ -948,10 +948,8 @@ impl AppBuilder {
             }
         }
 
-        // Register screen capture tool (desktop-only — requires user opt-in via Scrappy UI toggle)
-        let screen_capture_enabled = std::env::var("SCREEN_CAPTURE_ENABLED")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        // Register host device tools only after explicit user opt-in.
+        let screen_capture_enabled = crate::platform::env_flag_enabled("SCREEN_CAPTURE_ENABLED");
         let reckless_desktop_capture = self.config.desktop_autonomy.is_reckless_enabled()
             && self.config.desktop_autonomy.capture_evidence;
         if self.config.agent.allow_local_tools
@@ -960,6 +958,26 @@ impl AppBuilder {
             use crate::tools::builtin::ScreenCaptureTool;
             tools.register_sync(Arc::new(ScreenCaptureTool::new()));
             tracing::info!("Registered screen capture tool (enabled via user toggle)");
+        }
+        if self.config.agent.allow_local_tools
+            && crate::platform::env_flag_enabled("CAMERA_CAPTURE_ENABLED")
+        {
+            use crate::tools::builtin::CameraCaptureTool;
+            tools.register_sync(Arc::new(CameraCaptureTool::new()));
+            tracing::info!("Registered camera capture tool (enabled via user toggle)");
+        }
+        if self.config.agent.allow_local_tools
+            && crate::platform::env_flag_enabled("TALK_MODE_ENABLED")
+        {
+            tools.register_sync(Arc::new(crate::talk_mode::TalkModeTool::new()));
+            tracing::info!("Registered talk mode tool (enabled via user toggle)");
+        }
+        if self.config.agent.allow_local_tools
+            && crate::platform::env_flag_enabled("LOCATION_ENABLED")
+        {
+            use crate::tools::builtin::LocationTool;
+            tools.register_sync(Arc::new(LocationTool::new()));
+            tracing::info!("Registered location tool (enabled via user toggle)");
         }
 
         let _desktop_autonomy_manager = if self.config.desktop_autonomy.is_reckless_enabled() {
@@ -1126,7 +1144,7 @@ impl AppBuilder {
             "Startup phase: secrets"
         );
 
-        let providers_settings = self.providers_settings.clone().unwrap_or_default();
+        let mut providers_settings = self.providers_settings.clone().unwrap_or_default();
         let primed_oauth_credentials =
             crate::llm::prime_runtime_oauth_credentials(&providers_settings);
         if primed_oauth_credentials > 0 {
@@ -1152,6 +1170,13 @@ impl AppBuilder {
                 }
             }
         }
+        crate::llm::hydrate_runtime_credentials_from_secrets(
+            &mut self.config,
+            &mut providers_settings,
+            self.secrets_store.as_ref(),
+            "default",
+        )
+        .await;
         let llm_runtime = LlmRuntimeManager::new(
             self.config.clone(),
             providers_settings.clone(),
@@ -1284,6 +1309,80 @@ impl AppBuilder {
             elapsed_ms = phase_start.elapsed().as_millis(),
             "Startup phase: extensions"
         );
+
+        let mut user_tools_dir =
+            crate::platform::expand_home_dir(&self.config.extensions.user_tools_dir);
+        let legacy_user_tools_dir = crate::platform::resolve_data_dir("user_tools");
+        if !user_tools_dir.exists() && legacy_user_tools_dir.exists() {
+            if let Some(parent) = user_tools_dir.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::rename(&legacy_user_tools_dir, &user_tools_dir) {
+                Ok(()) => {
+                    tracing::info!(
+                        from = %legacy_user_tools_dir.display(),
+                        to = %user_tools_dir.display(),
+                        "Migrated legacy user tools directory to canonical hyphenated path"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        from = %legacy_user_tools_dir.display(),
+                        to = %user_tools_dir.display(),
+                        error = %error,
+                        "Could not migrate legacy user tools directory; using legacy path for this run"
+                    );
+                    user_tools_dir = legacy_user_tools_dir;
+                }
+            }
+        }
+        let (user_tool_base_dir, user_tool_working_dir) =
+            match self.config.agent.workspace_mode.as_str() {
+                "sandboxed" => {
+                    let dir = self.config.agent.workspace_root.clone().unwrap_or_else(|| {
+                        dirs::home_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("Library")
+                            .join("Application Support")
+                            .join("OpenClaw")
+                            .join("agent_workspace")
+                    });
+                    let _ = std::fs::create_dir_all(&dir);
+                    (Some(dir.clone()), Some(dir))
+                }
+                "project" => (
+                    None,
+                    Some(self.config.agent.workspace_root.clone().unwrap_or_else(|| {
+                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+                    })),
+                ),
+                _ => (None, None),
+            };
+        let user_tool_results = tools
+            .auto_discover_user_tools(
+                &user_tools_dir,
+                user_tool_base_dir,
+                user_tool_working_dir,
+                Some(&self.config.safety),
+                wasm_tool_runtime.clone(),
+                self.secrets_store.clone(),
+            )
+            .await;
+        if !user_tool_results.loaded.is_empty() {
+            tracing::info!(
+                dir = %user_tools_dir.display(),
+                count = user_tool_results.loaded.len(),
+                tools = ?user_tool_results.loaded,
+                "Loaded user-defined tools"
+            );
+        }
+        for (path, error) in &user_tool_results.errors {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "Failed to load user-defined tool"
+            );
+        }
 
         // Wire the lifecycle audit hook into the extension manager so
         // install/activate/remove events are recorded for the UI.
@@ -1463,6 +1562,27 @@ impl AppBuilder {
                             error = %error,
                             "Failed to initialize well-known skill source"
                         );
+                    }
+                }
+            }
+            if std::env::var("LOBEHUB_SKILLS_ENABLED")
+                .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+                .unwrap_or(true)
+            {
+                match crate::skills::lobe_source::LobeHubSkillSource::new(
+                    std::env::var("LOBEHUB_SKILLS_INDEX_URL").ok(),
+                ) {
+                    Ok(source) => remote_sources.push(Arc::new(source)),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "Failed to initialize LobeHub skill source");
+                    }
+                }
+            }
+            if let Ok(index_url) = std::env::var("SKILLS_SH_INDEX_URL") {
+                match crate::skills::skills_sh_source::SkillsShSource::new(index_url) {
+                    Ok(source) => remote_sources.push(Arc::new(source)),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "Failed to initialize skills.sh source");
                     }
                 }
             }

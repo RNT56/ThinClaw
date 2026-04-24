@@ -31,7 +31,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | Remote skill federation | ✅ | ThinClaw now supports GitHub taps plus `/.well-known/skills` registries, quarantine scanning, provenance lock files, and risky-install approval gates. |
 | Accessibility-tree browser automation | ✅ | Managed `agent-browser` integration and cloud browser routing move ThinClaw from screenshot-only inspection toward interaction-oriented browsing. |
 | Session-level `/personality` overlays (`/vibe` alias) | ✅ | Session-scoped personality overlays add temporary tone shifts without mutating durable identity files. |
-| CLI skin system | ✅ | Shared TOML-backed local skins now cover boot, REPL, full-screen TUI, onboarding TUI, setup prompts, and human-readable CLI subcommands with prompt symbols, ASCII art, taglines, and tool emoji labels. |
+| CLI skin system | ✅ | Shared TOML-backed local skins now cover boot, REPL, full-screen TUI, onboarding TUI, setup prompts, and human-readable CLI subcommands with prompt symbols, ASCII art, taglines, and tool emoji labels. Extended with `border_style` (plain/rounded/double/thick), `header_alignment`, `status_gradient`, `spinner_style` (kawaii/braille/dots/arrows), and custom `spinner_frames`. All new fields are optional with backward-compatible defaults. |
 | Reckless desktop autonomy | ✅ | Privileged host-level desktop autonomy adds native app adapters, generic UI automation, evidence capture, seeded desktop routines, managed shadow-canary code autorollout, and rollback for promoted builds. |
 | Trajectory archive + training export | ✅ | Structured turn archives and `trajectory export` provide SFT/DPO-friendly offline training datasets. |
 | Anthropic prompt caching | ✅ | Provider-scoped message metadata now carries Anthropic-compatible cache hints where supported. |
@@ -88,9 +88,9 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 
 | Channel | OpenClaw | ThinClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
-| CLI/TUI | ✅ | ✅ | - | Ratatui-based TUI |
+| CLI/TUI | ✅ | ✅ | - | Ratatui-based TUI with `ratatui-textarea` multi-line input (Alt+Enter/Shift+Enter newline, Ctrl+Enter force-submit, dynamic 3–8 line height), tick-based `KawaiiSpinner` animation in thinking/streaming states, dynamic skin-driven `BorderType` on all panels, gradient status bar, and braille startup spinner |
 | HTTP webhook | ✅ | ✅ | - | axum with secret validation |
-| REPL (local shell) | ✅ | ✅ | - | Full local shell surface with slash commands, skins, `/rollback`, and `/personality` (`/vibe` alias); no longer just a testing stub |
+| REPL (local shell) | ✅ | ✅ | - | Full local shell surface with slash commands, skins, `/rollback`, and `/personality` (`/vibe` alias); multi-line input via rustyline `Validator` (backslash `\` continuation + triple-backtick fencing); no longer just a testing stub |
 | WASM channels | ❌ | ✅ | - | ThinClaw innovation |
 | WhatsApp | ✅ | ✅ | - | WASM channel via Cloud API webhook — GET verify-token + POST HMAC validation, text/media/location/contacts/interactive/reaction inbound handling, outbound text + media replies, DM pairing, markdown→WhatsApp formatting, Unicode-safe chunking |
 | Telegram | ✅ | ✅ | - | WASM channel, DM pairing, caption, /start, bot_username, forum threading, sendMessage+editMessageText streaming (host-side, HTML formatted) |

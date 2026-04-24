@@ -1789,13 +1789,30 @@ mod tests {
             &self,
             _req: CompletionRequest,
         ) -> Result<CompletionResponse, crate::error::LlmError> {
-            unimplemented!("stub")
+            Ok(CompletionResponse {
+                content: "stub response".to_string(),
+                provider_model: Some("stub".to_string()),
+                cost_usd: None,
+                thinking_content: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: crate::llm::FinishReason::Stop,
+            })
         }
         async fn complete_with_tools(
             &self,
             _req: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
-            unimplemented!("stub")
+            Ok(ToolCompletionResponse {
+                content: Some("stub response".to_string()),
+                provider_model: Some("stub".to_string()),
+                cost_usd: None,
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: crate::llm::FinishReason::Stop,
+            })
         }
     }
 

@@ -25,23 +25,59 @@ impl std::fmt::Debug for SecretsConfig {
 }
 
 impl SecretsConfig {
-    /// Auto-detect secrets master key from env var, then OS secure store.
+    /// Resolve the secrets master key according to the strict secrets settings.
     ///
-    /// Sequential probe: SECRETS_MASTER_KEY env var first, then OS secure store.
-    /// No saved "source" needed; just try each source in order.
-    pub(crate) async fn resolve() -> Result<Self, ConfigError> {
-        use crate::settings::KeySource;
+    /// The default source is the OS secure store. `SECRETS_MASTER_KEY` is only
+    /// honored when settings or `THINCLAW_ALLOW_ENV_MASTER_KEY=1` explicitly
+    /// allow the environment fallback.
+    pub(crate) async fn resolve(settings: &crate::settings::Settings) -> Result<Self, ConfigError> {
+        use crate::settings::{KeySource, SecretsMasterKeySource};
 
-        let (master_key, source) = if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
-            (Some(SecretString::from(env_key)), KeySource::Env)
-        } else {
-            // Probe the OS secure store; if a key is stored, use it
-            match crate::platform::secure_store::get_master_key().await {
-                Ok(key_bytes) => {
-                    let key_hex: String = key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                    (Some(SecretString::from(key_hex)), KeySource::Keychain)
+        let env_allowed = settings.secrets.allow_env_master_key
+            || std::env::var("THINCLAW_ALLOW_ENV_MASTER_KEY")
+                .ok()
+                .map(|value| {
+                    matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                })
+                .unwrap_or(false);
+
+        let (master_key, source) = match settings.secrets.master_key_source {
+            SecretsMasterKeySource::None => (None, KeySource::None),
+            SecretsMasterKeySource::Env if env_allowed => {
+                if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
+                    (Some(SecretString::from(env_key)), KeySource::Env)
+                } else {
+                    (None, KeySource::None)
                 }
-                Err(_) => (None, KeySource::None),
+            }
+            SecretsMasterKeySource::Env => {
+                tracing::warn!(
+                    "SECRETS_MASTER_KEY ignored because env master keys are disabled; set secrets.allow_env_master_key=true or THINCLAW_ALLOW_ENV_MASTER_KEY=1 to allow it"
+                );
+                (None, KeySource::None)
+            }
+            SecretsMasterKeySource::OsSecureStore => {
+                match crate::platform::secure_store::get_master_key().await {
+                    Ok(key_bytes) => {
+                        let key_hex: String =
+                            key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                        (Some(SecretString::from(key_hex)), KeySource::Keychain)
+                    }
+                    Err(_) if env_allowed => {
+                        if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
+                            tracing::warn!(
+                                "Using SECRETS_MASTER_KEY fallback because OS secure store key is unavailable and env fallback is explicitly allowed"
+                            );
+                            (Some(SecretString::from(env_key)), KeySource::Env)
+                        } else {
+                            (None, KeySource::None)
+                        }
+                    }
+                    Err(_) => (None, KeySource::None),
+                }
             }
         };
 

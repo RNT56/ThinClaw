@@ -107,16 +107,38 @@ async fn capture_camera(path: &std::path::Path, warmup_secs: f32) -> Result<Stri
 
 /// Capture from camera on Linux.
 #[cfg(target_os = "linux")]
-async fn capture_camera(path: &std::path::Path, _warmup_secs: f32) -> Result<String, ToolError> {
+fn linux_camera_device(device_name: Option<&str>) -> String {
+    device_name
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| std::env::var("THINCLAW_CAMERA_DEVICE").ok())
+        .unwrap_or_else(|| "/dev/video0".to_string())
+}
+
+#[cfg(target_os = "linux")]
+async fn capture_camera(
+    path: &std::path::Path,
+    _warmup_secs: f32,
+    device_name: Option<&str>,
+) -> Result<String, ToolError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Create camera dir: {e}")))?;
     }
 
+    let device = linux_camera_device(device_name);
+
     // Try fswebcam first
     let fswebcam = Command::new("fswebcam")
-        .args(["-r", "1280x720", "--no-banner", &path.to_string_lossy()])
+        .args([
+            "-d",
+            &device,
+            "-r",
+            "1280x720",
+            "--no-banner",
+            &path.to_string_lossy(),
+        ])
         .output()
         .await;
 
@@ -134,7 +156,7 @@ async fn capture_camera(path: &std::path::Path, _warmup_secs: f32) -> Result<Str
             "-video_size",
             "1280x720",
             "-i",
-            "/dev/video0",
+            &device,
             "-frames:v",
             "1",
             "-y",
@@ -149,9 +171,9 @@ async fn capture_camera(path: &std::path::Path, _warmup_secs: f32) -> Result<Str
         }
     }
 
-    Err(ToolError::ExecutionFailed(
-        "No camera tool found. Install fswebcam or ffmpeg.".to_string(),
-    ))
+    Err(ToolError::ExecutionFailed(format!(
+        "Camera capture failed for Linux device '{device}'. Install fswebcam or ffmpeg, or set THINCLAW_CAMERA_DEVICE/device_name to a valid V4L2 device such as /dev/video0."
+    )))
 }
 
 /// Capture from camera on Windows.
@@ -275,7 +297,7 @@ impl Tool for CameraCaptureTool {
                 },
                 "device_name": {
                     "type": "string",
-                    "description": "Optional camera device override. On Windows this maps to a DirectShow device name and also falls back to THINCLAW_CAMERA_DEVICE."
+                    "description": "Optional camera device override. On Linux this maps to a V4L2 path such as /dev/video0. On Windows this maps to a DirectShow device name. Also falls back to THINCLAW_CAMERA_DEVICE."
                 }
             },
             "required": []
@@ -295,13 +317,13 @@ impl Tool for CameraCaptureTool {
             .and_then(|v| v.as_f64())
             .map(|w| w.min(10.0) as f32)
             .unwrap_or(1.0);
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let device_name = params.get("device_name").and_then(|v| v.as_str());
 
         let path = capture_path(custom_path);
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         let tool_used = capture_camera(&path, warmup, device_name).await?;
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         let tool_used = capture_camera(&path, warmup).await?;
 
         let metadata = tokio::fs::metadata(&path)
@@ -352,6 +374,16 @@ mod tests {
     fn test_capture_path_custom() {
         let path = capture_path(Some("/tmp/cam.jpg"));
         assert_eq!(path, PathBuf::from("/tmp/cam.jpg"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_camera_device_prefers_parameter() {
+        assert_eq!(
+            linux_camera_device(Some("/dev/video2")),
+            "/dev/video2".to_string()
+        );
+        assert_eq!(linux_camera_device(Some("  ")), "/dev/video0".to_string());
     }
 
     #[test]

@@ -290,11 +290,20 @@ impl Tool for HttpTool {
             self.credential_registry.as_ref(),
             self.secrets_store.as_ref(),
         ) {
-            let host = parsed_url.host_str().unwrap_or("");
-            let matched: Vec<crate::secrets::CredentialMapping> = registry.find_for_host(host);
+            let host = parsed_url.host_str().unwrap_or("").to_string();
+            let path = parsed_url.path().to_string();
+            let matched: Vec<crate::secrets::CredentialMapping> = registry.find_for_host(&host);
             for mapping in &matched {
                 match store
-                    .get_decrypted(&_ctx.user_id, &mapping.secret_name)
+                    .get_for_injection(
+                        &_ctx.user_id,
+                        &mapping.secret_name,
+                        crate::secrets::SecretAccessContext::new(
+                            "builtin.http",
+                            "http_credential_injection",
+                        )
+                        .target(host.clone(), path.clone()),
+                    )
                     .await
                 {
                     Ok(secret) => {

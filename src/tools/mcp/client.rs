@@ -742,7 +742,11 @@ impl McpClient {
         };
 
         match secrets
-            .get_decrypted(&self.user_id, &config.token_secret_name())
+            .get_for_injection(
+                &self.user_id,
+                &config.token_secret_name(),
+                crate::secrets::SecretAccessContext::new("mcp.client", "oauth_access_token"),
+            )
             .await
         {
             Ok(token) => Ok(Some(token.expose().to_string())),

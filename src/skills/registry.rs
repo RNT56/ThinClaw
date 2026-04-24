@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use crate::skills::gating;
 use crate::skills::parser::{SkillParseError, parse_skill_md};
 use crate::skills::{
-    GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE, SkillSource, SkillTrust,
-    normalize_line_endings,
+    GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE, SkillSource, SkillSourceTier,
+    SkillTrust, normalize_line_endings,
 };
 
 /// Maximum number of skills that can be discovered from a single directory.
@@ -77,6 +77,8 @@ pub struct SkillRegistry {
     installed_dir: Option<PathBuf>,
     /// Optional workspace skills directory.
     workspace_dir: Option<PathBuf>,
+    /// Optional external read-only skill directories with display provenance.
+    external_read_only_dirs: Vec<(PathBuf, SkillSourceTier)>,
 }
 
 impl SkillRegistry {
@@ -87,6 +89,7 @@ impl SkillRegistry {
             user_dir,
             installed_dir: None,
             workspace_dir: None,
+            external_read_only_dirs: Vec::new(),
         }
     }
 
@@ -107,6 +110,11 @@ impl SkillRegistry {
         self
     }
 
+    pub fn with_external_read_only_dir(mut self, dir: PathBuf, tier: SkillSourceTier) -> Self {
+        self.external_read_only_dirs.push((dir, tier));
+        self
+    }
+
     /// Return the configured directories that participate in discovery.
     pub fn discovery_dirs(&self) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
@@ -117,6 +125,11 @@ impl SkillRegistry {
         if let Some(dir) = self.installed_dir.as_ref() {
             dirs.push(dir.clone());
         }
+        dirs.extend(
+            self.external_read_only_dirs
+                .iter()
+                .map(|(dir, _)| dir.clone()),
+        );
         dirs
     }
 
@@ -179,6 +192,25 @@ impl SkillRegistry {
                     );
                     continue;
                 }
+                seen.insert(name.clone());
+                loaded_names.push(name);
+                self.skills.push(skill);
+            }
+        }
+
+        for (dir, tier) in self.external_read_only_dirs.clone() {
+            let ext_skills = self
+                .discover_from_dir(&dir, SkillTrust::Installed, SkillSource::External)
+                .await;
+            for (name, mut skill) in ext_skills {
+                if seen.contains(&name) {
+                    tracing::debug!(
+                        "Skipping external skill '{}' (overridden by local registry tiers)",
+                        name
+                    );
+                    continue;
+                }
+                skill.source_tier = tier;
                 seen.insert(name.clone());
                 loaded_names.push(name);
                 self.skills.push(skill);
@@ -493,6 +525,10 @@ impl SkillRegistry {
                 name: name.to_string(),
                 reason: "bundled skills cannot be removed".to_string(),
             }),
+            SkillSource::External(_) => Err(SkillRegistryError::CannotRemove {
+                name: name.to_string(),
+                reason: "external read-only skills cannot be removed".to_string(),
+            }),
         }
     }
 
@@ -579,6 +615,12 @@ impl SkillRegistry {
                     reason: "bundled skills cannot change trust".into(),
                 });
             }
+            SkillSource::External(_) => {
+                return Err(SkillRegistryError::CannotRemove {
+                    name: name.to_string(),
+                    reason: "external read-only skills cannot change trust".into(),
+                });
+            }
         };
 
         // Already at target trust?
@@ -628,6 +670,11 @@ impl SkillRegistry {
         let skill = &mut self.skills[idx];
         skill.trust = target_trust;
         skill.source = SkillSource::User(new_skill_dir);
+        skill.source_tier = if target_trust == SkillTrust::Trusted {
+            SkillSourceTier::Trusted
+        } else {
+            SkillSourceTier::Community
+        };
 
         tracing::info!(
             skill = name,
@@ -669,6 +716,7 @@ impl SkillRegistry {
                 SkillSource::User(dir) => dir.join("SKILL.md"),
                 SkillSource::Workspace(dir) => dir.join("SKILL.md"),
                 SkillSource::Bundled(dir) => dir.join("SKILL.md"),
+                SkillSource::External(dir) => dir.join("SKILL.md"),
             };
             (md_path, skill.trust, skill.source.clone())
         };
@@ -799,6 +847,7 @@ async fn load_and_validate_skill(
 
     // Compute content hash
     let content_hash = compute_hash(&prompt_content);
+    let source_tier = source_tier_for_skill(&manifest, trust, &source);
 
     // Compile regex patterns
     let compiled_patterns = LoadedSkill::compile_patterns(&manifest.activation.patterns);
@@ -834,6 +883,7 @@ async fn load_and_validate_skill(
         prompt_content,
         trust,
         source,
+        source_tier,
         content_hash,
         compiled_patterns,
         lowercased_keywords,
@@ -842,6 +892,37 @@ async fn load_and_validate_skill(
     };
 
     Ok((name, skill))
+}
+
+fn source_tier_for_skill(
+    manifest: &crate::skills::SkillManifest,
+    trust: SkillTrust,
+    source: &SkillSource,
+) -> SkillSourceTier {
+    if let Some(provenance) = manifest
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.openclaw.as_ref())
+        .and_then(|openclaw| openclaw.provenance.as_deref())
+    {
+        match provenance.trim().to_ascii_lowercase().as_str() {
+            "builtin" => return SkillSourceTier::Builtin,
+            "official" => return SkillSourceTier::Official,
+            "trusted" => return SkillSourceTier::Trusted,
+            "unvetted" => return SkillSourceTier::Unvetted,
+            "community" | "generated" => return SkillSourceTier::Community,
+            _ => {}
+        }
+    }
+
+    match source {
+        SkillSource::Bundled(_) => SkillSourceTier::Builtin,
+        SkillSource::Workspace(_) | SkillSource::User(_) if trust == SkillTrust::Trusted => {
+            SkillSourceTier::Trusted
+        }
+        SkillSource::External(_) => SkillSourceTier::Community,
+        _ => SkillSourceTier::Community,
+    }
 }
 
 /// Compute SHA-256 hash of content in the format "sha256:hex...".

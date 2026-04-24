@@ -97,57 +97,7 @@ pub struct PageLink {
 
 /// Find a usable browser binary.
 fn find_browser() -> Option<PathBuf> {
-    let candidates = if cfg!(target_os = "windows") {
-        vec![
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-            r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
-            "chrome",
-            "msedge",
-            "brave",
-        ]
-    } else {
-        vec![
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            "chromium-browser",
-            "chromium",
-            "google-chrome",
-            "google-chrome-stable",
-            "chrome",
-        ]
-    };
-
-    for candidate in candidates {
-        let path = Path::new(candidate);
-        if path.exists() {
-            return Some(path.to_path_buf());
-        }
-        // Check in PATH
-        let lookup = if cfg!(target_os = "windows") {
-            Command::new("where").arg(candidate).output()
-        } else {
-            Command::new("which").arg(candidate).output()
-        };
-        if let Ok(output) = lookup
-            && output.status.success()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let path_str = stdout
-                .lines()
-                .map(|line| line.trim())
-                .find(|line| !line.is_empty());
-            if let Some(path_str) = path_str {
-                return Some(PathBuf::from(path_str));
-            }
-        }
-    }
-
-    None
+    crate::platform::find_browser_executable()
 }
 
 /// Run browser headless and capture DOM content.

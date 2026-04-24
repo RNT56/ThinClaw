@@ -12,6 +12,7 @@
 
 mod rendering;
 pub mod skin;
+pub mod spinner;
 
 use std::io;
 use std::sync::RwLock;
@@ -23,12 +24,14 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::prelude::*;
+use ratatui_textarea::{Input, Key, TextArea};
 use tokio::sync::mpsc;
 
 use crate::channels::StatusUpdate;
 use crate::platform::shell_launcher;
 use crate::settings::Settings;
 use crate::tui::skin::CliSkin;
+use crate::tui::spinner::KawaiiSpinner;
 
 static RUNTIME_GATEWAY_URL_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
 
@@ -62,7 +65,20 @@ pub enum ChatMessage {
         text: String,
         model: Option<String>,
     },
+    /// Neutral system information (help text, shell output, status).
     System {
+        text: String,
+    },
+    /// Positive confirmation (skin changed, command succeeded, etc.).
+    Info {
+        text: String,
+    },
+    /// Actionable warning (approval needed, interrupted, etc.).
+    Warning {
+        text: String,
+    },
+    /// Error requiring attention.
+    Error {
         text: String,
     },
     ToolCall {
@@ -102,14 +118,14 @@ impl StreamState {
 pub struct TuiApp {
     /// Chat message history for rendering.
     messages: Vec<ChatMessage>,
-    /// Current input text.
-    input: String,
-    /// Input cursor position.
-    cursor_pos: usize,
+    /// Multi-line text area widget for input.
+    textarea: TextArea<'static>,
     /// Input history (up/down arrows).
     input_history: Vec<String>,
     /// Current position in history.
     input_history_idx: Option<usize>,
+    /// Saved input before history navigation started.
+    pre_history_input: Option<String>,
     /// Scroll offset for chat area.
     scroll_offset: u16,
     /// Active model display name.
@@ -138,6 +154,10 @@ pub struct TuiApp {
     total_chat_lines: u16,
     /// Startup guidance shown in the first system card.
     startup_message: String,
+    /// Animated spinner for thinking/streaming states.
+    spinner: KawaiiSpinner,
+    /// Tick counter for animation timing.
+    animation_tick: u64,
 }
 
 /// Events the TUI sends to the agent controller.
@@ -193,12 +213,14 @@ impl TuiApp {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| settings.agent.cli_skin.clone());
         let skin = CliSkin::load(&default_skin_name);
+        let spinner = KawaiiSpinner::from_skin(&skin, "thinking");
+        let textarea = Self::build_textarea(&skin);
         Self {
             messages: Vec::new(),
-            input: String::new(),
-            cursor_pos: 0,
+            textarea,
             input_history: Vec::new(),
             input_history_idx: None,
+            pre_history_input: None,
             scroll_offset: 0,
             model: "default".to_string(),
             agent_id: "main".to_string(),
@@ -213,7 +235,27 @@ impl TuiApp {
             incoming_rx,
             total_chat_lines: 0,
             startup_message: build_startup_message(&settings),
+            spinner,
+            animation_tick: 0,
         }
+    }
+
+    /// Build a fresh TextArea widget styled for the given skin.
+    fn build_textarea(_skin: &CliSkin) -> TextArea<'static> {
+        let mut textarea = TextArea::default();
+        textarea.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
+        textarea.set_cursor_line_style(Style::default());
+        textarea
+    }
+
+    /// Extract the current textarea content as a single string.
+    fn textarea_content(&self) -> String {
+        self.textarea.lines().join("\n")
+    }
+
+    /// Clear the textarea and reset to a single empty line.
+    fn clear_textarea(&mut self) {
+        self.textarea = Self::build_textarea(&self.skin);
     }
 
     /// Run the TUI event loop.
@@ -250,6 +292,12 @@ impl TuiApp {
             // Poll for events with 50ms tick for smooth streaming
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(50)) => {
+                    // Advance animation tick
+                    self.animation_tick += 1;
+                    if self.animation_tick % 6 == 0 {
+                        self.spinner.tick();
+                    }
+
                     // Check for keyboard input
                     while event::poll(Duration::ZERO)? {
                         if let Event::Key(key) = event::read()? {
@@ -286,8 +334,8 @@ impl TuiApp {
                     tokio::spawn(async move {
                         let _ = tx.send(TuiEvent::Abort).await;
                     });
-                    self.messages.push(ChatMessage::System {
-                        text: "[aborted]".to_string(),
+                    self.messages.push(ChatMessage::Warning {
+                        text: "Stream aborted".to_string(),
                     });
                 } else if self
                     .last_ctrl_c
@@ -296,8 +344,7 @@ impl TuiApp {
                     return KeyAction::Exit;
                 } else {
                     self.last_ctrl_c = Some(Instant::now());
-                    self.input.clear();
-                    self.cursor_pos = 0;
+                    self.clear_textarea();
                     self.status_text = "Press Ctrl+C again to exit".to_string();
                 }
                 KeyAction::Continue
@@ -308,22 +355,49 @@ impl TuiApp {
                 self.scroll_offset = 0;
                 KeyAction::Continue
             }
-            // Enter: submit
-            (_, KeyCode::Enter) => {
-                if self.input.is_empty() {
+            // Ctrl+Enter: always submit regardless of content
+            (KeyModifiers::CONTROL, KeyCode::Enter) => {
+                let text = self.textarea_content();
+                if text.trim().is_empty() {
                     return KeyAction::Continue;
                 }
-                let text = self.input.clone();
                 self.input_history.push(text.clone());
                 self.input_history_idx = None;
-                self.input.clear();
-                self.cursor_pos = 0;
+                self.pre_history_input = None;
+                self.clear_textarea();
                 KeyAction::Submit(text)
             }
-            // Up: history prev
-            (_, KeyCode::Up) => {
+            // Alt+Enter or Shift+Enter: insert newline (multi-line continuation)
+            (KeyModifiers::ALT, KeyCode::Enter) | (KeyModifiers::SHIFT, KeyCode::Enter) => {
+                self.textarea.input(Self::textarea_input(key));
+                KeyAction::Continue
+            }
+            // Enter: submit if single-line, or if starts with '/'
+            (_, KeyCode::Enter) => {
+                let text = self.textarea_content();
+                if text.trim().is_empty() {
+                    return KeyAction::Continue;
+                }
+                // For single-line input or slash commands, Enter submits
+                if self.textarea.lines().len() <= 1 || text.starts_with('/') {
+                    self.input_history.push(text.clone());
+                    self.input_history_idx = None;
+                    self.pre_history_input = None;
+                    self.clear_textarea();
+                    return KeyAction::Submit(text);
+                }
+                // For multi-line input, Enter adds a line
+                self.textarea.input(Self::textarea_input(key));
+                KeyAction::Continue
+            }
+            // Up: history prev (only when single-line and cursor at first line)
+            (_, KeyCode::Up) if self.textarea.lines().len() <= 1 => {
                 if self.input_history.is_empty() {
                     return KeyAction::Continue;
+                }
+                // Save current input before entering history
+                if self.input_history_idx.is_none() {
+                    self.pre_history_input = Some(self.textarea_content());
                 }
                 let idx = match self.input_history_idx {
                     Some(i) if i > 0 => i - 1,
@@ -331,22 +405,25 @@ impl TuiApp {
                     None => self.input_history.len() - 1,
                 };
                 self.input_history_idx = Some(idx);
-                self.input = self.input_history[idx].clone();
-                self.cursor_pos = self.input.chars().count();
+                self.textarea = Self::build_textarea(&self.skin);
+                self.textarea.insert_str(&self.input_history[idx]);
                 KeyAction::Continue
             }
-            // Down: history next
-            (_, KeyCode::Down) => {
+            // Down: history next (only when single-line)
+            (_, KeyCode::Down) if self.textarea.lines().len() <= 1 => {
                 if let Some(idx) = self.input_history_idx {
                     if idx + 1 < self.input_history.len() {
                         let new_idx = idx + 1;
                         self.input_history_idx = Some(new_idx);
-                        self.input = self.input_history[new_idx].clone();
-                        self.cursor_pos = self.input.chars().count();
+                        self.textarea = Self::build_textarea(&self.skin);
+                        self.textarea.insert_str(&self.input_history[new_idx]);
                     } else {
                         self.input_history_idx = None;
-                        self.input.clear();
-                        self.cursor_pos = 0;
+                        self.textarea = Self::build_textarea(&self.skin);
+                        if let Some(ref saved) = self.pre_history_input {
+                            self.textarea.insert_str(saved);
+                        }
+                        self.pre_history_input = None;
                     }
                 }
                 KeyAction::Continue
@@ -363,68 +440,47 @@ impl TuiApp {
                     .min(self.total_chat_lines);
                 KeyAction::Continue
             }
-            // Home/End in input
-            (_, KeyCode::Home) => {
-                self.cursor_pos = 0;
-                KeyAction::Continue
-            }
-            (_, KeyCode::End) => {
-                self.cursor_pos = self.input.chars().count();
-                KeyAction::Continue
-            }
-            // Left/Right cursor
-            (_, KeyCode::Left) => {
-                self.cursor_pos = self.cursor_pos.saturating_sub(1);
-                KeyAction::Continue
-            }
-            (_, KeyCode::Right) => {
-                if self.cursor_pos < self.input.chars().count() {
-                    self.cursor_pos += 1;
-                }
-                KeyAction::Continue
-            }
-            // Backspace
-            (_, KeyCode::Backspace) => {
-                if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
-                    // Convert char index to byte offset for String::remove()
-                    if let Some((byte_idx, _)) = self.input.char_indices().nth(self.cursor_pos) {
-                        self.input.remove(byte_idx);
-                    }
-                }
-                KeyAction::Continue
-            }
-            // Delete
-            (_, KeyCode::Delete) => {
-                if self.cursor_pos < self.input.chars().count() {
-                    // Convert char index to byte offset for String::remove()
-                    if let Some((byte_idx, _)) = self.input.char_indices().nth(self.cursor_pos) {
-                        self.input.remove(byte_idx);
-                    }
-                }
-                KeyAction::Continue
-            }
             // Tab: autocomplete slash commands
             (_, KeyCode::Tab) => {
-                if self.input.starts_with('/') {
+                let content = self.textarea_content();
+                if content.starts_with('/') {
                     self.autocomplete_command();
+                } else {
+                    self.textarea.input(Self::textarea_input(key));
                 }
                 KeyAction::Continue
             }
-            // Character input
-            (_, KeyCode::Char(c)) => {
-                // Convert char index to byte offset for String::insert()
-                let byte_pos = self
-                    .input
-                    .char_indices()
-                    .nth(self.cursor_pos)
-                    .map(|(i, _)| i)
-                    .unwrap_or(self.input.len());
-                self.input.insert(byte_pos, c);
-                self.cursor_pos += 1;
+            // All other keys: delegate to TextArea
+            _ => {
+                self.textarea.input(Self::textarea_input(key));
                 KeyAction::Continue
             }
-            _ => KeyAction::Continue,
+        }
+    }
+
+    fn textarea_input(key: event::KeyEvent) -> Input {
+        Input {
+            key: match key.code {
+                KeyCode::Char(ch) => Key::Char(ch),
+                KeyCode::F(n) => Key::F(n),
+                KeyCode::Backspace => Key::Backspace,
+                KeyCode::Enter => Key::Enter,
+                KeyCode::Left => Key::Left,
+                KeyCode::Right => Key::Right,
+                KeyCode::Up => Key::Up,
+                KeyCode::Down => Key::Down,
+                KeyCode::Tab | KeyCode::BackTab => Key::Tab,
+                KeyCode::Delete => Key::Delete,
+                KeyCode::Home => Key::Home,
+                KeyCode::End => Key::End,
+                KeyCode::PageUp => Key::PageUp,
+                KeyCode::PageDown => Key::PageDown,
+                KeyCode::Esc => Key::Esc,
+                _ => Key::Null,
+            },
+            ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+            alt: key.modifiers.contains(KeyModifiers::ALT),
+            shift: key.modifiers.contains(KeyModifiers::SHIFT) || key.code == KeyCode::BackTab,
         }
     }
 
@@ -541,15 +597,15 @@ impl TuiApp {
                 tool_name,
                 description,
             } => {
-                self.messages.push(ChatMessage::System {
-                    text: format!("⚠ Approval needed: {} — {}", tool_name, description),
+                self.messages.push(ChatMessage::Warning {
+                    text: format!("Approval needed: {} — {}", tool_name, description),
                 });
                 self.status_text = format!("Awaiting approval for {tool_name}");
             }
             TuiUpdate::Error(msg) => {
                 self.active_stream = None;
-                self.messages.push(ChatMessage::System {
-                    text: format!("❌ {msg}"),
+                self.messages.push(ChatMessage::Error {
+                    text: msg,
                 });
                 self.status_text = "Needs attention".to_string();
             }
@@ -606,7 +662,7 @@ impl TuiApp {
             }
             "/think" => {
                 self.show_thinking = !self.show_thinking;
-                self.push_system_note(format!(
+                self.push_info(format!(
                     "Thinking display: {}",
                     if self.show_thinking { "on" } else { "off" }
                 ));
@@ -621,7 +677,7 @@ impl TuiApp {
                 let _ = self.outgoing_tx.send(TuiEvent::Abort).await;
                 self.active_stream = None;
                 self.status_text = "Interrupted".to_string();
-                self.push_system_note("Operation interrupted.");
+                self.push_warning("Operation interrupted.");
             }
             "/skin" => {
                 self.handle_skin_command(arg);
@@ -641,7 +697,7 @@ impl TuiApp {
                 self.status_text = format!("Running {command}...");
             }
             _ => {
-                self.push_system_note(format!(
+                self.push_warning(format!(
                     "Unknown command: {command}. Type /help for available commands."
                 ));
             }
@@ -677,7 +733,7 @@ impl TuiApp {
                 self.scroll_offset = u16::MAX;
             }
             Err(e) => {
-                self.messages.push(ChatMessage::System {
+                self.messages.push(ChatMessage::Error {
                     text: format!("Shell error: {e}"),
                 });
                 self.scroll_offset = u16::MAX;
@@ -686,14 +742,16 @@ impl TuiApp {
     }
 
     fn autocomplete_command(&mut self) {
+        let content = self.textarea_content();
         let matches: Vec<&&str> = crate::agent::command_catalog::tui_autocomplete_commands()
             .iter()
-            .filter(|c| c.starts_with(&self.input))
+            .filter(|c| c.starts_with(&content))
             .collect();
 
         if matches.len() == 1 {
-            self.input = format!("{} ", matches[0]);
-            self.cursor_pos = self.input.chars().count();
+            let completed = format!("{} ", matches[0]);
+            self.textarea = Self::build_textarea(&self.skin);
+            self.textarea.insert_str(&completed);
         }
     }
 
@@ -721,8 +779,10 @@ impl TuiApp {
             arg.to_string()
         };
         self.skin = CliSkin::load(&requested);
+        self.spinner = KawaiiSpinner::from_skin(&self.skin, "thinking");
+        self.textarea = Self::build_textarea(&self.skin);
         self.status_text = format!("Skin switched to {}", self.skin.name);
-        self.push_system_note(format!(
+        self.push_info(format!(
             "Skin switched to '{}'. Prompt symbol: {}",
             self.skin.name,
             self.skin.prompt_symbol()
@@ -735,6 +795,25 @@ impl TuiApp {
         self.scroll_offset = u16::MAX;
     }
 
+    fn push_info(&mut self, text: impl Into<String>) {
+        self.messages
+            .push(ChatMessage::Info { text: text.into() });
+        self.scroll_offset = u16::MAX;
+    }
+
+    fn push_warning(&mut self, text: impl Into<String>) {
+        self.messages
+            .push(ChatMessage::Warning { text: text.into() });
+        self.scroll_offset = u16::MAX;
+    }
+
+    #[allow(dead_code)]
+    fn push_error(&mut self, text: impl Into<String>) {
+        self.messages
+            .push(ChatMessage::Error { text: text.into() });
+        self.scroll_offset = u16::MAX;
+    }
+
     fn close_last_detail_card(&mut self) {
         if self.active_stream.is_some() {
             self.status_text = "Cannot close detail cards while a run is active".to_string();
@@ -744,7 +823,7 @@ impl TuiApp {
         if let Some(index) = self
             .messages
             .iter()
-            .rposition(|message| !matches!(message, ChatMessage::User { .. }))
+            .rposition(|message| !matches!(message, ChatMessage::User { .. } | ChatMessage::Info { .. } | ChatMessage::Warning { .. } | ChatMessage::Error { .. }))
         {
             self.messages.remove(index);
             self.scroll_offset = u16::MAX;

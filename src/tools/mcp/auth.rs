@@ -886,7 +886,11 @@ async fn get_client_id(
 
     // Otherwise try to get the DCR client_id from secrets
     match secrets
-        .get_decrypted(user_id, &server_config.client_id_secret_name())
+        .get_for_injection(
+            user_id,
+            &server_config.client_id_secret_name(),
+            crate::secrets::SecretAccessContext::new("mcp.auth", "oauth_client_id"),
+        )
         .await
     {
         Ok(client_id) => Ok(client_id.expose().to_string()),
@@ -904,7 +908,11 @@ pub async fn get_access_token(
     user_id: &str,
 ) -> Result<Option<String>, AuthError> {
     match secrets
-        .get_decrypted(user_id, &server_config.token_secret_name())
+        .get_for_injection(
+            user_id,
+            &server_config.token_secret_name(),
+            crate::secrets::SecretAccessContext::new("mcp.auth", "oauth_access_token"),
+        )
         .await
     {
         Ok(token) => Ok(Some(token.expose().to_string())),
@@ -944,7 +952,11 @@ pub async fn refresh_access_token(
 
     // Get the refresh token
     let refresh_token = secrets
-        .get_decrypted(user_id, &server_config.refresh_token_secret_name())
+        .get_for_injection(
+            user_id,
+            &server_config.refresh_token_secret_name(),
+            crate::secrets::SecretAccessContext::new("mcp.auth", "oauth_refresh_token"),
+        )
         .await
         .map_err(|e| AuthError::RefreshFailed(format!("No refresh token: {}", e)))?;
 

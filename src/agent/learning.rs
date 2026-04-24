@@ -363,6 +363,13 @@ pub struct ProviderPrefetchContext {
 pub trait MemoryProvider: Send + Sync {
     fn name(&self) -> &'static str;
     async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus;
+    async fn system_prompt_block(
+        &self,
+        _settings: &LearningSettings,
+        _user_id: &str,
+    ) -> Option<String> {
+        None
+    }
     async fn prefetch(
         &self,
         settings: &LearningSettings,
@@ -402,6 +409,13 @@ pub trait MemoryProvider: Send + Sync {
         }
         Some(lines.join("\n"))
     }
+    async fn prefetch_session_context(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+    ) -> Option<String> {
+        self.system_prompt_block(settings, user_id).await
+    }
     async fn after_turn_sync(
         &self,
         settings: &LearningSettings,
@@ -426,6 +440,17 @@ pub trait MemoryProvider: Send + Sync {
     ) -> Result<(), String> {
         self.export_turn(settings, user_id, payload).await
     }
+    async fn pre_compress_hook(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        self.export_turn(settings, user_id, payload).await
+    }
+    async fn shutdown(&self, _settings: &LearningSettings) -> Result<(), String> {
+        Ok(())
+    }
     fn tool_extensions(&self) -> Vec<String> {
         vec![
             "external_memory_recall".to_string(),
@@ -439,6 +464,9 @@ pub struct HonchoProvider;
 
 #[derive(Default)]
 pub struct ZepProvider;
+
+#[derive(Default)]
+pub struct CustomHttpProvider;
 
 fn provider_base_url(config: &std::collections::HashMap<String, String>) -> Option<String> {
     config
@@ -571,6 +599,82 @@ impl MemoryProvider for HonchoProvider {
         .await
     }
 
+    async fn system_prompt_block(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+    ) -> Option<String> {
+        let provider = settings.providers.provider(self.name())?;
+        if !provider.enabled || !provider.user_modeling_enabled {
+            return None;
+        }
+        let base_url = provider_base_url(&provider.config)?;
+        let token = provider_token(&provider.config);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+
+        let mut request = client
+            .get(format!(
+                "{}/v1/user-context",
+                base_url.trim_end_matches('/')
+            ))
+            .query(&[
+                ("user_id", user_id),
+                ("cadence", &provider.cadence.unwrap_or(5).to_string()),
+                ("depth", &provider.depth.unwrap_or(3).to_string()),
+            ]);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let response = request.send().await.ok()?.error_for_status().ok()?;
+        let payload = response.json::<serde_json::Value>().await.ok()?;
+
+        let user_representations = payload
+            .get("user_representations")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        let peer_cards = payload
+            .get("peer_cards")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        let session_summary = payload
+            .get("session_summary")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+
+        if user_representations.is_empty() && peer_cards.is_empty() && session_summary.is_none() {
+            return None;
+        }
+
+        let mut lines = vec!["## External Memory Model".to_string()];
+        if !user_representations.is_empty() {
+            lines.push("User representations:".to_string());
+            lines.extend(
+                user_representations
+                    .into_iter()
+                    .map(|value| format!("- {value}")),
+            );
+        }
+        if !peer_cards.is_empty() {
+            lines.push("Peer cards:".to_string());
+            lines.extend(peer_cards.into_iter().map(|value| format!("- {value}")));
+        }
+        if let Some(summary) = session_summary {
+            lines.push(format!("Session summary: {summary}"));
+        }
+        Some(lines.join("\n"))
+    }
+
     async fn recall(
         &self,
         settings: &LearningSettings,
@@ -662,6 +766,56 @@ impl MemoryProvider for HonchoProvider {
             Ok(())
         } else {
             Err(format!("Honcho ingest failed: HTTP {}", response.status()))
+        }
+    }
+
+    async fn pre_compress_hook(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        if !settings
+            .providers
+            .provider(self.name())
+            .is_some_and(|provider| provider.enabled)
+        {
+            return Ok(());
+        }
+        let base_url = settings
+            .providers
+            .provider(self.name())
+            .and_then(|provider| provider_base_url(&provider.config))
+            .ok_or_else(|| "Honcho base_url not configured".to_string())?;
+        let token = settings
+            .providers
+            .provider(self.name())
+            .and_then(|provider| provider_token(&provider.config));
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let mut req = client
+            .post(format!(
+                "{}/v1/session-summary",
+                base_url.trim_end_matches('/')
+            ))
+            .json(&serde_json::json!({
+                "user_id": user_id,
+                "payload": payload,
+            }));
+        if let Some(token) = token {
+            req = req.bearer_auth(token);
+        }
+        let response = req.send().await.map_err(|e| e.to_string())?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Honcho session summary export failed: HTTP {}",
+                response.status()
+            ))
         }
     }
 }
@@ -788,6 +942,175 @@ pub struct LearningOutcome {
     pub notes: Vec<String>,
 }
 
+#[async_trait]
+impl MemoryProvider for CustomHttpProvider {
+    fn name(&self) -> &'static str {
+        "custom_http"
+    }
+
+    async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
+        let Some(provider) = settings.providers.provider(self.name()) else {
+            return provider_health_request(self.name(), false, None, None).await;
+        };
+        let base_url = provider_base_url(&provider.config);
+        provider_health_request(
+            self.name(),
+            provider.enabled,
+            base_url,
+            provider_token(&provider.config),
+        )
+        .await
+    }
+
+    async fn recall(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderMemoryHit>, String> {
+        let provider = settings
+            .providers
+            .provider(self.name())
+            .ok_or_else(|| "custom_http provider is not configured".to_string())?;
+        if !provider.enabled {
+            return Ok(Vec::new());
+        }
+        let recall_url = provider
+            .config
+            .get("recall_url")
+            .cloned()
+            .or_else(|| {
+                provider_base_url(&provider.config)
+                    .map(|url| format!("{}/recall", url.trim_end_matches('/')))
+            })
+            .ok_or_else(|| "missing recall_url or base_url".to_string())?;
+        let response = custom_http_request(
+            &provider.config,
+            reqwest::Method::POST,
+            &recall_url,
+            Some(serde_json::json!({
+                "user_id": user_id,
+                "query": query,
+                "limit": limit,
+            })),
+        )
+        .await?;
+        Ok(parse_custom_http_hits(response, self.name()))
+    }
+
+    async fn export_turn(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(provider) = settings.providers.provider(self.name()) else {
+            return Ok(());
+        };
+        if !provider.enabled {
+            return Ok(());
+        }
+        let sync_url = provider
+            .config
+            .get("sync_url")
+            .cloned()
+            .or_else(|| {
+                provider_base_url(&provider.config)
+                    .map(|url| format!("{}/sync", url.trim_end_matches('/')))
+            })
+            .ok_or_else(|| "missing sync_url or base_url".to_string())?;
+        let _ = custom_http_request(
+            &provider.config,
+            reqwest::Method::POST,
+            &sync_url,
+            Some(serde_json::json!({
+                "user_id": user_id,
+                "payload": payload,
+            })),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+async fn custom_http_request(
+    config: &std::collections::HashMap<String, String>,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = client.request(method, url);
+    if let Some(token) = provider_token(config) {
+        request = request.bearer_auth(token);
+    }
+    if let Some(headers) = config.get("headers_json") {
+        let parsed: serde_json::Map<String, serde_json::Value> = serde_json::from_str(headers)
+            .map_err(|error| format!("invalid headers_json: {error}"))?;
+        for (key, value) in parsed {
+            if let Some(value) = value.as_str() {
+                request = request.header(key, value);
+            }
+        }
+    }
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    request
+        .send()
+        .await
+        .map_err(|error| error.to_string())?
+        .error_for_status()
+        .map_err(|error| error.to_string())?
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn parse_custom_http_hits(value: serde_json::Value, provider: &str) -> Vec<ProviderMemoryHit> {
+    let items = value
+        .as_array()
+        .cloned()
+        .or_else(|| {
+            value
+                .get("memories")
+                .and_then(|value| value.as_array())
+                .cloned()
+        })
+        .or_else(|| {
+            value
+                .get("results")
+                .and_then(|value| value.as_array())
+                .cloned()
+        })
+        .unwrap_or_default();
+    items
+        .into_iter()
+        .filter_map(|item| {
+            let summary = item
+                .get("summary")
+                .or_else(|| item.get("text"))
+                .or_else(|| item.get("content"))
+                .and_then(|value| value.as_str())?
+                .trim()
+                .to_string();
+            if summary.is_empty() {
+                return None;
+            }
+            Some(ProviderMemoryHit {
+                provider: provider.to_string(),
+                summary,
+                score: item.get("score").and_then(|value| value.as_f64()),
+                provenance: item,
+            })
+        })
+        .collect()
+}
+
 pub struct MemoryProviderManager {
     store: Arc<dyn Database>,
     providers: Vec<Arc<dyn MemoryProvider>>,
@@ -824,12 +1147,34 @@ impl GeneratedSkillLifecycle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillSynthesisTrigger {
+    ComplexSuccess,
+    DeadEndRecovery,
+    UserCorrection,
+    NonTrivialWorkflow,
+}
+
+impl SkillSynthesisTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ComplexSuccess => "complex_success",
+            Self::DeadEndRecovery => "dead_end_recovery",
+            Self::UserCorrection => "user_correction",
+            Self::NonTrivialWorkflow => "non_trivial_workflow",
+        }
+    }
+}
+
 const PROPOSAL_SUPPRESSION_WINDOW_HOURS: i64 = 24 * 7;
 
 impl MemoryProviderManager {
     pub fn new(store: Arc<dyn Database>) -> Self {
-        let providers: Vec<Arc<dyn MemoryProvider>> =
-            vec![Arc::new(HonchoProvider), Arc::new(ZepProvider)];
+        let providers: Vec<Arc<dyn MemoryProvider>> = vec![
+            Arc::new(HonchoProvider),
+            Arc::new(ZepProvider),
+            Arc::new(CustomHttpProvider),
+        ];
         Self { store, providers }
     }
 
@@ -863,11 +1208,7 @@ impl MemoryProviderManager {
         &'a self,
         settings: &LearningSettings,
     ) -> Option<&'a Arc<dyn MemoryProvider>> {
-        let target = match settings.providers.active {
-            ActiveLearningProvider::None => return None,
-            ActiveLearningProvider::Honcho => "honcho",
-            ActiveLearningProvider::Zep => "zep",
-        };
+        let target = settings.providers.active_provider_name()?;
         self.providers
             .iter()
             .find(|provider| provider.name() == target)
@@ -901,7 +1242,12 @@ impl MemoryProviderManager {
         let active_name = self
             .active_provider_for_settings(settings)
             .map(|active| active.name().to_string())
-            .unwrap_or_else(|| settings.providers.active.as_str().to_string());
+            .unwrap_or_else(|| {
+                settings
+                    .providers
+                    .active_provider_name()
+                    .unwrap_or_else(|| ActiveLearningProvider::None.as_str().to_string())
+            });
         let is_active = self
             .active_provider_for_settings(settings)
             .is_some_and(|active| active.name() == provider.name());
@@ -978,6 +1324,11 @@ impl MemoryProviderManager {
             hits,
             rendered_context,
         })
+    }
+
+    pub async fn provider_system_prompt_block(&self, user_id: &str) -> Option<String> {
+        let (settings, provider, _) = self.ready_active_provider(user_id).await?;
+        provider.prefetch_session_context(&settings, user_id).await
     }
 
     pub async fn provider_recall(
@@ -1077,6 +1428,13 @@ impl MemoryProviderManager {
             .map(|(_, provider, _)| provider.tool_extensions())
             .unwrap_or_default()
     }
+
+    pub async fn shutdown_active_provider(&self, user_id: &str) -> Result<(), String> {
+        let Some((settings, provider, _)) = self.ready_active_provider(user_id).await else {
+            return Ok(());
+        };
+        provider.shutdown(&settings).await
+    }
 }
 
 impl LearningOrchestrator {
@@ -1115,6 +1473,7 @@ impl LearningOrchestrator {
                     ensure_auto_apply_class(&mut learning.auto_apply_classes, "prompt");
                     ensure_auto_apply_class(&mut learning.auto_apply_classes, "routine");
                     ensure_auto_apply_class(&mut learning.auto_apply_classes, "code");
+                    learning.skill_synthesis.auto_apply = true;
                     learning.code_proposals.auto_apply_without_review = true;
                     learning.code_proposals.publish_mode = "local_autorollout".to_string();
                 }
@@ -1122,6 +1481,67 @@ impl LearningOrchestrator {
             }
             Err(_) => LearningSettings::default(),
         }
+    }
+
+    async fn load_full_settings_for_user(&self, user_id: &str) -> crate::settings::Settings {
+        match self.store.get_all_settings(user_id).await {
+            Ok(map) => crate::settings::Settings::from_db_map(&map),
+            Err(_) => crate::settings::Settings::default(),
+        }
+    }
+
+    async fn persist_full_settings(
+        &self,
+        user_id: &str,
+        settings: &crate::settings::Settings,
+    ) -> Result<(), String> {
+        for (key, value) in settings.to_db_map() {
+            self.store
+                .set_setting(user_id, &key, &value)
+                .await
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub async fn configure_memory_provider(
+        &self,
+        user_id: &str,
+        provider_name: &str,
+        provider_settings: crate::settings::LearningProviderSettings,
+        activate: bool,
+    ) -> Result<Vec<ProviderHealthStatus>, String> {
+        let provider_name = provider_name.trim().to_ascii_lowercase();
+        if provider_name.is_empty() {
+            return Err("provider name must be non-empty".to_string());
+        }
+
+        let mut settings = self.load_full_settings_for_user(user_id).await;
+        *settings.learning.providers.provider_mut(&provider_name) = provider_settings;
+        if activate {
+            settings.learning.providers.active_provider = Some(provider_name.clone());
+            settings.learning.providers.active = match provider_name.as_str() {
+                "honcho" => ActiveLearningProvider::Honcho,
+                "zep" => ActiveLearningProvider::Zep,
+                _ => ActiveLearningProvider::None,
+            };
+        }
+        self.persist_full_settings(user_id, &settings).await?;
+        Ok(self.provider_health(user_id).await)
+    }
+
+    pub async fn disable_active_memory_provider(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<ProviderHealthStatus>, String> {
+        self.provider_manager
+            .shutdown_active_provider(user_id)
+            .await?;
+        let mut settings = self.load_full_settings_for_user(user_id).await;
+        settings.learning.providers.active = ActiveLearningProvider::None;
+        settings.learning.providers.active_provider = None;
+        self.persist_full_settings(user_id, &settings).await?;
+        Ok(self.provider_health(user_id).await)
     }
 
     pub async fn provider_health(&self, user_id: &str) -> Vec<ProviderHealthStatus> {
@@ -1147,6 +1567,12 @@ impl LearningOrchestrator {
     ) -> Vec<ProviderMemoryHit> {
         self.provider_manager
             .provider_recall(user_id, query, limit)
+            .await
+    }
+
+    pub async fn provider_system_prompt_block(&self, user_id: &str) -> Option<String> {
+        self.provider_manager
+            .provider_system_prompt_block(user_id)
             .await
     }
 
@@ -1194,6 +1620,10 @@ impl LearningOrchestrator {
         }
 
         let owner_user_id = &session.user_id;
+        let settings = self.load_settings_for_user(owner_user_id).await;
+        if !settings.skill_synthesis.enabled {
+            return Ok(None);
+        }
         let workflow_digest = generated_workflow_digest(&turn.user_input, &turn.tool_calls);
         let skill_name = format!("workflow-{}", &workflow_digest[7..19]);
         let existing_candidates = self
@@ -1214,12 +1644,19 @@ impl LearningOrchestrator {
             .count() as u32
             + 1;
 
-        if !generated_skill_turn_is_eligible(turn, &turn.user_input, reuse_count) {
+        let triggers = generated_skill_triggers(
+            turn,
+            &turn.user_input,
+            reuse_count,
+            settings.skill_synthesis.min_tool_calls,
+        );
+        if triggers.is_empty() {
             return Ok(None);
         }
 
-        let (lifecycle, activation_reason, should_activate) =
+        let (lifecycle, activation_reason, lifecycle_should_activate) =
             generated_skill_lifecycle_for_reuse(reuse_count);
+        let should_activate = lifecycle_should_activate || settings.skill_synthesis.auto_apply;
         let created_at = Utc::now();
         let skill_content = synthesize_generated_skill_markdown(
             &skill_name,
@@ -1245,6 +1682,10 @@ impl LearningOrchestrator {
             "thread_id": thread_id,
             "turn_number": turn.turn_number,
             "tool_count": turn.tool_calls.len(),
+            "trigger_kinds": triggers
+                .iter()
+                .map(|trigger| serde_json::Value::String(trigger.as_str().to_string()))
+                .collect::<Vec<_>>(),
             "last_transition_at": created_at,
             "state_history": [generated_skill_transition_entry(
                 lifecycle,
@@ -1265,8 +1706,13 @@ impl LearningOrchestrator {
             target_type: Some("skill".to_string()),
             target_name: Some(skill_name.clone()),
             summary: Some(format!(
-                "Generated procedural skill for workflow digest {}",
-                &workflow_digest[7..19]
+                "Generated procedural skill for workflow digest {} ({})",
+                &workflow_digest[7..19],
+                triggers
+                    .iter()
+                    .map(|trigger| trigger.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
             proposal: proposal.clone(),
             created_at,
@@ -3024,18 +3470,20 @@ fn ensure_auto_apply_class(classes: &mut Vec<String>, value: &str) {
     }
 }
 
-fn generated_skill_turn_is_eligible(
+fn generated_skill_triggers(
     turn: &crate::agent::session::Turn,
     user_input: &str,
     reuse_count: u32,
-) -> bool {
+    min_tool_calls: u32,
+) -> Vec<SkillSynthesisTrigger> {
     let distinct_categories = turn
         .tool_calls
         .iter()
         .map(|call| generated_tool_category(&call.name))
         .collect::<std::collections::HashSet<_>>()
         .len();
-    let has_multi_tool_pattern = turn.tool_calls.len() >= 3 && distinct_categories >= 2;
+    let has_multi_tool_pattern =
+        turn.tool_calls.len() as u32 >= min_tool_calls && distinct_categories >= 2;
     let recovered_from_failure = turn
         .tool_calls
         .iter()
@@ -3044,10 +3492,20 @@ fn generated_skill_turn_is_eligible(
         && !turn.tool_calls.is_empty()
         && turn.tool_calls.iter().all(|call| call.error.is_none());
     let repeated_workflow_match = reuse_count >= 2;
-    has_multi_tool_pattern
-        || recovered_from_failure
-        || corrected_then_succeeded
-        || repeated_workflow_match
+    let mut triggers = Vec::new();
+    if has_multi_tool_pattern {
+        triggers.push(SkillSynthesisTrigger::ComplexSuccess);
+    }
+    if recovered_from_failure {
+        triggers.push(SkillSynthesisTrigger::DeadEndRecovery);
+    }
+    if corrected_then_succeeded {
+        triggers.push(SkillSynthesisTrigger::UserCorrection);
+    }
+    if repeated_workflow_match {
+        triggers.push(SkillSynthesisTrigger::NonTrivialWorkflow);
+    }
+    triggers
 }
 
 fn detect_generated_skill_correction_signal(content: &str) -> bool {
@@ -5596,5 +6054,23 @@ mod tests {
             .find(|version| version.status == "rolled_back")
             .expect("rollback artifact version");
         assert_eq!(rollback_version.candidate_id, Some(candidate.id));
+    }
+
+    #[test]
+    fn custom_http_provider_parses_common_recall_shapes() {
+        let hits = parse_custom_http_hits(
+            serde_json::json!({
+                "results": [
+                    { "id": "m1", "summary": "prefers concise answers", "score": 0.82 },
+                    { "id": "m2", "content": "likes examples" },
+                    { "id": "m3", "summary": "" }
+                ]
+            }),
+            "custom_http",
+        );
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].provider, "custom_http");
+        assert_eq!(hits[0].score, Some(0.82));
+        assert_eq!(hits[1].summary, "likes examples");
     }
 }

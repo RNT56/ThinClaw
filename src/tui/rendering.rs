@@ -55,12 +55,16 @@ impl TuiApp {
             self.render_hero(frame, body_chunks[0]);
         }
 
+        // Dynamic input height: grows with content, clamped to 3..8 lines
+        let input_line_count = self.textarea.lines().len() as u16;
+        let input_height = (input_line_count + 2).clamp(3, 8);
+
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(5),    // Chat area
-                Constraint::Length(3), // Input
-                Constraint::Length(1), // Status bar
+                Constraint::Min(5),               // Chat area
+                Constraint::Length(input_height), // Input (dynamic)
+                Constraint::Length(1),            // Status bar
             ])
             .split(main_area);
 
@@ -97,7 +101,10 @@ impl TuiApp {
                 Span::styled(" ", self.skin.muted_style()),
                 Span::styled(&self.status_text, self.skin.muted_style()),
             ]);
-            frame.render_widget(Paragraph::new(header), area);
+            frame.render_widget(
+                Paragraph::new(header).alignment(self.skin.header_alignment),
+                area,
+            );
             return;
         };
 
@@ -117,11 +124,14 @@ impl TuiApp {
             Span::styled(&self.status_text, self.skin.muted_style()),
         ]));
 
-        let header = Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(self.skin.border_style()),
-        );
+        let header = Paragraph::new(Text::from(lines))
+            .alignment(self.skin.header_alignment)
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .border_style(self.skin.border_style())
+                    .border_type(self.skin.tui_border_type()),
+            );
         frame.render_widget(header, area);
     }
 
@@ -153,6 +163,7 @@ impl TuiApp {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(self.skin.border_style())
+                    .border_type(self.skin.tui_border_type())
                     .title(Span::styled(
                         format!(" {} sigil ", self.skin.name),
                         self.skin.accent_style(),
@@ -176,6 +187,7 @@ impl TuiApp {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(self.skin.border_style())
+                    .border_type(self.skin.tui_border_type())
                     .title(Span::styled(" Activity deck ", self.skin.muted_style())),
             )
             .wrap(Wrap { trim: false })
@@ -184,38 +196,57 @@ impl TuiApp {
         frame.render_widget(chat, area);
     }
 
-    fn render_input(&self, frame: &mut Frame, area: Rect) {
-        let input = Paragraph::new(self.input.as_str()).block(
+    fn render_input(&mut self, frame: &mut Frame, area: Rect) {
+        self.textarea.set_block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(self.skin.accent_style())
+                .border_type(self.skin.tui_border_type())
                 .title(Span::styled(
                     format!(" Command bay ({}) ", self.skin.prompt_symbol()),
                     self.skin.title_style(),
                 )),
         );
-        frame.render_widget(input, area);
-
-        #[allow(clippy::cast_possible_truncation)]
-        frame.set_cursor_position((area.x + self.cursor_pos as u16 + 1, area.y + 1));
+        frame.render_widget(&self.textarea, area);
     }
 
     fn render_status(&self, frame: &mut Frame, area: Rect) {
-        let (indicator, indicator_style) = if self.active_stream.is_some() {
-            ("●", self.skin.good_style())
+        let indicator_spans = if self.active_stream.is_some() {
+            self.spinner.to_spans(&self.skin)
         } else {
-            ("○", self.skin.border_soft_style())
+            vec![Span::styled("○ ", self.skin.border_soft_style())]
         };
 
-        let status_line = Line::from(vec![
-            Span::styled(format!(" {} ", indicator), indicator_style),
-            Span::styled(&self.status_text, self.skin.muted_style()),
-            Span::styled(" · ", self.skin.border_soft_style()),
-            Span::styled(&self.model, self.skin.accent_soft_style()),
-            Span::styled(" · ", self.skin.border_soft_style()),
-            Span::styled(format!("agent {}", self.agent_id), self.skin.muted_style()),
-        ]);
-        frame.render_widget(Paragraph::new(status_line), area);
+        let mut status_spans = Vec::new();
+        status_spans.push(Span::raw(" "));
+        status_spans.extend(indicator_spans);
+        status_spans.push(Span::styled(" ", Style::default()));
+        status_spans.push(Span::styled(&self.status_text, self.skin.muted_style()));
+        status_spans.push(Span::styled(" · ", self.skin.border_soft_style()));
+        status_spans.push(Span::styled(&self.model, self.skin.accent_soft_style()));
+        status_spans.push(Span::styled(" · ", self.skin.border_soft_style()));
+        status_spans.push(Span::styled(
+            format!("agent {}", self.agent_id),
+            self.skin.muted_style(),
+        ));
+
+        // When gradient is enabled, color each character of the status line
+        // with a left-to-right accent→border gradient for a premium feel.
+        if self.skin.status_gradient && area.width > 0 {
+            // Build a gradient-tinted version of the status content
+            let plain: String = status_spans.iter().map(|s| s.content.as_ref()).collect();
+            let mut gradient_spans = Vec::new();
+            for (i, ch) in plain.chars().enumerate() {
+                let ratio = i as f32 / plain.len().max(1) as f32;
+                let color = self
+                    .skin
+                    .gradient_at(self.skin.accent, self.skin.border, ratio);
+                gradient_spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
+            }
+            frame.render_widget(Paragraph::new(Line::from(gradient_spans)), area);
+        } else {
+            frame.render_widget(Paragraph::new(Line::from(status_spans)), area);
+        }
     }
 
     /// Count total lines for scroll calculation (no borrow of text data).
@@ -240,6 +271,11 @@ impl TuiApp {
                     }
                 }
                 ChatMessage::System { text } => {
+                    count += text.lines().count() as u16;
+                }
+                ChatMessage::Info { text }
+                | ChatMessage::Warning { text }
+                | ChatMessage::Error { text } => {
                     count += text.lines().count() as u16;
                 }
             }
@@ -339,6 +375,30 @@ impl TuiApp {
                         ]));
                     }
                 }
+                ChatMessage::Info { text } => {
+                    for line in text.lines() {
+                        lines.push(Line::from(vec![
+                            Span::styled("✓ ", self.skin.good_style()),
+                            Span::styled(line, self.skin.good_style()),
+                        ]));
+                    }
+                }
+                ChatMessage::Warning { text } => {
+                    for line in text.lines() {
+                        lines.push(Line::from(vec![
+                            Span::styled("⚠ ", self.skin.warn_style().bold()),
+                            Span::styled(line, self.skin.warn_style()),
+                        ]));
+                    }
+                }
+                ChatMessage::Error { text } => {
+                    for line in text.lines() {
+                        lines.push(Line::from(vec![
+                            Span::styled("✖ ", self.skin.bad_style().bold()),
+                            Span::styled(line, self.skin.bad_style()),
+                        ]));
+                    }
+                }
             }
             lines.push(Line::from(""));
         }
@@ -347,10 +407,13 @@ impl TuiApp {
             let display = stream.display_text();
             if !display.is_empty() {
                 let display_lines: Vec<String> = display.lines().map(ToOwned::to_owned).collect();
-                lines.push(Line::from(vec![
-                    Span::styled("╭ ", self.skin.accent_style()),
-                    Span::styled(format!("stream {}", self.model), self.skin.accent_style()),
-                ]));
+                let mut header_spans = vec![Span::styled("╭ ", self.skin.accent_style())];
+                header_spans.extend(self.spinner.to_spans(&self.skin));
+                header_spans.push(Span::styled(
+                    format!(" stream {}", self.model),
+                    self.skin.accent_style(),
+                ));
+                lines.push(Line::from(header_spans));
                 for line in display_lines {
                     lines.push(Line::from(vec![
                         Span::styled("│ ", self.skin.border_soft_style()),
@@ -362,10 +425,9 @@ impl TuiApp {
                     Span::styled(" still working ", self.skin.muted_style()),
                 ]));
             } else {
-                lines.push(Line::from(vec![
-                    Span::styled("╭ ", self.skin.accent_style()),
-                    Span::styled("thinking", self.skin.accent_style()),
-                ]));
+                let mut header_spans = vec![Span::styled("╭ ", self.skin.accent_style())];
+                header_spans.extend(self.spinner.to_spans(&self.skin));
+                lines.push(Line::from(header_spans));
                 lines.push(Line::from(vec![
                     Span::styled("│ ", self.skin.border_soft_style()),
                     Span::styled("holding the line...", self.skin.muted_style()),

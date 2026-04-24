@@ -1,5 +1,3 @@
-version: '3.9'
-
 # ThinClaw Remote Agent — Docker Compose deployment
 #
 # Quick start:
@@ -15,16 +13,18 @@ services:
     build:
       context: ..  # ThinClaw/ directory (one level up from deploy/)
       dockerfile: Dockerfile
+      args:
+        BUILD_FEATURES: ${BUILD_FEATURES:-full}
     container_name: thinclaw-remote
     restart: unless-stopped
     ports:
-      - "3000:3000"   # Gateway HTTP API (Scrappy connects here)
+      - "${GATEWAY_PORT:-3000}:${GATEWAY_PORT:-3000}"   # Gateway HTTP API (Scrappy connects here)
     env_file:
       - .env
     environment:
       # Gateway — always bind to all interfaces inside container
       - GATEWAY_HOST=0.0.0.0
-      - GATEWAY_PORT=3000
+      - GATEWAY_PORT=${GATEWAY_PORT:-3000}
       - CLI_ENABLED=false
       - HEARTBEAT_ENABLED=true
       - HEARTBEAT_NOTIFY_CHANNEL=gateway
@@ -39,7 +39,7 @@ services:
         condition: service_healthy
         required: false
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:18789/api/health"]
+      test: ["CMD-SHELL", "curl -f \"http://localhost:$${GATEWAY_PORT:-3000}/api/health\""]
       interval: 30s
       timeout: 10s
       retries: 3

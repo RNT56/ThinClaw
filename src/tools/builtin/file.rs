@@ -191,6 +191,47 @@ pub(crate) fn effective_base_dir(ctx: &JobContext, configured: Option<&Path>) ->
     metadata_base_dir(ctx).or_else(|| configured.map(Path::to_path_buf))
 }
 
+fn read_file_result(
+    path: &Path,
+    content: &str,
+    offset: usize,
+    limit: Option<u64>,
+) -> serde_json::Value {
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
+
+    let start_line = if offset > 0 {
+        offset.saturating_sub(1).min(total_lines)
+    } else {
+        0
+    };
+    let end_line = if let Some(lim) = limit {
+        (start_line + lim as usize).min(total_lines)
+    } else {
+        total_lines
+    };
+
+    let selected_lines: Vec<String> = lines[start_line..end_line]
+        .iter()
+        .enumerate()
+        .map(|(i, line)| format!("{:>6}│ {}", start_line + i + 1, line))
+        .collect();
+
+    serde_json::json!({
+        "content": selected_lines.join("\n"),
+        "total_lines": total_lines,
+        "lines_shown": end_line - start_line,
+        "path": path.display().to_string()
+    })
+}
+
+#[cfg(feature = "acp")]
+fn acp_session_id(ctx: &JobContext) -> Option<&str> {
+    ctx.metadata
+        .get("acp_session_id")
+        .and_then(serde_json::Value::as_str)
+}
+
 /// Read file contents tool.
 #[derive(Debug, Default)]
 pub struct ReadFileTool {
@@ -256,6 +297,31 @@ impl Tool for ReadFileTool {
         let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
         let path = validate_path(path_str, base_dir.as_deref())?;
 
+        #[cfg(feature = "acp")]
+        if let Some(session_id) = acp_session_id(ctx) {
+            match crate::channels::acp::client_read_text_file(
+                session_id,
+                &path.display().to_string(),
+                (offset > 0).then_some(offset as u64),
+                limit,
+            )
+            .await
+            {
+                Ok(Some(content)) => {
+                    return Ok(ToolOutput::success(
+                        read_file_result(&path, &content, offset, limit),
+                        start.elapsed(),
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(ToolError::ExternalService(format!(
+                        "ACP fs/read_text_file failed: {error}"
+                    )));
+                }
+            }
+        }
+
         // Check file size
         let metadata = fs::metadata(&path)
             .await
@@ -274,35 +340,10 @@ impl Tool for ReadFileTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read file: {}", e)))?;
 
-        // Apply offset and limit
-        let lines: Vec<&str> = content.lines().collect();
-        let total_lines = lines.len();
-
-        let start_line = if offset > 0 {
-            offset.saturating_sub(1)
-        } else {
-            0
-        };
-        let end_line = if let Some(lim) = limit {
-            (start_line + lim as usize).min(total_lines)
-        } else {
-            total_lines
-        };
-
-        let selected_lines: Vec<String> = lines[start_line..end_line]
-            .iter()
-            .enumerate()
-            .map(|(i, line)| format!("{:>6}│ {}", start_line + i + 1, line))
-            .collect();
-
-        let result = serde_json::json!({
-            "content": selected_lines.join("\n"),
-            "total_lines": total_lines,
-            "lines_shown": end_line - start_line,
-            "path": path.display().to_string()
-        });
-
-        Ok(ToolOutput::success(result, start.elapsed()))
+        Ok(ToolOutput::success(
+            read_file_result(&path, &content, offset, limit),
+            start.elapsed(),
+        ))
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -411,6 +452,33 @@ impl Tool for WriteFileTool {
 
         let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
         let path = validate_path(path_str, base_dir.as_deref())?;
+
+        #[cfg(feature = "acp")]
+        if let Some(session_id) = acp_session_id(ctx) {
+            match crate::channels::acp::client_write_text_file(
+                session_id,
+                &path.display().to_string(),
+                content,
+            )
+            .await
+            {
+                Ok(Some(())) => {
+                    let result = serde_json::json!({
+                        "path": path.display().to_string(),
+                        "bytes_written": content.len(),
+                        "success": true,
+                        "backend": "acp_client_fs"
+                    });
+                    return Ok(ToolOutput::success(result, start.elapsed()));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(ToolError::ExternalService(format!(
+                        "ACP fs/write_text_file failed: {error}"
+                    )));
+                }
+            }
+        }
 
         checkpoint_before_mutation(ctx, &path, base_dir.as_deref(), "pre: write_file").await?;
 

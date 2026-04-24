@@ -138,7 +138,23 @@ impl Highlighter for ReplHelper {
     }
 }
 
-impl Validator for ReplHelper {}
+impl Validator for ReplHelper {
+    fn validate(
+        &self,
+        ctx: &mut rustyline::validate::ValidationContext,
+    ) -> rustyline::Result<rustyline::validate::ValidationResult> {
+        let input = ctx.input();
+        // Backslash continuation: if the line ends with '\', request more input.
+        if input.ends_with('\\') {
+            return Ok(rustyline::validate::ValidationResult::Incomplete);
+        }
+        // Triple-backtick fencing: if odd number of ```, request more input.
+        if input.matches("```").count() % 2 != 0 {
+            return Ok(rustyline::validate::ValidationResult::Incomplete);
+        }
+        Ok(rustyline::validate::ValidationResult::Valid(None))
+    }
+}
 impl Helper for ReplHelper {}
 
 struct EscInterruptHandler {

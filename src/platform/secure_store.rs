@@ -15,6 +15,9 @@ fn cached_master_key() -> &'static std::sync::RwLock<Option<Vec<u8>>> {
 
 #[cfg(target_os = "macos")]
 fn read_cached_master_key() -> Option<Vec<u8>> {
+    if !secure_store_cache_enabled() {
+        return None;
+    }
     cached_master_key()
         .read()
         .ok()
@@ -23,12 +26,28 @@ fn read_cached_master_key() -> Option<Vec<u8>> {
 
 #[cfg(target_os = "macos")]
 fn write_cached_master_key(key: &[u8]) {
+    if !secure_store_cache_enabled() {
+        return;
+    }
     if let Ok(mut guard) = cached_master_key().write() {
         if let Some(existing) = guard.as_mut() {
             existing.fill(0);
         }
         *guard = Some(key.to_vec());
     }
+}
+
+#[cfg(target_os = "macos")]
+fn secure_store_cache_enabled() -> bool {
+    std::env::var("THINCLAW_KEYCHAIN_CACHE")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -42,6 +61,108 @@ fn clear_cached_master_key() {
 
 pub fn display_name() -> &'static str {
     "OS secure store"
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecureStoreProbe {
+    pub available: bool,
+    pub env_fallback: bool,
+    pub detail: String,
+    pub guidance: String,
+}
+
+impl SecureStoreProbe {
+    fn available(detail: impl Into<String>) -> Self {
+        Self {
+            available: true,
+            env_fallback: false,
+            detail: detail.into(),
+            guidance: String::new(),
+        }
+    }
+
+    fn env_fallback(detail: impl Into<String>) -> Self {
+        Self {
+            available: true,
+            env_fallback: true,
+            detail: detail.into(),
+            guidance: String::new(),
+        }
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        not(any(target_os = "macos", target_os = "windows"))
+    ))]
+    #[allow(dead_code)]
+    fn unavailable(detail: impl Into<String>, guidance: impl Into<String>) -> Self {
+        Self {
+            available: false,
+            env_fallback: false,
+            detail: detail.into(),
+            guidance: guidance.into(),
+        }
+    }
+}
+
+pub async fn probe_availability() -> SecureStoreProbe {
+    if std::env::var_os("SECRETS_MASTER_KEY").is_some() {
+        return SecureStoreProbe::env_fallback(
+            "SECRETS_MASTER_KEY is configured; encrypted secrets can use the environment fallback.",
+        );
+    }
+
+    probe_os_secure_store().await
+}
+
+#[cfg(target_os = "linux")]
+async fn probe_os_secure_store() -> SecureStoreProbe {
+    use secret_service::{EncryptionType, SecretService};
+
+    if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none()
+        && std::env::var_os("XDG_RUNTIME_DIR").is_none()
+    {
+        return SecureStoreProbe::unavailable(
+            "No Linux user D-Bus session was detected for Secret Service.",
+            "Run ThinClaw from a logged-in desktop user session, start a Secret Service provider such as GNOME Keyring/KWallet, or set SECRETS_MASTER_KEY for headless Linux and containers.",
+        );
+    }
+
+    match SecretService::connect(EncryptionType::Dh).await {
+        Ok(service) => match service.get_default_collection().await {
+            Ok(_) => SecureStoreProbe::available(
+                "Linux Secret Service is reachable through the user D-Bus session.",
+            ),
+            Err(error) => SecureStoreProbe::unavailable(
+                format!(
+                    "Linux Secret Service connected but no default collection is usable: {error}"
+                ),
+                "Unlock or configure GNOME Keyring/KWallet, or set SECRETS_MASTER_KEY for headless Linux and containers.",
+            ),
+        },
+        Err(error) => SecureStoreProbe::unavailable(
+            format!("Linux Secret Service is not reachable: {error}"),
+            "Install/start GNOME Keyring or KWallet in a user D-Bus session, or set SECRETS_MASTER_KEY for headless Linux and containers.",
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn probe_os_secure_store() -> SecureStoreProbe {
+    SecureStoreProbe::available("macOS Keychain is the configured OS secure store.")
+}
+
+#[cfg(target_os = "windows")]
+async fn probe_os_secure_store() -> SecureStoreProbe {
+    SecureStoreProbe::available("Windows Credential Manager is the configured OS secure store.")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+async fn probe_os_secure_store() -> SecureStoreProbe {
+    SecureStoreProbe::unavailable(
+        "No OS secure store implementation is available on this platform.",
+        "Set SECRETS_MASTER_KEY to enable the environment fallback.",
+    )
 }
 
 pub fn generate_master_key() -> Vec<u8> {

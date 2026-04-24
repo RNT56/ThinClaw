@@ -154,7 +154,7 @@ You can run ThinClaw:
 | Local CLI / gateway host | Supported | Supported | Supported |
 | Native OS secure store | Supported | Supported | Supported |
 | `thinclaw service` lifecycle | Supported | Supported | Supported |
-| Local browser automation | Chrome / Brave | Chrome / Chromium / Brave | Chrome / Edge / Brave |
+| Local browser automation | Chrome / Brave / Edge | Chrome / Chromium / Brave / Edge | Chrome / Edge / Brave |
 | Docker browser fallback | Supported | Supported | Docker Desktop |
 | Camera / microphone capture | Supported | Supported | Supported with `ffmpeg` |
 | Signal attachments | Supported | Supported | Supported, override with `SIGNAL_ATTACHMENTS_DIR` when needed |
@@ -196,8 +196,8 @@ The default build (`light`) is lean; opt into more with `--features`:
 
 | Profile | Command | What It Adds |
 |---|---|---|
-| **light** (default) | `cargo build` | PostgreSQL, libSQL, HTML-to-Markdown, doc extraction, timezones |
-| **full** | `cargo build --features full` | + web gateway, REPL, tunnel, Docker sandbox, browser, Nostr |
+| **light** (default) | `cargo build` | PostgreSQL, libSQL, local gateway, HTML-to-Markdown, doc extraction, timezones |
+| **full** | `cargo build --features full` | + ACP, REPL/TUI, tunnel, Docker sandbox, browser, Nostr |
 | **desktop** | `cargo build --features desktop` | libSQL, HTML-to-Markdown, doc extraction, REPL, timezones |
 | **minimal** | `cargo build --no-default-features --features libsql` | Single DB backend, nothing else |
 

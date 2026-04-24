@@ -87,6 +87,13 @@ static SMART_APPROVER: OnceLock<Arc<SmartApprover>> = OnceLock::new();
 static SMART_APPROVAL_CACHE: LazyLock<Mutex<HashMap<String, ApprovalDecision>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+#[cfg(feature = "acp")]
+fn acp_session_id(ctx: &JobContext) -> Option<&str> {
+    ctx.metadata
+        .get("acp_session_id")
+        .and_then(serde_json::Value::as_str)
+}
+
 /// Shell command execution tool.
 pub struct ShellTool {
     /// Working directory for commands (if None, uses job's working dir or cwd).
@@ -470,6 +477,53 @@ impl ShellTool {
                     "Smart approval denied shell command: {}",
                     truncate_for_error(cmd)
                 )));
+            }
+        }
+
+        #[cfg(feature = "acp")]
+        if let Some(session_id) = acp_session_id(ctx) {
+            let cwd_string = cwd.display().to_string();
+            let acp_start = std::time::Instant::now();
+            match crate::channels::acp::client_execute_terminal(
+                session_id,
+                cmd,
+                Some(&cwd_string),
+                timeout_duration,
+                extra_env,
+            )
+            .await
+            {
+                Ok(Some(execution)) => {
+                    let mut runtime_capabilities = vec!["terminal".to_string()];
+                    if execution.truncated {
+                        runtime_capabilities.push("output_truncated".to_string());
+                    }
+                    if execution.signal.is_some() {
+                        runtime_capabilities.push("signal".to_string());
+                    }
+                    return Ok(ExecutionResult {
+                        stdout: execution.output.clone(),
+                        stderr: execution.signal.unwrap_or_default(),
+                        output: execution.output,
+                        exit_code: execution.exit_code.unwrap_or(-1),
+                        backend: ExecutionBackendKind::LocalHost,
+                        runtime:
+                            crate::tools::execution_backend::RuntimeDescriptor::logical_surface(
+                                "acp_client_terminal",
+                                "client_terminal",
+                                "acp",
+                                runtime_capabilities,
+                                None::<String>,
+                            ),
+                        duration: acp_start.elapsed(),
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(ToolError::ExternalService(format!(
+                        "ACP terminal execution failed: {error}"
+                    )));
+                }
             }
         }
 

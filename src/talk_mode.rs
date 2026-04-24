@@ -300,11 +300,103 @@ async fn record_audio(
 
 /// Record audio on Linux.
 #[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinuxMicrophoneBackend {
+    Auto,
+    Pipewire,
+    Pulse,
+    Alsa,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxMicrophoneBackend {
+    pub fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None => Ok(Self::Auto),
+            Some(value) if value.eq_ignore_ascii_case("auto") => Ok(Self::Auto),
+            Some(value) if value.eq_ignore_ascii_case("pipewire") => Ok(Self::Pipewire),
+            Some(value)
+                if value.eq_ignore_ascii_case("pulse")
+                    || value.eq_ignore_ascii_case("pulseaudio") =>
+            {
+                Ok(Self::Pulse)
+            }
+            Some(value) if value.eq_ignore_ascii_case("alsa") => Ok(Self::Alsa),
+            Some(value) => Err(format!(
+                "invalid THINCLAW_MICROPHONE_BACKEND value '{value}' (expected auto, pipewire, pulse, or alsa)"
+            )),
+        }
+    }
+
+    pub fn from_env() -> Result<Self, String> {
+        Self::parse(std::env::var("THINCLAW_MICROPHONE_BACKEND").ok().as_deref())
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinuxAudioInput {
+    label: &'static str,
+    format: &'static str,
+    input: String,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_audio_inputs(
+    backend: LinuxMicrophoneBackend,
+    device_name: Option<&str>,
+) -> Vec<LinuxAudioInput> {
+    let configured_device = device_name
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| std::env::var("THINCLAW_MICROPHONE_DEVICE").ok());
+    let pulse_device = configured_device
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let alsa_device = configured_device.unwrap_or_else(|| "default".to_string());
+
+    match backend {
+        LinuxMicrophoneBackend::Auto => vec![
+            LinuxAudioInput {
+                label: "pipewire-pulse",
+                format: "pulse",
+                input: pulse_device.clone(),
+            },
+            LinuxAudioInput {
+                label: "pulse",
+                format: "pulse",
+                input: pulse_device,
+            },
+            LinuxAudioInput {
+                label: "alsa",
+                format: "alsa",
+                input: alsa_device,
+            },
+        ],
+        LinuxMicrophoneBackend::Pipewire => vec![LinuxAudioInput {
+            label: "pipewire-pulse",
+            format: "pulse",
+            input: pulse_device,
+        }],
+        LinuxMicrophoneBackend::Pulse => vec![LinuxAudioInput {
+            label: "pulse",
+            format: "pulse",
+            input: pulse_device,
+        }],
+        LinuxMicrophoneBackend::Alsa => vec![LinuxAudioInput {
+            label: "alsa",
+            format: "alsa",
+            input: alsa_device,
+        }],
+    }
+}
+
+#[cfg(target_os = "linux")]
 async fn record_audio(
     path: &std::path::Path,
     duration_secs: u32,
     sample_rate: u32,
-    _device_name: Option<&str>,
+    device_name: Option<&str>,
 ) -> Result<(), ToolError> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -312,32 +404,50 @@ async fn record_audio(
             .map_err(|e| ToolError::ExecutionFailed(format!("Create audio dir: {e}")))?;
     }
 
-    let ffmpeg = Command::new("ffmpeg")
-        .args([
-            "-f",
-            "pulse",
-            "-i",
-            "default",
-            "-ar",
-            &sample_rate.to_string(),
-            "-ac",
-            "1",
-            "-t",
-            &duration_secs.to_string(),
-            "-y",
-            &path.to_string_lossy(),
-        ])
-        .output()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("ffmpeg: {e}")))?;
+    let backend = LinuxMicrophoneBackend::from_env().map_err(ToolError::ExecutionFailed)?;
+    let sample_rate = sample_rate.to_string();
+    let duration_secs = duration_secs.to_string();
+    let output_path = path.to_string_lossy().to_string();
+    let mut attempted = Vec::new();
 
-    if !ffmpeg.status.success() {
-        return Err(ToolError::ExecutionFailed(
-            "Audio recording failed. Install ffmpeg with PulseAudio support.".to_string(),
-        ));
+    for input in linux_audio_inputs(backend, device_name) {
+        let ffmpeg = Command::new("ffmpeg")
+            .args([
+                "-f",
+                input.format,
+                "-i",
+                &input.input,
+                "-ar",
+                &sample_rate,
+                "-ac",
+                "1",
+                "-t",
+                &duration_secs,
+                "-y",
+                &output_path,
+            ])
+            .output()
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("ffmpeg: {e}")))?;
+
+        if ffmpeg.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&ffmpeg.stderr).trim().to_string();
+        attempted.push(if stderr.is_empty() {
+            format!(
+                "{} input '{}' exited with {}",
+                input.label, input.input, ffmpeg.status
+            )
+        } else {
+            format!("{} input '{}': {stderr}", input.label, input.input)
+        });
     }
 
-    Ok(())
+    Err(ToolError::ExecutionFailed(format!(
+        "Audio recording failed on Linux. Set THINCLAW_MICROPHONE_BACKEND=auto|pipewire|pulse|alsa and THINCLAW_MICROPHONE_DEVICE to a valid source if needed. Details: {}",
+        attempted.join("; ")
+    )))
 }
 
 /// Record audio on Windows.
@@ -611,7 +721,7 @@ impl Tool for TalkModeTool {
                 },
                 "device_name": {
                     "type": "string",
-                    "description": "Optional microphone device override. On Windows this maps to a DirectShow device name and also falls back to THINCLAW_MICROPHONE_DEVICE."
+                    "description": "Optional microphone device override. On Linux this maps to a PipeWire/PulseAudio/ALSA source depending on THINCLAW_MICROPHONE_BACKEND=auto|pipewire|pulse|alsa. On Windows this maps to a DirectShow device name. Also falls back to THINCLAW_MICROPHONE_DEVICE."
                 }
             },
             "required": []
@@ -709,6 +819,25 @@ mod tests {
         assert_eq!(AudioFormat::Wav.extension(), "wav");
         assert_eq!(AudioFormat::Mp3.extension(), "mp3");
         assert_eq!(AudioFormat::Ogg.extension(), "ogg");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_microphone_backend_selection() {
+        assert_eq!(
+            LinuxMicrophoneBackend::parse(None).unwrap(),
+            LinuxMicrophoneBackend::Auto
+        );
+        assert_eq!(
+            LinuxMicrophoneBackend::parse(Some("alsa")).unwrap(),
+            LinuxMicrophoneBackend::Alsa
+        );
+        assert!(LinuxMicrophoneBackend::parse(Some("oss")).is_err());
+
+        let inputs = linux_audio_inputs(LinuxMicrophoneBackend::Alsa, Some("hw:1,0"));
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].format, "alsa");
+        assert_eq!(inputs[0].input, "hw:1,0");
     }
 
     #[test]

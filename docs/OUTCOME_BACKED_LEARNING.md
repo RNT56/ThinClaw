@@ -31,6 +31,29 @@ Default behavior remains review-oriented. The explicit exception is `desktop_aut
 
 There is no historical backfill in v1. Contracts are only created for new activity after rollout.
 
+## Generated Skill Synthesis
+
+ThinClaw now treats generated workflow skills as part of the same Learning Ledger rather than a separate feature track.
+
+- `learning.skill_synthesis.enabled` gates post-turn generated-skill review.
+- `learning.skill_synthesis.min_tool_calls` defaults to `3` and raises the bar for complex-success synthesis.
+- `learning.skill_synthesis.auto_apply` stays off by default and is enabled automatically for `reckless_desktop`.
+
+The generated-skill reviewer still uses the existing lifecycle states (`draft`, `shadow`, `proposed`, `active`, `frozen`, `rolled_back`), but candidate metadata now records trigger kinds such as:
+
+- `complex_success`
+- `dead_end_recovery`
+- `user_correction`
+- `non_trivial_workflow`
+
+Normal mode remains approval- and review-oriented. `reckless_desktop` can auto-activate generated skills through the existing lifecycle instead of bypassing the ledger.
+
+The adjacent agent-facing skill lifecycle now also includes:
+
+- `skill_update` for provenance-backed refresh when a lock file exists
+- `skill_audit` for re-running the quarantine scanner without uninstalling
+- `skill_snapshot` for writing point-in-time skill manifests under `~/.thinclaw/skills/.hub/`
+
 ## Current Scope
 
 ### Contract Types

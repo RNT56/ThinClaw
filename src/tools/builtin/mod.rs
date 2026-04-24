@@ -72,7 +72,10 @@ pub use execute_code::ExecuteCodeTool;
 pub use extension_tools::{
     ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
 };
-pub use external_memory::{ExternalMemoryRecallTool, ExternalMemoryStatusTool};
+pub use external_memory::{
+    ExternalMemoryOffTool, ExternalMemoryRecallTool, ExternalMemorySetupTool,
+    ExternalMemoryStatusTool,
+};
 #[cfg(feature = "document-extraction")]
 pub use extract_document::ExtractDocumentTool;
 pub use file::{ApplyPatchTool, GrepTool, ListDirTool, ReadFileTool, WriteFileTool};
@@ -106,8 +109,8 @@ pub use search_files::SearchFilesTool;
 pub use send_message::{SendMessageFn, SendMessageTool};
 pub use shell::ShellTool;
 pub use skill_tools::{
-    SkillInstallTool, SkillListTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
-    SkillSearchTool,
+    SkillAuditTool, SkillInstallTool, SkillListTool, SkillPromoteTrustTool, SkillReadTool,
+    SkillReloadTool, SkillRemoveTool, SkillSearchTool, SkillSnapshotTool, SkillUpdateTool,
 };
 pub use slack_actions::SlackActionsTool;
 pub use subagent::{CancelSubagentTool, ListSubagentsTool, SpawnSubagentTool};

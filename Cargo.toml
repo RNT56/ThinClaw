@@ -169,6 +169,7 @@ sysinfo = "0.38.2"
 nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }
 chromiumoxide = { version = "0.9.1", optional = true }
 ratatui = "0.30.0"
+ratatui-textarea = { version = "0.9", default-features = false, features = ["crossterm"] }
 unicode-width = "0.2.2"
 textwrap = "0.16.2"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
@@ -226,10 +227,10 @@ insta = { version = "1", features = ["json", "yaml"] }
 serde_json = "1"
 
 [features]
-# Default: lightweight build — core agent + databases + HTML/doc tools.
+# Default: lightweight build — core agent + databases + gateway + HTML/doc tools.
 # Use --features full for everything. See docs/BUILD_PROFILES.md
 default = ["light"]
-# Lightweight build — no web gateway, no tunnel, no Docker, no voice,
+# Lightweight build — includes the local gateway; no tunnel, no Docker, no voice,
 # no local browser, no nostr. Saves ~65 MB of binary size vs full.
 light = [
     "postgres",
@@ -242,6 +243,7 @@ light = [
 desktop = ["libsql", "html-to-markdown", "document-extraction", "repl", "timezones"]
 # Individual runtime modules (can be combined with light)
 web-gateway = []
+acp = []
 repl = []
 tunnel = []
 docker-sandbox = []
@@ -251,6 +253,7 @@ timezones = ["dep:chrono-tz"]
 # Everything — full-featured agent with all capabilities
 full = [
     "light",
+    "acp",
     "web-gateway",
     "repl",
     "tunnel",
@@ -287,6 +290,11 @@ bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types
 [[test]]
 name = "html_to_markdown"
 required-features = ["html-to-markdown"]
+
+[[bin]]
+name = "thinclaw-acp"
+path = "src/bin/thinclaw-acp.rs"
+required-features = ["acp"]
 
 [[bench]]
 name = "safety_sanitize"

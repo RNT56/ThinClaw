@@ -15,14 +15,7 @@ use crate::tools::ToolProfile;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 fn parse_tool_profile_param(value: &str) -> Result<ToolProfile, ToolError> {
-    match value {
-        "standard" => Ok(ToolProfile::Standard),
-        "restricted" => Ok(ToolProfile::Restricted),
-        "explicit_only" => Ok(ToolProfile::ExplicitOnly),
-        other => Err(ToolError::InvalidParameters(format!(
-            "Invalid tool_profile '{other}'"
-        ))),
-    }
+    value.parse().map_err(ToolError::InvalidParameters)
 }
 
 // ── CreateAgentTool ──────────────────────────────────────────────────

@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 use futures::stream;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::channels::status_view::{ChannelStatusEntry, ChannelViewState};
@@ -17,6 +18,113 @@ use crate::error::ChannelError;
 
 const LEGACY_WEB_CHANNEL_ALIAS: &str = "web";
 const GATEWAY_CHANNEL_NAME: &str = "gateway";
+
+/// Raw platform-neutral event shape used by channel drivers before an event is
+/// turned into ThinClaw's canonical [`IncomingMessage`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncomingEvent {
+    pub platform: String,
+    pub chat_type: String,
+    pub chat_id: String,
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+/// Parsed slash command produced by the centralized channel command parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommand {
+    pub command: String,
+    pub args: String,
+}
+
+/// Standard ThinClaw session-key format for gateway and chat platform ingress.
+pub fn mint_session_key(platform: &str, chat_type: &str, chat_id: &str) -> String {
+    format!(
+        "agent:main:{}:{}:{}",
+        sanitize_session_key_part(platform),
+        sanitize_session_key_part(chat_type),
+        sanitize_session_key_part(chat_id)
+    )
+}
+
+/// Compatibility aliases for persisted sessions created before the unified key
+/// format landed. New channel drivers should write only `mint_session_key`.
+pub fn legacy_session_key_aliases(platform: &str, chat_type: &str, chat_id: &str) -> Vec<String> {
+    let platform = sanitize_session_key_part(platform);
+    let chat_type = sanitize_session_key_part(chat_type);
+    let chat_id = sanitize_session_key_part(chat_id);
+    let mut aliases = vec![
+        format!("{platform}:{chat_id}"),
+        format!("{platform}:{chat_type}:{chat_id}"),
+        format!("agent:main:{platform}:{chat_id}"),
+    ];
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+/// Convert a platform-neutral event into the canonical incoming-message shape.
+pub fn normalize_incoming_event(event: IncomingEvent) -> IncomingMessage {
+    let thread_id = mint_session_key(&event.platform, &event.chat_type, &event.chat_id);
+    let aliases = legacy_session_key_aliases(&event.platform, &event.chat_type, &event.chat_id);
+    let metadata = serde_json::json!({
+        "platform": event.platform.clone(),
+        "chat_type": event.chat_type.clone(),
+        "chat_id": event.chat_id.clone(),
+        "session_key": thread_id.clone(),
+        "legacy_session_key_aliases": aliases,
+        "raw": event.metadata,
+    });
+
+    let mut message = IncomingMessage::new(event.platform, event.user_id, event.text)
+        .with_thread(thread_id)
+        .with_metadata(metadata);
+    if let Some(name) = event.user_name {
+        message = message.with_user_name(name);
+    }
+    message
+}
+
+/// Parse a leading slash command without each channel re-implementing prefix
+/// handling. Returns `None` for regular user messages.
+pub fn parse_slash_command(content: &str) -> Option<SlashCommand> {
+    let trimmed = content.trim();
+    let rest = trimmed.strip_prefix('/')?;
+    if rest.is_empty() {
+        return None;
+    }
+    let (command, args) = rest
+        .split_once(char::is_whitespace)
+        .map(|(cmd, args)| (cmd, args.trim()))
+        .unwrap_or((rest, ""));
+    if command.is_empty() {
+        return None;
+    }
+    Some(SlashCommand {
+        command: command.to_ascii_lowercase(),
+        args: args.to_string(),
+    })
+}
+
+fn sanitize_session_key_part(value: &str) -> String {
+    let cleaned = value
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            ':' | '\n' | '\r' | '\t' => '_',
+            _ => ch,
+        })
+        .collect::<String>();
+    if cleaned.is_empty() {
+        "unknown".to_string()
+    } else {
+        cleaned
+    }
+}
 
 /// Per-channel atomic message counters.
 struct ChannelCounters {
@@ -674,6 +782,45 @@ impl ChannelManager {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::*;
+
+    #[test]
+    fn mints_standard_session_key_and_aliases() {
+        assert_eq!(
+            mint_session_key("matrix", "room", "!abc:def"),
+            "agent:main:matrix:room:!abc_def"
+        );
+        let aliases = legacy_session_key_aliases("matrix", "room", "!abc:def");
+        assert!(aliases.contains(&"matrix:!abc_def".to_string()));
+        assert!(aliases.contains(&"matrix:room:!abc_def".to_string()));
+    }
+
+    #[test]
+    fn normalizes_incoming_event_with_metadata() {
+        let message = normalize_incoming_event(IncomingEvent {
+            platform: "sms".to_string(),
+            chat_type: "dm".to_string(),
+            chat_id: "+15551234567".to_string(),
+            user_id: "+15551234567".to_string(),
+            user_name: Some("Pat".to_string()),
+            text: "/help please".to_string(),
+            metadata: serde_json::json!({ "provider": "twilio" }),
+        });
+        assert_eq!(message.channel, "sms");
+        assert_eq!(
+            message.thread_id.as_deref(),
+            Some("agent:main:sms:dm:+15551234567")
+        );
+        assert_eq!(
+            parse_slash_command(&message.content).unwrap().command,
+            "help"
+        );
+        assert_eq!(message.metadata["raw"]["provider"], "twilio");
     }
 }
 

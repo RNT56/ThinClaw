@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use crate::terminal_branding::TerminalBranding;
 
 /// Run all diagnostic checks and print results.
-pub async fn run_doctor_command() -> anyhow::Result<()> {
+pub async fn run_doctor_command(
+    linux_profile: crate::platform::LinuxReadinessProfile,
+) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     branding.print_banner(
         "ThinClaw Doctor",
@@ -18,6 +20,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
 
     let mut passed = 0u32;
     let mut failed = 0u32;
+    let mut skipped = 0u32;
 
     // ── Configuration checks ──────────────────────────────────
 
@@ -27,6 +30,7 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         &branding,
         &mut passed,
         &mut failed,
+        &mut skipped,
     );
 
     check(
@@ -35,6 +39,16 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         &branding,
         &mut passed,
         &mut failed,
+        &mut skipped,
+    );
+
+    check(
+        "Secrets posture",
+        check_secrets_posture().await,
+        &branding,
+        &mut passed,
+        &mut failed,
+        &mut skipped,
     );
 
     check(
@@ -43,40 +57,54 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         &branding,
         &mut passed,
         &mut failed,
+        &mut skipped,
     );
 
-    // ── External binary checks ────────────────────────────────
+    // ── Linux readiness checks ────────────────────────────────
 
-    check(
-        "Docker",
-        check_binary("docker", &["--version"]),
-        &branding,
-        &mut passed,
-        &mut failed,
+    println!();
+    println!(
+        "  {}",
+        branding.body_bold(format!("Linux readiness ({})", linux_profile.as_str()))
     );
+    let linux = crate::platform::linux_readiness_report(linux_profile).await;
+    for probe in &linux.probes {
+        check_linux_probe(probe, &branding, &mut passed, &mut failed, &mut skipped);
+    }
 
-    check(
+    // ── Optional external binary checks ───────────────────────
+
+    check_optional_binary(
         "cloudflared",
-        check_binary("cloudflared", &["--version"]),
+        &["--version"],
+        is_tunnel_provider("cloudflare"),
+        "only required when TUNNEL_PROVIDER=cloudflare",
         &branding,
         &mut passed,
         &mut failed,
+        &mut skipped,
     );
 
-    check(
+    check_optional_binary(
         "ngrok",
-        check_binary("ngrok", &["version"]),
+        &["version"],
+        is_tunnel_provider("ngrok"),
+        "only required when TUNNEL_PROVIDER=ngrok",
         &branding,
         &mut passed,
         &mut failed,
+        &mut skipped,
     );
 
-    check(
+    check_optional_binary(
         "tailscale",
-        check_binary("tailscale", &["version"]),
+        &["version"],
+        is_tunnel_provider("tailscale"),
+        "only required when TUNNEL_PROVIDER=tailscale",
         &branding,
         &mut passed,
         &mut failed,
+        &mut skipped,
     );
 
     // ── Summary ───────────────────────────────────────────────
@@ -87,6 +115,9 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
         branding.good(format!("{passed} passed")),
         branding.bad(format!("{failed} failed"))
     );
+    if skipped > 0 {
+        println!("  {}", branding.warn(format!("{skipped} skipped")));
+    }
 
     if failed > 0 {
         println!(
@@ -106,6 +137,7 @@ fn check(
     branding: &TerminalBranding,
     passed: &mut u32,
     failed: &mut u32,
+    skipped: &mut u32,
 ) {
     match result {
         CheckResult::Pass(detail) => {
@@ -127,6 +159,7 @@ fn check(
             );
         }
         CheckResult::Skip(reason) => {
+            *skipped += 1;
             println!(
                 "  {} {}: {}",
                 branding.warn("[skip]"),
@@ -137,10 +170,56 @@ fn check(
     }
 }
 
+fn check_linux_probe(
+    probe: &crate::platform::LinuxProbe,
+    branding: &TerminalBranding,
+    passed: &mut u32,
+    failed: &mut u32,
+    skipped: &mut u32,
+) {
+    let result = match probe.status {
+        crate::platform::LinuxProbeStatus::Pass => CheckResult::Pass(probe.detail.clone()),
+        crate::platform::LinuxProbeStatus::Fail => {
+            let mut detail = probe.detail.clone();
+            if let Some(guidance) = &probe.guidance {
+                detail.push_str(" ");
+                detail.push_str(guidance);
+            }
+            CheckResult::Fail(detail)
+        }
+        crate::platform::LinuxProbeStatus::Skip => CheckResult::Skip(probe.detail.clone()),
+    };
+    check(probe.label, result, branding, passed, failed, skipped);
+}
+
 enum CheckResult {
     Pass(String),
     Fail(String),
     Skip(String),
+}
+
+fn is_tunnel_provider(provider: &str) -> bool {
+    std::env::var("TUNNEL_PROVIDER")
+        .map(|value| value.eq_ignore_ascii_case(provider))
+        .unwrap_or(false)
+}
+
+fn check_optional_binary(
+    name: &str,
+    args: &[&str],
+    required: bool,
+    skip_reason: &str,
+    branding: &TerminalBranding,
+    passed: &mut u32,
+    failed: &mut u32,
+    skipped: &mut u32,
+) {
+    let result = if required {
+        check_binary(name, args)
+    } else {
+        CheckResult::Skip(skip_reason.to_string())
+    };
+    check(name, result, branding, passed, failed, skipped);
 }
 
 async fn check_llm_config() -> CheckResult {
@@ -223,6 +302,32 @@ async fn check_database() -> CheckResult {
                 CheckResult::Fail("DATABASE_URL not set".into())
             }
         }
+    }
+}
+
+async fn check_secrets_posture() -> CheckResult {
+    let probe = crate::platform::secure_store::probe_availability().await;
+    let env_present = std::env::var_os("SECRETS_MASTER_KEY").is_some();
+    let env_allowed = std::env::var("THINCLAW_ALLOW_ENV_MASTER_KEY")
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+
+    if env_present && !env_allowed {
+        return CheckResult::Fail(
+            "SECRETS_MASTER_KEY is present but ignored by strict defaults; use the OS secure store or set THINCLAW_ALLOW_ENV_MASTER_KEY=1 deliberately"
+                .into(),
+        );
+    }
+
+    if probe.available {
+        if probe.env_fallback {
+            CheckResult::Pass("explicit env fallback is configured for local_encrypted v2".into())
+        } else {
+            CheckResult::Pass(format!("{}; local_encrypted v2 expected", probe.detail))
+        }
+    } else {
+        CheckResult::Fail(format!("{} {}", probe.detail, probe.guidance))
     }
 }
 

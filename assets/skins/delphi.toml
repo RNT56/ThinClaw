@@ -23,6 +23,10 @@ hero_art = [
   '      ╱ ╲      ',
 ]
 tool_emojis = { shell = "✶", browser = "◇", memory = "❖", search_files = "⌕", todo = "∴", subagent = "⟡" }
+border_style = "rounded"
+header_alignment = "center"
+status_gradient = true
+spinner_style = "kawaii"
 
 [web]
 aura_primary = "#9B6EF3"

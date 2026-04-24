@@ -484,7 +484,14 @@ async fn research_provider_api_key(
         }
     }
     for name in names {
-        match secrets.get_decrypted(user_id, &name).await {
+        match secrets
+            .get_for_injection(
+                user_id,
+                &name,
+                crate::secrets::SecretAccessContext::new("experiments.api", "gpu_cloud_credential"),
+            )
+            .await
+        {
             Ok(secret) => return Some(secret.expose().to_string()),
             Err(err) => {
                 tracing::debug!(
@@ -671,7 +678,17 @@ async fn resolved_secret_env_pairs(
         let Some((secret_name, env_names)) = parse_secret_reference(reference) else {
             continue;
         };
-        match secrets.get_decrypted(user_id, &secret_name).await {
+        match secrets
+            .get_for_injection(
+                user_id,
+                &secret_name,
+                crate::secrets::SecretAccessContext::new(
+                    "experiments.api",
+                    "runner_env_credential",
+                ),
+            )
+            .await
+        {
             Ok(secret) => {
                 let value = secret.expose().to_string();
                 for env_name in env_names {

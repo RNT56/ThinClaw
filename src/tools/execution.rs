@@ -356,6 +356,7 @@ fn deny_reason_for_profile(
         ToolProfile::Standard => true,
         ToolProfile::Restricted => descriptor.is_safe_read_only_orchestrator(),
         ToolProfile::ExplicitOnly => false,
+        ToolProfile::Acp => descriptor_allowed_for_acp(descriptor),
     };
 
     if implicitly_allowed {
@@ -368,6 +369,33 @@ fn deny_reason_for_profile(
             profile.as_str()
         ))
     }
+}
+
+fn descriptor_allowed_for_acp(descriptor: &ToolDescriptor) -> bool {
+    let name = descriptor.name.as_str();
+    if descriptor.is_coordination_tool() {
+        return true;
+    }
+
+    matches!(
+        name,
+        "read_file"
+            | "write_file"
+            | "list_dir"
+            | "apply_patch"
+            | "grep"
+            | "search_files"
+            | "shell"
+            | "process"
+            | "execute_code"
+            | "session_search"
+            | "browser"
+            | "vision_analyze"
+            | "llm_list_models"
+            | "llm_select"
+    ) || name.starts_with("memory_")
+        || name.starts_with("external_memory_")
+        || name.starts_with("skill_")
 }
 
 fn deny_reason_for_lane(
@@ -473,5 +501,62 @@ pub fn approval_class_from_requirement(requirement: ApprovalRequirement) -> Tool
         ApprovalRequirement::Never => ToolApprovalClass::Never,
         ApprovalRequirement::UnlessAutoApproved => ToolApprovalClass::Conditional,
         ApprovalRequirement::Always => ToolApprovalClass::Always,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::{ToolDomain, ToolMetadata, ToolSideEffectLevel};
+
+    fn descriptor(name: &str) -> ToolDescriptor {
+        ToolDescriptor {
+            name: name.to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({ "type": "object" }),
+            domain: ToolDomain::Container,
+            metadata: ToolMetadata {
+                authoritative_source: false,
+                live_data: false,
+                side_effect_level: ToolSideEffectLevel::Write,
+                approval_class: ToolApprovalClass::Conditional,
+                parallel_safe: false,
+                route_intents: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn acp_profile_allows_editor_tools_and_blocks_messaging() {
+        assert!(descriptor_allowed_for_profile(
+            &descriptor("read_file"),
+            ToolExecutionLane::Chat,
+            ToolProfile::Acp,
+            &serde_json::json!({})
+        ));
+        assert!(descriptor_allowed_for_profile(
+            &descriptor("skill_search"),
+            ToolExecutionLane::Chat,
+            ToolProfile::Acp,
+            &serde_json::json!({})
+        ));
+        assert!(!descriptor_allowed_for_profile(
+            &descriptor("spawn_subagent"),
+            ToolExecutionLane::Chat,
+            ToolProfile::Acp,
+            &serde_json::json!({})
+        ));
+        assert!(!descriptor_allowed_for_profile(
+            &descriptor("send_message"),
+            ToolExecutionLane::Chat,
+            ToolProfile::Acp,
+            &serde_json::json!({})
+        ));
+        assert!(!descriptor_allowed_for_profile(
+            &descriptor("routine_create"),
+            ToolExecutionLane::Chat,
+            ToolProfile::Acp,
+            &serde_json::json!({})
+        ));
     }
 }

@@ -101,7 +101,11 @@ impl SecretsContext {
     pub async fn get_secret(&self, name: &str) -> Result<SecretString, ChannelSetupError> {
         let decrypted = self
             .store
-            .get_decrypted(&self.user_id, name)
+            .get_for_injection(
+                &self.user_id,
+                name,
+                crate::secrets::SecretAccessContext::new("setup.channels", "setup_validation"),
+            )
             .await
             .map_err(|e| ChannelSetupError::Secrets(format!("Failed to read secret: {}", e)))?;
         Ok(SecretString::from(decrypted.expose().to_string()))

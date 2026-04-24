@@ -4,22 +4,19 @@ use async_trait::async_trait;
 
 use crate::agent::learning::{LearningOrchestrator, ProviderHealthStatus, ProviderReadiness};
 use crate::context::JobContext;
-use crate::settings::ActiveLearningProvider;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::settings::LearningProviderSettings;
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
-fn active_provider_status(
-    active: ActiveLearningProvider,
-    statuses: &[ProviderHealthStatus],
-) -> Result<&ProviderHealthStatus, ToolError> {
-    let active_name = match active {
-        ActiveLearningProvider::None => {
-            return Err(ToolError::ExecutionFailed(
-                "No external memory provider is active. Enable learning.providers.active to use this tool."
-                    .to_string(),
-            ));
-        }
-        _ => active.as_str(),
-    };
+fn active_provider_status<'a>(
+    active_provider: Option<&str>,
+    statuses: &'a [ProviderHealthStatus],
+) -> Result<&'a ProviderHealthStatus, ToolError> {
+    let active_name = active_provider.filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+        ToolError::ExecutionFailed(
+            "No external memory provider is active. Enable learning.providers.active to use this tool."
+                .to_string(),
+        )
+    })?;
 
     statuses
         .iter()
@@ -102,7 +99,10 @@ impl Tool for ExternalMemoryRecallTool {
 
         let settings = self.orchestrator.load_settings_for_user(&ctx.user_id).await;
         let statuses = self.orchestrator.provider_health(&ctx.user_id).await;
-        let active_status = active_provider_status(settings.providers.active, &statuses)?;
+        let active_status = active_provider_status(
+            settings.providers.active_provider_name().as_deref(),
+            &statuses,
+        )?;
         ensure_active_provider_healthy(active_status)?;
 
         let hits = self
@@ -160,7 +160,10 @@ impl Tool for ExternalMemoryStatusTool {
         let start = std::time::Instant::now();
         let settings = self.orchestrator.load_settings_for_user(&ctx.user_id).await;
         let statuses = self.orchestrator.provider_health(&ctx.user_id).await;
-        let active_provider = settings.providers.active.as_str();
+        let active_provider = settings
+            .providers
+            .active_provider_name()
+            .unwrap_or_else(|| settings.providers.active.as_str().to_string());
         let active_status = statuses
             .iter()
             .find(|status| status.provider == active_provider);
@@ -179,6 +182,206 @@ impl Tool for ExternalMemoryStatusTool {
             }),
             start.elapsed(),
         ))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+}
+
+pub struct ExternalMemorySetupTool {
+    orchestrator: Arc<LearningOrchestrator>,
+}
+
+impl ExternalMemorySetupTool {
+    pub fn new(orchestrator: Arc<LearningOrchestrator>) -> Self {
+        Self { orchestrator }
+    }
+}
+
+#[async_trait]
+impl Tool for ExternalMemorySetupTool {
+    fn name(&self) -> &str {
+        "external_memory_setup"
+    }
+
+    fn description(&self) -> &str {
+        "Configure and optionally activate an external memory provider such as Honcho or Zep."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "description": "Provider slug (for example honcho, zep, or a registered custom provider)."
+                },
+                "base_url": {
+                    "type": "string",
+                    "description": "Base URL for the provider API."
+                },
+                "api_key": {
+                    "type": "string",
+                    "description": "Optional inline API key."
+                },
+                "api_key_env": {
+                    "type": "string",
+                    "description": "Optional environment variable name holding the API key."
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "activate": {
+                    "type": "boolean",
+                    "default": true
+                },
+                "cadence": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "depth": {
+                    "type": "integer",
+                    "minimum": 1
+                },
+                "user_modeling_enabled": {
+                    "type": "boolean",
+                    "default": false
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Additional provider-specific config key/value pairs."
+                }
+            },
+            "required": ["provider"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let provider = require_str(&params, "provider")?
+            .trim()
+            .to_ascii_lowercase();
+        let enabled = params
+            .get("enabled")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        let activate = params
+            .get("activate")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        let mut config = params
+            .get("config")
+            .and_then(|value| value.as_object())
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(key, value)| value.as_str().map(|value| (key, value.to_string())))
+            .collect::<std::collections::HashMap<_, _>>();
+        if let Some(base_url) = params.get("base_url").and_then(|value| value.as_str()) {
+            config.insert("base_url".to_string(), base_url.to_string());
+        }
+        if let Some(api_key) = params.get("api_key").and_then(|value| value.as_str()) {
+            config.insert("api_key".to_string(), api_key.to_string());
+        }
+        if let Some(api_key_env) = params.get("api_key_env").and_then(|value| value.as_str()) {
+            config.insert("api_key_env".to_string(), api_key_env.to_string());
+        }
+        let provider_settings = LearningProviderSettings {
+            enabled,
+            config,
+            cadence: params
+                .get("cadence")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as u32),
+            depth: params
+                .get("depth")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as u32),
+            user_modeling_enabled: params
+                .get("user_modeling_enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
+        };
+        let statuses = self
+            .orchestrator
+            .configure_memory_provider(&ctx.user_id, &provider, provider_settings, activate)
+            .await
+            .map_err(ToolError::ExecutionFailed)?;
+        let active_status = statuses.iter().find(|status| status.provider == provider);
+
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "provider": provider,
+                "active": activate,
+                "active_status": active_status,
+                "providers": statuses,
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+}
+
+pub struct ExternalMemoryOffTool {
+    orchestrator: Arc<LearningOrchestrator>,
+}
+
+impl ExternalMemoryOffTool {
+    pub fn new(orchestrator: Arc<LearningOrchestrator>) -> Self {
+        Self { orchestrator }
+    }
+}
+
+#[async_trait]
+impl Tool for ExternalMemoryOffTool {
+    fn name(&self) -> &str {
+        "external_memory_off"
+    }
+
+    fn description(&self) -> &str {
+        "Disable the active external memory provider and shut it down cleanly."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let statuses = self
+            .orchestrator
+            .disable_active_memory_provider(&ctx.user_id)
+            .await
+            .map_err(ToolError::ExecutionFailed)?;
+
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "active": false,
+                "providers": statuses,
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {

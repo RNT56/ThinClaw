@@ -304,6 +304,10 @@ pub struct ThreadRuntimeState {
     #[serde(default)]
     pub post_compaction_context: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_workspace_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_provider_system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_snapshot_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ephemeral_overlay_hash: Option<String>,
@@ -392,6 +396,8 @@ impl Thread {
             active_subagents,
             last_context_pressure,
             post_compaction_context: None,
+            frozen_workspace_prompt: None,
+            frozen_provider_system_prompt: None,
             prompt_snapshot_hash: None,
             ephemeral_overlay_hash: None,
             prompt_segment_order: Vec::new(),
@@ -1026,6 +1032,8 @@ mod tests {
             active_subagents: vec![],
             last_context_pressure: None,
             post_compaction_context: None,
+            frozen_workspace_prompt: None,
+            frozen_provider_system_prompt: None,
             prompt_snapshot_hash: None,
             ephemeral_overlay_hash: None,
             prompt_segment_order: Vec::new(),
@@ -1051,6 +1059,8 @@ mod tests {
             active_subagents: Vec::new(),
             last_context_pressure: Some(ContextPressure::Warning),
             post_compaction_context: Some("summary".to_string()),
+            frozen_workspace_prompt: Some("workspace".to_string()),
+            frozen_provider_system_prompt: Some("provider".to_string()),
             prompt_snapshot_hash: Some("sha256:stable".to_string()),
             ephemeral_overlay_hash: Some("sha256:ephemeral".to_string()),
             prompt_segment_order: vec![
@@ -1065,6 +1075,14 @@ mod tests {
             serde_json::from_str(&encoded).expect("deserialize runtime");
 
         assert_eq!(decoded.prompt_snapshot_hash, runtime.prompt_snapshot_hash);
+        assert_eq!(
+            decoded.frozen_workspace_prompt,
+            runtime.frozen_workspace_prompt
+        );
+        assert_eq!(
+            decoded.frozen_provider_system_prompt,
+            runtime.frozen_provider_system_prompt
+        );
         assert_eq!(
             decoded.ephemeral_overlay_hash,
             runtime.ephemeral_overlay_hash

@@ -481,6 +481,10 @@ async fn loaded_skill_root(
             "Skill '{}' is bundled and cannot be changed through skill_manage",
             name
         ))),
+        SkillSource::External(_) => Err(ToolError::ExecutionFailed(format!(
+            "Skill '{}' is external read-only and cannot be changed through skill_manage",
+            name
+        ))),
     }
 }
 

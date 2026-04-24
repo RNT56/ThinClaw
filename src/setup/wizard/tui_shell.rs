@@ -268,6 +268,7 @@ impl OnboardingTuiShell {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style)
+            .border_type(self.skin.tui_border_type())
             .title(Span::styled(
                 format!(" {} ", spec.eyebrow),
                 self.skin.accent_style(),

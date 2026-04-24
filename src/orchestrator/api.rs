@@ -526,7 +526,14 @@ async fn get_credentials_handler(
 
     for grant in &grants {
         let decrypted = secrets
-            .get_decrypted(&principal_id, &grant.secret_name)
+            .get_for_injection(
+                &principal_id,
+                &grant.secret_name,
+                crate::secrets::SecretAccessContext::new(
+                    "orchestrator.api",
+                    "sandbox_credential_grant",
+                ),
+            )
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -535,17 +542,6 @@ async fn get_credentials_handler(
                 );
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
-
-        // Record usage for audit trail
-        if let Ok(secret) = secrets.get(&principal_id, &grant.secret_name).await
-            && let Err(e) = secrets.record_usage(secret.id).await
-        {
-            tracing::warn!(
-                job_id = %job_id,
-                "Failed to record credential usage: {}", e
-            );
-        }
-
         tracing::debug!(
             job_id = %job_id,
             env_var = %grant.env_var,
@@ -804,6 +800,7 @@ mod tests {
                     value: SecretString::from("supersecretvalue".to_string()),
                     provider: None,
                     expires_at: None,
+                    created_by: None,
                 },
             )
             .await

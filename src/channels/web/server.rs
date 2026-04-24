@@ -137,6 +137,18 @@ pub async fn start_server(
                 name: "gateway".to_string(),
                 reason: format!("Failed to get local addr: {}", e),
             })?;
+    if let Some(path) = std::env::var_os("THINCLAW_GATEWAY_BOUND_ADDR_FILE") {
+        std::fs::write(&path, bound_addr.to_string()).map_err(|e| {
+            crate::error::ChannelError::StartupFailed {
+                name: "gateway".to_string(),
+                reason: format!(
+                    "Failed to write bound gateway address to {}: {}",
+                    std::path::PathBuf::from(path).display(),
+                    e
+                ),
+            }
+        })?;
+    }
 
     // Public routes (no auth)
     let public = Router::new()

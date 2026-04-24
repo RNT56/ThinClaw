@@ -59,7 +59,7 @@ Desktop autonomy uses one code path with two deployment shapes.
 | Mode | Intended Host Shape | Notes |
 |---|---|---|
 | `whole_machine_admin` | Main logged-in operator account on a desktop or Mac mini | Default mode |
-| `dedicated_user` | Separate GUI user session reserved for autonomy | Requires `target_username` and an active GUI session |
+| `dedicated_user` | Separate GUI user session reserved for autonomy | Supported on macOS/Windows only in this release; Linux returns `unsupported_deployment_mode` |
 
 ### `whole_machine_admin`
 
@@ -67,7 +67,7 @@ Use this when ThinClaw should act inside the current logged-in desktop session.
 
 - macOS uses a per-user `LaunchAgent`
 - Windows uses the scheduled-task/session bootstrap path
-- Linux uses the desktop-autostart/session path
+- Linux uses the desktop-autostart/session path and currently supports GNOME on X11 only
 
 ### `dedicated_user`
 
@@ -81,7 +81,19 @@ Use this when the autonomy runtime should live inside a separate desktop user.
 
 Desktop autonomy does not auto-login the dedicated user.
 
-Linux dedicated-user support remains best-effort and may report `unsupported_deployment_mode` depending on the active desktop/session shape.
+Linux dedicated-user creation/session ownership is disabled for this release and
+reports `unsupported_deployment_mode`. Use `whole_machine_admin` from a logged-in
+GNOME on X11 session instead.
+
+Linux GNOME/X11 readiness:
+
+```bash
+thinclaw doctor --profile desktop-gnome
+sudo apt install python3 python3-gi python3-pyatspi libreoffice \
+  libreoffice-script-provider-python evolution evolution-data-server-bin \
+  xdotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick \
+  at-spi2-core libglib2.0-bin
+```
 
 ## Tool Surfaces
 

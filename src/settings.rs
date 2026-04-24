@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 use crate::tools::policy::ToolPolicyManager;
@@ -94,6 +95,48 @@ pub enum ProviderCredentialMode {
     ExternalOAuthSync,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretsBackendKind {
+    #[default]
+    LocalEncrypted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretsMasterKeySource {
+    #[default]
+    OsSecureStore,
+    Env,
+    None,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretsSettings {
+    #[serde(default)]
+    pub backend: SecretsBackendKind,
+    #[serde(default)]
+    pub master_key_source: SecretsMasterKeySource,
+    #[serde(default)]
+    pub allow_env_master_key: bool,
+    #[serde(default)]
+    pub cache_ttl_secs: u64,
+    #[serde(default = "default_true")]
+    pub strict_sensitive_routes: bool,
+}
+
+impl Default for SecretsSettings {
+    fn default() -> Self {
+        Self {
+            backend: SecretsBackendKind::LocalEncrypted,
+            master_key_source: SecretsMasterKeySource::OsSecureStore,
+            allow_env_master_key: false,
+            cache_ttl_secs: 0,
+            strict_sensitive_routes: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OAuthCredentialSourceConfig {
     /// Which external credential format/provider to read.
@@ -152,6 +195,12 @@ pub struct ProvidersSettings {
     /// Each enabled provider can expose one primary model and one cheap model.
     #[serde(default)]
     pub provider_models: HashMap<String, ProviderModelSlots>,
+
+    /// Runtime-only API keys resolved from the encrypted secrets store for
+    /// configured providers. This is skipped for persistence and redacted by
+    /// `SecretString` debug output.
+    #[serde(skip)]
+    pub resolved_provider_api_keys: HashMap<String, Vec<SecretString>>,
 
     /// Maximum number of concurrent requests leased to a single routed
     /// provider/credential before failover prefers another available option.
@@ -277,6 +326,7 @@ impl Default for ProvidersSettings {
             primary_pool_order: Vec::new(),
             cheap_pool_order: Vec::new(),
             provider_models: HashMap::new(),
+            resolved_provider_api_keys: HashMap::new(),
             credential_max_concurrent: default_provider_credential_max_concurrent(),
             credential_selection_strategy: CredentialSelectionStrategy::FillFirst,
             oauth_sync_enabled: false,
@@ -355,6 +405,10 @@ fn default_learning_publish_mode() -> String {
     "branch_pr_draft".to_string()
 }
 
+fn default_learning_skill_synthesis_min_tool_calls() -> u32 {
+    3
+}
+
 fn default_desktop_emergency_stop_path() -> String {
     "~/.thinclaw/AUTONOMY_DISABLED".to_string()
 }
@@ -377,6 +431,16 @@ fn default_experiments_ui_visibility() -> String {
 
 fn default_experiments_promotion_mode() -> String {
     "branch_pr_draft".to_string()
+}
+
+fn default_prompt_project_context_max_tokens() -> usize {
+    8_000
+}
+
+fn default_extensions_user_tools_dir() -> String {
+    crate::platform::resolve_data_dir("user-tools")
+        .to_string_lossy()
+        .to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -459,6 +523,26 @@ impl Default for LearningReflectionSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningSkillSynthesisSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_learning_skill_synthesis_min_tool_calls")]
+    pub min_tool_calls: u32,
+    #[serde(default)]
+    pub auto_apply: bool,
+}
+
+impl Default for LearningSkillSynthesisSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_tool_calls: default_learning_skill_synthesis_min_tool_calls(),
+            auto_apply: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LearningProviderSettings {
     /// Whether this external memory provider is enabled.
@@ -467,6 +551,15 @@ pub struct LearningProviderSettings {
     /// Provider-specific config values (base_url, api_key_env, project_id, etc).
     #[serde(default)]
     pub config: HashMap<String, String>,
+    /// How frequently the provider should run deeper user-modeling work.
+    #[serde(default)]
+    pub cadence: Option<u32>,
+    /// How many reasoning/modeling passes the provider may use when supported.
+    #[serde(default)]
+    pub depth: Option<u32>,
+    /// Whether provider-specific user modeling blocks should be injected.
+    #[serde(default)]
+    pub user_modeling_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -492,6 +585,12 @@ impl ActiveLearningProvider {
 pub struct LearningProvidersSettings {
     #[serde(default)]
     pub active: ActiveLearningProvider,
+    /// Canonical active provider name for newer registry-driven providers.
+    #[serde(default)]
+    pub active_provider: Option<String>,
+    /// Registry-backed provider map used by newer memory providers.
+    #[serde(default)]
+    pub registry: HashMap<String, LearningProviderSettings>,
     #[serde(default)]
     pub honcho: LearningProviderSettings,
     #[serde(default)]
@@ -502,8 +601,39 @@ impl Default for LearningProvidersSettings {
     fn default() -> Self {
         Self {
             active: ActiveLearningProvider::None,
+            active_provider: None,
+            registry: HashMap::new(),
             honcho: LearningProviderSettings::default(),
             zep: LearningProviderSettings::default(),
+        }
+    }
+}
+
+impl LearningProvidersSettings {
+    pub fn active_provider_name(&self) -> Option<String> {
+        self.active_provider.clone().or_else(|| match self.active {
+            ActiveLearningProvider::None => None,
+            ActiveLearningProvider::Honcho => Some("honcho".to_string()),
+            ActiveLearningProvider::Zep => Some("zep".to_string()),
+        })
+    }
+
+    pub fn provider(&self, name: &str) -> Option<&LearningProviderSettings> {
+        if let Some(provider) = self.registry.get(name) {
+            return Some(provider);
+        }
+        match name {
+            "honcho" => Some(&self.honcho),
+            "zep" => Some(&self.zep),
+            _ => None,
+        }
+    }
+
+    pub fn provider_mut(&mut self, name: &str) -> &mut LearningProviderSettings {
+        match name {
+            "honcho" => &mut self.honcho,
+            "zep" => &mut self.zep,
+            other => self.registry.entry(other.to_string()).or_default(),
         }
     }
 }
@@ -686,6 +816,8 @@ pub struct LearningSettings {
     #[serde(default)]
     pub reflection: LearningReflectionSettings,
     #[serde(default)]
+    pub skill_synthesis: LearningSkillSynthesisSettings,
+    #[serde(default)]
     pub prompt_mutation: LearningPromptMutationSettings,
     #[serde(default)]
     pub providers: LearningProvidersSettings,
@@ -704,11 +836,43 @@ impl Default for LearningSettings {
             auto_apply_classes: default_learning_auto_apply_classes(),
             safe_mode: LearningSafeModeSettings::default(),
             reflection: LearningReflectionSettings::default(),
+            skill_synthesis: LearningSkillSynthesisSettings::default(),
             prompt_mutation: LearningPromptMutationSettings::default(),
             providers: LearningProvidersSettings::default(),
             code_proposals: LearningCodeProposalSettings::default(),
             exports: LearningExportSettings::default(),
             outcomes: LearningOutcomeSettings::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptSettings {
+    #[serde(default = "default_true")]
+    pub session_freeze_enabled: bool,
+    #[serde(default = "default_prompt_project_context_max_tokens")]
+    pub project_context_max_tokens: usize,
+}
+
+impl Default for PromptSettings {
+    fn default() -> Self {
+        Self {
+            session_freeze_enabled: true,
+            project_context_max_tokens: default_prompt_project_context_max_tokens(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtensionsSettings {
+    #[serde(default = "default_extensions_user_tools_dir")]
+    pub user_tools_dir: String,
+}
+
+impl Default for ExtensionsSettings {
+    fn default() -> Self {
+        Self {
+            user_tools_dir: default_extensions_user_tools_dir(),
         }
     }
 }
@@ -797,6 +961,10 @@ pub struct Settings {
     #[serde(default)]
     pub secrets_master_key_source: KeySource,
 
+    /// Hardened secrets configuration.
+    #[serde(default)]
+    pub secrets: SecretsSettings,
+
     // === Step 3: Inference Provider ===
     /// LLM backend: "anthropic", "openai", "ollama", "openai_compatible", "tinfoil".
     #[serde(default)]
@@ -837,6 +1005,14 @@ pub struct Settings {
     /// Channel configuration.
     #[serde(default)]
     pub channels: ChannelSettings,
+
+    /// Prompt assembly/runtime controls.
+    #[serde(default)]
+    pub prompt: PromptSettings,
+
+    /// Operator-trusted extension fast-path settings.
+    #[serde(default)]
+    pub extensions: ExtensionsSettings,
 
     // === Step 6b: Notifications ===
     /// Global notification routing preferences.
@@ -1132,6 +1308,10 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub http_enabled: bool,
 
+    /// Whether ACP stdio mode is enabled for editor integrations.
+    #[serde(default)]
+    pub acp_enabled: bool,
+
     /// HTTP webhook port (if enabled).
     #[serde(default)]
     pub http_port: Option<u16>,
@@ -1370,6 +1550,7 @@ impl Default for ChannelSettings {
     fn default() -> Self {
         Self {
             http_enabled: false,
+            acp_enabled: false,
             http_port: None,
             http_host: None,
             signal_enabled: false,

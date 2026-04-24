@@ -786,6 +786,13 @@ CREATE TABLE IF NOT EXISTS secrets (
     encrypted_value BLOB NOT NULL,
     key_salt BLOB NOT NULL,
     provider TEXT,
+    encryption_version INTEGER NOT NULL DEFAULT 2,
+    key_version INTEGER NOT NULL DEFAULT 1,
+    cipher TEXT NOT NULL DEFAULT 'aes-256-gcm',
+    kdf TEXT NOT NULL DEFAULT 'hkdf-sha256',
+    aad_version INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT,
+    rotated_at TEXT,
     expires_at TEXT,
     last_used_at TEXT,
     usage_count INTEGER NOT NULL DEFAULT 0,
@@ -795,6 +802,19 @@ CREATE TABLE IF NOT EXISTS secrets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_secrets_user ON secrets(user_id);
+
+CREATE TABLE IF NOT EXISTS secret_key_versions (
+    version INTEGER PRIMARY KEY,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    retired_at TEXT
+);
+
+INSERT OR IGNORE INTO secret_key_versions (version, status)
+VALUES (1, 'active');
+
+CREATE INDEX IF NOT EXISTS idx_secret_key_versions_status
+    ON secret_key_versions(status);
 
 -- ==================== WASM Tools ====================
 
@@ -1184,6 +1204,58 @@ pub struct LibsqlColumnUpgrade {
 /// bring pre-V10/V11 tables up to date.  Each is run individually so that
 /// "duplicate column" errors (column already present) can be safely ignored.
 pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
+    // ── V23: secret key-version metadata ───────────────────────────────
+    LibsqlColumnUpgrade {
+        version: 23,
+        description: "Create secret key versions metadata table",
+        sql: "CREATE TABLE IF NOT EXISTS secret_key_versions (version INTEGER PRIMARY KEY, status TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), retired_at TEXT)",
+    },
+    LibsqlColumnUpgrade {
+        version: 23,
+        description: "Initialize active secret key version",
+        sql: "INSERT OR IGNORE INTO secret_key_versions (version, status) VALUES (1, 'active')",
+    },
+    LibsqlColumnUpgrade {
+        version: 23,
+        description: "Index secret key version status",
+        sql: "CREATE INDEX IF NOT EXISTS idx_secret_key_versions_status ON secret_key_versions(status)",
+    },
+    // ── V22: secrets hardening metadata ─────────────────────────────────
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret encryption version",
+        sql: "ALTER TABLE secrets ADD COLUMN encryption_version INTEGER NOT NULL DEFAULT 1",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret key version",
+        sql: "ALTER TABLE secrets ADD COLUMN key_version INTEGER NOT NULL DEFAULT 1",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret cipher metadata",
+        sql: "ALTER TABLE secrets ADD COLUMN cipher TEXT NOT NULL DEFAULT 'aes-256-gcm'",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret KDF metadata",
+        sql: "ALTER TABLE secrets ADD COLUMN kdf TEXT NOT NULL DEFAULT 'hkdf-sha256'",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret AAD version",
+        sql: "ALTER TABLE secrets ADD COLUMN aad_version INTEGER NOT NULL DEFAULT 0",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret creator metadata",
+        sql: "ALTER TABLE secrets ADD COLUMN created_by TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret rotation timestamp",
+        sql: "ALTER TABLE secrets ADD COLUMN rotated_at TEXT",
+    },
     // ── V11: conversations ──────────────────────────────────────────────
     LibsqlColumnUpgrade {
         version: 11,

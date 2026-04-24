@@ -18,7 +18,7 @@ use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::context::JobContext;
-use crate::safety::LeakDetector;
+use crate::safety::{LeakAction, LeakDetector, LeakScanResult};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
@@ -81,6 +81,14 @@ struct ResolvedHostCredential {
     secret_value: String,
 }
 
+#[derive(Debug, Clone)]
+struct LeakBoundaryEvent {
+    source: String,
+    action_taken: String,
+    content_hash: String,
+    redacted_preview: Option<String>,
+}
+
 /// Store data for WASM tool execution.
 ///
 /// Contains the resource limiter, host state, WASI context, and injected
@@ -96,6 +104,8 @@ struct StoreData {
     /// Pre-resolved credentials for automatic host-based injection.
     /// Applied by matching URL host against each credential's host_patterns.
     host_credentials: Vec<ResolvedHostCredential>,
+    /// Leak detector events observed at host boundaries during this execution.
+    leak_events: Vec<LeakBoundaryEvent>,
     /// Dedicated tokio runtime for HTTP requests, lazily initialized.
     /// Reused across multiple `http_request` calls within one execution.
     http_runtime: Option<tokio::runtime::Runtime>,
@@ -120,6 +130,7 @@ impl StoreData {
             table: ResourceTable::new(),
             credentials,
             host_credentials,
+            leak_events: Vec::new(),
             http_runtime: None,
         }
     }
@@ -165,6 +176,31 @@ impl StoreData {
             }
         }
         result
+    }
+
+    fn leak_detector(&self) -> LeakDetector {
+        let mut values: Vec<String> = self.credentials.values().cloned().collect();
+        values.extend(
+            self.host_credentials
+                .iter()
+                .map(|credential| credential.secret_value.clone()),
+        );
+        LeakDetector::with_exact_values(values)
+    }
+
+    fn record_leak_scan(&mut self, source: &str, content: &str, result: &LeakScanResult) {
+        if result.matches.is_empty() {
+            return;
+        }
+        let content_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+        for leak_match in &result.matches {
+            self.leak_events.push(LeakBoundaryEvent {
+                source: source.to_string(),
+                action_taken: leak_match.action.to_string(),
+                content_hash: content_hash.clone(),
+                redacted_preview: Some(leak_match.masked_preview.clone()),
+            });
+        }
     }
 
     /// Inject pre-resolved host credentials into the request.
@@ -220,6 +256,56 @@ impl StoreData {
     }
 }
 
+fn leak_boundary_events_from_scan(
+    source: &str,
+    content: &str,
+    result: &LeakScanResult,
+) -> Vec<LeakBoundaryEvent> {
+    if result.matches.is_empty() {
+        return Vec::new();
+    }
+    let content_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+    result
+        .matches
+        .iter()
+        .map(|leak_match| LeakBoundaryEvent {
+            source: source.to_string(),
+            action_taken: leak_match.action.to_string(),
+            content_hash: content_hash.clone(),
+            redacted_preview: Some(leak_match.masked_preview.clone()),
+        })
+        .collect()
+}
+
+async fn persist_wasm_leak_events(
+    secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
+    user_id: &str,
+    events: &[LeakBoundaryEvent],
+) {
+    let Some(store) = secrets_store else {
+        return;
+    };
+    for event in events {
+        if let Err(error) = store
+            .record_leak_detection_event(
+                user_id,
+                &event.source,
+                &event.action_taken,
+                &event.content_hash,
+                event.redacted_preview.as_deref(),
+            )
+            .await
+        {
+            tracing::warn!(
+                source = %event.source,
+                action = %event.action_taken,
+                error = %error,
+                "Failed to persist leak detection event"
+            );
+        }
+    }
+}
+
 // Provide WASI context for the WASM component.
 // Required because tools are compiled with wasm32-wasip2 target.
 impl WasiView for StoreData {
@@ -263,22 +349,48 @@ impl near::agent::host::Host for StoreData {
         body: Option<Vec<u8>>,
         timeout_ms: Option<u32>,
     ) -> Result<near::agent::host::HttpResponse, String> {
-        // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN})
-        let injected_url = self.inject_credentials(&url, "url");
+        let leak_detector = self.leak_detector();
+        let raw_headers: HashMap<String, String> =
+            serde_json::from_str(&headers_json).unwrap_or_default();
 
         // Check HTTP allowlist
         self.host_state
-            .check_http_allowed(&injected_url, &method)
+            .check_http_allowed(&url, &method)
             .map_err(|e| format!("HTTP not allowed: {}", e))?;
+
+        // Validate guest-provided request material before any host credential
+        // injection so a WASM guest cannot use injected credentials to smuggle
+        // its own secret-looking material through the boundary.
+        let mut request_probe = format!("{method}\n{url}\n{headers_json}");
+        if let Some(body) = body.as_deref() {
+            request_probe.push('\n');
+            request_probe.push_str(&String::from_utf8_lossy(body));
+        }
+        let request_scan = leak_detector.scan(&request_probe);
+        self.record_leak_scan("wasm_tool.request", &request_probe, &request_scan);
+        if request_scan.should_block {
+            let blocking_match = request_scan
+                .matches
+                .iter()
+                .find(|m| m.action == LeakAction::Block);
+            return Err(format!(
+                "Potential secret leak blocked: pattern '{}' matched '{}'",
+                blocking_match
+                    .map(|m| m.pattern_name.as_str())
+                    .unwrap_or("unknown"),
+                blocking_match
+                    .map(|m| m.masked_preview.as_str())
+                    .unwrap_or("")
+            ));
+        }
 
         // Record for rate limiting
         self.host_state
             .record_http_request()
             .map_err(|e| format!("Rate limit exceeded: {}", e))?;
 
-        // Parse headers and inject credentials into header values
-        let raw_headers: HashMap<String, String> =
-            serde_json::from_str(&headers_json).unwrap_or_default();
+        // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN})
+        let injected_url = self.inject_credentials(&url, "url");
 
         let mut headers: HashMap<String, String> = raw_headers
             .into_iter()
@@ -297,16 +409,6 @@ impl near::agent::host::Host for StoreData {
         if let Some(host) = extract_host_from_url(&url) {
             self.inject_host_credentials(&host, &mut headers, &mut url);
         }
-
-        let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
         // Get the max response size from capabilities (default 10MB).
         let max_response_bytes = self
@@ -408,20 +510,50 @@ impl near::agent::host::Host for StoreData {
                     max_response
                 ));
             }
-            let body = body.to_vec();
+            let mut body = body.to_vec();
 
             // Leak detection on response body
+            let mut response_leak_events = Vec::new();
             if let Ok(body_str) = std::str::from_utf8(&body) {
-                leak_detector
-                    .scan_and_clean(body_str)
-                    .map_err(|e| format!("Potential secret leak in response: {}", e))?;
+                let response_scan = leak_detector.scan(body_str);
+                response_leak_events.extend(leak_boundary_events_from_scan(
+                    "wasm_tool.response",
+                    body_str,
+                    &response_scan,
+                ));
+                if response_scan.should_block {
+                    let blocking_match = response_scan
+                        .matches
+                        .iter()
+                        .find(|m| m.action == LeakAction::Block);
+                    return Err(format!(
+                        "Potential secret leak in response: pattern '{}' matched '{}'",
+                        blocking_match
+                            .map(|m| m.pattern_name.as_str())
+                            .unwrap_or("unknown"),
+                        blocking_match
+                            .map(|m| m.masked_preview.as_str())
+                            .unwrap_or("")
+                    ));
+                }
+                if let Some(redacted) = response_scan.redacted_content {
+                    body = redacted.into_bytes();
+                }
             }
 
-            Ok(near::agent::host::HttpResponse {
-                status,
-                headers_json,
-                body,
-            })
+            Ok((
+                near::agent::host::HttpResponse {
+                    status,
+                    headers_json,
+                    body,
+                },
+                response_leak_events,
+            ))
+        });
+
+        let result = result.map(|(response, events)| {
+            self.leak_events.extend(events);
+            response
         });
 
         // Redact credentials from error messages before returning to WASM
@@ -555,7 +687,14 @@ impl WasmToolWrapper {
         context_json: Option<String>,
         host_credentials: Vec<ResolvedHostCredential>,
         available_secret_names: HashSet<String>,
-    ) -> Result<(String, Vec<crate::tools::wasm::host::LogEntry>), WasmError> {
+    ) -> Result<
+        (
+            String,
+            Vec<crate::tools::wasm::host::LogEntry>,
+            Vec<LeakBoundaryEvent>,
+        ),
+        WasmError,
+    > {
         let engine = self.runtime.engine();
         let limits = &self.prepared.limits;
 
@@ -620,8 +759,14 @@ impl WasmToolWrapper {
             }
         })?;
 
-        // Get logs from host state
-        let logs = store.data_mut().host_state.take_logs();
+        // Get logs and boundary leak events from host state.
+        let (logs, leak_events) = {
+            let data = store.data_mut();
+            (
+                data.host_state.take_logs(),
+                std::mem::take(&mut data.leak_events),
+            )
+        };
 
         // Check for tool-level error
         if let Some(err) = response.error {
@@ -629,7 +774,7 @@ impl WasmToolWrapper {
         }
 
         // Return result (or empty string if none)
-        Ok((response.output.unwrap_or_default(), logs))
+        Ok((response.output.unwrap_or_default(), logs, leak_events))
     }
 }
 
@@ -712,7 +857,10 @@ impl Tool for WasmToolWrapper {
         let duration = start.elapsed();
 
         match result {
-            Ok(Ok((result_json, logs))) => {
+            Ok(Ok((result_json, logs, leak_events))) => {
+                persist_wasm_leak_events(self.secrets_store.as_deref(), &ctx.user_id, &leak_events)
+                    .await;
+
                 // Emit collected logs
                 for log in logs {
                     match log.level {
@@ -791,7 +939,20 @@ async fn refresh_oauth_token(
     }
 
     let refresh_name = format!("{}_refresh_token", config.secret_name);
-    let refresh_secret = match store.get_decrypted(user_id, &refresh_name).await {
+    let refresh_secret = match store
+        .get_for_injection(
+            user_id,
+            &refresh_name,
+            crate::secrets::SecretAccessContext::new("wasm.oauth_refresh", "refresh_token").target(
+                extract_host_from_url(&config.token_url).unwrap_or_else(|| "unknown".to_string()),
+                url::Url::parse(&config.token_url)
+                    .ok()
+                    .map(|url| url.path().to_string())
+                    .unwrap_or_default(),
+            ),
+        )
+        .await
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::debug!(
@@ -999,7 +1160,17 @@ async fn resolve_host_credentials(
             continue;
         }
 
-        let secret = match store.get_decrypted(user_id, &mapping.secret_name).await {
+        let secret = match store
+            .get_for_injection(
+                user_id,
+                &mapping.secret_name,
+                crate::secrets::SecretAccessContext::new(
+                    "wasm.host_credentials",
+                    "http_credential_injection",
+                ),
+            )
+            .await
+        {
             Ok(s) => s,
             Err(e) => {
                 tracing::debug!(

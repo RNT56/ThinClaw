@@ -28,6 +28,12 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check lints (cargo clippy)
         run: cargo clippy -- -D warnings
+      - name: Guard Linux deploy port
+        run: |
+          if rg -n "18789" Dockerfile deploy docs/DEPLOYMENT.md docs/EXTERNAL_DEPENDENCIES.md; then
+            echo "Legacy gateway port 18789 must not appear in deploy files or deployment docs."
+            exit 1
+          fi
       - name: Install cargo-deny
         run: cargo install cargo-deny --locked
       - name: Audit dependencies
@@ -49,6 +55,8 @@ jobs:
             cargo-args: ""
           - name: full
             cargo-args: "--features full"
+          - name: all-features
+            cargo-args: "--all-features"
           - name: desktop
             cargo-args: "--no-default-features --features desktop"
           - name: minimal-libsql
@@ -66,12 +74,35 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: profile-${{ matrix.name }}
+      - name: Install Linux all-features packages
+        if: matrix.name == 'all-features'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+          rustup target add wasm32-wasip2
+          cargo install wasm-tools --locked
       - name: cargo check
         run: cargo check ${{ matrix.cargo-args }}
       - name: cargo clippy
         run: cargo clippy ${{ matrix.cargo-args }} -- -D warnings
       - name: Compile tests (no run)
         run: cargo test --no-run ${{ matrix.cargo-args }}
+
+  linux-host-smoke:
+    name: Linux Host Runtime Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-host-smoke
+      - name: Host runtime smoke
+        run: cargo test --features full --bin thinclaw --test host_runtime_smoke -- --nocapture --test-threads=1
 
   macos-host-regression:
     name: macOS Host Regression
@@ -92,6 +123,39 @@ jobs:
         run: cargo test --no-run --features full
       - name: Host runtime smoke
         run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+
+  linux-deploy-smoke:
+    name: Linux Docker Deploy Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Build Docker image with full profile
+        run: docker build --build-arg BUILD_FEATURES=full -t thinclaw:ci .
+      - name: Prepare Compose env
+        run: |
+          cp deploy/env.example deploy/.env
+          sed -i 's/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=ci-smoke-token/' deploy/.env
+          sed -i 's/^LLM_BACKEND=.*/LLM_BACKEND=ollama/' deploy/.env
+          sed -i 's|^LLM_BASE_URL=.*|OLLAMA_BASE_URL=http://127.0.0.1:11434|' deploy/.env
+          sed -i 's/^EMBEDDING_ENABLED=.*/EMBEDDING_ENABLED=false/' deploy/.env
+      - name: Compose smoke
+        working-directory: deploy
+        run: |
+          docker compose up -d --build thinclaw
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:3000/api/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose ps
+          docker compose logs thinclaw
+          exit 1
+      - name: Compose cleanup
+        if: always()
+        working-directory: deploy
+        run: docker compose down -v
 
   windows-host-matrix:
     name: "Windows Host: ${{ matrix.name }}"

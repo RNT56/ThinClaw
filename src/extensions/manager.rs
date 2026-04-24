@@ -1022,6 +1022,13 @@ impl ExtensionManager {
         self.get_mcp_server(name).await
     }
 
+    pub async fn upsert_mcp_server_config(
+        &self,
+        config: McpServerConfig,
+    ) -> Result<(), crate::tools::mcp::config::ConfigError> {
+        self.add_mcp_server(config).await
+    }
+
     pub async fn get_active_mcp_client(&self, name: &str) -> Option<Arc<McpClient>> {
         self.mcp_clients.read().await.get(name).cloned()
     }
@@ -2388,7 +2395,14 @@ impl ExtensionManager {
         // Get webhook secrets from secrets store
         let signature_secret = self
             .secrets
-            .get_decrypted(&self.user_id, &signature_secret_name)
+            .get_for_injection(
+                &self.user_id,
+                &signature_secret_name,
+                crate::secrets::SecretAccessContext::new(
+                    "extensions.manager",
+                    "webhook_signature_validation",
+                ),
+            )
             .await
             .ok()
             .map(|s| s.expose().to_string());
@@ -2398,7 +2412,14 @@ impl ExtensionManager {
                 signature_secret.clone()
             } else {
                 self.secrets
-                    .get_decrypted(&self.user_id, secret_name)
+                    .get_for_injection(
+                        &self.user_id,
+                        secret_name,
+                        crate::secrets::SecretAccessContext::new(
+                            "extensions.manager",
+                            "webhook_verify_token",
+                        ),
+                    )
                     .await
                     .ok()
                     .map(|s| s.expose().to_string())
@@ -2575,7 +2596,14 @@ impl ExtensionManager {
 
         let signature_secret = self
             .secrets
-            .get_decrypted(&self.user_id, &signature_secret_name)
+            .get_for_injection(
+                &self.user_id,
+                &signature_secret_name,
+                crate::secrets::SecretAccessContext::new(
+                    "extensions.manager",
+                    "webhook_signature_validation",
+                ),
+            )
             .await
             .ok()
             .map(|secret| secret.expose().to_string());
@@ -2585,7 +2613,14 @@ impl ExtensionManager {
                 signature_secret.clone()
             } else {
                 self.secrets
-                    .get_decrypted(&self.user_id, secret_name)
+                    .get_for_injection(
+                        &self.user_id,
+                        secret_name,
+                        crate::secrets::SecretAccessContext::new(
+                            "extensions.manager",
+                            "webhook_verify_token",
+                        ),
+                    )
                     .await
                     .ok()
                     .map(|secret| secret.expose().to_string())

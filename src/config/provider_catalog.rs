@@ -65,8 +65,8 @@ pub struct ProviderEndpoint {
     pub supports_streaming: bool,
     /// Environment variable name for the API key (e.g., "OPENAI_API_KEY").
     pub env_key_name: String,
-    /// Secret store key name for `inject_llm_keys_from_secrets()`.
-    /// This maps to the key used in `SecretsStore.get_decrypted()`.
+    /// Secret store key name used by scoped runtime credential resolution.
+    /// This maps to the key used for audited `get_for_injection` access.
     pub secret_name: String,
     /// URL where the user can obtain an API key (optional, surfaced in UI).
     #[serde(default)]
@@ -84,8 +84,8 @@ pub struct ProviderEndpoint {
 
 /// Lazy-initialized catalog of all known cloud providers.
 ///
-/// The key is the **provider slug** (matches keychain names, UI identifiers,
-/// and the `providers.enabled` config values).
+/// The key is the **provider slug** (matches Provider Vault identifiers, UI
+/// identifiers, and the `providers.enabled` config values).
 ///
 /// Loading order: disk `registry/providers.json` → embedded fallback.
 pub fn catalog() -> &'static HashMap<String, ProviderEndpoint> {

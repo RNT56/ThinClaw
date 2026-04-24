@@ -451,14 +451,23 @@ mod tests {
             &self,
             _request: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, LlmError> {
-            unimplemented!("tool completions are not used in these tests")
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                provider_model: Some("dummy".to_string()),
+                cost_usd: None,
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+            })
         }
 
         async fn complete_stream(
             &self,
             _request: CompletionRequest,
         ) -> Result<StreamChunkStream, LlmError> {
-            unimplemented!("streaming is not used in these tests")
+            Ok(Box::pin(futures::stream::empty()) as StreamChunkStream)
         }
     }
 

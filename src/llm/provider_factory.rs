@@ -304,6 +304,29 @@ pub fn create_provider_for_catalog_entry(
     create_provider_for_catalog_entry_with_api_key(provider_slug, model, None)
 }
 
+/// Create an LLM provider from a catalog entry using scoped runtime credentials.
+///
+/// When more than one credential is resolved for the provider, the returned
+/// provider is a credential-level failover chain. This avoids depending on the
+/// process-wide config overlay for secrets loaded from the encrypted store.
+pub fn create_provider_for_catalog_entry_with_settings(
+    provider_slug: &str,
+    model: &str,
+    providers_settings: Option<&ProvidersSettings>,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let entries =
+        create_provider_variants_for_catalog_entry(provider_slug, model, providers_settings)?;
+    if entries.len() == 1 {
+        Ok(Arc::clone(&entries[0].provider))
+    } else {
+        Ok(Arc::new(FailoverProvider::with_entries(
+            entries,
+            CooldownConfig::default(),
+            LeaseConfig::default(),
+        )?))
+    }
+}
+
 fn create_provider_for_catalog_entry_with_api_key(
     provider_slug: &str,
     model: &str,
@@ -449,6 +472,17 @@ fn resolve_catalog_api_keys(
         && !value.trim().is_empty()
     {
         return Ok(vec![value]);
+    }
+
+    if let Some(values) = providers_settings
+        .and_then(|settings| settings.resolved_provider_api_keys.get(provider_slug))
+        .filter(|values| !values.is_empty())
+    {
+        return Ok(values
+            .iter()
+            .map(|value| value.expose_secret().trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect());
     }
 
     fn append_from_env(target: &mut Vec<String>, env_name: &str) -> Result<(), LlmError> {

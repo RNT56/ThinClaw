@@ -7,19 +7,19 @@ for different deployment scenarios.
 
 | Profile | Command | Use Case |
 |---------|---------|----------|
-| **light** (default) | `cargo build` | CLI agent, API-only, cron agents |
-| **full** | `cargo build --features full` | Production with web UI, tunnel, Docker |
+| **light** (default) | `cargo build` | CLI agent, local gateway, API-only, cron agents |
+| **full** | `cargo build --features full` | Production runtime with tunnel, Docker sandbox, browser, Nostr |
 | **desktop** | `cargo build --features desktop` | Tauri/Scrappy desktop embedding |
 | **minimal** | `cargo build --no-default-features --features libsql` | Embedded, air-gapped, IoT |
-| **custom** | `cargo build --features light,web-gateway` | Mix and match |
+| **custom** | `cargo build --features light,browser` | Mix and match |
 
 ## Profile Details
 
 ### `light` (default)
 
-**Included:** PostgreSQL, libSQL, HTML-to-Markdown, document extraction (PDF/DOCX).
+**Included:** PostgreSQL, libSQL, local HTTP gateway/web UI, HTML-to-Markdown, document extraction (PDF/DOCX).
 
-**Excluded:** Web gateway, REPL boot screen, tunnel providers, Docker sandbox, voice wake.
+**Excluded:** REPL/TUI boot screen, ACP server, tunnel providers, Docker sandbox, browser automation, Nostr, voice wake.
 
 Best for: CLI-only usage, cron-driven agents, headless deployments, API-only servers.
 
@@ -34,10 +34,10 @@ thinclaw
 
 ### `full`
 
-Everything in `light` **plus**: web gateway (browser UI with SSE/WebSocket), REPL mode
-(interactive terminal with boot screen), tunnel providers (Tailscale/Cloudflare),
-Docker sandbox (container isolation for untrusted code), browser automation
-(Chromium-based), and Nostr protocol integration.
+Everything in `light` **plus**: ACP integration, REPL/TUI mode (interactive terminal
+with boot screen), tunnel providers (Tailscale/Cloudflare), Docker sandbox
+(container isolation for untrusted code), browser automation (Chromium-based),
+and Nostr protocol integration.
 
 Best for: Full production deployments with web UI and all channel support.
 
@@ -75,8 +75,8 @@ cargo build --release --no-default-features --features postgres
 Individual features can be combined freely:
 
 ```bash
-# Light + web gateway only (no tunnel, no Docker)
-cargo build --features light,web-gateway
+# Light + browser automation only (no tunnel, no Docker sandbox)
+cargo build --features light,browser
 
 # Light + tunnel for public webhook access
 cargo build --features light,tunnel
@@ -103,7 +103,8 @@ cargo build --all-features
 | `html-to-markdown` | Web page → markdown conversion | html-to-markdown-rs, readabilityrs |
 | `document-extraction` | PDF/DOCX/PPTX/XLSX text extraction | pdf-extract, zip |
 | `timezones` | Timezone handling via chrono-tz | chrono-tz |
-| `web-gateway` | HTTP web UI + API server | (uses axum, already a base dep) |
+| `web-gateway` | Compatibility flag for the always-available local HTTP web UI + API server | (uses axum, already a base dep) |
+| `acp` | ACP integration surface | (no extra system deps) |
 | `repl` | Interactive REPL mode + boot screen | (no extra deps) |
 | `tunnel` | VPN tunnel integration | (uses tailscale binary externally) |
 | `docker-sandbox` | Docker container sandboxing | (uses bollard, already a base dep) |
@@ -114,16 +115,20 @@ cargo build --all-features
 | `bedrock` | AWS Bedrock Titan embeddings | aws-config, aws-sdk-bedrockruntime |
 | `integration` | Gate for integration tests | (no extra deps) |
 
-Linux note: the default `light` profile does not include `voice`, so a normal
-Linux build does not need ALSA development headers. If you opt into
-`--features light,voice` or `--all-features`, install `libasound2-dev`.
+Linux notes:
+
+- The default `light` profile includes the local gateway and does not need any extra system packages beyond the normal Rust build toolchain.
+- `full` needs Docker for Docker sandbox jobs and Docker Chromium fallback, plus a local Chrome/Chromium/Brave/Edge browser if you set `BROWSER_DOCKER=never`.
+- `--features light,voice` or `--all-features` requires `libasound2-dev`.
+- `--features bedrock` or `--all-features` requires AWS credentials (`AWS_PROFILE` or AWS access keys).
+- `--features bundled-wasm` or `--all-features` requires `rustup target add wasm32-wasip2` and `cargo install wasm-tools --locked`.
 
 ## Profile Composition
 
 ```
-light    = postgres + libsql + html-to-markdown + document-extraction + timezones
+light    = postgres + libsql + gateway + html-to-markdown + document-extraction + timezones
 desktop  = libsql + html-to-markdown + document-extraction + repl + timezones
-full     = light + web-gateway + repl + tunnel + docker-sandbox + browser + nostr
+full     = light + acp + repl/tui + tunnel + docker-sandbox + browser + nostr
 ```
 
 ## `full` vs `--all-features`
@@ -140,7 +145,8 @@ users don't need:
 | `integration` | Gate for integration tests; not a runtime capability. |
 
 Use `full` for production. Use `--all-features` for CI test coverage or when you
-specifically need one of the extras above.
+specifically need one of the extras above. On Linux, run
+`thinclaw doctor --profile all-features` before using `--all-features` locally.
 
 ## CI/CD
 
@@ -149,10 +155,10 @@ passes clippy, and compiles tests:
 
 | CI Check | Profiles Tested |
 |----------|----------------|
-| `cargo check` | light (default), full, desktop, minimal-libsql, minimal-postgres |
+| `cargo check` | light (default), full, all-features, desktop, minimal-libsql, minimal-postgres |
 | `cargo clippy` | All of the above |
 | `cargo test --no-run` | All of the above (compile-only) |
-| `cargo test` (execution) | `--all-features` (with PostgreSQL service) |
+| Host/deploy smoke | Linux host runtime, Docker image build, Docker Compose `/api/health` |
 
 - **Feature matrix:** Catches broken `#[cfg(feature = "...")]` gates before they ship.
   The `light` profile is especially important since it's what `cargo install thinclaw` produces.

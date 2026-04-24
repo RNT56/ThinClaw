@@ -92,3 +92,36 @@ ThinClaw now treats the CLI skin system as the shared brand source for both term
 
 3. Existing behavior
    Verify SSE streaming, history loading, thread switching, tool event rendering, and settings save/reset flows still behave as before.
+
+## TUI Skin Fields
+
+The following TOML fields extend the skin system for the full-screen TUI. All are optional — skins that omit them receive safe defaults (rounded borders, braille spinner, left-aligned header, no gradient).
+
+| Field | Type | Default | Values |
+|-------|------|---------|--------|
+| `border_style` | string | `"rounded"` | `"plain"`, `"rounded"`, `"double"`, `"thick"` |
+| `header_alignment` | string | `"left"` | `"left"`, `"center"`, `"right"` |
+| `status_gradient` | bool | `false` | When `true`, the status bar text renders with a left-to-right accent→border color gradient |
+| `spinner_style` | string | `"braille"` | `"kawaii"`, `"braille"`, `"dots"`, `"arrows"` |
+| `spinner_frames` | string array | `[]` | Custom animation frames (overrides `spinner_style` preset when non-empty) |
+
+Example TOML snippet:
+
+```toml
+border_style = "double"
+header_alignment = "center"
+status_gradient = true
+spinner_style = "kawaii"
+# spinner_frames = ["(◕‿◕)", "(◕ᴗ◕)", "(◠‿◠)"]  # optional custom override
+```
+
+### Builtin Skin Presets
+
+| Skin | Border | Spinner | Gradient | Alignment |
+|------|--------|---------|----------|-----------|
+| cockpit | rounded | braille | ✓ | left |
+| midnight | double | kawaii | ✓ | left |
+| solar | rounded | dots | ✗ | left |
+| athena | thick | kawaii | ✓ | left |
+| delphi | rounded | kawaii | ✓ | center |
+| olympus | double | arrows | ✓ | left |

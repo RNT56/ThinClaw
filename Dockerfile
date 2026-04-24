@@ -2,9 +2,10 @@
 #
 # Build:
 #   docker build --platform linux/amd64 -t thinclaw:latest .
+#   docker build --build-arg BUILD_FEATURES=light -t thinclaw:light .
 #
 # Run:
-#   docker run --env-file .env -p 18789:18789 thinclaw:latest
+#   docker run --env-file .env -p 3000:3000 thinclaw:latest
 
 # Stage 1: Build
 FROM rust:1.92-slim-bookworm AS builder
@@ -16,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && cargo install wasm-tools
 
 WORKDIR /app
+ARG BUILD_FEATURES=full
 
 # Copy manifests first for layer caching
 COPY Cargo.toml Cargo.lock ./
@@ -30,7 +32,11 @@ COPY channels-src/ channels-src/
 COPY tools-src/ tools-src/
 COPY wit/ wit/
 
-RUN cargo build --release --bin thinclaw
+RUN if [ "$BUILD_FEATURES" = "default" ] || [ -z "$BUILD_FEATURES" ]; then \
+        cargo build --release --bin thinclaw; \
+    else \
+        cargo build --release --bin thinclaw --features "$BUILD_FEATURES"; \
+    fi
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -46,8 +52,9 @@ COPY --from=builder /app/migrations /app/migrations
 RUN useradd -m -u 1000 -s /bin/bash thinclaw
 USER thinclaw
 
-EXPOSE 18789
+EXPOSE 3000
 
-ENV RUST_LOG=thinclaw=info
+ENV RUST_LOG=thinclaw=info \
+    GATEWAY_PORT=3000
 
 ENTRYPOINT ["thinclaw"]

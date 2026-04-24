@@ -105,6 +105,8 @@ impl SetupWizard {
             ));
             self.generated_env_master_key = Some(env_key);
             self.settings.secrets_master_key_source = KeySource::Env;
+            self.settings.secrets.master_key_source = crate::settings::SecretsMasterKeySource::Env;
+            self.settings.secrets.allow_env_master_key = true;
             return Ok(());
         }
 
@@ -118,6 +120,9 @@ impl SetupWizard {
                     .map_err(|e| SetupError::Config(e.to_string()))?,
             ));
             self.settings.secrets_master_key_source = KeySource::Keychain;
+            self.settings.secrets.master_key_source =
+                crate::settings::SecretsMasterKeySource::OsSecureStore;
+            self.settings.secrets.allow_env_master_key = false;
             return Ok(());
         }
 
@@ -132,6 +137,9 @@ impl SetupWizard {
                     .map_err(|e| SetupError::Config(e.to_string()))?,
             ));
             self.settings.secrets_master_key_source = KeySource::Keychain;
+            self.settings.secrets.master_key_source =
+                crate::settings::SecretsMasterKeySource::OsSecureStore;
+            self.settings.secrets.allow_env_master_key = false;
             return Ok(());
         }
 
@@ -147,6 +155,8 @@ impl SetupWizard {
         ));
         self.generated_env_master_key = Some(key_hex);
         self.settings.secrets_master_key_source = KeySource::Env;
+        self.settings.secrets.master_key_source = crate::settings::SecretsMasterKeySource::Env;
+        self.settings.secrets.allow_env_master_key = true;
         Ok(())
     }
 
@@ -521,6 +531,8 @@ impl SetupWizard {
         if env_key_exists {
             print_info("Found SECRETS_MASTER_KEY in the environment.");
             self.settings.secrets_master_key_source = KeySource::Env;
+            self.settings.secrets.master_key_source = crate::settings::SecretsMasterKeySource::Env;
+            self.settings.secrets.allow_env_master_key = true;
             print_success("Security configured (env var)");
             return Ok(());
         }
@@ -549,6 +561,9 @@ impl SetupWizard {
                 .map_err(SetupError::Io)?
             {
                 self.settings.secrets_master_key_source = KeySource::Keychain;
+                self.settings.secrets.master_key_source =
+                    crate::settings::SecretsMasterKeySource::OsSecureStore;
+                self.settings.secrets.allow_env_master_key = false;
                 print_success(&format!("Security configured ({secure_store})"));
                 return Ok(());
             }
@@ -591,6 +606,9 @@ impl SetupWizard {
                 ));
 
                 self.settings.secrets_master_key_source = KeySource::Keychain;
+                self.settings.secrets.master_key_source =
+                    crate::settings::SecretsMasterKeySource::OsSecureStore;
+                self.settings.secrets.allow_env_master_key = false;
                 print_success(&format!(
                     "Master key generated and saved to the {secure_store}"
                 ));
@@ -614,10 +632,16 @@ impl SetupWizard {
                 }
 
                 self.settings.secrets_master_key_source = KeySource::Env;
+                self.settings.secrets.master_key_source =
+                    crate::settings::SecretsMasterKeySource::Env;
+                self.settings.secrets.allow_env_master_key = true;
                 print_success("Configured for environment storage");
             }
             _ => {
                 self.settings.secrets_master_key_source = KeySource::None;
+                self.settings.secrets.master_key_source =
+                    crate::settings::SecretsMasterKeySource::None;
+                self.settings.secrets.allow_env_master_key = false;
                 print_info(
                     "Secrets features are disabled. Channel tokens must be set through environment variables.",
                 );

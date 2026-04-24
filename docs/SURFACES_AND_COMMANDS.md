@@ -30,6 +30,28 @@ Local clients (CLI, TUI, WebUI) may add extra client-specific controls such as:
 
 However, the core commands above form the baseline shared vocabulary across all surfaces.
 
+## TUI Input Controls
+
+The full-screen TUI uses `ratatui-textarea` for multi-line input:
+
+| Key | Action |
+|-----|--------|
+| `Enter` | Submit (single-line) or insert newline (multi-line content) |
+| `Alt+Enter` / `Shift+Enter` | Insert a newline (multi-line continuation) |
+| `Ctrl+Enter` | Force-submit regardless of content |
+| `Up` / `Down` | Browse input history (single-line) or move cursor (multi-line) |
+| `Tab` | Autocomplete slash commands |
+| `Ctrl+C` | Abort active stream, or double-tap to exit |
+| `Ctrl+L` | Clear the chat area |
+| `PageUp` / `PageDown` | Scroll the chat history |
+
+## REPL Multi-line Input
+
+The REPL channel supports multi-line input via two continuation mechanisms:
+
+- **Backslash continuation** — End a line with `\` to request more input on the next line.
+- **Fenced code blocks** — An odd number of triple-backtick (`\`\`\``) markers keeps the input open until the block is closed.
+
 ## Surface Expectations
 
 - CLI and TUI should expose the same core command names.

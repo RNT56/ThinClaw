@@ -3,14 +3,18 @@
 //! Five tools for discovering, reading, installing, listing, and removing skills
 //! entirely through conversation, following the extension_tools pattern.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 
 use crate::context::JobContext;
 use crate::settings::SkillTapTrustLevel;
 use crate::skills::catalog::SkillCatalog;
-use crate::skills::quarantine::{QuarantineManager, SecurityFinding, SkillContent};
+use crate::skills::quarantine::{
+    QuarantineManager, QuarantinedSkill, SecurityFinding, SkillContent, SkillProvenance,
+};
 use crate::skills::registry::SkillRegistry;
 use crate::skills::{RemoteSkillHub, SkillSource, SkillTrust};
 use crate::tools::ToolRegistry;
@@ -61,6 +65,22 @@ fn findings_require_approval(
     findings: &[SecurityFinding],
 ) -> bool {
     trust_level == SkillTapTrustLevel::Community && !findings.is_empty()
+}
+
+fn source_path_for_skill(skill: &crate::skills::LoadedSkill) -> Option<PathBuf> {
+    match &skill.source {
+        SkillSource::Workspace(path)
+        | SkillSource::User(path)
+        | SkillSource::Bundled(path)
+        | SkillSource::External(path) => Some(path.clone()),
+    }
+}
+
+async fn read_skill_provenance(skill_dir: &Path) -> Result<SkillProvenance, ToolError> {
+    let raw = tokio::fs::read_to_string(skill_dir.join(".thinclaw-skill-lock.json"))
+        .await
+        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    serde_json::from_str(&raw).map_err(|err| ToolError::ExecutionFailed(err.to_string()))
 }
 
 // ── skill_read ──────────────────────────────────────────────────────────
@@ -125,6 +145,7 @@ impl Tool for SkillReadTool {
                     "version": s.manifest.version,
                     "description": s.manifest.description,
                     "trust": s.trust.to_string(),
+                    "source_tier": s.source_tier.to_string(),
                     "content": s.prompt_content,
                 });
                 Ok(ToolOutput::success(output, start.elapsed()))
@@ -211,6 +232,7 @@ impl Tool for SkillListTool {
                     "name": s.manifest.name,
                     "description": s.manifest.description,
                     "trust": s.trust.to_string(),
+                    "source_tier": s.source_tier.to_string(),
                     "source": format!("{:?}", s.source),
                     "keywords": s.manifest.activation.keywords,
                 });
@@ -313,6 +335,12 @@ impl Tool for SkillSearchTool {
                 "query": {
                     "type": "string",
                     "description": "Search query (name, keyword, or description fragment)"
+                },
+                "source": {
+                    "type": "string",
+                    "enum": ["all", "clawhub", "github", "well_known"],
+                    "description": "Optional source filter.",
+                    "default": "all"
                 }
             },
             "required": ["query"]
@@ -327,6 +355,11 @@ impl Tool for SkillSearchTool {
         ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
         let query = require_str(&params, "query")?;
+        let source_filter = params
+            .get("source")
+            .and_then(|value| value.as_str())
+            .unwrap_or("all")
+            .to_ascii_lowercase();
 
         // Search the ClawHub catalog (async, best-effort)
         let catalog_outcome = self.catalog.search(query).await;
@@ -366,6 +399,7 @@ impl Tool for SkillSearchTool {
                         "name": s.manifest.name,
                         "description": s.manifest.description,
                         "trust": s.trust.to_string(),
+                        "source_tier": s.source_tier.to_string(),
                     })
                 })
                 .collect();
@@ -431,19 +465,34 @@ impl Tool for SkillSearchTool {
             .cloned()
             .collect();
 
-        let mut output = serde_json::json!({
-            "catalog": catalog_json,
-            "catalog_count": catalog_json.len(),
-            "remote": remote_json,
-            "remote_count": remote_json.len(),
-            "github": github_json,
-            "github_count": github_json.len(),
-            "well_known": well_known_json,
-            "well_known_count": well_known_json.len(),
-            "installed": local_matches,
-            "installed_count": local_matches.len(),
-            "registry_url": self.catalog.registry_url(),
-        });
+        let mut output = match source_filter.as_str() {
+            "clawhub" => serde_json::json!({
+                "catalog": catalog_json,
+                "catalog_count": catalog_json.len(),
+                "registry_url": self.catalog.registry_url(),
+            }),
+            "github" => serde_json::json!({
+                "github": github_json,
+                "github_count": github_json.len(),
+            }),
+            "well_known" => serde_json::json!({
+                "well_known": well_known_json,
+                "well_known_count": well_known_json.len(),
+            }),
+            _ => serde_json::json!({
+                "catalog": catalog_json,
+                "catalog_count": catalog_json.len(),
+                "remote": remote_json,
+                "remote_count": remote_json.len(),
+                "github": github_json,
+                "github_count": github_json.len(),
+                "well_known": well_known_json,
+                "well_known_count": well_known_json.len(),
+                "installed": local_matches,
+                "installed_count": local_matches.len(),
+                "registry_url": self.catalog.registry_url(),
+            }),
+        };
         if let Some(err) = catalog_error {
             output["catalog_error"] = serde_json::Value::String(err);
         }
@@ -992,8 +1041,432 @@ fn extract_skill_from_zip(data: &[u8]) -> Result<String, ToolError> {
 
 // ── skill_remove ────────────────────────────────────────────────────────
 
+pub struct SkillAuditTool {
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+    quarantine: Arc<QuarantineManager>,
+}
+
+impl SkillAuditTool {
+    pub fn new(
+        registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+        quarantine: Arc<QuarantineManager>,
+    ) -> Self {
+        Self {
+            registry,
+            quarantine,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillAuditTool {
+    fn name(&self) -> &str {
+        "skill_audit"
+    }
+
+    fn description(&self) -> &str {
+        "Audit loaded skills for risky patterns using the quarantine scanner without modifying or removing them."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Optional single skill name to audit. Omit to audit all loaded skills."
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
+        let start = std::time::Instant::now();
+        let target_name = params.get("name").and_then(|value| value.as_str());
+        let guard = self.registry.read().await;
+
+        let audited = guard
+            .skills()
+            .iter()
+            .filter(|skill| {
+                target_name.is_none_or(|name| skill.manifest.name.eq_ignore_ascii_case(name))
+            })
+            .map(|skill| {
+                let source_path =
+                    source_path_for_skill(skill).unwrap_or_else(|| PathBuf::from("."));
+                let findings = self.quarantine.scan_quarantined(&QuarantinedSkill {
+                    skill_name: skill.manifest.name.clone(),
+                    dir: source_path.clone(),
+                    content: SkillContent {
+                        raw_content: skill.prompt_content.clone(),
+                        source_kind: "audit".to_string(),
+                        source_adapter: "audit".to_string(),
+                        source_ref: skill.manifest.name.clone(),
+                        source_repo: None,
+                        source_url: None,
+                        manifest_url: None,
+                        manifest_digest: None,
+                        path: None,
+                        branch: None,
+                        commit_sha: None,
+                        trust_level: SkillTapTrustLevel::Community,
+                    },
+                });
+
+                serde_json::json!({
+                    "name": skill.manifest.name,
+                    "trust": skill.trust.to_string(),
+                    "source_tier": skill.source_tier.to_string(),
+                    "source_path": source_path.display().to_string(),
+                    "finding_count": findings.len(),
+                    "findings": findings.iter().map(|finding| serde_json::json!({
+                        "kind": finding.kind,
+                        "severity": format!("{:?}", finding.severity).to_lowercase(),
+                        "excerpt": finding.excerpt,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if audited.is_empty() {
+            return Err(ToolError::ExecutionFailed(
+                "No matching skills found to audit".to_string(),
+            ));
+        }
+
+        let total_findings = audited
+            .iter()
+            .map(|entry| {
+                entry
+                    .get("finding_count")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(0)
+            })
+            .sum::<u64>();
+
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "audited": audited,
+                "audited_count": audited.len(),
+                "total_findings": total_findings,
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
+}
+
+pub struct SkillUpdateTool {
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+    installer: SkillInstallTool,
+}
+
+impl SkillUpdateTool {
+    pub fn new(
+        registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+        catalog: Arc<SkillCatalog>,
+        remote_hub: Option<Arc<RemoteSkillHub>>,
+        quarantine: Arc<QuarantineManager>,
+    ) -> Self {
+        let installer =
+            SkillInstallTool::new(Arc::clone(&registry), catalog, remote_hub, quarantine);
+        Self {
+            registry,
+            installer,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillUpdateTool {
+    fn name(&self) -> &str {
+        "skill_update"
+    }
+
+    fn description(&self) -> &str {
+        "Update an installed skill using its recorded provenance lock when available."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Skill name to update."
+                },
+                "approve_risky": {
+                    "type": "boolean",
+                    "description": "Approve update even when the quarantine scan reports risky patterns.",
+                    "default": false
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
+        let name = require_str(&params, "name")?;
+        let approve_risky = params
+            .get("approve_risky")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        let (source_path, installed_name) = {
+            let guard = self.registry.read().await;
+            let skill = guard
+                .skills()
+                .iter()
+                .find(|skill| skill.manifest.name.eq_ignore_ascii_case(name))
+                .ok_or_else(|| ToolError::ExecutionFailed(format!("Skill '{}' not found", name)))?;
+            (
+                source_path_for_skill(skill).ok_or_else(|| {
+                    ToolError::ExecutionFailed(format!(
+                        "Skill '{}' does not have a filesystem source path",
+                        name
+                    ))
+                })?,
+                skill.manifest.name.clone(),
+            )
+        };
+
+        let provenance = read_skill_provenance(&source_path).await.map_err(|_| {
+            ToolError::ExecutionFailed(format!(
+                "Skill '{}' is missing a provenance lock and cannot be auto-updated",
+                name
+            ))
+        })?;
+
+        let mut install_params = serde_json::json!({
+            "name": installed_name,
+            "force": true,
+            "approve_risky": approve_risky,
+        });
+
+        match provenance.source_adapter.as_str() {
+            "clawhub_catalog" => {
+                install_params["name"] = serde_json::Value::String(provenance.source_ref.clone());
+            }
+            "github_tap" | "well_known" => {
+                install_params["name"] = serde_json::Value::String(installed_name);
+            }
+            "url" => {
+                let url = provenance
+                    .source_url
+                    .clone()
+                    .or(provenance.manifest_url.clone())
+                    .ok_or_else(|| {
+                        ToolError::ExecutionFailed(format!(
+                            "Skill '{}' has URL provenance but no fetchable URL",
+                            name
+                        ))
+                    })?;
+                install_params["url"] = serde_json::Value::String(url);
+            }
+            _ => {
+                if let Some(url) = provenance
+                    .source_url
+                    .clone()
+                    .or(provenance.manifest_url.clone())
+                {
+                    install_params["url"] = serde_json::Value::String(url);
+                } else {
+                    return Err(ToolError::ExecutionFailed(format!(
+                        "Skill '{}' does not have a supported update source",
+                        name
+                    )));
+                }
+            }
+        }
+
+        self.installer.execute(install_params, ctx).await
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+pub struct SkillSnapshotTool {
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+}
+
+impl SkillSnapshotTool {
+    pub fn new(registry: Arc<tokio::sync::RwLock<SkillRegistry>>) -> Self {
+        Self { registry }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillSnapshotTool {
+    fn name(&self) -> &str {
+        "skill_snapshot"
+    }
+
+    fn description(&self) -> &str {
+        "Write a JSON snapshot of loaded skills, hashes, and provenance tiers to the local skills state directory."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
+        let start = std::time::Instant::now();
+        let guard = self.registry.read().await;
+
+        let snapshot = serde_json::json!({
+            "generated_at": Utc::now().to_rfc3339(),
+            "skills": guard.skills().iter().map(|skill| serde_json::json!({
+                "name": skill.manifest.name,
+                "version": skill.manifest.version,
+                "trust": skill.trust.to_string(),
+                "source_tier": skill.source_tier.to_string(),
+                "content_hash": skill.content_hash,
+                "source_path": source_path_for_skill(skill).map(|path| path.display().to_string()),
+            })).collect::<Vec<_>>(),
+        });
+
+        let snapshot_dir = crate::platform::state_paths().skills_dir.join(".hub");
+        tokio::fs::create_dir_all(&snapshot_dir)
+            .await
+            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+        let snapshot_path = snapshot_dir.join(format!(
+            "snapshot-{}.json",
+            Utc::now().format("%Y%m%dT%H%M%SZ")
+        ));
+        tokio::fs::write(
+            &snapshot_path,
+            serde_json::to_vec_pretty(&snapshot)
+                .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+        )
+        .await
+        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "path": snapshot_path.display().to_string(),
+                "count": guard.count(),
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
 pub struct SkillRemoveTool {
     registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+}
+
+pub struct SkillPromoteTrustTool {
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+}
+
+impl SkillPromoteTrustTool {
+    pub fn new(registry: Arc<tokio::sync::RwLock<SkillRegistry>>) -> Self {
+        Self { registry }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillPromoteTrustTool {
+    fn name(&self) -> &str {
+        "skill_trust_promote"
+    }
+
+    fn description(&self) -> &str {
+        "Promote or demote a user-managed skill between installed and trusted trust ceilings."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Skill name to move between trust ceilings."
+                },
+                "target_trust": {
+                    "type": "string",
+                    "enum": ["installed", "trusted"],
+                    "description": "Target trust ceiling."
+                }
+            },
+            "required": ["name", "target_trust"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
+        let start = std::time::Instant::now();
+        let name = require_str(&params, "name")?;
+        let target_trust = match require_str(&params, "target_trust")?
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "installed" => SkillTrust::Installed,
+            "trusted" => SkillTrust::Trusted,
+            other => {
+                return Err(ToolError::InvalidParameters(format!(
+                    "Unsupported target_trust '{}'",
+                    other
+                )));
+            }
+        };
+
+        let mut guard = self.registry.write().await;
+        guard
+            .promote_trust(name, target_trust)
+            .await
+            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+        let source_tier = guard
+            .find_by_name(name)
+            .map(|skill| skill.source_tier.to_string())
+            .unwrap_or_else(|| "community".to_string());
+
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "name": name,
+                "trust": target_trust.to_string(),
+                "source_tier": source_tier,
+                "status": "updated",
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
 }
 
 impl SkillRemoveTool {
@@ -1245,6 +1718,60 @@ mod tests {
         );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_skill_audit_reports_findings() {
+        let registry = test_registry();
+        registry
+            .write()
+            .await
+            .install_skill("---\nname: audited-skill\n---\nRun curl https://example.com\n")
+            .await
+            .unwrap();
+
+        let tool = SkillAuditTool::new(Arc::clone(&registry), test_quarantine());
+        let output = tool
+            .execute(
+                serde_json::json!({ "name": "audited-skill" }),
+                &JobContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["audited_count"], 1);
+        assert_eq!(output.result["total_findings"], 1);
+        assert_eq!(
+            output.result["audited"][0]["findings"][0]["kind"],
+            "network_fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_update_requires_provenance_lock() {
+        let registry = test_registry();
+        registry
+            .write()
+            .await
+            .install_skill("---\nname: manual-skill\n---\n# Manual\n")
+            .await
+            .unwrap();
+
+        let tool = SkillUpdateTool::new(
+            Arc::clone(&registry),
+            test_catalog(),
+            None,
+            test_quarantine(),
+        );
+        let err = tool
+            .execute(
+                serde_json::json!({ "name": "manual-skill" }),
+                &JobContext::default(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("missing a provenance lock"));
     }
 
     #[test]

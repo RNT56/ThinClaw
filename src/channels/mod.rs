@@ -42,6 +42,8 @@
 //! See the [`wasm`] module for details.
 
 pub mod ack_reaction;
+#[cfg(feature = "acp")]
+pub mod acp;
 #[cfg(target_os = "macos")]
 mod apple_mail;
 mod bluebubbles;
@@ -84,7 +86,10 @@ pub use health_monitor::{ChannelHealthMonitor, ChannelHealthStatus, HealthMonito
 pub use http::HttpChannel;
 #[cfg(target_os = "macos")]
 pub use imessage::{IMessageChannel, IMessageConfig, IMessageDiagnostic};
-pub use manager::ChannelManager;
+pub use manager::{
+    ChannelManager, IncomingEvent, SlashCommand, legacy_session_key_aliases, mint_session_key,
+    normalize_incoming_event, parse_slash_command,
+};
 #[cfg(feature = "nostr")]
 pub use nostr::NostrChannel;
 pub use repl::ReplChannel;

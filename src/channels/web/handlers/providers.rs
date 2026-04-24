@@ -6,7 +6,8 @@ use axum::{
     http::StatusCode,
 };
 
-use crate::channels::web::identity_helpers::GatewayRequestIdentity;
+use crate::channels::web::identity_helpers::{GatewayAuthSource, GatewayRequestIdentity};
+use crate::channels::web::rate_limiter::RateLimiter;
 use crate::channels::web::server::GatewayState;
 
 /// Response for GET /api/providers — lists all catalog providers with key status.
@@ -36,6 +37,27 @@ pub(crate) struct ProviderInfo {
     pub(crate) setup_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) credential: Option<ProviderCredentialMetadata>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub(crate) struct ProviderCredentialMetadata {
+    pub(crate) source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) masked_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) key_version: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) encryption_version: Option<i32>,
 }
 
 #[derive(serde::Serialize)]
@@ -288,6 +310,13 @@ pub(crate) async fn providers_list_handler(
         } else {
             false
         };
+        let credential = provider_credential_metadata(
+            secrets,
+            &request_identity.principal_id,
+            &endpoint.secret_name,
+            &endpoint.env_key_name,
+        )
+        .await;
         let oauth = provider_oauth_ui_state(slug);
 
         let api_style_str = match endpoint.api_style {
@@ -318,6 +347,7 @@ pub(crate) async fn providers_list_handler(
             oauth_source_location: oauth.source_location,
             setup_url: endpoint.setup_url.clone(),
             tier: endpoint.tier.clone(),
+            credential,
         });
     }
 
@@ -348,6 +378,13 @@ pub(crate) async fn providers_list_handler(
         oauth_source_location: None,
         setup_url: None,
         tier: None,
+        credential: provider_credential_metadata(
+            secrets,
+            &request_identity.principal_id,
+            "llm_compatible_api_key",
+            "LLM_API_KEY",
+        )
+        .await,
     });
 
     let bedrock_has_key = crate::config::helpers::optional_env("BEDROCK_API_KEY")
@@ -391,6 +428,13 @@ pub(crate) async fn providers_list_handler(
         oauth_source_location: None,
         setup_url: None,
         tier: None,
+        credential: provider_credential_metadata(
+            secrets,
+            &request_identity.principal_id,
+            "llm_bedrock_api_key",
+            "BEDROCK_API_KEY",
+        )
+        .await,
     });
 
     providers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
@@ -1601,6 +1645,56 @@ pub(crate) async fn secret_exists(
     }
 }
 
+async fn provider_credential_metadata(
+    secrets: Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    user_id: &str,
+    secret_name: &str,
+    env_key: &str,
+) -> Option<ProviderCredentialMetadata> {
+    if let Ok(Some(value)) = crate::config::helpers::optional_env(env_key)
+        && !value.trim().is_empty()
+    {
+        return Some(ProviderCredentialMetadata {
+            source: "env".to_string(),
+            masked_preview: Some(mask_provider_key(&value)),
+            fingerprint: Some(provider_key_fingerprint(&value)),
+            created_at: None,
+            updated_at: None,
+            last_used_at: None,
+            key_version: None,
+            encryption_version: None,
+        });
+    }
+
+    let store = secrets?;
+    let secret = store.get(user_id, secret_name).await.ok()?;
+    let value = store
+        .get_for_injection(
+            user_id,
+            secret_name,
+            crate::secrets::SecretAccessContext::new(
+                "provider_vault.metadata",
+                "credential_metadata",
+            ),
+        )
+        .await
+        .ok();
+    Some(ProviderCredentialMetadata {
+        source: "local_encrypted".to_string(),
+        masked_preview: value
+            .as_ref()
+            .map(|secret| mask_provider_key(secret.expose())),
+        fingerprint: value
+            .as_ref()
+            .map(|secret| provider_key_fingerprint(secret.expose())),
+        created_at: Some(secret.created_at),
+        updated_at: Some(secret.updated_at),
+        last_used_at: secret.last_used_at,
+        key_version: Some(secret.key_version),
+        encryption_version: Some(secret.encryption_version),
+    })
+}
+
 pub(crate) async fn providers_config_set_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -2034,12 +2128,71 @@ pub(crate) struct ProviderKeyRequest {
     api_key: Option<String>,
 }
 
+fn provider_key_write_limiter() -> &'static RateLimiter {
+    static LIMITER: std::sync::OnceLock<RateLimiter> = std::sync::OnceLock::new();
+    LIMITER.get_or_init(|| RateLimiter::new(10, 60))
+}
+
+fn require_sensitive_route_auth(identity: &GatewayRequestIdentity) -> Result<(), StatusCode> {
+    match identity.auth_source {
+        GatewayAuthSource::BearerHeader | GatewayAuthSource::TrustedProxy => Ok(()),
+        GatewayAuthSource::BearerQuery => Err(StatusCode::FORBIDDEN),
+    }
+}
+
+fn validate_provider_api_key(raw: Option<&str>) -> Result<String, StatusCode> {
+    let api_key = raw.unwrap_or("").trim().to_string();
+    if api_key.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if api_key
+        .chars()
+        .any(|ch| ch.is_control() || ch == '\n' || ch == '\r')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(api_key)
+}
+
+fn mask_provider_key(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= 8 {
+        "****".to_string()
+    } else {
+        format!(
+            "{}...{}",
+            chars.iter().take(4).collect::<String>(),
+            chars
+                .iter()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<String>()
+        )
+    }
+}
+
+fn provider_key_fingerprint(value: &str) -> String {
+    let key = blake3::derive_key(
+        "thinclaw.provider-vault.fingerprint.v1",
+        b"local-display-only",
+    );
+    let hash = blake3::keyed_hash(&key, value.as_bytes());
+    hex::encode(&hash.as_bytes()[..12])
+}
+
 pub(crate) async fn providers_save_key_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
     Path(slug): Path<String>,
     Json(body): Json<ProviderKeyRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    require_sensitive_route_auth(&request_identity)?;
+    if !provider_key_write_limiter().check() {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     let secrets = state
         .secrets_store
         .as_ref()
@@ -2048,15 +2201,15 @@ pub(crate) async fn providers_save_key_handler(
 
     match &spec {
         ProviderCredentialSpec::ApiKey { secret_name, .. } => {
-            let api_key = body.api_key.as_deref().unwrap_or("").trim().to_string();
-            if api_key.is_empty() {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            let _ = secrets
-                .delete(&request_identity.principal_id, secret_name)
-                .await;
+            let api_key = validate_provider_api_key(body.api_key.as_deref())?;
+            let masked = mask_provider_key(&api_key);
+            let fingerprint = provider_key_fingerprint(&api_key);
             let params = crate::secrets::CreateSecretParams::new(*secret_name, api_key)
-                .with_provider(slug.clone());
+                .with_provider(slug.clone())
+                .with_created_by(format!(
+                    "provider_vault:{}",
+                    request_identity.auth_source.as_str()
+                ));
             secrets
                 .create(&request_identity.principal_id, params)
                 .await
@@ -2064,6 +2217,12 @@ pub(crate) async fn providers_save_key_handler(
                     tracing::error!("Failed to save API key for '{}': {}", slug, e);
                     StatusCode::INTERNAL_SERVER_ERROR
                 })?;
+            tracing::info!(
+                provider = %slug,
+                fingerprint = %fingerprint,
+                masked = %masked,
+                "Provider Vault credential atomically upserted"
+            );
         }
     }
 
@@ -2103,6 +2262,12 @@ pub(crate) async fn providers_save_key_handler(
         Json(serde_json::json!({
             "status": "ok",
             "message": format!("Credentials saved for {}", spec.display_name()),
+            "credential": {
+                "source": "local_encrypted",
+                "provider": slug,
+                "masked_preview": body.api_key.as_deref().map(mask_provider_key),
+                "fingerprint": body.api_key.as_deref().map(provider_key_fingerprint),
+            }
         })),
     ))
 }
@@ -2112,6 +2277,10 @@ pub(crate) async fn providers_delete_key_handler(
     request_identity: GatewayRequestIdentity,
     Path(slug): Path<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    require_sensitive_route_auth(&request_identity)?;
+    if !provider_key_write_limiter().check() {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     let secrets = state
         .secrets_store
         .as_ref()

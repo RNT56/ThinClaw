@@ -9,6 +9,7 @@ Some delivery surfaces are compiled into the trusted Rust host. Others are packa
 - Use **native Rust channels** when the integration needs persistent connections, local filesystem access, or the full host `Channel` behavior.
 - Use **WASM channels** when the integration is stateless, HTTP-driven, and benefits from credential isolation and hot reload.
 - Treat the **gateway** as the operator control plane, not just another chat surface.
+- Normalize new messaging platforms through `ChannelManager` helpers before adding platform-specific routing logic.
 
 ## Channel Inventory
 
@@ -27,8 +28,14 @@ Some delivery surfaces are compiled into the trusted Rust host. Others are packa
 | Slack | WASM package | stateless Events API path, host-managed credentials |
 | WhatsApp | WASM package | webhook-driven packaged channel |
 | Discord interactions | WASM package | slash-command / webhook path |
+| ACP | native stdio | editor-native JSON-RPC agent subprocess |
 
 The installable WASM packages are represented in `registry/channels/`. The host runtime loads them from `~/.thinclaw/channels/`.
+
+Linux note: native Apple Mail and native iMessage require macOS-only local data
+stores and are intentionally unavailable on Linux. Linux deployments should use
+Gmail for mail and BlueBubbles for iMessage-compatible messaging through a
+Mac-hosted BlueBubbles server.
 
 ## When ThinClaw Uses Native Channels
 
@@ -97,6 +104,16 @@ Channel-specific formatting behavior belongs to the channel layer, not to generi
 
 Today the canonical lookup seam is `ChannelManager::formatting_hints_for()`. If you add or change channel-specific rendering behavior, update the owning native channel implementation or WASM manifest first so every surface sees the same guidance.
 
+## Unified Event Normalization
+
+New native messaging channels should convert platform payloads into `IncomingEvent` and call `normalize_incoming_event` before sending work to the agent.
+
+- Standard session keys use `agent:main:<platform>:<chat_type>:<chat_id>`.
+- `legacy_session_key_aliases` preserves lookup compatibility for older persisted keys.
+- `parse_slash_command` is the shared slash-command parser; channels should not open-code `/` prefix splitting.
+
+This is the foundation for Mattermost, Matrix, SMS/Twilio, browser-push, DingTalk, Feishu/Lark, WeCom, Weixin, and QQ drivers. Platform drivers should own authentication and transport details; the manager owns canonical session identity and command parsing.
+
 ## Operator Docs
 
 Use these pages for operator setup:
@@ -117,5 +134,6 @@ If you are authoring a new channel:
 - build a **native channel** when you need persistent or local capabilities
 - build a **WASM channel** when you need stateless packaged delivery
 - define formatting/rendering guidance on the channel itself (`Channel::formatting_hints()` for native, `formatting_hints` in `*.capabilities.json` for WASM)
+- use `IncomingEvent`, `mint_session_key`, and `parse_slash_command` for all new chat-platform ingress
 
 See [BUILDING_CHANNELS.md](BUILDING_CHANNELS.md) for the implementation guide.

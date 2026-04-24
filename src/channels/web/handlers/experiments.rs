@@ -821,7 +821,14 @@ pub(crate) async fn experiments_gpu_cloud_validate_handler(
     ))?;
     let (status, message) = if connected {
         match secrets
-            .get_decrypted(&request_identity.principal_id, secret_name)
+            .get_for_injection(
+                &request_identity.principal_id,
+                secret_name,
+                crate::secrets::SecretAccessContext::new(
+                    "experiments.gpu_cloud_validate",
+                    "provider_credential_validation",
+                ),
+            )
             .await
         {
             Ok(secret) => match crate::experiments::adapters::validate_gpu_cloud_credentials(
@@ -935,7 +942,14 @@ pub(crate) async fn experiments_gpu_cloud_launch_test_handler(
         "Unknown GPU cloud provider".to_string(),
     ))?;
     let secret = secrets
-        .get_decrypted(&request_identity.principal_id, secret_name)
+        .get_for_injection(
+            &request_identity.principal_id,
+            secret_name,
+            crate::secrets::SecretAccessContext::new(
+                "experiments.gpu_cloud_launch_test",
+                "provider_credential_validation",
+            ),
+        )
         .await
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
     let validation_message =

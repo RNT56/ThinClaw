@@ -412,7 +412,14 @@ impl ChannelWatcher {
 
         let signature_secret = match secrets_store {
             Some(store) => store
-                .get_decrypted(user_id, &signature_secret_name)
+                .get_for_injection(
+                    user_id,
+                    &signature_secret_name,
+                    crate::secrets::SecretAccessContext::new(
+                        "wasm.channel_watcher",
+                        "webhook_signature_validation",
+                    ),
+                )
                 .await
                 .ok()
                 .map(|secret| secret.expose().to_string()),
@@ -424,7 +431,14 @@ impl ChannelWatcher {
                 signature_secret.clone()
             }
             (Some(secret_name), Some(store)) => store
-                .get_decrypted(user_id, secret_name)
+                .get_for_injection(
+                    user_id,
+                    secret_name,
+                    crate::secrets::SecretAccessContext::new(
+                        "wasm.channel_watcher",
+                        "webhook_verify_token",
+                    ),
+                )
                 .await
                 .ok()
                 .map(|secret| secret.expose().to_string()),

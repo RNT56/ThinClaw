@@ -24,8 +24,8 @@ use thinclaw::{
     },
     cli::{
         Cli, Command, run_channels_command, run_gateway_command, run_identity_command,
-        run_mcp_command, run_pairing_command, run_reset_command, run_status_command,
-        run_tool_command, run_trajectory_command,
+        run_mcp_command, run_pairing_command, run_reset_command, run_secrets_command,
+        run_status_command, run_tool_command, run_trajectory_command,
     },
     config::Config,
     pairing::PairingStore,
@@ -165,23 +165,29 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::WindowsServiceRuntime { home }) => {
             return thinclaw::service::run_windows_service_dispatcher(home.clone());
         }
-        Some(Command::Doctor) => {
+        Some(Command::Doctor { profile }) => {
             init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
-            return thinclaw::cli::run_doctor_command().await;
+            return thinclaw::cli::run_doctor_command((*profile).into()).await;
         }
-        Some(Command::Status) => {
+        Some(Command::Status { profile }) => {
             init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
-            return run_status_command().await;
+            return run_status_command((*profile).into()).await;
         }
         Some(Command::Reset(reset_cmd)) => {
             init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return run_reset_command(reset_cmd.clone()).await;
+        }
+        Some(Command::Secrets(secrets_cmd)) => {
+            init_cli_tracing(cli.debug);
+            let _ = dotenvy::dotenv();
+            thinclaw::bootstrap::load_thinclaw_env();
+            return run_secrets_command(secrets_cmd.clone()).await;
         }
         Some(Command::Cron(cron_cmd)) => {
             init_cli_tracing(cli.debug);

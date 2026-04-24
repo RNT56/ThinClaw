@@ -17,6 +17,7 @@ pub mod mcp;
 pub mod policy;
 pub mod rate_limiter;
 pub mod url_guard;
+pub mod user_tool;
 pub mod wasm;
 
 mod registry;

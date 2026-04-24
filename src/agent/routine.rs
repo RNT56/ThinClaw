@@ -618,12 +618,7 @@ impl RoutineAction {
                 let tool_profile = config
                     .get("tool_profile")
                     .and_then(|v| v.as_str())
-                    .and_then(|value| match value {
-                        "standard" => Some(ToolProfile::Standard),
-                        "restricted" => Some(ToolProfile::Restricted),
-                        "explicit_only" => Some(ToolProfile::ExplicitOnly),
-                        _ => None,
-                    });
+                    .and_then(|value| value.parse::<ToolProfile>().ok());
                 Ok(RoutineAction::FullJob {
                     title,
                     description,

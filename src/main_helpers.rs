@@ -23,7 +23,7 @@ use thinclaw::pairing::PairingStore;
 use thinclaw::secrets::CreateSecretParams;
 use thinclaw::secrets::SecretsStore;
 
-const STARTUP_SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
+const STARTUP_SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Minimal terminal spinner shown during quiet interactive startup.
 pub(crate) struct QuietStartupSpinner {
@@ -42,10 +42,10 @@ impl QuietStartupSpinner {
 
             while running_for_thread.load(Ordering::Relaxed) {
                 let frame = STARTUP_SPINNER_FRAMES[frame_idx % STARTUP_SPINNER_FRAMES.len()];
-                let _ = write!(stdout, "\r\x1b[2K  Starting ThinClaw... {frame}");
+                let _ = write!(stdout, "\r\x1b[2K  {frame} Starting ThinClaw...");
                 let _ = stdout.flush();
                 frame_idx += 1;
-                std::thread::sleep(Duration::from_millis(120));
+                std::thread::sleep(Duration::from_millis(80));
             }
 
             let _ = write!(stdout, "\r\x1b[2K");
@@ -239,7 +239,16 @@ pub(crate) async fn resolve_container_provider_api_key(
     }
 
     if let Some(store) = secrets_store
-        && let Ok(secret) = store.get_decrypted(user_id, provider_secret_name).await
+        && let Ok(secret) = store
+            .get_for_injection(
+                user_id,
+                provider_secret_name,
+                thinclaw::secrets::SecretAccessContext::new(
+                    "main_helpers",
+                    "provider_credential_resolution",
+                ),
+            )
+            .await
     {
         let value = secret.expose().trim().to_string();
         if !value.is_empty() {
@@ -409,7 +418,14 @@ pub(crate) async fn setup_wasm_channels(
 
         let signature_secret = if let Some(secrets) = secrets_store {
             secrets
-                .get_decrypted("default", &signature_secret_name)
+                .get_for_injection(
+                    "default",
+                    &signature_secret_name,
+                    thinclaw::secrets::SecretAccessContext::new(
+                        "main_helpers",
+                        "webhook_signature_validation",
+                    ),
+                )
                 .await
                 .ok()
                 .map(|s| s.expose().to_string())
@@ -422,7 +438,14 @@ pub(crate) async fn setup_wasm_channels(
                 signature_secret.clone()
             } else if let Some(secrets) = secrets_store {
                 secrets
-                    .get_decrypted("default", secret_name)
+                    .get_for_injection(
+                        "default",
+                        secret_name,
+                        thinclaw::secrets::SecretAccessContext::new(
+                            "main_helpers",
+                            "webhook_verify_token",
+                        ),
+                    )
                     .await
                     .ok()
                     .map(|s| s.expose().to_string())

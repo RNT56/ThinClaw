@@ -55,7 +55,8 @@
 //! let exists = store.exists("user_123", "openai_key").await?;
 //!
 //! // Decrypt for injection (host boundary only)
-//! let decrypted = store.get_decrypted("user_123", "openai_key").await?;
+//! let context = thinclaw::secrets::SecretAccessContext::new("example", "credential_injection");
+//! let decrypted = store.get_for_injection("user_123", "openai_key", context).await?;
 //! ```
 
 mod crypto;
@@ -70,8 +71,8 @@ pub use store::LibSqlSecretsStore;
 pub use store::PostgresSecretsStore;
 pub use store::SecretsStore;
 pub use types::{
-    CreateSecretParams, CredentialLocation, CredentialMapping, DecryptedSecret, Secret,
-    SecretError, SecretRef,
+    CreateSecretParams, CredentialLocation, CredentialMapping, DecryptedSecret,
+    MasterKeyRotationReport, Secret, SecretAccessContext, SecretBackend, SecretError, SecretRef,
 };
 
 pub use store::in_memory::InMemorySecretsStore;

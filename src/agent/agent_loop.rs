@@ -1874,6 +1874,29 @@ impl Agent {
     /// Faster than routing `/interrupt` through `handle_message_external()`
     /// because it skips hook chains, submission parsing, and hydration.
     /// Directly locks the session and sets the thread's cancellation flag.
+    pub async fn cancel_turn_for_identity(
+        &self,
+        channel: &str,
+        session_key: &str,
+        identity: crate::identity::ResolvedIdentity,
+        metadata: serde_json::Value,
+    ) -> Result<(), Error> {
+        let (session, thread_id) = self
+            .session_manager
+            .resolve_thread_for_identity(&identity, channel, Some(session_key))
+            .await;
+        let message = crate::channels::IncomingMessage::new(
+            channel,
+            identity.raw_sender_id.clone(),
+            "/interrupt",
+        )
+        .with_thread(session_key)
+        .with_metadata(metadata)
+        .with_identity(identity);
+        self.process_interrupt(&message, session, thread_id).await?;
+        Ok(())
+    }
+
     pub async fn cancel_turn(&self, session_key: &str) -> Result<(), Error> {
         let identity = crate::identity::ResolvedIdentity {
             principal_id: "local_user".to_string(),
@@ -1885,16 +1908,13 @@ impl Agent {
             raw_sender_id: "local_user".to_string(),
             stable_external_conversation_key: format!("tauri:direct:{session_key}"),
         };
-        let (session, thread_id) = self
-            .session_manager
-            .resolve_thread_for_identity(&identity, "tauri", Some(session_key))
-            .await;
-        let message = crate::channels::IncomingMessage::new("tauri", "local_user", "/interrupt")
-            .with_thread(session_key)
-            .with_metadata(serde_json::json!({"thread_id": session_key}))
-            .with_identity(identity);
-        self.process_interrupt(&message, session, thread_id).await?;
-        Ok(())
+        self.cancel_turn_for_identity(
+            "tauri",
+            session_key,
+            identity,
+            serde_json::json!({"thread_id": session_key}),
+        )
+        .await
     }
 }
 

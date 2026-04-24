@@ -59,7 +59,13 @@ impl TtsTool {
     async fn resolve_api_key(&self) -> Result<String, ToolError> {
         // Try secrets store first
         if let Some(secrets) = &self.secrets
-            && let Ok(decrypted) = secrets.get_decrypted("default", "openai_api_key").await
+            && let Ok(decrypted) = secrets
+                .get_for_injection(
+                    "default",
+                    "openai_api_key",
+                    crate::secrets::SecretAccessContext::new("builtin.tts", "openai_tts_request"),
+                )
+                .await
         {
             return Ok(decrypted.expose().to_string());
         }

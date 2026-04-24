@@ -32,6 +32,12 @@ These flags can be appended to almost any command:
   - `set <KEY> <VALUE>`: Update a configuration value.
 - `thinclaw identity`: Manage household actors and linked endpoints.
 - `thinclaw models`: Inspect available LLM models from your configured providers.
+- `thinclaw secrets`: Manage encrypted local secrets without printing values.
+  - `status`: Show OS secure-store and env-fallback posture.
+  - `list [--user <ID>]`: List secret metadata, versions, and usage counts.
+  - `set <NAME> [--value <VALUE>] [--provider <SLUG>] [--user <ID>]`: Store or replace one secret.
+  - `delete <NAME> [--user <ID>]`: Delete one secret.
+  - `rotate-master`: Generate a new OS secure-store master key, re-encrypt active v2 secrets, and advance the local key version.
 - `thinclaw channels`: Manage messaging channel configurations (Telegram, Discord, etc.).
 - `thinclaw gateway`: Manage the built-in web gateway settings.
 
@@ -72,8 +78,8 @@ These flags can be appended to almost any command:
 - `thinclaw message`: Send a message to the agent directly from the CLI without starting the interactive prompt.
 - `thinclaw pairing`: DM pairing logic to approve inbound requests from unknown senders on supported channels.
 - `thinclaw logs`: Query, tail, and filter system logs.
-- `thinclaw doctor`: Probe external dependencies and validate the current configuration.
-- `thinclaw status`: Show system health and diagnostics.
+- `thinclaw doctor`: Probe external dependencies and validate the current configuration. On Linux, add `--profile server`, `--profile desktop-gnome`, or `--profile all-features`.
+- `thinclaw status`: Show system health and diagnostics. On Linux, the same `--profile` values summarize runtime readiness.
 - `thinclaw service`: (Mac/Linux only) Manage the OS background service.
   - `install`: Install ThinClaw as a system service.
   - `start`: Start the background service.

@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::personality;
 use crate::agent::prompt_assembly::PromptAssemblyV2;
+use crate::agent::prompt_sanitation::sanitize_project_context;
 use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
@@ -282,28 +283,60 @@ impl Agent {
         } else {
             self.workspace().map(Arc::clone)
         };
-
-        // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
-        // In group chats, MEMORY.md is excluded to prevent leaking personal context.
-        let mut workspace_prompt = if let Some(ws) = effective_workspace.as_ref() {
-            match ws
-                .system_prompt_for_identity(
-                    Some(&identity),
-                    &message.channel,
-                    self.deps.safety.redact_pii_in_prompts(),
-                )
-                .await
-            {
-                Ok(prompt) if !prompt.is_empty() => Some(prompt),
-                Ok(_) => None,
-                Err(e) => {
-                    tracing::debug!("Could not load workspace system prompt: {}", e);
+        let prompt_settings = if let Some(store) = self.store().map(Arc::clone) {
+            match store.get_all_settings(&identity.principal_id).await {
+                Ok(map) => crate::settings::Settings::from_db_map(&map).prompt,
+                Err(_) => crate::settings::PromptSettings::default(),
+            }
+        } else {
+            crate::settings::PromptSettings::default()
+        };
+        let existing_runtime = if let Some(store) = self.store().map(Arc::clone) {
+            match crate::agent::load_thread_runtime(&store, thread_id).await {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    tracing::debug!(
+                        thread = %thread_id,
+                        error = %err,
+                        "Failed to load thread runtime before prompt assembly"
+                    );
                     None
                 }
             }
         } else {
             None
         };
+
+        // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
+        // In group chats, MEMORY.md is excluded to prevent leaking personal context.
+        let mut workspace_prompt = if prompt_settings.session_freeze_enabled {
+            existing_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.frozen_workspace_prompt.clone())
+        } else {
+            None
+        };
+        if workspace_prompt.is_none() {
+            workspace_prompt = if let Some(ws) = effective_workspace.as_ref() {
+                match ws
+                    .system_prompt_for_identity(
+                        Some(&identity),
+                        &message.channel,
+                        self.deps.safety.redact_pii_in_prompts(),
+                    )
+                    .await
+                {
+                    Ok(prompt) if !prompt.is_empty() => Some(prompt),
+                    Ok(_) => None,
+                    Err(e) => {
+                        tracing::debug!("Could not load workspace system prompt: {}", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+        }
         if let Some(agent_prompt) = routed_agent
             .as_ref()
             .and_then(|agent| agent.system_prompt.as_ref())
@@ -315,6 +348,26 @@ impl Agent {
                 _ => agent_prompt.clone(),
             });
         }
+        let workspace_prompt = workspace_prompt
+            .map(|prompt| {
+                let sanitized =
+                    sanitize_project_context(&prompt, prompt_settings.project_context_max_tokens);
+                if sanitized.was_truncated {
+                    tracing::info!(
+                        thread = %thread_id,
+                        "Workspace prompt context was truncated to fit prompt.project_context_max_tokens"
+                    );
+                }
+                for pattern in &sanitized.warning_patterns {
+                    tracing::warn!(
+                        thread = %thread_id,
+                        pattern = %pattern,
+                        "Suspicious project context content detected during prompt assembly"
+                    );
+                }
+                sanitized.content
+            })
+            .filter(|prompt| !prompt.trim().is_empty());
 
         // Select and prepare active skills (if skills system is enabled)
         let active_skills = self
@@ -423,13 +476,27 @@ impl Agent {
         } else {
             None
         };
-        let (provider_context, provider_tool_extensions) =
+        let (provider_context, provider_tool_extensions, provider_system_prompt) =
             if let Some(store) = self.store().map(Arc::clone) {
                 let orchestrator = crate::agent::learning::LearningOrchestrator::new(
                     store,
                     self.workspace().cloned(),
                     self.skill_registry().cloned(),
                 );
+                let frozen_block = if prompt_settings.session_freeze_enabled {
+                    existing_runtime
+                        .as_ref()
+                        .and_then(|runtime| runtime.frozen_provider_system_prompt.clone())
+                } else {
+                    None
+                };
+                let provider_system_prompt = if let Some(block) = frozen_block {
+                    Some(block)
+                } else {
+                    orchestrator
+                        .provider_system_prompt_block(&identity.principal_id)
+                        .await
+                };
                 (
                     orchestrator
                         .prefetch_provider_context(&identity.principal_id, &message.content, 6)
@@ -437,9 +504,10 @@ impl Agent {
                     orchestrator
                         .provider_tool_extensions(&identity.principal_id)
                         .await,
+                    provider_system_prompt,
                 )
             } else {
-                (None, Vec::new())
+                (None, Vec::new(), None)
             };
         let post_compaction_fragment = if let Some(store) = self.store().map(Arc::clone)
             && let Ok(Some(runtime)) = crate::agent::load_thread_runtime(&store, thread_id).await
@@ -482,7 +550,14 @@ impl Agent {
             }
         };
         let prompt_assembly = PromptAssemblyV2::new()
-            .push_stable("workspace_prompt", workspace_prompt.unwrap_or_default())
+            .push_stable(
+                "workspace_prompt",
+                workspace_prompt.clone().unwrap_or_default(),
+            )
+            .push_stable(
+                "provider_system_prompt",
+                provider_system_prompt.clone().unwrap_or_default(),
+            )
             .push_stable(
                 "skills_index",
                 skill_index_context
@@ -550,13 +625,38 @@ impl Agent {
             let ephemeral_hash = prompt_assembly.ephemeral_hash.clone();
             let segment_order = prompt_assembly.segment_order.clone();
             let provider_context_refs = prompt_assembly.provider_context_refs.clone();
+            let prior_stable_hash = existing_runtime
+                .as_ref()
+                .and_then(|runtime| runtime.prompt_snapshot_hash.clone());
+            let frozen_workspace_prompt = workspace_prompt.clone();
+            let frozen_provider_system_prompt = provider_system_prompt.clone();
             let _ = crate::agent::mutate_thread_runtime(&store, thread_id, |runtime| {
+                if prompt_settings.session_freeze_enabled {
+                    runtime.frozen_workspace_prompt = runtime
+                        .frozen_workspace_prompt
+                        .clone()
+                        .or(frozen_workspace_prompt.clone());
+                    runtime.frozen_provider_system_prompt = runtime
+                        .frozen_provider_system_prompt
+                        .clone()
+                        .or(frozen_provider_system_prompt.clone());
+                }
                 runtime.prompt_snapshot_hash = Some(stable_hash.clone());
                 runtime.ephemeral_overlay_hash = Some(ephemeral_hash.clone());
                 runtime.prompt_segment_order = segment_order.clone();
                 runtime.provider_context_refs = provider_context_refs.clone();
             })
             .await;
+            if let Some(previous) = prior_stable_hash
+                && previous != stable_hash
+            {
+                tracing::info!(
+                    thread = %thread_id,
+                    previous_stable_hash = %previous,
+                    new_stable_hash = %stable_hash,
+                    "Stable prompt hash changed; cache-bust event recorded"
+                );
+            }
         }
 
         // Capture the routed model name for cost tracking, thinking config, etc.
@@ -1096,12 +1196,7 @@ impl Agent {
                         .metadata
                         .get("tool_profile")
                         .and_then(|value| value.as_str())
-                        .and_then(|value| match value {
-                            "standard" => Some(crate::tools::ToolProfile::Standard),
-                            "restricted" => Some(crate::tools::ToolProfile::Restricted),
-                            "explicit_only" => Some(crate::tools::ToolProfile::ExplicitOnly),
-                            _ => None,
-                        })
+                        .and_then(|value| value.parse::<crate::tools::ToolProfile>().ok())
                         .unwrap_or(self.config.main_tool_profile),
                     &job_ctx.metadata,
                 )
@@ -2096,13 +2191,10 @@ impl Agent {
                                     let target_tool_profile = parsed
                                         .get("target_tool_profile")
                                         .and_then(|v| v.as_str())
-                                        .map(|value| match value {
-                                            "standard" => crate::tools::ToolProfile::Standard,
-                                            "restricted" => crate::tools::ToolProfile::Restricted,
-                                            "explicit_only" => {
-                                                crate::tools::ToolProfile::ExplicitOnly
-                                            }
-                                            _ => self.config.subagent_tool_profile,
+                                        .map(|value| {
+                                            value
+                                                .parse::<crate::tools::ToolProfile>()
+                                                .unwrap_or(self.config.subagent_tool_profile)
                                         });
                                     let parent_identity = message.resolved_identity();
 

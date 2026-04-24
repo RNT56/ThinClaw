@@ -306,8 +306,11 @@ ThinClaw auto-detects the local browser binary in common locations. No configura
 **Override the binary path:**
 
 ```env
-CHROME_PATH=/usr/bin/google-chrome-stable
+BROWSER_EXECUTABLE=/usr/bin/google-chrome-stable
 ```
+
+`CHROME_PATH` is still accepted as a legacy alias, but new Linux deployments
+should use `BROWSER_EXECUTABLE`.
 
 ---
 
@@ -320,11 +323,54 @@ CHROME_PATH=/usr/bin/google-chrome-stable
 **ThinClaw configuration:**
 
 ```env
-# Force Docker Chromium even if a local binary exists
-BROWSER_DOCKER=always
+# auto: use local browser first, then Docker Chromium fallback
+# always: force Docker Chromium even if a local binary exists
+# never: disable Docker Chromium fallback
+BROWSER_DOCKER=auto
 ```
 
 The `BrowserTool` handles the container lifecycle automatically (start, health-check, stop).
+
+---
+
+## Linux Runtime Readiness
+
+Use `thinclaw doctor --profile server` for Ubuntu/Debian server or Docker hosts,
+`thinclaw doctor --profile desktop-gnome` for the supported GNOME/X11 desktop
+path, and `thinclaw doctor --profile all-features` before building or running
+with every optional feature enabled.
+
+Important Linux env vars:
+
+```env
+BROWSER_EXECUTABLE=/usr/bin/google-chrome-stable
+BROWSER_DOCKER=auto
+SCREEN_CAPTURE_ENABLED=false
+CAMERA_CAPTURE_ENABLED=false
+TALK_MODE_ENABLED=false
+LOCATION_ENABLED=false
+LOCATION_ALLOW_IP_FALLBACK=false
+THINCLAW_CAMERA_DEVICE=/dev/video0
+THINCLAW_MICROPHONE_DEVICE=default
+THINCLAW_MICROPHONE_BACKEND=auto
+THINCLAW_ALLOW_ENV_MASTER_KEY=1
+SECRETS_MASTER_KEY=hex-encoded-32-byte-key-for-headless-hosts
+```
+
+`SECRETS_MASTER_KEY` is ignored by default. Use the environment fallback only for headless hosts or containers where Linux Secret Service is not available, and prefer a service-manager secret mechanism over plain shell exports.
+
+Ubuntu/Debian packages for the supported GNOME/X11 desktop-autonomy path:
+
+```bash
+sudo apt install python3 python3-gi python3-pyatspi libreoffice \
+  libreoffice-script-provider-python evolution evolution-data-server-bin \
+  xdotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick \
+  at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam
+```
+
+Linux native Apple Mail and native iMessage channels are not available. Use
+Gmail for mail and BlueBubbles for iMessage-compatible messaging from a Mac-hosted
+BlueBubbles server.
 
 ---
 
@@ -624,7 +670,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/thinclaw.yourdomain.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:18789;
+        proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -652,7 +698,7 @@ Use [Let's Encrypt](https://letsencrypt.org/) + [certbot](https://certbot.eff.or
 
 ```
 thinclaw.yourdomain.com {
-    reverse_proxy localhost:18789
+    reverse_proxy localhost:3000
 }
 ```
 

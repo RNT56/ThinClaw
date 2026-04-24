@@ -12,7 +12,10 @@ Use this page to pick the right path for your role instead of relying on whichev
 - Understanding identity, packs, and `/personality`: go to [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
 - Understanding memory, continuity, and `/compress`: go to [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
 - Understanding outcome-backed learning, Learning Ledger outcomes, and deferred review: go to [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md)
+- Understanding skill trust, provenance, quarantine, and lifecycle tools: go to [SKILLS_ECOSYSTEM.md](SKILLS_ECOSYSTEM.md)
+- Running ThinClaw in editor-native ACP clients: go to [ACP_INTEGRATION.md](ACP_INTEGRATION.md)
 - Understanding research workspaces, experiments, and GPU clouds: go to [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md)
+- Understanding eval/SFT agent environments: go to [AGENT_ENV.md](AGENT_ENV.md)
 - Understanding the shared surface vocabulary: go to [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md)
 - Choosing or configuring providers: go to [LLM_PROVIDERS.md](LLM_PROVIDERS.md)
 - Understanding channels: go to [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md)
@@ -28,7 +31,10 @@ Use this page to pick the right path for your role instead of relying on whichev
 - [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
 - [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
 - [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md)
+- [SKILLS_ECOSYSTEM.md](SKILLS_ECOSYSTEM.md)
+- [ACP_INTEGRATION.md](ACP_INTEGRATION.md)
 - [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md)
+- [AGENT_ENV.md](AGENT_ENV.md)
 - Deployment note: `thinclaw` and `thinclaw run` are quiet by default; use `thinclaw --debug` or `thinclaw --debug run` for verbose startup logs
 - [LLM_PROVIDERS.md](LLM_PROVIDERS.md)
 - [EXTERNAL_DEPENDENCIES.md](EXTERNAL_DEPENDENCIES.md)
@@ -59,8 +65,11 @@ Use this page to pick the right path for your role instead of relying on whichev
 | Identity packs and session personality | [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md) |
 | Memory, continuity, and growth surfaces | [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md) |
 | Outcome-backed learning and Learning Ledger outcomes | [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md) |
+| Skills ecosystem and lifecycle | [SKILLS_ECOSYSTEM.md](SKILLS_ECOSYSTEM.md) |
+| ACP editor integration | [ACP_INTEGRATION.md](ACP_INTEGRATION.md) |
 | Desktop autonomy profile, bootstrap, and rollback | [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md) |
 | Research, experiments, and remote runners | [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md) |
+| AgentEnv eval and SFT framework | [AGENT_ENV.md](AGENT_ENV.md) |
 | Shared cross-surface command vocabulary | [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md) |
 | Onboarding and setup behavior | [../src/setup/README.md](../src/setup/README.md) |
 | Deployment and remote access | [DEPLOYMENT.md](DEPLOYMENT.md) |
@@ -68,6 +77,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 | Security and trust | [SECURITY.md](SECURITY.md) |
 | Extension architecture | [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md) |
 | LLM provider configuration | [LLM_PROVIDERS.md](LLM_PROVIDERS.md) |
+| Secrets, Provider Vault, and trust boundaries | [SECURITY.md](SECURITY.md) |
 | Provider catalog (code) | [../src/config/provider_catalog.rs](../src/config/provider_catalog.rs) |
 | Tool implementation guidance | [../src/tools/README.md](../src/tools/README.md) |
 | Memory and workspace model | [../src/workspace/README.md](../src/workspace/README.md) |

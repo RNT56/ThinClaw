@@ -1,7 +1,7 @@
 //! Tool registry for managing available tools.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -25,21 +25,23 @@ use crate::tools::builtin::{AgentBrowserTool, BrowserTool};
 use crate::tools::builtin::{
     AgentThinkTool, AppleMailTool, ApplyPatchTool, CancelJobTool, CanvasTool, ClarifyTool,
     CreateAgentTool, CreateJobTool, DesktopAutonomyTool, DeviceInfoTool, EchoTool,
-    EmitUserMessageTool, ExecuteCodeTool, ExternalMemoryRecallTool, ExternalMemoryStatusTool,
-    GrepTool, HomeAssistantTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
-    LearningFeedbackTool, LearningHistoryTool, LearningOutcomesTool, LearningProposalReviewTool,
-    LearningStatusTool, ListAgentsTool, ListDirTool, ListJobsTool, LlmListModelsTool,
-    LlmSelectTool, MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool,
-    MemoryWriteTool, MessageAgentTool, MoaTool, ProcessTool, PromptManageTool, PromptQueue,
-    ReadFileTool, RemoveAgentTool, SearchFilesTool, SendMessageTool, SessionSearchTool,
-    SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, SkillInstallTool,
-    SkillListTool, SkillManageTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
-    SkillSearchTool, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool, VisionAnalyzeTool,
-    WriteFileTool,
+    EmitUserMessageTool, ExecuteCodeTool, ExternalMemoryOffTool, ExternalMemoryRecallTool,
+    ExternalMemorySetupTool, ExternalMemoryStatusTool, GrepTool, HomeAssistantTool, HttpTool,
+    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, LearningFeedbackTool,
+    LearningHistoryTool, LearningOutcomesTool, LearningProposalReviewTool, LearningStatusTool,
+    ListAgentsTool, ListDirTool, ListJobsTool, LlmListModelsTool, LlmSelectTool, MemoryDeleteTool,
+    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, MoaTool,
+    ProcessTool, PromptManageTool, PromptQueue, ReadFileTool, RemoveAgentTool, SearchFilesTool,
+    SendMessageTool, SessionSearchTool, SharedModelOverride, SharedProcessRegistry,
+    SharedTodoStore, ShellTool, SkillAuditTool, SkillInstallTool, SkillListTool, SkillManageTool,
+    SkillPromoteTrustTool, SkillReadTool, SkillReloadTool, SkillRemoveTool, SkillSearchTool,
+    SkillSnapshotTool, SkillUpdateTool, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool,
+    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool,
+    VisionAnalyzeTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDescriptor, ToolDomain, ToolExecutionLane, ToolProfile};
+use crate::tools::user_tool::{UserToolLoadResults, load_user_tools_from_dir};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
     WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
@@ -86,7 +88,11 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_read",
     "skill_search",
     "skill_install",
+    "skill_update",
+    "skill_audit",
+    "skill_snapshot",
     "skill_remove",
+    "skill_trust_promote",
     "tts",
     "browser",
     "canvas",
@@ -112,6 +118,8 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "learning_feedback",
     "learning_proposal_review",
     "external_memory_recall",
+    "external_memory_setup",
+    "external_memory_off",
     "external_memory_status",
     // Hermes-parity tools
     "process",
@@ -134,12 +142,21 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
 ];
 
 const IMPLICIT_CAPABILITY_TOOLS: &[&str] = &["agent_think", "emit_user_message"];
-const HIDDEN_BY_DEFAULT_TOOL_NAMES: &[&str] = &["external_memory_recall", "external_memory_status"];
+const HIDDEN_BY_DEFAULT_TOOL_NAMES: &[&str] = &[
+    "external_memory_recall",
+    "external_memory_setup",
+    "external_memory_off",
+    "external_memory_status",
+];
 const SKILL_ADMIN_TOOLS: &[&str] = &[
     "skill_search",
     "skill_install",
+    "skill_update",
+    "skill_audit",
+    "skill_snapshot",
     "skill_remove",
     "skill_reload",
+    "skill_trust_promote",
     "skill_manage",
 ];
 
@@ -509,8 +526,8 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ClarifyTool));
 
         // Browser tool with user-local profile dir.
-        // Attach Docker Chromium config when the env var is set, so the tool
-        // can fall back to a containerised browser when no local Chrome exists.
+        // Attach Docker Chromium config in auto/always mode so the tool can
+        // fall back to a containerised browser when no local browser exists.
         #[cfg(feature = "browser")]
         {
             let browser_profile = dirs::data_dir()
@@ -532,7 +549,7 @@ impl ToolRegistry {
                     browser_profile,
                     cloud_browser_provider.map(std::borrow::ToOwned::to_owned),
                 ))
-            } else if std::env::var("BROWSER_DOCKER").is_ok() {
+            } else if crate::platform::BrowserDockerMode::from_env_lossy().allows_docker() {
                 let docker_config =
                     crate::sandbox::docker_chromium::DockerChromiumConfig::from_env();
                 tracing::info!(
@@ -847,12 +864,24 @@ impl ToolRegistry {
         self.register_sync(Arc::new(SkillInstallTool::new(
             Arc::clone(&registry),
             Arc::clone(&catalog),
-            remote_hub,
-            quarantine,
+            remote_hub.clone(),
+            Arc::clone(&quarantine),
         )));
+        self.register_sync(Arc::new(SkillUpdateTool::new(
+            Arc::clone(&registry),
+            Arc::clone(&catalog),
+            remote_hub.clone(),
+            Arc::clone(&quarantine),
+        )));
+        self.register_sync(Arc::new(SkillAuditTool::new(
+            Arc::clone(&registry),
+            Arc::clone(&quarantine),
+        )));
+        self.register_sync(Arc::new(SkillSnapshotTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillRemoveTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(SkillReloadTool::new(registry)));
-        tracing::info!("Registered 6 skill management tools");
+        self.register_sync(Arc::new(SkillReloadTool::new(Arc::clone(&registry))));
+        self.register_sync(Arc::new(SkillPromoteTrustTool::new(registry)));
+        tracing::info!("Registered 10 skill management tools");
     }
 
     /// Register learning tools for prompt mutation and learning-ledger access.
@@ -898,11 +927,17 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ExternalMemoryRecallTool::new(Arc::clone(
             &orchestrator,
         ))));
+        self.register_sync(Arc::new(ExternalMemorySetupTool::new(Arc::clone(
+            &orchestrator,
+        ))));
+        self.register_sync(Arc::new(ExternalMemoryOffTool::new(Arc::clone(
+            &orchestrator,
+        ))));
         self.register_sync(Arc::new(ExternalMemoryStatusTool::new(Arc::clone(
             &orchestrator,
         ))));
         self.register_sync(Arc::new(LearningProposalReviewTool::new(orchestrator)));
-        count += 7;
+        count += 9;
 
         tracing::info!("Registered {} learning tools", count);
     }
@@ -1172,6 +1207,28 @@ impl ToolRegistry {
         }
         self.register_sync(Arc::new(tool));
         tracing::info!("Registered search_files tool");
+    }
+
+    /// Auto-discover operator-trusted user tools from the configured TOML directory.
+    pub async fn auto_discover_user_tools(
+        self: &Arc<Self>,
+        dir: &Path,
+        base_dir: Option<PathBuf>,
+        working_dir: Option<PathBuf>,
+        safety: Option<&SafetyConfig>,
+        wasm_runtime: Option<Arc<WasmToolRuntime>>,
+        secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    ) -> UserToolLoadResults {
+        load_user_tools_from_dir(
+            Arc::clone(self),
+            dir,
+            base_dir,
+            working_dir,
+            safety,
+            wasm_runtime,
+            secrets_store,
+        )
+        .await
     }
 
     /// Register the software builder tool.

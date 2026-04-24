@@ -270,7 +270,11 @@ impl<'a> WasmToolOAuthFlow<'a> {
             None if is_google_secret_name(&auth.secret_name) => {
                 let access_token = self
                     .secrets
-                    .get_decrypted(self.user_id, &existing_secret_name)
+                    .get_for_injection(
+                        self.user_id,
+                        &existing_secret_name,
+                        crate::secrets::SecretAccessContext::new("wasm.oauth", "scope_discovery"),
+                    )
                     .await?;
                 match discover_google_token_scopes(access_token.expose()).await {
                     Ok(scopes) if !scopes.is_empty() => {
@@ -578,7 +582,11 @@ impl<'a> WasmToolOAuthFlow<'a> {
         for candidate in secret_lookup_names(secret_name) {
             match self
                 .secrets
-                .get_decrypted(&self.user_id, &scopes_secret_name(&candidate))
+                .get_for_injection(
+                    &self.user_id,
+                    &scopes_secret_name(&candidate),
+                    crate::secrets::SecretAccessContext::new("wasm.oauth", "scope_metadata_read"),
+                )
                 .await
             {
                 Ok(value) => return Ok(Some(parse_scopes_value(value.expose()))),
@@ -606,7 +614,11 @@ impl<'a> WasmToolOAuthFlow<'a> {
 
         let existing = self
             .secrets
-            .get_decrypted(self.user_id, existing_secret_name)
+            .get_for_injection(
+                self.user_id,
+                existing_secret_name,
+                crate::secrets::SecretAccessContext::new("wasm.oauth", "secret_alias_migration"),
+            )
             .await?;
         let mut params = CreateSecretParams::new(&canonical, existing.expose());
         if let Some(ref provider) = auth.provider {
@@ -618,7 +630,14 @@ impl<'a> WasmToolOAuthFlow<'a> {
 
         if let Ok(refresh) = self
             .secrets
-            .get_decrypted(self.user_id, &refresh_secret_name(existing_secret_name))
+            .get_for_injection(
+                self.user_id,
+                &refresh_secret_name(existing_secret_name),
+                crate::secrets::SecretAccessContext::new(
+                    "wasm.oauth",
+                    "refresh_secret_alias_migration",
+                ),
+            )
             .await
         {
             let refresh_params =

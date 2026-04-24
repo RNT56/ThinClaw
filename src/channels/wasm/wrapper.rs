@@ -193,6 +193,10 @@ impl ChannelStoreData {
         }
         result
     }
+
+    fn leak_detector(&self) -> LeakDetector {
+        LeakDetector::with_exact_values(self.credentials.values().cloned())
+    }
 }
 
 // Implement WasiView to provide WASI context and resource table
@@ -247,16 +251,21 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             "WASM http_request called"
         );
 
-        // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN} with actual token)
-        let injected_url = self.inject_credentials(&url, "url");
+        let leak_detector = self.leak_detector();
+        let raw_headers: std::collections::HashMap<String, String> =
+            serde_json::from_str(&headers_json).unwrap_or_default();
+        let raw_header_vec: Vec<(String, String)> = raw_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
-        // Log whether injection happened (without revealing the token)
-        let url_changed = injected_url != url;
-        tracing::info!(url_changed = url_changed, "URL after credential injection");
+        leak_detector
+            .scan_http_request(&url, &raw_header_vec, body.as_deref())
+            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
-        // Check if HTTP is allowed for this URL
+        // Check if HTTP is allowed before credential injection.
         self.host_state
-            .check_http_allowed(&injected_url, &method)
+            .check_http_allowed(&url, &method)
             .map_err(|e| {
                 tracing::error!(error = %e, "HTTP not allowed");
                 format!("HTTP not allowed: {}", e)
@@ -268,11 +277,15 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             format!("Rate limit exceeded: {}", e)
         })?;
 
-        // Parse headers and inject credentials into header values
-        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
-        let raw_headers: std::collections::HashMap<String, String> =
-            serde_json::from_str(&headers_json).unwrap_or_default();
+        // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN} with actual token)
+        let injected_url = self.inject_credentials(&url, "url");
 
+        // Log whether injection happened (without revealing the token)
+        let url_changed = injected_url != url;
+        tracing::info!(url_changed = url_changed, "URL after credential injection");
+
+        // Inject credentials into header values
+        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
         let headers: std::collections::HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
@@ -293,16 +306,6 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         );
 
         let url = injected_url;
-        let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
-
         // Get the max response size from capabilities (default 10MB).
         let max_response_bytes = self
             .host_state
@@ -402,7 +405,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                     max_response
                 ));
             }
-            let body = body.to_vec();
+            let mut body = body.to_vec();
 
             tracing::info!(
                 status = status,
@@ -422,9 +425,12 @@ impl near::agent::channel_host::Host for ChannelStoreData {
 
             // Leak detection on response body (best-effort)
             if let Ok(body_str) = std::str::from_utf8(&body) {
-                leak_detector
+                let cleaned = leak_detector
                     .scan_and_clean(body_str)
                     .map_err(|e| format!("Potential secret leak in response: {}", e))?;
+                if cleaned != body_str {
+                    body = cleaned.into_bytes();
+                }
             }
 
             Ok(near::agent::channel_host::HttpResponse {

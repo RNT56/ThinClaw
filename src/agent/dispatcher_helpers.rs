@@ -30,12 +30,7 @@ pub(crate) async fn execute_chat_tool_standalone(
         .metadata
         .get("tool_profile")
         .and_then(|value| value.as_str())
-        .and_then(|value| match value {
-            "standard" => Some(ToolProfile::Standard),
-            "restricted" => Some(ToolProfile::Restricted),
-            "explicit_only" => Some(ToolProfile::ExplicitOnly),
-            _ => None,
-        });
+        .and_then(|value| value.parse::<ToolProfile>().ok());
 
     let prepared = match execution::prepare_tool_call(execution::ToolPrepareRequest {
         tools,

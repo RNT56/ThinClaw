@@ -309,7 +309,17 @@ pub async fn inject_channel_credentials_from_secrets(
             continue;
         }
 
-        let decrypted = match secrets.get_decrypted(user_id, &secret_meta.name).await {
+        let decrypted = match secrets
+            .get_for_injection(
+                user_id,
+                &secret_meta.name,
+                crate::secrets::SecretAccessContext::new(
+                    "wasm.channel_runtime_config",
+                    "channel_credential_injection",
+                ),
+            )
+            .await
+        {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(

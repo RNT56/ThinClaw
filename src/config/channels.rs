@@ -11,6 +11,7 @@ use crate::settings::Settings;
 #[derive(Debug, Clone)]
 pub struct ChannelsConfig {
     pub cli: CliConfig,
+    pub acp_enabled: bool,
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
@@ -245,6 +246,7 @@ impl ChannelsConfig {
             cli: CliConfig {
                 enabled: cli_enabled,
             },
+            acp_enabled: parse_bool_env("ACP_ENABLED", settings.channels.acp_enabled)?,
             http,
             gateway,
             signal,

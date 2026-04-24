@@ -7,7 +7,7 @@
 #
 # Core features (always installed):
 #   - Docker Engine + Docker Compose
-#   - UFW Firewall (allows SSH + port 18789)
+#   - UFW Firewall (allows SSH + the ThinClaw gateway port)
 #   - Fail2ban (SSH brute-force protection)
 #   - ThinClaw Docker Compose stack
 #
@@ -63,7 +63,7 @@ fi
 # ── Detect environment ──────────────────────────────────────────────────────
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-THINCLAW_PORT=18789
+THINCLAW_PORT="${GATEWAY_PORT:-3000}"
 
 echo "============================================================"
 echo "  ThinClaw Remote Agent Setup"
@@ -307,6 +307,7 @@ cp env.example .env
 
 # Inject the gateway auth token
 sed -i "s/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=${TOKEN}/" .env
+sed -i "s/^GATEWAY_PORT=.*/GATEWAY_PORT=${THINCLAW_PORT}/" .env
 
 echo "    .env configured with gateway token."
 
@@ -383,6 +384,12 @@ sleep 5
 
 CONTAINER_STATUS=$(docker ps --filter "name=thinclaw-remote" --format "{{.Status}}" 2>/dev/null || echo "unknown")
 echo "  Container status: $CONTAINER_STATUS"
+if curl -fsS "http://localhost:$THINCLAW_PORT/api/health" >/dev/null 2>&1; then
+    echo "  Health endpoint:  http://localhost:$THINCLAW_PORT/api/health OK"
+else
+    echo "  WARNING: Health endpoint did not respond on http://localhost:$THINCLAW_PORT/api/health"
+    echo "           Check: docker compose ps && docker compose logs thinclaw"
+fi
 
 # Determine connection URL
 if [[ -n "$TAILSCALE_KEY" ]] && command -v tailscale &> /dev/null; then

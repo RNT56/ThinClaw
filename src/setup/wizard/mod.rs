@@ -765,9 +765,16 @@ impl SetupWizard {
                 Ok(status) => status,
                 Err(SetupError::Io(error)) if shell.is_some() && is_back_navigation(&error) => {
                     self.restore_checkpoint(checkpoint);
-                    if self.should_reopen_tui_menus_on_back(index, shell.is_some())
-                        && self.reroute_tui_back_from_first_guided_step().await?
-                    {
+                    let rerouted = if self.should_reopen_tui_menus_on_back(index, shell.is_some()) {
+                        if self.is_guide_mode() {
+                            self.reroute_tui_back_from_first_guided_step().await?
+                        } else {
+                            self.reroute_tui_back_from_first_quick_step().await?
+                        }
+                    } else {
+                        false
+                    };
+                    if rerouted {
                         plan = self.plan.clone().ok_or_else(|| {
                             SetupError::Config(
                                 "Onboarding plan was not initialized after back navigation"
@@ -811,12 +818,12 @@ impl SetupWizard {
     }
 
     fn should_reopen_tui_menus_on_back(&self, index: usize, has_shell: bool) -> bool {
-        has_shell && index == 0 && !self.config.channels_only && self.is_guide_mode()
+        has_shell && index == 0 && !self.config.channels_only
     }
 
     async fn reroute_tui_back_from_first_guided_step(&mut self) -> Result<bool, SetupError> {
         let original_guide_topic = self.config.guide_topic;
-        if !self.should_reopen_tui_menus_on_back(0, true) {
+        if !self.is_guide_mode() || !self.should_reopen_tui_menus_on_back(0, true) {
             return Ok(false);
         }
 
@@ -849,6 +856,36 @@ impl SetupWizard {
                     return Err(error);
                 }
             }
+        }
+
+        self.apply_run_mode_defaults().await?;
+        self.reset_plan_state();
+        Ok(true)
+    }
+
+    /// Re-show the Quick vs. Advanced entry prompt when the user presses
+    /// Ctrl+B on the very first plan step in quick-setup mode.
+    async fn reroute_tui_back_from_first_quick_step(&mut self) -> Result<bool, SetupError> {
+        if self.is_guide_mode() || !self.should_reopen_tui_menus_on_back(0, true) {
+            return Ok(false);
+        }
+
+        // Re-present the "Quick Setup vs. Advanced Setup" entry prompt.
+        // If the user presses Ctrl+B again at that prompt, treat it as a
+        // no-op (stay on current plan) since there is nothing further back.
+        match self.resolve_setup_entry_prompt(self.resolved_ui_mode) {
+            Ok(()) => {
+                // User may have switched to Advanced, which sets guide_topic.
+                // If they picked Advanced, show the topic menu too.
+                if self.config.guide_topic == Some(GuideTopic::Menu) {
+                    self.resolve_guide_topic_prompt()?;
+                }
+            }
+            Err(SetupError::Io(error)) if is_back_navigation(&error) => {
+                // Nowhere further back to go — stay on the current plan.
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
         }
 
         self.apply_run_mode_defaults().await?;
@@ -2011,10 +2048,11 @@ mod tests {
     }
 
     #[test]
-    fn test_tui_back_does_not_reopen_menus_in_quick_setup() {
+    fn test_tui_back_reopens_menus_in_quick_setup() {
         let wizard = SetupWizard::new();
 
-        assert!(!wizard.should_reopen_tui_menus_on_back(0, true));
+        // Quick setup should also allow Ctrl+B back to the entry prompt.
+        assert!(wizard.should_reopen_tui_menus_on_back(0, true));
     }
 
     #[test]

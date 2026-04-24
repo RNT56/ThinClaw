@@ -282,6 +282,8 @@ impl Agent {
             runtime.pending_approval = None;
             runtime.pending_auth = None;
             runtime.post_compaction_context = None;
+            runtime.frozen_workspace_prompt = None;
+            runtime.frozen_provider_system_prompt = None;
             runtime.prompt_snapshot_hash = None;
             runtime.ephemeral_overlay_hash = None;
             runtime.prompt_segment_order.clear();
@@ -848,6 +850,8 @@ impl Agent {
             let ephemeral_overlay_hash = runtime.ephemeral_overlay_hash.clone();
             let prompt_segment_order = runtime.prompt_segment_order.clone();
             let provider_context_refs = runtime.provider_context_refs.clone();
+            let frozen_workspace_prompt = runtime.frozen_workspace_prompt.clone();
+            let frozen_provider_system_prompt = runtime.frozen_provider_system_prompt.clone();
             *runtime = thread.runtime_state(
                 owner_agent_id.clone(),
                 model_override.clone(),
@@ -862,6 +866,8 @@ impl Agent {
             runtime.post_compaction_context = existing_runtime
                 .as_ref()
                 .and_then(|saved| saved.post_compaction_context.clone());
+            runtime.frozen_workspace_prompt = frozen_workspace_prompt;
+            runtime.frozen_provider_system_prompt = frozen_provider_system_prompt;
             runtime.prompt_snapshot_hash = prompt_snapshot_hash;
             runtime.ephemeral_overlay_hash = ephemeral_overlay_hash;
             runtime.prompt_segment_order = prompt_segment_order;
@@ -2247,12 +2253,7 @@ impl Agent {
                 .metadata
                 .get("tool_profile")
                 .and_then(|value| value.as_str())
-                .and_then(|value| match value {
-                    "standard" => Some(ToolProfile::Standard),
-                    "restricted" => Some(ToolProfile::Restricted),
-                    "explicit_only" => Some(ToolProfile::ExplicitOnly),
-                    _ => None,
-                });
+                .and_then(|value| value.parse::<ToolProfile>().ok());
 
             let _ = self
                 .channels

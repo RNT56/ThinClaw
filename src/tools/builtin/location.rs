@@ -3,7 +3,7 @@
 //! Gets the device's current geographic location.
 //! Uses platform-native approaches:
 //! - macOS: CoreLocation via a small inline Swift script
-//! - Linux: GeoClue D-Bus service or IP-based geolocation
+//! - Linux: GeoClue D-Bus service; optional IP fallback only when explicitly enabled
 //!
 //! This replaces `LocationCommands.swift` from the companion app.
 
@@ -142,38 +142,8 @@ if let loc = delegate.location {
     })
 }
 
-/// Get location on Linux using IP-based geolocation as fallback.
-#[cfg(target_os = "linux")]
-async fn get_location() -> Result<LocationResult, ToolError> {
-    // Try IP-based geolocation as a simple fallback
-    let client = reqwest::Client::new();
-    let resp = client
-        .get("http://ip-api.com/json/?fields=lat,lon")
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("IP geolocation: {e}")))?;
-
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| ToolError::ExecutionFailed(format!("Parse: {e}")))?;
-
-    let lat = body.get("lat").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let lon = body.get("lon").and_then(|v| v.as_f64()).unwrap_or(0.0);
-
-    Ok(LocationResult {
-        latitude: lat,
-        longitude: lon,
-        accuracy_meters: None, // IP-based is very imprecise
-        altitude_meters: None,
-        source: "ip-geolocation".to_string(),
-    })
-}
-
-/// Get location on Windows using IP-based geolocation.
-#[cfg(target_os = "windows")]
-async fn get_location() -> Result<LocationResult, ToolError> {
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+async fn get_ip_geolocation() -> Result<LocationResult, ToolError> {
     let client = reqwest::Client::new();
     let resp = client
         .get("http://ip-api.com/json/?fields=lat,lon")
@@ -197,6 +167,115 @@ async fn get_location() -> Result<LocationResult, ToolError> {
         altitude_meters: None,
         source: "ip-geolocation".to_string(),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ip_fallback_allowed() -> bool {
+    crate::platform::env_flag_enabled("LOCATION_ALLOW_IP_FALLBACK")
+}
+
+/// Get location on Linux using GeoClue D-Bus. IP lookup is an explicit fallback.
+#[cfg(target_os = "linux")]
+async fn get_location() -> Result<LocationResult, ToolError> {
+    match get_geoclue_location().await {
+        Ok(location) => Ok(location),
+        Err(geoclue_error) if linux_ip_fallback_allowed() => {
+            tracing::warn!(error = %geoclue_error, "GeoClue location failed; using explicit IP fallback");
+            get_ip_geolocation().await
+        }
+        Err(geoclue_error) => Err(ToolError::ExecutionFailed(format!(
+            "GeoClue location failed and IP fallback is disabled: {geoclue_error}. \
+             Install/configure GeoClue or set LOCATION_ALLOW_IP_FALLBACK=true to allow approximate network geolocation."
+        ))),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn get_geoclue_location() -> Result<LocationResult, ToolError> {
+    use zbus::zvariant::OwnedObjectPath;
+
+    let connection = zbus::Connection::system()
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("GeoClue system D-Bus: {e}")))?;
+    let manager = zbus::Proxy::new(
+        &connection,
+        "org.freedesktop.GeoClue2",
+        "/org/freedesktop/GeoClue2/Manager",
+        "org.freedesktop.GeoClue2.Manager",
+    )
+    .await
+    .map_err(|e| ToolError::ExecutionFailed(format!("GeoClue manager proxy: {e}")))?;
+
+    let client_path: OwnedObjectPath = manager
+        .call("GetClient", &())
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("GeoClue GetClient: {e}")))?;
+    let client = zbus::Proxy::new(
+        &connection,
+        "org.freedesktop.GeoClue2",
+        client_path.as_str(),
+        "org.freedesktop.GeoClue2.Client",
+    )
+    .await
+    .map_err(|e| ToolError::ExecutionFailed(format!("GeoClue client proxy: {e}")))?;
+
+    let _ = client.set_property("DesktopId", &"thinclaw").await;
+    let _ = client.set_property("RequestedAccuracyLevel", &4u32).await;
+    let _: () = client
+        .call("Start", &())
+        .await
+        .map_err(|e| ToolError::ExecutionFailed(format!("GeoClue Start: {e}")))?;
+
+    let mut last_error = "GeoClue did not publish a location".to_string();
+    for _ in 0..20 {
+        let location_path: Result<OwnedObjectPath, _> = client.get_property("Location").await;
+        match location_path {
+            Ok(path) if path.as_str() != "/" => {
+                let location = zbus::Proxy::new(
+                    &connection,
+                    "org.freedesktop.GeoClue2",
+                    path.as_str(),
+                    "org.freedesktop.GeoClue2.Location",
+                )
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("GeoClue location proxy: {e}")))?;
+                let latitude: f64 = location
+                    .get_property("Latitude")
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed(format!("GeoClue latitude: {e}")))?;
+                let longitude: f64 = location
+                    .get_property("Longitude")
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed(format!("GeoClue longitude: {e}")))?;
+                let accuracy_meters = location.get_property("Accuracy").await.ok();
+                let altitude_meters = location.get_property("Altitude").await.ok();
+                let _: Result<(), _> = client.call("Stop", &()).await;
+                return Ok(LocationResult {
+                    latitude,
+                    longitude,
+                    accuracy_meters,
+                    altitude_meters,
+                    source: "GeoClue".to_string(),
+                });
+            }
+            Ok(_) => {
+                last_error = "GeoClue returned an empty location path".to_string();
+            }
+            Err(error) => {
+                last_error = format!("GeoClue Location property: {error}");
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    let _: Result<(), _> = client.call("Stop", &()).await;
+    Err(ToolError::ExecutionFailed(last_error))
+}
+
+/// Get location on Windows using IP-based geolocation.
+#[cfg(target_os = "windows")]
+async fn get_location() -> Result<LocationResult, ToolError> {
+    get_ip_geolocation().await
 }
 
 #[async_trait]
@@ -277,5 +356,11 @@ mod tests {
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["latitude"], 37.7749);
         assert_eq!(json["longitude"], -122.4194);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_ip_fallback_defaults_off() {
+        assert!(!linux_ip_fallback_allowed());
     }
 }
