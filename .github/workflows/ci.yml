@@ -175,7 +175,10 @@ jobs:
       - name: Compose cleanup
         if: always()
         working-directory: deploy
-        run: docker compose down -v
+        run: |
+          if [ -f .env ]; then
+            docker compose down -v
+          fi
 
   linux-docker-multiarch-metadata:
     name: Linux Docker Multi-Arch Metadata
