@@ -26,8 +26,8 @@ use tokio::sync::Mutex;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamSupport,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Configuration for the response cache.
@@ -286,6 +286,14 @@ impl LlmProvider for CachedProvider {
     fn supports_streaming(&self) -> bool {
         self.inner.supports_streaming()
     }
+
+    fn stream_support(&self) -> StreamSupport {
+        self.inner.stream_support()
+    }
+
+    fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
+        self.inner.stream_support_for_model(requested_model)
+    }
 }
 
 #[cfg(test)]
@@ -303,6 +311,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             thinking: Default::default(),
+            stream_policy: Default::default(),
             metadata: Default::default(),
         }
     }
@@ -316,6 +325,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             thinking: Default::default(),
+            stream_policy: Default::default(),
             metadata: Default::default(),
         }
     }
@@ -454,6 +464,7 @@ mod tests {
             temperature: None,
             stop_sequences: None,
             thinking: Default::default(),
+            stream_policy: Default::default(),
             metadata: Default::default(),
         };
         cached.complete(third).await.unwrap();
@@ -475,6 +486,7 @@ mod tests {
             temperature: None,
             tool_choice: None,
             thinking: Default::default(),
+            stream_policy: Default::default(),
             metadata: Default::default(),
         };
 

@@ -33,7 +33,9 @@ pub use github_source::GitHubSkillSource;
 pub use lobe_source::LobeHubSkillSource;
 pub use quarantine::QuarantineManager;
 pub use registry::SkillRegistry;
-pub use remote_source::{RemoteSkill, RemoteSkillHub, RemoteSkillSource};
+pub use remote_source::{
+    RemoteSkill, RemoteSkillHub, RemoteSkillSource, SharedRemoteSkillHub, build_remote_skill_hub,
+};
 pub use selector::prefilter_skills;
 pub use skills_sh_source::SkillsShSource;
 pub use watcher::{SkillWatcher, SkillWatcherConfig};

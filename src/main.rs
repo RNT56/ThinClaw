@@ -96,12 +96,14 @@ fn setup_config_for_onboard_command(
     channels_only: bool,
     guide_topic: Option<thinclaw::setup::GuideTopic>,
     ui_mode: UiMode,
+    profile: Option<thinclaw::setup::OnboardingProfile>,
 ) -> SetupConfig {
     SetupConfig {
         skip_auth,
         channels_only,
         guide_topic,
         ui_mode,
+        profile,
         pause_after_completion: false,
     }
 }
@@ -268,14 +270,20 @@ async fn main() -> anyhow::Result<()> {
             channels_only,
             guide,
             ui,
+            profile,
         }) => {
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
 
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
-                let config =
-                    setup_config_for_onboard_command(*skip_auth, *channels_only, *guide, *ui);
+                let config = setup_config_for_onboard_command(
+                    *skip_auth,
+                    *channels_only,
+                    *guide,
+                    *ui,
+                    *profile,
+                );
                 let mut wizard = SetupWizard::with_config(config);
                 wizard.run().await?;
                 if wizard.should_continue_to_runtime() {
@@ -286,7 +294,7 @@ async fn main() -> anyhow::Result<()> {
             }
             #[cfg(not(any(feature = "postgres", feature = "libsql")))]
             {
-                let _ = (skip_auth, channels_only, guide, ui);
+                let _ = (skip_auth, channels_only, guide, ui, profile);
                 eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
                 return Ok(());
             }
@@ -511,6 +519,8 @@ async fn main() -> anyhow::Result<()> {
         uuid::Uuid,
         std::collections::VecDeque<thinclaw::orchestrator::api::PendingPrompt>,
     >::new()));
+    #[cfg(feature = "docker-sandbox")]
+    let mut orchestrator_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
 
     #[cfg(feature = "docker-sandbox")]
     let container_job_manager: Option<Arc<ContainerJobManager>> = if config.sandbox.enabled {
@@ -579,8 +589,15 @@ async fn main() -> anyhow::Result<()> {
             secrets_store: runtime_secrets_store.clone(),
         };
 
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        orchestrator_shutdown_tx = Some(shutdown_tx);
         tokio::spawn(async move {
-            if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
+            if let Err(e) =
+                OrchestratorApi::start_with_shutdown(orchestrator_state, 50051, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+            {
                 tracing::error!("Orchestrator API failed: {}", e);
             }
         });
@@ -1126,6 +1143,12 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref sc) = components.skill_catalog {
             gw = gw.with_skill_catalog(Arc::clone(sc));
         }
+        if let Some(ref hub) = components.skill_remote_hub {
+            gw = gw.with_skill_remote_hub(hub.clone());
+        }
+        if let Some(ref quarantine) = components.skill_quarantine {
+            gw = gw.with_skill_quarantine(Arc::clone(quarantine));
+        }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
         gw = gw.with_cost_tracker(Arc::clone(&components.cost_tracker));
         if let Some(ref ss) = components.secrets_store {
@@ -1316,6 +1339,14 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(runtime),
             Arc::clone(&components.tools),
         );
+        loader = loader.with_tool_invoker(Arc::new(
+            thinclaw::tools::execution::HostMediatedToolInvoker::new(
+                Arc::clone(&components.tools),
+                Arc::clone(&components.safety),
+                thinclaw::tools::ToolExecutionLane::WorkerRuntime,
+                thinclaw::tools::ToolProfile::ExplicitOnly,
+            ),
+        ));
         if let Some(ref secrets) = components.secrets_store {
             loader = loader.with_secrets_store(Arc::clone(secrets));
         }
@@ -1812,6 +1843,11 @@ async fn main() -> anyhow::Result<()> {
         server.lock().await.shutdown().await;
     }
 
+    #[cfg(feature = "docker-sandbox")]
+    if let Some(tx) = orchestrator_shutdown_tx.take() {
+        let _ = tx.send(());
+    }
+
     #[cfg(feature = "tunnel")]
     if let Some(tunnel) = active_tunnel {
         tracing::info!("Stopping {} tunnel...", tunnel.name());
@@ -1851,6 +1887,7 @@ mod tests {
             false,
             Some(thinclaw::setup::GuideTopic::Menu),
             UiMode::Cli,
+            None,
         );
 
         assert_eq!(config.guide_topic, Some(thinclaw::setup::GuideTopic::Menu));

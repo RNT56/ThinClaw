@@ -23,7 +23,7 @@ use crate::context::JobContext;
 use crate::error::LlmError;
 use crate::llm::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamChunkStream,
-    ToolCompletionRequest, ToolCompletionResponse,
+    StreamSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
@@ -165,6 +165,16 @@ impl LlmProvider for ModelSpecOverrideProvider {
     fn supports_streaming_for_model(&self, requested_model: Option<&str>) -> bool {
         self.inner
             .supports_streaming_for_model(requested_model.or(Some(self.model_spec.as_str())))
+    }
+
+    fn stream_support(&self) -> StreamSupport {
+        self.inner
+            .stream_support_for_model(Some(self.model_spec.as_str()))
+    }
+
+    fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
+        self.inner
+            .stream_support_for_model(requested_model.or(Some(self.model_spec.as_str())))
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {

@@ -104,6 +104,26 @@ jobs:
       - name: Host runtime smoke
         run: cargo test --features full --bin thinclaw --test host_runtime_smoke -- --nocapture --test-threads=1
 
+  linux-arm64-host-smoke:
+    name: Linux ARM64 Host Runtime Smoke
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-arm64-host-smoke
+      - name: cargo check
+        run: cargo check --features full
+      - name: Compile tests
+        run: cargo test --no-run --features full
+      - name: Host runtime smoke
+        run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+
   macos-host-regression:
     name: macOS Host Regression
     runs-on: macos-14
@@ -156,6 +176,21 @@ jobs:
         if: always()
         working-directory: deploy
         run: docker compose down -v
+
+  linux-docker-multiarch-metadata:
+    name: Linux Docker Multi-Arch Metadata
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Verify base images support ARM64
+        run: |
+          docker buildx imagetools inspect rust:1.92-slim-bookworm | grep -q 'linux/arm64'
+          docker buildx imagetools inspect debian:bookworm-slim | grep -q 'linux/arm64'
+      - name: Validate local Docker build
+        run: docker buildx build --platform linux/amd64 --build-arg BUILD_FEATURES=light --load -t thinclaw:ci-light .
 
   windows-host-matrix:
     name: "Windows Host: ${{ matrix.name }}"

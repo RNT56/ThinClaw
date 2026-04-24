@@ -80,6 +80,8 @@ pub struct AppComponents {
     pub hooks: Arc<HookRegistry>,
     pub skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<SkillCatalog>>,
+    pub skill_remote_hub: Option<crate::skills::SharedRemoteSkillHub>,
+    pub skill_quarantine: Option<Arc<crate::skills::quarantine::QuarantineManager>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
@@ -601,6 +603,7 @@ impl AppBuilder {
     pub async fn init_extensions(
         &self,
         tools: &Arc<ToolRegistry>,
+        safety: &Arc<SafetyLayer>,
         hooks: &Arc<HookRegistry>,
     ) -> Result<
         (
@@ -631,17 +634,26 @@ impl AppBuilder {
                 None
             };
 
+        let wasm_tool_invoker = Arc::new(crate::tools::execution::HostMediatedToolInvoker::new(
+            Arc::clone(tools),
+            Arc::clone(safety),
+            crate::tools::ToolExecutionLane::WorkerRuntime,
+            crate::tools::ToolProfile::ExplicitOnly,
+        ));
+
         // Load WASM tools and MCP servers concurrently
         let wasm_tools_future = {
             let wasm_tool_runtime = wasm_tool_runtime.clone();
             let secrets_store = self.secrets_store.clone();
             let tools = Arc::clone(tools);
+            let tool_invoker = Arc::clone(&wasm_tool_invoker);
             let wasm_config = self.config.wasm.clone();
             async move {
                 let mut dev_loaded_tool_names: Vec<String> = Vec::new();
 
                 if let Some(ref runtime) = wasm_tool_runtime {
                     let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
+                    loader = loader.with_tool_invoker(Arc::clone(&tool_invoker));
                     if let Some(ref secrets) = secrets_store {
                         loader = loader.with_secrets_store(Arc::clone(secrets));
                     }
@@ -870,6 +882,7 @@ impl AppBuilder {
                 Arc::clone(&mcp_session_manager),
                 ext_secrets,
                 Arc::clone(tools),
+                Some(Arc::clone(&wasm_tool_invoker)),
                 Some(Arc::clone(hooks)),
                 wasm_tool_runtime.clone(),
                 self.config.wasm.tools_dir.clone(),
@@ -1304,7 +1317,7 @@ impl AppBuilder {
             extension_manager,
             catalog_entries,
             dev_loaded_tool_names,
-        ) = self.init_extensions(&tools, &hooks).await?;
+        ) = self.init_extensions(&tools, &safety, &hooks).await?;
         tracing::info!(
             elapsed_ms = phase_start.elapsed().as_millis(),
             "Startup phase: extensions"
@@ -1366,6 +1379,14 @@ impl AppBuilder {
                 Some(&self.config.safety),
                 wasm_tool_runtime.clone(),
                 self.secrets_store.clone(),
+                Some(Arc::new(
+                    crate::tools::execution::HostMediatedToolInvoker::new(
+                        Arc::clone(&tools),
+                        Arc::clone(&safety),
+                        crate::tools::ToolExecutionLane::WorkerRuntime,
+                        crate::tools::ToolProfile::ExplicitOnly,
+                    ),
+                )),
             )
             .await;
         if !user_tool_results.loaded.is_empty() {
@@ -1499,113 +1520,71 @@ impl AppBuilder {
         }
 
         // Skills system
-        let (skill_registry, skill_catalog) = if self.config.skills.enabled {
-            let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
-                .with_installed_dir(self.config.skills.installed_dir.clone());
+        let (skill_registry, skill_catalog, skill_remote_hub, skill_quarantine) =
+            if self.config.skills.enabled {
+                let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
+                    .with_installed_dir(self.config.skills.installed_dir.clone());
 
-            // Wire workspace skills dir: <workspace_root>/skills/
-            //
-            // Workspace skills have highest priority (see discover_all ordering) and
-            // are loaded with Trusted trust level. They are intended for repo-scoped
-            // or project-scoped skills placed by developers alongside their code.
-            //
-            // Derivation priority:
-            //   1. SKILLS_WORKSPACE_DIR env var (explicit override)
-            //   2. <workspace_root>/skills/ when workspace_root is configured
-            //   3. No workspace skills directory (workspace skills disabled)
-            let workspace_skills_dir = if let Ok(explicit) = std::env::var("SKILLS_WORKSPACE_DIR") {
-                if !explicit.is_empty() {
-                    Some(std::path::PathBuf::from(explicit))
-                } else {
-                    None
+                // Wire workspace skills dir: <workspace_root>/skills/
+                //
+                // Workspace skills have highest priority (see discover_all ordering) and
+                // are loaded with Trusted trust level. They are intended for repo-scoped
+                // or project-scoped skills placed by developers alongside their code.
+                //
+                // Derivation priority:
+                //   1. SKILLS_WORKSPACE_DIR env var (explicit override)
+                //   2. <workspace_root>/skills/ when workspace_root is configured
+                //   3. No workspace skills directory (workspace skills disabled)
+                let workspace_skills_dir =
+                    if let Ok(explicit) = std::env::var("SKILLS_WORKSPACE_DIR") {
+                        if !explicit.is_empty() {
+                            Some(std::path::PathBuf::from(explicit))
+                        } else {
+                            None
+                        }
+                    } else {
+                        self.config
+                            .agent
+                            .workspace_root
+                            .as_ref()
+                            .map(|root| root.join("skills"))
+                    };
+
+                if let Some(ws_dir) = workspace_skills_dir {
+                    tracing::info!("Skills: workspace dir → {}", ws_dir.display());
+                    registry = registry.with_workspace_dir(ws_dir);
                 }
-            } else {
-                self.config
-                    .agent
-                    .workspace_root
-                    .as_ref()
-                    .map(|root| root.join("skills"))
-            };
 
-            if let Some(ws_dir) = workspace_skills_dir {
-                tracing::info!("Skills: workspace dir → {}", ws_dir.display());
-                registry = registry.with_workspace_dir(ws_dir);
-            }
-
-            let loaded = registry.discover_all().await;
-            if !loaded.is_empty() {
-                tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
-            }
-            let registry = Arc::new(tokio::sync::RwLock::new(registry));
-            let catalog = crate::skills::catalog::shared_catalog();
-            let mut remote_sources: Vec<Arc<dyn crate::skills::remote_source::RemoteSkillSource>> =
-                Vec::new();
-            if !self.config.skills.skill_taps.is_empty() {
-                match crate::skills::github_source::GitHubSkillSource::new(
+                let loaded = registry.discover_all().await;
+                if !loaded.is_empty() {
+                    tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
+                }
+                let registry = Arc::new(tokio::sync::RwLock::new(registry));
+                let catalog = crate::skills::catalog::shared_catalog();
+                let remote_hub = crate::skills::build_remote_skill_hub(
                     self.config.skills.skill_taps.clone(),
-                ) {
-                    Ok(source) if source.is_enabled() => remote_sources.push(Arc::new(source)),
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(error = %error, "Failed to initialize GitHub skill source");
-                    }
-                }
-            }
-            if !self.config.skills.well_known_skill_registries.is_empty() {
-                match crate::skills::well_known_source::WellKnownSkillSource::new(
                     self.config.skills.well_known_skill_registries.clone(),
-                ) {
-                    Ok(source) if source.is_enabled() => remote_sources.push(Arc::new(source)),
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "Failed to initialize well-known skill source"
-                        );
-                    }
-                }
-            }
-            if std::env::var("LOBEHUB_SKILLS_ENABLED")
-                .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
-                .unwrap_or(true)
-            {
-                match crate::skills::lobe_source::LobeHubSkillSource::new(
-                    std::env::var("LOBEHUB_SKILLS_INDEX_URL").ok(),
-                ) {
-                    Ok(source) => remote_sources.push(Arc::new(source)),
-                    Err(error) => {
-                        tracing::warn!(error = %error, "Failed to initialize LobeHub skill source");
-                    }
-                }
-            }
-            if let Ok(index_url) = std::env::var("SKILLS_SH_INDEX_URL") {
-                match crate::skills::skills_sh_source::SkillsShSource::new(index_url) {
-                    Ok(source) => remote_sources.push(Arc::new(source)),
-                    Err(error) => {
-                        tracing::warn!(error = %error, "Failed to initialize skills.sh source");
-                    }
-                }
-            }
-            let remote_hub = if remote_sources.is_empty() {
-                None
+                );
+                let shared_remote_hub = crate::skills::SharedRemoteSkillHub::new(remote_hub);
+                let quarantine = Arc::new(crate::skills::quarantine::QuarantineManager::new(
+                    self.config.skills.quarantine_dir.clone(),
+                ));
+                tools.register_skill_tools(
+                    Arc::clone(&registry),
+                    Arc::clone(&catalog),
+                    Some(shared_remote_hub.clone()),
+                    Arc::clone(&quarantine),
+                    self.db.as_ref().map(Arc::clone),
+                );
+                (
+                    Some(registry),
+                    Some(catalog),
+                    Some(shared_remote_hub),
+                    Some(quarantine),
+                )
             } else {
-                Some(Arc::new(crate::skills::remote_source::RemoteSkillHub::new(
-                    remote_sources,
-                )))
+                (None, None, None, None)
             };
-            let quarantine = Arc::new(crate::skills::quarantine::QuarantineManager::new(
-                self.config.skills.quarantine_dir.clone(),
-            ));
-            tools.register_skill_tools(
-                Arc::clone(&registry),
-                Arc::clone(&catalog),
-                remote_hub,
-                quarantine,
-            );
-            (Some(registry), Some(catalog))
-        } else {
-            (None, None)
-        };
 
         if let Some(db) = self.db.as_ref() {
             tools.register_learning_tools(
@@ -1678,6 +1657,8 @@ impl AppBuilder {
             hooks,
             skill_registry,
             skill_catalog,
+            skill_remote_hub,
+            skill_quarantine,
             cost_guard,
             catalog_entries,
             dev_loaded_tool_names,

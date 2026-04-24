@@ -51,8 +51,12 @@ The external memory layer still supports active-provider recall/export flows, bu
 - provider-specific stable prompt blocks
 - provider setup/off through agent tools
 - optional Honcho user-modeling injection via `cadence`, `depth`, and `user_modeling_enabled`
+- first-class provider adapters for `mem0`, `openmemory`, `letta`, `chroma`, and `qdrant`
 - `custom_http` provider support through the registry-backed config map
+- explicit `external_memory_export` for important facts or summaries that should be mirrored immediately
 
 Backwards compatibility is preserved for legacy `learning.providers.honcho` and `learning.providers.zep` settings.
 
 `custom_http` expects either `base_url` or explicit `recall_url` / `sync_url` values. Recall requests are POSTed as `{ user_id, query, limit }`; sync requests are POSTed as `{ user_id, payload }`. Responses may be an array or an object with `results`/`memories`, where each item exposes `summary`, `text`, or `content`.
+
+`mem0` defaults to the hosted Mem0 API and accepts `api_key` or `api_key_env`. `openmemory` defaults to a local Mem0/OpenMemory REST server at `http://localhost:8888`. `letta` requires `agent_id` and uses archival memory search/export paths. `chroma` and `qdrant` require `embedding_url` plus `collection_id` or `collection` respectively, because their native APIs need vectors for recall and upsert.

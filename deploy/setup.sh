@@ -3,20 +3,28 @@
 # ThinClaw Remote Deployment Setup Script
 # ============================================================================
 #
-# Bootstraps a Linux server for running the ThinClaw agent via Docker Compose.
+# Bootstraps a Linux server for running ThinClaw natively or via Docker Compose.
 #
-# Core features (always installed):
+# Core Docker features:
 #   - Docker Engine + Docker Compose
 #   - UFW Firewall (allows SSH + the ThinClaw gateway port)
 #   - Fail2ban (SSH brute-force protection)
 #   - ThinClaw Docker Compose stack
 #
+# Core native Pi OS Lite features:
+#   - /usr/local/bin/thinclaw
+#   - /var/lib/thinclaw/.thinclaw/.env
+#   - system thinclaw.service running as the unprivileged thinclaw user
+#
 # Optional features (via flags):
+#   --mode <auto|native|docker>
+#   --binary <path>          Native install source binary
+#   --image <image>          Docker image for Compose
 #   --tailscale <auth-key>   Install Tailscale VPN and join the network
 #   --systemd                Create a systemd service for ThinClaw
 #
 # Usage:
-#   sudo bash setup.sh --token <gateway_token> [--tailscale <ts-key>] [--systemd]
+#   sudo bash setup.sh --token <gateway_token> [--mode auto|native|docker] [--tailscale <ts-key>] [--systemd]
 #
 # Examples:
 #   # Minimal (Docker only):
@@ -34,18 +42,27 @@ set -euo pipefail
 TOKEN=""
 TAILSCALE_KEY=""
 ENABLE_SYSTEMD=false
+MODE="auto"
+BINARY_PATH=""
+THINCLAW_IMAGE="${THINCLAW_IMAGE:-ghcr.io/rnt56/thinclaw:latest}"
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --token) TOKEN="$2"; shift ;;
+        --mode) MODE="$2"; shift ;;
+        --binary) BINARY_PATH="$2"; shift ;;
+        --image) THINCLAW_IMAGE="$2"; shift ;;
         --tailscale) TAILSCALE_KEY="$2"; shift ;;
         --systemd) ENABLE_SYSTEMD=true ;;
         --help|-h)
-            echo "Usage: sudo bash setup.sh --token <token> [--tailscale <auth-key>] [--systemd]"
+            echo "Usage: sudo bash setup.sh --token <token> [--mode auto|native|docker] [--binary <path>] [--image <image>] [--tailscale <auth-key>] [--systemd]"
             echo ""
             echo "  --token <token>         Gateway auth token (required)"
+            echo "  --mode <mode>           Install mode: auto, native, or docker (default: auto)"
+            echo "  --binary <path>         Native install source binary"
+            echo "  --image <image>         Docker image for Compose (default: $THINCLAW_IMAGE)"
             echo "  --tailscale <auth-key>  Install Tailscale VPN and authenticate with this key"
-            echo "  --systemd               Create a systemd service for auto-start management"
+            echo "  --systemd               In docker mode, create a systemd service for auto-start management"
             echo ""
             exit 0
             ;;
@@ -60,6 +77,11 @@ if [[ -z "$TOKEN" ]]; then
     exit 1
 fi
 
+if [[ "$MODE" != "auto" && "$MODE" != "native" && "$MODE" != "docker" ]]; then
+    echo "ERROR: --mode must be one of: auto, native, docker"
+    exit 1
+fi
+
 # ── Detect environment ──────────────────────────────────────────────────────
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -71,6 +93,7 @@ echo "============================================================"
 echo ""
 echo "Deploy directory: $DEPLOY_DIR"
 echo "Gateway port:     $THINCLAW_PORT"
+echo "Requested mode:   $MODE"
 echo "Tailscale:        $([ -n "$TAILSCALE_KEY" ] && echo 'Yes' || echo 'No')"
 echo "Systemd service:  $([ "$ENABLE_SYSTEMD" = true ] && echo 'Yes' || echo 'No')"
 echo ""
@@ -95,6 +118,277 @@ else
 fi
 
 echo "==> Detected package manager: $PKG_MANAGER"
+
+is_pi_os_lite_64() {
+    local arch=""
+    arch="$(uname -m 2>/dev/null || true)"
+    [[ "$arch" == "aarch64" || "$arch" == "arm64" ]] || return 1
+    [[ -f /etc/os-release ]] || return 1
+    grep -qi "bookworm" /etc/os-release || return 1
+    if grep -qi "raspberry pi" /etc/os-release 2>/dev/null; then
+        return 0
+    fi
+    if [[ -f /etc/rpi-issue ]] && grep -qi "raspberry pi" /etc/rpi-issue; then
+        return 0
+    fi
+    return 1
+}
+
+generate_hex_32() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+    else
+        od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+    fi
+}
+
+configure_firewall() {
+    echo ""
+    echo "==> Configuring UFW Firewall..."
+
+    if ! command -v ufw &> /dev/null; then
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            apt-get install -y -qq ufw
+        elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
+            $PKG_MANAGER install -y epel-release 2>/dev/null || true
+            $PKG_MANAGER install -y ufw 2>/dev/null || true
+        fi
+    fi
+
+    if command -v ufw &> /dev/null; then
+        echo "y" | ufw reset 2>/dev/null || true
+        ufw default deny incoming
+        ufw default allow outgoing
+        ufw allow ssh comment "SSH access"
+        ufw allow "$THINCLAW_PORT/tcp" comment "ThinClaw Gateway"
+
+        if [[ -n "$TAILSCALE_KEY" ]]; then
+            ufw allow in on tailscale0 comment "Tailscale VPN"
+        fi
+
+        echo "y" | ufw enable
+        echo "    UFW configured:"
+        ufw status numbered 2>/dev/null || ufw status
+    else
+        echo "    WARNING: UFW could not be installed. Configure your firewall manually."
+        echo "    Required ports: SSH (22), ThinClaw ($THINCLAW_PORT/tcp)"
+    fi
+}
+
+install_fail2ban() {
+    echo ""
+    echo "==> Installing Fail2ban..."
+
+    if ! command -v fail2ban-client &> /dev/null; then
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            apt-get install -y -qq fail2ban
+        elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
+            $PKG_MANAGER install -y epel-release 2>/dev/null || true
+            $PKG_MANAGER install -y fail2ban
+        fi
+    fi
+
+    if command -v fail2ban-client &> /dev/null; then
+        cat > /etc/fail2ban/jail.local <<'FAIL2BAN_CONF'
+[DEFAULT]
+bantime  = 3600
+findtime = 600
+maxretry = 5
+
+[sshd]
+enabled = true
+port    = ssh
+filter  = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+FAIL2BAN_CONF
+
+        if [ ! -f /var/log/auth.log ]; then
+            sed -i 's|logpath = /var/log/auth.log|backend = systemd|' /etc/fail2ban/jail.local
+        fi
+
+        systemctl enable fail2ban
+        systemctl restart fail2ban
+        echo "    Fail2ban installed and configured."
+    else
+        echo "    WARNING: Fail2ban could not be installed."
+    fi
+}
+
+install_tailscale_if_requested() {
+    if [[ -z "$TAILSCALE_KEY" ]]; then
+        echo ""
+        echo "==> Tailscale: Skipped (no --tailscale flag provided)"
+        return 0
+    fi
+
+    echo ""
+    echo "==> Installing Tailscale VPN..."
+    if ! command -v tailscale &> /dev/null; then
+        curl -fsSL https://tailscale.com/install.sh | sh
+    fi
+
+    if command -v tailscale &> /dev/null; then
+        tailscale up --authkey="$TAILSCALE_KEY" --accept-routes --accept-dns=false
+        TS_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
+        echo "    Tailscale installed and connected."
+        echo "    Tailscale IPv4: $TS_IP"
+        if command -v ufw &> /dev/null; then
+            ufw delete allow "$THINCLAW_PORT/tcp" 2>/dev/null || true
+            ufw allow in on tailscale0 to any port "$THINCLAW_PORT" proto tcp \
+                comment "ThinClaw via Tailscale only"
+            echo "    UFW updated: port $THINCLAW_PORT only accessible via Tailscale."
+        fi
+    else
+        echo "    ERROR: Tailscale installation failed."
+    fi
+}
+
+resolve_native_binary() {
+    if [[ -n "$BINARY_PATH" && -x "$BINARY_PATH" ]]; then
+        echo "$BINARY_PATH"
+        return 0
+    fi
+    if [[ -x "$DEPLOY_DIR/../target/release/thinclaw" ]]; then
+        echo "$DEPLOY_DIR/../target/release/thinclaw"
+        return 0
+    fi
+    if [[ -x "$DEPLOY_DIR/../thinclaw" ]]; then
+        echo "$DEPLOY_DIR/../thinclaw"
+        return 0
+    fi
+    if command -v thinclaw >/dev/null 2>&1; then
+        command -v thinclaw
+        return 0
+    fi
+    return 1
+}
+
+install_native_pi() {
+    echo ""
+    echo "==> Native Raspberry Pi OS Lite install"
+
+    if [ "$PKG_MANAGER" != "apt" ]; then
+        echo "ERROR: Native Pi OS Lite mode expects apt."
+        exit 1
+    fi
+
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y -qq
+    apt-get install -y -qq ca-certificates curl openssl
+
+    local source_binary=""
+    if ! source_binary="$(resolve_native_binary)"; then
+        echo "ERROR: Could not find a ThinClaw binary to install."
+        echo "Provide one with --binary /path/to/thinclaw, or install the aarch64-unknown-linux-gnu release artifact first."
+        exit 1
+    fi
+
+    if [[ "$(readlink -f "$source_binary" 2>/dev/null || echo "$source_binary")" != "/usr/local/bin/thinclaw" ]]; then
+        install -m 0755 "$source_binary" /usr/local/bin/thinclaw
+    else
+        chmod 0755 /usr/local/bin/thinclaw
+    fi
+
+    if ! id thinclaw >/dev/null 2>&1; then
+        useradd --system --create-home --home-dir /var/lib/thinclaw --shell /usr/sbin/nologin thinclaw
+    fi
+
+    install -d -m 0750 -o thinclaw -g thinclaw /var/lib/thinclaw/.thinclaw
+    install -d -m 0750 -o thinclaw -g thinclaw /var/lib/thinclaw/.thinclaw/logs
+
+    local master_key=""
+    master_key="$(generate_hex_32)"
+    cat > /var/lib/thinclaw/.thinclaw/.env <<ENV
+ONBOARD_COMPLETED=true
+THINCLAW_HOME=/var/lib/thinclaw/.thinclaw
+DATABASE_BACKEND=libsql
+LIBSQL_PATH=/var/lib/thinclaw/.thinclaw/thinclaw.db
+GATEWAY_ENABLED=true
+GATEWAY_HOST=0.0.0.0
+GATEWAY_PORT=${THINCLAW_PORT}
+GATEWAY_AUTH_TOKEN=${TOKEN}
+THINCLAW_ALLOW_ENV_MASTER_KEY=1
+SECRETS_MASTER_KEY=${master_key}
+LLM_BACKEND=openai_compatible
+LLM_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_API_KEY=CHANGE_ME
+EMBEDDING_ENABLED=false
+CLI_ENABLED=false
+HEARTBEAT_ENABLED=false
+SANDBOX_ENABLED=false
+ROUTINES_ENABLED=true
+BROWSER_DOCKER=auto
+SCREEN_CAPTURE_ENABLED=false
+CAMERA_CAPTURE_ENABLED=false
+TALK_MODE_ENABLED=false
+LOCATION_ENABLED=false
+LOCATION_ALLOW_IP_FALLBACK=false
+DESKTOP_AUTONOMY_ENABLED=false
+ENV
+    chown thinclaw:thinclaw /var/lib/thinclaw/.thinclaw/.env
+    chmod 0600 /var/lib/thinclaw/.thinclaw/.env
+
+    cat > /etc/systemd/system/thinclaw.service <<'SYSTEMD_UNIT'
+[Unit]
+Description=ThinClaw AI Agent
+Documentation=https://github.com/RNT56/ThinClaw
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=thinclaw
+Group=thinclaw
+WorkingDirectory=/var/lib/thinclaw
+Environment=THINCLAW_HOME=/var/lib/thinclaw/.thinclaw
+Environment=HOME=/var/lib/thinclaw
+ExecStart=/usr/local/bin/thinclaw run --no-onboard
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMD_UNIT
+
+    systemctl daemon-reload
+    systemctl enable thinclaw.service
+    systemctl restart thinclaw.service || true
+
+    configure_firewall
+    install_fail2ban
+    install_tailscale_if_requested
+
+    echo ""
+    echo "============================================================"
+    echo "  ThinClaw Native Pi OS Lite Setup Complete!"
+    echo "============================================================"
+    echo "  Binary:       /usr/local/bin/thinclaw"
+    echo "  Config:       /var/lib/thinclaw/.thinclaw/.env"
+    echo "  Service:      systemctl status thinclaw"
+    echo "  Gateway URL:  http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo '<pi-ip>'):$THINCLAW_PORT"
+    echo "  Token:        $TOKEN"
+    echo ""
+    echo "  Next:"
+    echo "    1. Edit /var/lib/thinclaw/.thinclaw/.env and replace OPENROUTER_API_KEY=CHANGE_ME or configure another LLM."
+    echo "    2. Run: sudo systemctl restart thinclaw"
+    echo "    3. Verify: curl http://localhost:$THINCLAW_PORT/api/health"
+    echo "============================================================"
+}
+
+if [[ "$MODE" == "auto" ]]; then
+    if is_pi_os_lite_64; then
+        MODE="native"
+    else
+        MODE="docker"
+    fi
+    echo "==> Auto-selected install mode: $MODE"
+fi
+
+if [[ "$MODE" == "native" ]]; then
+    install_native_pi
+    exit 0
+fi
 
 # ============================================================================
 # 1. INSTALL DOCKER
@@ -308,6 +602,7 @@ cp env.example .env
 # Inject the gateway auth token
 sed -i "s/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=${TOKEN}/" .env
 sed -i "s/^GATEWAY_PORT=.*/GATEWAY_PORT=${THINCLAW_PORT}/" .env
+sed -i "s|^THINCLAW_IMAGE=.*|THINCLAW_IMAGE=${THINCLAW_IMAGE}|" .env
 
 echo "    .env configured with gateway token."
 
@@ -316,7 +611,8 @@ echo ""
 echo "==> Starting ThinClaw Docker Compose stack..."
 
 docker compose down 2>/dev/null || true
-docker compose up -d --build
+docker compose pull thinclaw 2>/dev/null || true
+docker compose up -d
 
 echo "    Docker Compose stack started."
 

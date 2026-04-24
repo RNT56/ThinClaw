@@ -159,6 +159,15 @@ pub enum StatusUpdate {
     StreamChunk(String),
     /// General status message.
     Status(String),
+    /// Structured plan update for clients that can render agent plans.
+    Plan { entries: Vec<serde_json::Value> },
+    /// LLM token/cost usage for the most recent model turn.
+    Usage {
+        input_tokens: u32,
+        output_tokens: u32,
+        cost_usd: Option<f64>,
+        model: Option<String>,
+    },
     /// A sandbox job has started (shown as a clickable card in the UI).
     JobStarted {
         job_id: String,
@@ -315,6 +324,8 @@ pub enum StreamMode {
     /// Status line: send a single updating status line that shows the
     /// current assistant state (like a progress bar), then a final message.
     StatusLine,
+    /// Emit `StatusUpdate::StreamChunk` events instead of editing a draft.
+    EventChunks,
 }
 
 impl StreamMode {
@@ -323,6 +334,9 @@ impl StreamMode {
         match s.to_lowercase().trim() {
             "edit" | "edit_first" | "editfirst" | "fulledit" | "full_edit" => Self::EditFirst,
             "status" | "status_line" | "statusline" => Self::StatusLine,
+            "event" | "events" | "chunk" | "chunks" | "event_chunks" | "eventchunks" => {
+                Self::EventChunks
+            }
             _ => Self::None,
         }
     }
@@ -614,5 +628,17 @@ mod tests {
     #[test]
     fn formatting_hints_defaults_to_none() {
         assert_eq!(DummyChannel.formatting_hints(), None);
+    }
+
+    #[test]
+    fn stream_mode_parses_event_chunks_aliases() {
+        assert_eq!(
+            StreamMode::from_str_value("event_chunks"),
+            StreamMode::EventChunks
+        );
+        assert_eq!(
+            StreamMode::from_str_value("events"),
+            StreamMode::EventChunks
+        );
     }
 }

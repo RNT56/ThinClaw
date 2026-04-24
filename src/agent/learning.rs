@@ -454,6 +454,7 @@ pub trait MemoryProvider: Send + Sync {
     fn tool_extensions(&self) -> Vec<String> {
         vec![
             "external_memory_recall".to_string(),
+            "external_memory_export".to_string(),
             "external_memory_status".to_string(),
         ]
     }
@@ -467,6 +468,21 @@ pub struct ZepProvider;
 
 #[derive(Default)]
 pub struct CustomHttpProvider;
+
+#[derive(Default)]
+pub struct Mem0Provider;
+
+#[derive(Default)]
+pub struct OpenMemoryProvider;
+
+#[derive(Default)]
+pub struct LettaProvider;
+
+#[derive(Default)]
+pub struct ChromaProvider;
+
+#[derive(Default)]
+pub struct QdrantProvider;
 
 fn provider_base_url(config: &std::collections::HashMap<String, String>) -> Option<String> {
     config
@@ -490,6 +506,256 @@ fn provider_token(config: &std::collections::HashMap<String, String>) -> Option<
             .filter(|v| !v.trim().is_empty());
     }
     None
+}
+
+fn provider_config_value(
+    config: &std::collections::HashMap<String, String>,
+    key: &str,
+) -> Option<String> {
+    config.get(key).cloned().filter(|v| !v.trim().is_empty())
+}
+
+fn provider_base_url_or(
+    config: &std::collections::HashMap<String, String>,
+    default: &str,
+) -> String {
+    provider_base_url(config).unwrap_or_else(|| default.to_string())
+}
+
+fn provider_bool(config: &std::collections::HashMap<String, String>, key: &str) -> bool {
+    config
+        .get(key)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn provider_scoped_user_id(
+    config: &std::collections::HashMap<String, String>,
+    user_id: &str,
+) -> String {
+    provider_config_value(config, "user_id").unwrap_or_else(|| user_id.to_string())
+}
+
+fn provider_agent_id(config: &std::collections::HashMap<String, String>) -> String {
+    provider_config_value(config, "agent_id").unwrap_or_else(|| "thinclaw".to_string())
+}
+
+fn provider_join_url(base_url: &str, path: &str) -> String {
+    if path.starts_with("http://") || path.starts_with("https://") {
+        return path.to_string();
+    }
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+fn provider_path(
+    config: &std::collections::HashMap<String, String>,
+    key: &str,
+    default: &str,
+) -> String {
+    provider_config_value(config, key).unwrap_or_else(|| default.to_string())
+}
+
+fn provider_path_with_vars(
+    config: &std::collections::HashMap<String, String>,
+    key: &str,
+    default: &str,
+) -> String {
+    let mut path = provider_path(config, key, default);
+    for (name, value) in config {
+        path = path.replace(&format!("{{{name}}}"), value);
+    }
+    path
+}
+
+fn apply_provider_auth(
+    request: reqwest::RequestBuilder,
+    config: &std::collections::HashMap<String, String>,
+    default_scheme: &str,
+) -> reqwest::RequestBuilder {
+    let Some(token) = provider_token(config) else {
+        return request;
+    };
+
+    if let Some(header) = provider_config_value(config, "auth_header") {
+        return request.header(header, token);
+    }
+
+    let scheme = provider_config_value(config, "auth_scheme")
+        .unwrap_or_else(|| default_scheme.to_string())
+        .to_ascii_lowercase();
+    match scheme.as_str() {
+        "none" | "disabled" => request,
+        "token" => request.header(reqwest::header::AUTHORIZATION, format!("Token {token}")),
+        "api-key" | "api_key" => request.header("api-key", token),
+        "x-api-key" | "x_api_key" => request.header("X-API-Key", token),
+        "x-chroma-token" | "x_chroma_token" => request.header("x-chroma-token", token),
+        "bearer" | _ => request.bearer_auth(token),
+    }
+}
+
+fn provider_required_status(
+    provider_name: &str,
+    enabled: bool,
+    missing: &[String],
+) -> Option<ProviderHealthStatus> {
+    if !enabled {
+        return Some(ProviderHealthStatus {
+            provider: provider_name.to_string(),
+            active: false,
+            enabled,
+            healthy: false,
+            readiness: ProviderReadiness::Disabled,
+            latency_ms: None,
+            error: None,
+            capabilities: Vec::new(),
+            metadata: serde_json::json!({"state": "disabled"}),
+        });
+    }
+    if missing.is_empty() {
+        return None;
+    }
+    Some(ProviderHealthStatus {
+        provider: provider_name.to_string(),
+        active: false,
+        enabled,
+        healthy: false,
+        readiness: ProviderReadiness::NotConfigured,
+        latency_ms: None,
+        error: Some(format!("missing {}", missing.join(", "))),
+        capabilities: Vec::new(),
+        metadata: serde_json::json!({
+            "state": "not_configured",
+            "missing": missing,
+        }),
+    })
+}
+
+async fn configured_provider_health(
+    provider_name: &str,
+    provider: Option<&crate::settings::LearningProviderSettings>,
+    default_base_url: Option<&str>,
+    default_health_path: Option<&str>,
+    default_auth_scheme: &str,
+    required_keys: &[&str],
+) -> ProviderHealthStatus {
+    let Some(provider) = provider else {
+        return provider_health_request(provider_name, false, None, None).await;
+    };
+
+    let mut missing = Vec::new();
+    let base_url =
+        provider_base_url(&provider.config).or_else(|| default_base_url.map(str::to_string));
+    if base_url.is_none() {
+        missing.push("base_url".to_string());
+    }
+    for key in required_keys {
+        if *key == "api_key" {
+            if provider_token(&provider.config).is_none() {
+                missing.push("api_key or api_key_env".to_string());
+            }
+        } else if provider_config_value(&provider.config, key).is_none() {
+            missing.push((*key).to_string());
+        }
+    }
+    if provider_bool(&provider.config, "require_api_key")
+        && provider_token(&provider.config).is_none()
+    {
+        missing.push("api_key or api_key_env".to_string());
+    }
+    if let Some(status) = provider_required_status(provider_name, provider.enabled, &missing) {
+        return status;
+    }
+
+    if provider_bool(&provider.config, "skip_health_check") || default_health_path.is_none() {
+        return ProviderHealthStatus {
+            provider: provider_name.to_string(),
+            active: false,
+            enabled: provider.enabled,
+            healthy: true,
+            readiness: ProviderReadiness::Ready,
+            latency_ms: None,
+            error: None,
+            capabilities: Vec::new(),
+            metadata: serde_json::json!({
+                "state": "configured",
+                "health_check": "skipped",
+            }),
+        };
+    }
+
+    let base_url = base_url.expect("checked above");
+    let health_path = provider_config_value(&provider.config, "health_url")
+        .or_else(|| provider_config_value(&provider.config, "health_path"))
+        .unwrap_or_else(|| default_health_path.unwrap_or("/health").to_string());
+    let health_url = provider_join_url(&base_url, &health_path);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build();
+    let Ok(client) = client else {
+        return ProviderHealthStatus {
+            provider: provider_name.to_string(),
+            active: false,
+            enabled: provider.enabled,
+            healthy: false,
+            readiness: ProviderReadiness::Unhealthy,
+            latency_ms: None,
+            error: Some("failed to initialize HTTP client".to_string()),
+            capabilities: Vec::new(),
+            metadata: serde_json::json!({}),
+        };
+    };
+
+    let started = std::time::Instant::now();
+    let request = apply_provider_auth(
+        client.get(&health_url),
+        &provider.config,
+        default_auth_scheme,
+    );
+    match request.send().await {
+        Ok(response) => ProviderHealthStatus {
+            provider: provider_name.to_string(),
+            active: false,
+            enabled: provider.enabled,
+            healthy: response.status().is_success(),
+            readiness: if response.status().is_success() {
+                ProviderReadiness::Ready
+            } else {
+                ProviderReadiness::Unhealthy
+            },
+            latency_ms: Some(started.elapsed().as_millis() as u64),
+            error: if response.status().is_success() {
+                None
+            } else {
+                Some(format!("HTTP {}", response.status()))
+            },
+            capabilities: Vec::new(),
+            metadata: serde_json::json!({
+                "status": response.status().as_u16(),
+                "health_url": health_url,
+            }),
+        },
+        Err(err) => ProviderHealthStatus {
+            provider: provider_name.to_string(),
+            active: false,
+            enabled: provider.enabled,
+            healthy: false,
+            readiness: ProviderReadiness::Unhealthy,
+            latency_ms: Some(started.elapsed().as_millis() as u64),
+            error: Some(err.to_string()),
+            capabilities: Vec::new(),
+            metadata: serde_json::json!({"health_url": health_url}),
+        },
+    }
 }
 
 async fn provider_health_request(
@@ -1034,6 +1300,844 @@ impl MemoryProvider for CustomHttpProvider {
     }
 }
 
+async fn provider_json_request(
+    config: &std::collections::HashMap<String, String>,
+    default_auth_scheme: &str,
+    method: reqwest::Method,
+    url: &str,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request = apply_provider_auth(client.request(method, url), config, default_auth_scheme);
+    if let Some(headers) = config.get("headers_json") {
+        let parsed: serde_json::Map<String, serde_json::Value> = serde_json::from_str(headers)
+            .map_err(|error| format!("invalid headers_json: {error}"))?;
+        for (key, value) in parsed {
+            if let Some(value) = value.as_str() {
+                request = request.header(key, value);
+            }
+        }
+    }
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request.send().await.map_err(|error| error.to_string())?;
+    let status = response.status();
+    let text = response.text().await.map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {text}"));
+    }
+    if text.trim().is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    serde_json::from_str(&text).map_err(|error| error.to_string())
+}
+
+fn payload_text(payload: &serde_json::Value) -> String {
+    if let Some(value) = payload.as_str() {
+        return value.to_string();
+    }
+    for key in ["content", "text", "summary", "memory", "user_message"] {
+        if let Some(value) = payload.get(key).and_then(|value| value.as_str()) {
+            if !value.trim().is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    let user = payload
+        .get("user")
+        .or_else(|| payload.get("user_message"))
+        .and_then(|value| value.as_str());
+    let assistant = payload
+        .get("assistant")
+        .or_else(|| payload.get("assistant_response"))
+        .and_then(|value| value.as_str());
+    match (user, assistant) {
+        (Some(user), Some(assistant)) => {
+            format!("User: {user}\nAssistant: {assistant}")
+        }
+        _ => serde_json::to_string(payload).unwrap_or_else(|_| format!("{payload:?}")),
+    }
+}
+
+fn provider_memory_text_at_depth(value: &serde_json::Value, depth: usize) -> Option<String> {
+    if let Some(text) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_string());
+    }
+    if depth > 2 {
+        return None;
+    }
+    for key in [
+        "summary",
+        "memory",
+        "text",
+        "content",
+        "document",
+        "page_content",
+        "value",
+    ] {
+        if let Some(text) = value
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return Some(text.to_string());
+        }
+    }
+    for key in ["payload", "metadata", "data", "record"] {
+        if let Some(nested) = value.get(key)
+            && let Some(text) = provider_memory_text_at_depth(nested, depth + 1)
+        {
+            return Some(text);
+        }
+    }
+    None
+}
+
+fn provider_score(value: &serde_json::Value) -> Option<f64> {
+    for key in ["score", "similarity", "relevance", "rrf_score"] {
+        if let Some(score) = value.get(key).and_then(|value| value.as_f64()) {
+            return Some(score);
+        }
+    }
+    value
+        .get("metadata")
+        .and_then(|metadata| provider_score(metadata))
+        .or_else(|| {
+            value
+                .get("payload")
+                .and_then(|payload| provider_score(payload))
+        })
+}
+
+fn parse_matrix_hits(value: &serde_json::Value, provider: &str) -> Vec<ProviderMemoryHit> {
+    let Some(document_batches) = value.get("documents").and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let scores = value
+        .get("scores")
+        .or_else(|| value.get("distances"))
+        .and_then(|value| value.as_array());
+    let ids = value.get("ids").and_then(|value| value.as_array());
+    let metadatas = value.get("metadatas").and_then(|value| value.as_array());
+    let mut hits = Vec::new();
+    for (batch_index, batch) in document_batches.iter().enumerate() {
+        let Some(documents) = batch.as_array() else {
+            continue;
+        };
+        let score_batch = scores
+            .and_then(|batches| batches.get(batch_index))
+            .and_then(|batch| batch.as_array());
+        let id_batch = ids
+            .and_then(|batches| batches.get(batch_index))
+            .and_then(|batch| batch.as_array());
+        let metadata_batch = metadatas
+            .and_then(|batches| batches.get(batch_index))
+            .and_then(|batch| batch.as_array());
+        for (index, document) in documents.iter().enumerate() {
+            let Some(summary) = document
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let provenance = serde_json::json!({
+                "id": id_batch.and_then(|values| values.get(index)).cloned(),
+                "metadata": metadata_batch.and_then(|values| values.get(index)).cloned(),
+            });
+            hits.push(ProviderMemoryHit {
+                provider: provider.to_string(),
+                summary,
+                score: score_batch
+                    .and_then(|values| values.get(index))
+                    .and_then(|value| value.as_f64()),
+                provenance,
+            });
+        }
+    }
+    hits
+}
+
+fn parse_provider_hits(value: serde_json::Value, provider: &str) -> Vec<ProviderMemoryHit> {
+    let matrix_hits = parse_matrix_hits(&value, provider);
+    if !matrix_hits.is_empty() {
+        return matrix_hits;
+    }
+
+    let point_items = value
+        .get("result")
+        .and_then(|value| value.get("points"))
+        .and_then(|value| value.as_array())
+        .cloned();
+    let items = point_items
+        .or_else(|| value.as_array().cloned())
+        .or_else(|| {
+            value
+                .get("results")
+                .and_then(|value| value.as_array())
+                .cloned()
+        })
+        .or_else(|| {
+            value
+                .get("memories")
+                .and_then(|value| value.as_array())
+                .cloned()
+        })
+        .or_else(|| {
+            value
+                .get("data")
+                .and_then(|value| value.as_array())
+                .cloned()
+        })
+        .or_else(|| {
+            value
+                .get("result")
+                .and_then(|value| value.as_array())
+                .cloned()
+        })
+        .unwrap_or_default();
+
+    items
+        .into_iter()
+        .filter_map(|item| {
+            let summary = provider_memory_text_at_depth(&item, 0)?;
+            Some(ProviderMemoryHit {
+                provider: provider.to_string(),
+                summary,
+                score: provider_score(&item),
+                provenance: item,
+            })
+        })
+        .collect()
+}
+
+fn extract_embedding(value: serde_json::Value) -> Result<Vec<f64>, String> {
+    fn parse_vec(value: &serde_json::Value) -> Option<Vec<f64>> {
+        let array = value.as_array()?;
+        let mut out = Vec::with_capacity(array.len());
+        for item in array {
+            out.push(item.as_f64()?);
+        }
+        Some(out)
+    }
+
+    if let Some(embedding) = value.get("embedding").and_then(parse_vec) {
+        return Ok(embedding);
+    }
+    if let Some(embedding) = value.get("vector").and_then(parse_vec) {
+        return Ok(embedding);
+    }
+    if let Some(embedding) = value
+        .get("data")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("embedding"))
+        .and_then(parse_vec)
+    {
+        return Ok(embedding);
+    }
+    if let Some(embedding) = parse_vec(&value) {
+        return Ok(embedding);
+    }
+    Err("embedding response did not contain an embedding vector".to_string())
+}
+
+async fn embedding_from_config(
+    config: &std::collections::HashMap<String, String>,
+    text: &str,
+) -> Result<Vec<f64>, String> {
+    let embedding_url = provider_config_value(config, "embedding_url")
+        .ok_or_else(|| "missing embedding_url for vector memory provider".to_string())?;
+    let mut embedding_config = config.clone();
+    if let Some(token) = provider_config_value(config, "embedding_api_key") {
+        embedding_config.insert("api_key".to_string(), token);
+    } else if let Some(env_name) = provider_config_value(config, "embedding_api_key_env") {
+        embedding_config.insert("api_key_env".to_string(), env_name);
+    }
+    if let Some(scheme) = provider_config_value(config, "embedding_auth_scheme") {
+        embedding_config.insert("auth_scheme".to_string(), scheme);
+    } else {
+        embedding_config.insert("auth_scheme".to_string(), "bearer".to_string());
+    }
+
+    let shape = provider_config_value(config, "embedding_shape")
+        .unwrap_or_else(|| "openai".to_string())
+        .to_ascii_lowercase();
+    let body = if shape == "text" {
+        serde_json::json!({"text": text})
+    } else {
+        let model = provider_config_value(config, "embedding_model")
+            .unwrap_or_else(|| "text-embedding-3-small".to_string());
+        serde_json::json!({"input": text, "model": model})
+    };
+    let response = provider_json_request(
+        &embedding_config,
+        "bearer",
+        reqwest::Method::POST,
+        &embedding_url,
+        Some(body),
+    )
+    .await?;
+    extract_embedding(response)
+}
+
+fn provider_export_messages(
+    config: &std::collections::HashMap<String, String>,
+    payload: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    if let Some(messages) = payload.get("messages").and_then(|value| value.as_array()) {
+        return messages.clone();
+    }
+    vec![serde_json::json!({
+        "role": provider_config_value(config, "export_role").unwrap_or_else(|| "user".to_string()),
+        "content": payload_text(payload),
+    })]
+}
+
+#[async_trait]
+impl MemoryProvider for Mem0Provider {
+    fn name(&self) -> &'static str {
+        "mem0"
+    }
+
+    async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
+        let provider = settings.providers.provider(self.name());
+        let default_base = Some("https://api.mem0.ai");
+        let required = if provider
+            .and_then(|provider| provider_base_url(&provider.config))
+            .is_none_or(|url| url.contains("api.mem0.ai"))
+        {
+            vec!["api_key"]
+        } else {
+            Vec::new()
+        };
+        configured_provider_health(
+            self.name(),
+            provider,
+            default_base,
+            None,
+            "token",
+            &required,
+        )
+        .await
+    }
+
+    async fn system_prompt_block(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+    ) -> Option<String> {
+        let provider = settings.providers.provider(self.name())?;
+        if !provider.enabled || !provider.user_modeling_enabled {
+            return None;
+        }
+        Some(format!(
+            "## Mem0 Memory\nActive for user {}. Use external_memory_recall for semantic memory lookup.",
+            provider_scoped_user_id(&provider.config, user_id)
+        ))
+    }
+
+    async fn recall(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderMemoryHit>, String> {
+        let provider = settings
+            .providers
+            .provider(self.name())
+            .ok_or_else(|| "mem0 provider is not configured".to_string())?;
+        if !provider.enabled {
+            return Ok(Vec::new());
+        }
+        let base_url = provider_base_url_or(&provider.config, "https://api.mem0.ai");
+        let path = provider_path(&provider.config, "search_path", "/v2/memories/search/");
+        let url = provider_join_url(&base_url, &path);
+        let scoped_user_id = provider_scoped_user_id(&provider.config, user_id);
+        let mut body = serde_json::json!({
+            "query": query,
+            "filters": {"user_id": scoped_user_id},
+            "user_id": scoped_user_id,
+            "top_k": limit,
+            "limit": limit,
+        });
+        if provider_bool(&provider.config, "rerank")
+            && let Some(obj) = body.as_object_mut()
+        {
+            obj.insert("rerank".to_string(), serde_json::json!(true));
+        }
+        let response = provider_json_request(
+            &provider.config,
+            "token",
+            reqwest::Method::POST,
+            &url,
+            Some(body),
+        )
+        .await?;
+        Ok(parse_provider_hits(response, self.name()))
+    }
+
+    async fn export_turn(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(provider) = settings.providers.provider(self.name()) else {
+            return Ok(());
+        };
+        if !provider.enabled {
+            return Ok(());
+        }
+        let base_url = provider_base_url_or(&provider.config, "https://api.mem0.ai");
+        let path = provider_path(&provider.config, "sync_path", "/v1/memories/");
+        let url = provider_join_url(&base_url, &path);
+        let scoped_user_id = provider_scoped_user_id(&provider.config, user_id);
+        let body = serde_json::json!({
+            "messages": provider_export_messages(&provider.config, payload),
+            "user_id": scoped_user_id,
+            "agent_id": provider_agent_id(&provider.config),
+            "metadata": {"source": "thinclaw"},
+        });
+        let _ = provider_json_request(
+            &provider.config,
+            "token",
+            reqwest::Method::POST,
+            &url,
+            Some(body),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl MemoryProvider for OpenMemoryProvider {
+    fn name(&self) -> &'static str {
+        "openmemory"
+    }
+
+    async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
+        configured_provider_health(
+            self.name(),
+            settings.providers.provider(self.name()),
+            Some("http://localhost:8888"),
+            Some("/"),
+            "x-api-key",
+            &[],
+        )
+        .await
+    }
+
+    async fn recall(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderMemoryHit>, String> {
+        let provider = settings
+            .providers
+            .provider(self.name())
+            .ok_or_else(|| "openmemory provider is not configured".to_string())?;
+        if !provider.enabled {
+            return Ok(Vec::new());
+        }
+        let base_url = provider_base_url_or(&provider.config, "http://localhost:8888");
+        let path = provider_path(&provider.config, "search_path", "/search");
+        let url = provider_join_url(&base_url, &path);
+        let scoped_user_id = provider_scoped_user_id(&provider.config, user_id);
+        let response = provider_json_request(
+            &provider.config,
+            "x-api-key",
+            reqwest::Method::POST,
+            &url,
+            Some(serde_json::json!({
+                "query": query,
+                "user_id": scoped_user_id,
+                "limit": limit,
+                "top_k": limit,
+            })),
+        )
+        .await?;
+        Ok(parse_provider_hits(response, self.name()))
+    }
+
+    async fn export_turn(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(provider) = settings.providers.provider(self.name()) else {
+            return Ok(());
+        };
+        if !provider.enabled {
+            return Ok(());
+        }
+        let base_url = provider_base_url_or(&provider.config, "http://localhost:8888");
+        let path = provider_path(&provider.config, "sync_path", "/memories");
+        let url = provider_join_url(&base_url, &path);
+        let scoped_user_id = provider_scoped_user_id(&provider.config, user_id);
+        let _ = provider_json_request(
+            &provider.config,
+            "x-api-key",
+            reqwest::Method::POST,
+            &url,
+            Some(serde_json::json!({
+                "messages": provider_export_messages(&provider.config, payload),
+                "user_id": scoped_user_id,
+                "agent_id": provider_agent_id(&provider.config),
+            })),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl MemoryProvider for LettaProvider {
+    fn name(&self) -> &'static str {
+        "letta"
+    }
+
+    async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
+        let provider = settings.providers.provider(self.name());
+        let mut required = vec!["agent_id"];
+        if provider
+            .and_then(|provider| provider_base_url(&provider.config))
+            .is_none_or(|url| url.contains("api.letta.com"))
+        {
+            required.push("api_key");
+        }
+        configured_provider_health(
+            self.name(),
+            provider,
+            Some("https://api.letta.com"),
+            None,
+            "bearer",
+            &required,
+        )
+        .await
+    }
+
+    async fn recall(
+        &self,
+        settings: &LearningSettings,
+        _user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderMemoryHit>, String> {
+        let provider = settings
+            .providers
+            .provider(self.name())
+            .ok_or_else(|| "letta provider is not configured".to_string())?;
+        if !provider.enabled {
+            return Ok(Vec::new());
+        }
+        let base_url = provider_base_url_or(&provider.config, "https://api.letta.com");
+        let path = provider_path_with_vars(
+            &provider.config,
+            "search_path",
+            "/v1/agents/{agent_id}/archival-memory/search",
+        );
+        let url = provider_join_url(&base_url, &path);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|error| error.to_string())?;
+        let request = apply_provider_auth(
+            client
+                .get(&url)
+                .query(&[("query", query.to_string()), ("topK", limit.to_string())]),
+            &provider.config,
+            "bearer",
+        );
+        let response = request.send().await.map_err(|error| error.to_string())?;
+        let status = response.status();
+        let text = response.text().await.map_err(|error| error.to_string())?;
+        if !status.is_success() {
+            return Err(format!("HTTP {status}: {text}"));
+        }
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        Ok(parse_provider_hits(value, self.name()))
+    }
+
+    async fn export_turn(
+        &self,
+        settings: &LearningSettings,
+        _user_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(provider) = settings.providers.provider(self.name()) else {
+            return Ok(());
+        };
+        if !provider.enabled {
+            return Ok(());
+        }
+        let base_url = provider_base_url_or(&provider.config, "https://api.letta.com");
+        let path = provider_path_with_vars(
+            &provider.config,
+            "sync_path",
+            "/v1/agents/{agent_id}/archival-memory",
+        );
+        let url = provider_join_url(&base_url, &path);
+        let tags = provider_config_value(&provider.config, "tags")
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|tag| !tag.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec!["thinclaw".to_string(), "memory_export".to_string()]);
+        let _ = provider_json_request(
+            &provider.config,
+            "bearer",
+            reqwest::Method::POST,
+            &url,
+            Some(serde_json::json!({
+                "content": payload_text(payload),
+                "text": payload_text(payload),
+                "tags": tags,
+            })),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl MemoryProvider for ChromaProvider {
+    fn name(&self) -> &'static str {
+        "chroma"
+    }
+
+    async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
+        configured_provider_health(
+            self.name(),
+            settings.providers.provider(self.name()),
+            Some("http://localhost:8000"),
+            Some("/api/v2/heartbeat"),
+            "x-chroma-token",
+            &["collection_id", "embedding_url"],
+        )
+        .await
+    }
+
+    async fn recall(
+        &self,
+        settings: &LearningSettings,
+        _user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderMemoryHit>, String> {
+        let provider = settings
+            .providers
+            .provider(self.name())
+            .ok_or_else(|| "chroma provider is not configured".to_string())?;
+        if !provider.enabled {
+            return Ok(Vec::new());
+        }
+        let embedding = embedding_from_config(&provider.config, query).await?;
+        let base_url = provider_base_url_or(&provider.config, "http://localhost:8000");
+        let path = provider_path_with_vars(
+            &provider.config,
+            "query_path",
+            "/api/v2/tenants/{tenant}/databases/{database}/collections/{collection_id}/query",
+        )
+        .replace(
+            "{tenant}",
+            &provider_config_value(&provider.config, "tenant")
+                .unwrap_or_else(|| "default_tenant".to_string()),
+        )
+        .replace(
+            "{database}",
+            &provider_config_value(&provider.config, "database")
+                .unwrap_or_else(|| "default_database".to_string()),
+        );
+        let url = provider_join_url(&base_url, &path);
+        let response = provider_json_request(
+            &provider.config,
+            "x-chroma-token",
+            reqwest::Method::POST,
+            &url,
+            Some(serde_json::json!({
+                "query_embeddings": [embedding],
+                "n_results": limit,
+                "include": ["documents", "metadatas", "distances"],
+            })),
+        )
+        .await?;
+        Ok(parse_provider_hits(response, self.name()))
+    }
+
+    async fn export_turn(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(provider) = settings.providers.provider(self.name()) else {
+            return Ok(());
+        };
+        if !provider.enabled {
+            return Ok(());
+        }
+        let content = payload_text(payload);
+        let embedding = embedding_from_config(&provider.config, &content).await?;
+        let base_url = provider_base_url_or(&provider.config, "http://localhost:8000");
+        let path = provider_path_with_vars(
+            &provider.config,
+            "sync_path",
+            "/api/v2/tenants/{tenant}/databases/{database}/collections/{collection_id}/upsert",
+        )
+        .replace(
+            "{tenant}",
+            &provider_config_value(&provider.config, "tenant")
+                .unwrap_or_else(|| "default_tenant".to_string()),
+        )
+        .replace(
+            "{database}",
+            &provider_config_value(&provider.config, "database")
+                .unwrap_or_else(|| "default_database".to_string()),
+        );
+        let url = provider_join_url(&base_url, &path);
+        let id = format!("thinclaw-{}", Uuid::new_v4());
+        let _ = provider_json_request(
+            &provider.config,
+            "x-chroma-token",
+            reqwest::Method::POST,
+            &url,
+            Some(serde_json::json!({
+                "ids": [id],
+                "embeddings": [embedding],
+                "documents": [content],
+                "metadatas": [{
+                    "source": "thinclaw",
+                    "user_id": user_id,
+                }],
+            })),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl MemoryProvider for QdrantProvider {
+    fn name(&self) -> &'static str {
+        "qdrant"
+    }
+
+    async fn health(&self, settings: &LearningSettings) -> ProviderHealthStatus {
+        configured_provider_health(
+            self.name(),
+            settings.providers.provider(self.name()),
+            Some("http://localhost:6333"),
+            Some("/"),
+            "api-key",
+            &["collection", "embedding_url"],
+        )
+        .await
+    }
+
+    async fn recall(
+        &self,
+        settings: &LearningSettings,
+        _user_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<ProviderMemoryHit>, String> {
+        let provider = settings
+            .providers
+            .provider(self.name())
+            .ok_or_else(|| "qdrant provider is not configured".to_string())?;
+        if !provider.enabled {
+            return Ok(Vec::new());
+        }
+        let embedding = embedding_from_config(&provider.config, query).await?;
+        let collection = provider_config_value(&provider.config, "collection")
+            .ok_or_else(|| "missing collection".to_string())?;
+        let base_url = provider_base_url_or(&provider.config, "http://localhost:6333");
+        let path = provider_path_with_vars(
+            &provider.config,
+            "query_path",
+            &format!("/collections/{collection}/points/query"),
+        );
+        let url = provider_join_url(&base_url, &path);
+        let response = provider_json_request(
+            &provider.config,
+            "api-key",
+            reqwest::Method::POST,
+            &url,
+            Some(serde_json::json!({
+                "query": embedding,
+                "limit": limit,
+                "with_payload": true,
+            })),
+        )
+        .await?;
+        Ok(parse_provider_hits(response, self.name()))
+    }
+
+    async fn export_turn(
+        &self,
+        settings: &LearningSettings,
+        user_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let Some(provider) = settings.providers.provider(self.name()) else {
+            return Ok(());
+        };
+        if !provider.enabled {
+            return Ok(());
+        }
+        let content = payload_text(payload);
+        let embedding = embedding_from_config(&provider.config, &content).await?;
+        let collection = provider_config_value(&provider.config, "collection")
+            .ok_or_else(|| "missing collection".to_string())?;
+        let base_url = provider_base_url_or(&provider.config, "http://localhost:6333");
+        let path = provider_path_with_vars(
+            &provider.config,
+            "sync_path",
+            &format!("/collections/{collection}/points"),
+        );
+        let url = provider_join_url(&base_url, &path);
+        let _ = provider_json_request(
+            &provider.config,
+            "api-key",
+            reqwest::Method::PUT,
+            &url,
+            Some(serde_json::json!({
+                "points": [{
+                    "id": Uuid::new_v4().to_string(),
+                    "vector": embedding,
+                    "payload": {
+                        "text": content,
+                        "source": "thinclaw",
+                        "user_id": user_id,
+                    },
+                }],
+            })),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
 async fn custom_http_request(
     config: &std::collections::HashMap<String, String>,
     method: reqwest::Method,
@@ -1173,6 +2277,11 @@ impl MemoryProviderManager {
         let providers: Vec<Arc<dyn MemoryProvider>> = vec![
             Arc::new(HonchoProvider),
             Arc::new(ZepProvider),
+            Arc::new(Mem0Provider),
+            Arc::new(OpenMemoryProvider),
+            Arc::new(LettaProvider),
+            Arc::new(ChromaProvider),
+            Arc::new(QdrantProvider),
             Arc::new(CustomHttpProvider),
         ];
         Self { store, providers }
@@ -1385,6 +2494,18 @@ impl MemoryProviderManager {
         }
     }
 
+    pub async fn export_payload(
+        &self,
+        user_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, String> {
+        let Some((settings, provider, _)) = self.ready_active_provider(user_id).await else {
+            return Err("no ready external memory provider is active".to_string());
+        };
+        provider.export_turn(&settings, user_id, payload).await?;
+        Ok(provider.name().to_string())
+    }
+
     pub async fn session_end_extract(
         &self,
         user_id: &str,
@@ -1584,6 +2705,14 @@ impl LearningOrchestrator {
         self.provider_manager
             .after_turn_sync(user_id, artifact)
             .await;
+    }
+
+    pub async fn export_provider_payload(
+        &self,
+        user_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, String> {
+        self.provider_manager.export_payload(user_id, payload).await
     }
 
     pub async fn session_end_extract(
@@ -4908,6 +6037,7 @@ mod tests {
         name: &'static str,
         hits: Vec<ProviderMemoryHit>,
         recalls: Arc<Mutex<Vec<(String, String, usize)>>>,
+        exports: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
         health_status: ProviderHealthStatus,
     }
 
@@ -4938,9 +6068,13 @@ mod tests {
         async fn export_turn(
             &self,
             _settings: &LearningSettings,
-            _user_id: &str,
-            _payload: &serde_json::Value,
+            user_id: &str,
+            payload: &serde_json::Value,
         ) -> Result<(), String> {
+            self.exports
+                .lock()
+                .expect("export log mutex poisoned")
+                .push((user_id.to_string(), payload.clone()));
             Ok(())
         }
     }
@@ -5743,6 +6877,7 @@ mod tests {
                             provenance: serde_json::json!({"id": "honcho:1"}),
                         }],
                         recalls: Arc::clone(&honcho_recalls),
+                        exports: Arc::new(Mutex::new(Vec::new())),
                         health_status: provider_status(
                             "honcho",
                             ProviderReadiness::Ready,
@@ -5759,6 +6894,7 @@ mod tests {
                             provenance: serde_json::json!({"id": "zep:1"}),
                         }],
                         recalls: Arc::clone(&zep_recalls),
+                        exports: Arc::new(Mutex::new(Vec::new())),
                         health_status: provider_status("zep", ProviderReadiness::Ready, true, None),
                     }),
                 ],
@@ -5816,6 +6952,7 @@ mod tests {
                             provenance: serde_json::json!({"id": "honcho:down"}),
                         }],
                         recalls: Arc::clone(&honcho_recalls),
+                        exports: Arc::new(Mutex::new(Vec::new())),
                         health_status: provider_status(
                             "honcho",
                             ProviderReadiness::Unhealthy,
@@ -5832,6 +6969,7 @@ mod tests {
                             provenance: serde_json::json!({"id": "zep:1"}),
                         }],
                         recalls: Arc::clone(&zep_recalls),
+                        exports: Arc::new(Mutex::new(Vec::new())),
                         health_status: provider_status("zep", ProviderReadiness::Ready, true, None),
                     }),
                 ],
@@ -5874,6 +7012,140 @@ mod tests {
         assert!(
             zep_recalls.lock().expect("zep recall log").is_empty(),
             "inactive backups must not be used automatically"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn export_provider_payload_uses_only_ready_active_provider() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let user_id = "provider-export-user";
+        db.set_setting(
+            user_id,
+            "learning.providers.active",
+            &serde_json::json!("honcho"),
+        )
+        .await
+        .expect("set active provider");
+
+        let honcho_exports = Arc::new(Mutex::new(Vec::new()));
+        let zep_exports = Arc::new(Mutex::new(Vec::new()));
+        let orchestrator = LearningOrchestrator {
+            store: Arc::clone(&db),
+            workspace: None,
+            skill_registry: None,
+            routine_engine: None,
+            provider_manager: Arc::new(MemoryProviderManager::with_providers(
+                Arc::clone(&db),
+                vec![
+                    Arc::new(TestMemoryProvider {
+                        name: "honcho",
+                        hits: Vec::new(),
+                        recalls: Arc::new(Mutex::new(Vec::new())),
+                        exports: Arc::clone(&honcho_exports),
+                        health_status: provider_status(
+                            "honcho",
+                            ProviderReadiness::Ready,
+                            true,
+                            None,
+                        ),
+                    }),
+                    Arc::new(TestMemoryProvider {
+                        name: "zep",
+                        hits: Vec::new(),
+                        recalls: Arc::new(Mutex::new(Vec::new())),
+                        exports: Arc::clone(&zep_exports),
+                        health_status: provider_status("zep", ProviderReadiness::Ready, true, None),
+                    }),
+                ],
+            )),
+        };
+
+        let provider = orchestrator
+            .export_provider_payload(
+                user_id,
+                &serde_json::json!({"content": "prefers concise docs"}),
+            )
+            .await
+            .expect("export should use active provider");
+
+        assert_eq!(provider, "honcho");
+        let exports = honcho_exports.lock().expect("honcho export log");
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].0, user_id);
+        assert_eq!(exports[0].1["content"], "prefers concise docs");
+        assert!(
+            zep_exports.lock().expect("zep export log").is_empty(),
+            "inactive providers must not receive explicit exports"
+        );
+    }
+
+    #[test]
+    fn provider_hit_parser_handles_memory_service_and_vector_shapes() {
+        let mem0_hits = parse_provider_hits(
+            serde_json::json!({
+                "results": [
+                    {"id": "m1", "memory": "likes terse changelogs", "score": 0.88}
+                ]
+            }),
+            "mem0",
+        );
+        assert_eq!(mem0_hits[0].summary, "likes terse changelogs");
+        assert_eq!(mem0_hits[0].score, Some(0.88));
+
+        let chroma_hits = parse_provider_hits(
+            serde_json::json!({
+                "ids": [["doc-1"]],
+                "documents": [["uses qdrant for high-recall vector search"]],
+                "distances": [[0.12]],
+                "metadatas": [[{"source": "test"}]]
+            }),
+            "chroma",
+        );
+        assert_eq!(
+            chroma_hits[0].summary,
+            "uses qdrant for high-recall vector search"
+        );
+        assert_eq!(chroma_hits[0].score, Some(0.12));
+
+        let qdrant_hits = parse_provider_hits(
+            serde_json::json!({
+                "result": {
+                    "points": [
+                        {
+                            "id": "point-1",
+                            "score": 0.77,
+                            "payload": {"text": "keeps OpenMemory local"}
+                        }
+                    ]
+                }
+            }),
+            "qdrant",
+        );
+        assert_eq!(qdrant_hits[0].summary, "keeps OpenMemory local");
+        assert_eq!(qdrant_hits[0].score, Some(0.77));
+    }
+
+    #[tokio::test]
+    async fn vector_provider_health_requires_embedding_wiring() {
+        let mut settings = LearningSettings::default();
+        let mut qdrant = crate::settings::LearningProviderSettings {
+            enabled: true,
+            ..crate::settings::LearningProviderSettings::default()
+        };
+        qdrant
+            .config
+            .insert("collection".to_string(), "memories".to_string());
+        *settings.providers.provider_mut("qdrant") = qdrant;
+
+        let status = QdrantProvider.health(&settings).await;
+        assert_eq!(status.readiness, ProviderReadiness::NotConfigured);
+        assert!(
+            status
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("embedding_url")),
+            "vector memory providers should report missing embedding wiring"
         );
     }
 

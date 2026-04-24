@@ -132,6 +132,7 @@ pub struct ExtensionManager {
     // Shared
     secrets: Arc<dyn SecretsStore + Send + Sync>,
     tool_registry: Arc<ToolRegistry>,
+    wasm_tool_invoker: Option<Arc<crate::tools::execution::HostMediatedToolInvoker>>,
     hooks: Option<Arc<HookRegistry>>,
     pending_auth: RwLock<HashMap<String, PendingAuth>>,
     user_id: String,
@@ -156,6 +157,7 @@ impl ExtensionManager {
         mcp_session_manager: Arc<McpSessionManager>,
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         tool_registry: Arc<ToolRegistry>,
+        wasm_tool_invoker: Option<Arc<crate::tools::execution::HostMediatedToolInvoker>>,
         hooks: Option<Arc<HookRegistry>>,
         wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
         wasm_tools_dir: PathBuf,
@@ -181,6 +183,7 @@ impl ExtensionManager {
             channel_runtime: RwLock::new(None),
             secrets,
             tool_registry,
+            wasm_tool_invoker,
             hooks,
             pending_auth: RwLock::new(HashMap::new()),
             user_id,
@@ -2279,7 +2282,10 @@ impl ExtensionManager {
             None
         };
 
-        let loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry));
+        let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry));
+        if let Some(invoker) = &self.wasm_tool_invoker {
+            loader = loader.with_tool_invoker(Arc::clone(invoker));
+        }
         loader
             .load_from_files(name, &wasm_path, cap_path_option)
             .await

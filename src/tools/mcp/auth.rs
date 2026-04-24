@@ -581,8 +581,12 @@ pub async fn authorize_mcp_server(
 
     // Open browser
     println!("  Opening browser for {} login...", server_config.name);
+    if oauth_defaults::ssh_or_headless_detected() {
+        oauth_defaults::print_ssh_callback_hint();
+    }
     if let Err(e) = open::that(&auth_url) {
         println!("  Could not open browser: {}", e);
+        oauth_defaults::print_ssh_callback_hint();
         println!("  Please open this URL manually:");
         println!("  {}", auth_url);
     }

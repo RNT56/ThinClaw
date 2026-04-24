@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, StreamMode,
+};
 use crate::error::ChannelError;
 use crate::tui::{TuiApp, TuiEvent, TuiUpdate};
 
@@ -46,6 +48,10 @@ impl Default for TuiChannel {
 impl Channel for TuiChannel {
     fn name(&self) -> &str {
         "tui"
+    }
+
+    fn stream_mode(&self) -> StreamMode {
+        StreamMode::EventChunks
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {

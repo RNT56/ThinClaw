@@ -76,7 +76,7 @@ pub use update::{UpdateCommand, run_update_command};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::setup::{GuideTopic, UiMode};
+use crate::setup::{GuideTopic, OnboardingProfile, UiMode};
 
 #[derive(Parser, Debug)]
 #[command(name = "thinclaw")]
@@ -114,7 +114,10 @@ pub struct Cli {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum LinuxReadinessCliProfile {
     Server,
+    Remote,
     DesktopGnome,
+    #[value(name = "pi-os-lite-64")]
+    PiOsLite64,
     AllFeatures,
 }
 
@@ -122,7 +125,9 @@ impl From<LinuxReadinessCliProfile> for crate::platform::LinuxReadinessProfile {
     fn from(value: LinuxReadinessCliProfile) -> Self {
         match value {
             LinuxReadinessCliProfile::Server => Self::Server,
+            LinuxReadinessCliProfile::Remote => Self::Remote,
             LinuxReadinessCliProfile::DesktopGnome => Self::DesktopGnome,
+            LinuxReadinessCliProfile::PiOsLite64 => Self::PiOsLite64,
             LinuxReadinessCliProfile::AllFeatures => Self::AllFeatures,
         }
     }
@@ -154,6 +159,10 @@ pub enum Command {
         /// Onboarding interface mode
         #[arg(long, value_enum, default_value_t = UiMode::Auto)]
         ui: UiMode,
+
+        /// Preselect an onboarding profile, e.g. remote for SSH-managed hosts.
+        #[arg(long, value_enum)]
+        profile: Option<OnboardingProfile>,
     },
 
     /// Fully reset ThinClaw state so onboarding can start fresh
@@ -391,6 +400,61 @@ mod tests {
             cli.command,
             Some(Command::Doctor {
                 profile: LinuxReadinessCliProfile::DesktopGnome
+            })
+        ));
+    }
+
+    #[test]
+    fn test_remote_readiness_profile_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "doctor", "--profile", "remote"])
+            .expect("parse remote doctor profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Doctor {
+                profile: LinuxReadinessCliProfile::Remote
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["thinclaw", "status", "--profile", "remote"])
+            .expect("parse remote status profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Status {
+                profile: LinuxReadinessCliProfile::Remote
+            })
+        ));
+    }
+
+    #[test]
+    fn test_onboard_remote_profile_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "onboard", "--profile", "remote"])
+            .expect("parse remote onboarding profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Onboard {
+                profile: Some(OnboardingProfile::RemoteServer),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_pi_os_lite_readiness_profile_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "doctor", "--profile", "pi-os-lite-64"])
+            .expect("parse pi doctor profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Doctor {
+                profile: LinuxReadinessCliProfile::PiOsLite64
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["thinclaw", "status", "--profile", "pi-os-lite-64"])
+            .expect("parse pi status profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Status {
+                profile: LinuxReadinessCliProfile::PiOsLite64
             })
         ));
     }

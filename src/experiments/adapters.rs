@@ -133,6 +133,13 @@ pub async fn validate_runner_profile(
                 }
             }
         }
+        ExperimentRunnerBackend::AgentEnv => RunnerValidationOutcome {
+            valid: true,
+            message: "AgentEnv benchmark runner is available for local EnvRunner campaigns."
+                .to_string(),
+            readiness_class: ExperimentRunnerReadinessClass::LaunchReady,
+            launch_eligible: true,
+        },
         ExperimentRunnerBackend::GenericRemoteRunner => RunnerValidationOutcome {
             valid: true,
             message: "Generic remote runner lease flow is available.".to_string(),
@@ -692,16 +699,22 @@ pub async fn try_auto_launch(
                 requires_operator_action: false,
             })
         }
-        ExperimentRunnerBackend::LocalDocker => Ok(RunnerLaunchOutcome {
-            message: "Local runner executes inside the controller-managed Docker sandbox."
-                .to_string(),
-            bootstrap_command: None,
-            provider_template: None,
-            provider_job_id: None,
-            provider_job_metadata: serde_json::json!({}),
-            auto_launched: false,
-            requires_operator_action: false,
-        }),
+        ExperimentRunnerBackend::LocalDocker | ExperimentRunnerBackend::AgentEnv => {
+            Ok(RunnerLaunchOutcome {
+                message: if runner.backend == ExperimentRunnerBackend::AgentEnv {
+                    "AgentEnv runner executes inside the local controller.".to_string()
+                } else {
+                    "Local runner executes inside the controller-managed Docker sandbox."
+                        .to_string()
+                },
+                bootstrap_command: None,
+                provider_template: None,
+                provider_job_id: None,
+                provider_job_metadata: serde_json::json!({}),
+                auto_launched: false,
+                requires_operator_action: false,
+            })
+        }
     }
 }
 

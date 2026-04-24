@@ -37,6 +37,12 @@ stores and are intentionally unavailable on Linux. Linux deployments should use
 Gmail for mail and BlueBubbles for iMessage-compatible messaging through a
 Mac-hosted BlueBubbles server.
 
+Raspberry Pi OS Lite 64-bit runs the same headless channel surface as other
+Linux servers when using the `full` native artifact or multi-arch Docker image:
+gateway, HTTP webhooks, Signal, Discord, Nostr, Gmail, BlueBubbles, Telegram,
+Slack, WhatsApp, Discord interactions, WASM channels, and ACP. Desktop-bound
+channels and desktop autonomy remain unavailable on Lite.
+
 ## When ThinClaw Uses Native Channels
 
 Native Rust is the right path when any of these are true:

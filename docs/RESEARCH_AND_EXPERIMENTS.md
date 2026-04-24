@@ -44,8 +44,40 @@ The `src/agent/env/` framework packages ThinClaw's normal multi-turn agent loop 
 - `EnvRunner::evaluate` runs scripted episodes and stores `agent_env` run artifacts
 - `EnvRunner::collect_sft_jsonl` exports positive trajectories as chat-format JSONL
 - `EnvRunner::serve_openai_compatible` exposes `/v1/chat/completions` for external eval harnesses
+- `TerminalBenchEnv` and `SkillBenchEnv` can now run through Research campaigns by creating an `agent_env` runner with `backend_config.benchmark` set to `terminal_bench` or `skill_bench`
+- trajectory steps carry token/logprob capture metadata when a provider can supply exact token IDs and logprobs; unsupported providers mark the capability flags false rather than pretending synthetic data is exact
 
-This tranche intentionally stops at eval and SFT collection. Exact token IDs, logprobs, and managed RL training infrastructure are deferred until trajectory collection is stable.
+Example `backend_config` for a terminal benchmark runner:
+
+```json
+{
+  "benchmark": "terminal_bench",
+  "cases": [
+    {
+      "name": "smoke",
+      "command": "printf bench-ok",
+      "expectedStdoutContains": ["bench-ok"],
+      "expectedExitCode": 0,
+      "timeoutSecs": 30
+    }
+  ]
+}
+```
+
+Example `backend_config` for a skill benchmark runner:
+
+```json
+{
+  "benchmark": "skill_bench",
+  "cases": [
+    {
+      "name": "skill-readiness",
+      "skillContent": "# Skill Name\n\nDescribe when to use this skill and the concrete workflow.",
+      "requiredSubstrings": ["when to use", "workflow"]
+    }
+  ]
+}
+```
 
 ## Candidate Generation And Run History
 

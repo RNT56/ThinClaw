@@ -39,7 +39,9 @@ with boot screen), tunnel providers (Tailscale/Cloudflare), Docker sandbox
 (container isolation for untrusted code), browser automation (Chromium-based),
 and Nostr protocol integration.
 
-Best for: Full production deployments with web UI and all channel support.
+Best for: Full production deployments with web UI and all non-desktop channel
+support. This is the expected native build profile for Raspberry Pi OS Lite
+64-bit.
 
 ```bash
 cargo build --release --features full
@@ -119,9 +121,45 @@ Linux notes:
 
 - The default `light` profile includes the local gateway and does not need any extra system packages beyond the normal Rust build toolchain.
 - `full` needs Docker for Docker sandbox jobs and Docker Chromium fallback, plus a local Chrome/Chromium/Brave/Edge browser if you set `BROWSER_DOCKER=never`.
+- Raspberry Pi OS Lite 64-bit should use the `aarch64-unknown-linux-gnu` release artifact or `cargo build --release --features full` for native installs.
 - `--features light,voice` or `--all-features` requires `libasound2-dev`.
 - `--features bedrock` or `--all-features` requires AWS credentials (`AWS_PROFILE` or AWS access keys).
 - `--features bundled-wasm` or `--all-features` requires `rustup target add wasm32-wasip2` and `cargo install wasm-tools --locked`.
+
+## Raspberry Pi OS Lite 64-Bit Builds
+
+Pi OS Lite is a headless target, not a desktop-autonomy target.
+
+Use the release artifact for production:
+
+```bash
+export THINCLAW_VERSION=v0.13.6  # replace with the latest release tag
+curl -L -o thinclaw-pi.tar.gz \
+  "https://github.com/RNT56/ThinClaw/releases/download/${THINCLAW_VERSION}/thinclaw-aarch64-unknown-linux-gnu.tar.gz"
+tar -xzf thinclaw-pi.tar.gz
+```
+
+Build from source on a Pi only when you need local patches:
+
+```bash
+cargo build --release --features full
+```
+
+Docker users should prefer the multi-arch image:
+
+```bash
+docker pull ghcr.io/rnt56/thinclaw:latest
+```
+
+Use the `light` profile only for intentionally smaller gateway/libSQL installs.
+It omits ACP, tunnels, Docker sandbox, browser automation, and Nostr.
+
+Before deploying or enabling new runtime capabilities:
+
+```bash
+thinclaw doctor --profile pi-os-lite-64
+thinclaw status --profile pi-os-lite-64
+```
 
 ## Profile Composition
 
@@ -165,6 +203,7 @@ passes clippy, and compiles tests:
 - **Full test suite:** Runs with `--all-features` and a live PostgreSQL service for
   integration coverage.
 - **Release builds:** Produce binaries with the `full` profile for maximum compatibility.
+- **Raspberry Pi OS Lite 64-bit:** Uses the `aarch64-unknown-linux-gnu` release artifact for native installs and the multi-arch `ghcr.io/rnt56/thinclaw:<version>` / `latest` image for Docker installs.
 
 ## Migration from `full` Default
 

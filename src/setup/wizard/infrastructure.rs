@@ -28,7 +28,10 @@ use super::helpers::mask_password_in_url;
 
 impl SetupWizard {
     pub(super) async fn auto_configure_quick_runtime_defaults(&mut self) -> Result<(), SetupError> {
-        self.selected_profile = super::OnboardingProfile::BuilderAndCoding;
+        self.selected_profile = self
+            .config
+            .profile
+            .unwrap_or(super::OnboardingProfile::BuilderAndCoding);
         self.apply_profile_defaults();
         self.settings.user_timezone = Some(crate::timezone::detect_system_timezone().to_string());
         self.settings.webchat_theme = "system".to_string();
@@ -199,6 +202,11 @@ impl SetupWizard {
                 super::OnboardingProfile::BuilderAndCoding => {
                     print_success(
                         "Recommended: libSQL unless you already need shared PostgreSQL infrastructure.",
+                    );
+                }
+                super::OnboardingProfile::RemoteServer => {
+                    print_success(
+                        "Recommended: libSQL local file. Remote/headless hosts should avoid requiring a separate database before the service starts.",
                     );
                 }
                 super::OnboardingProfile::CustomAdvanced => {

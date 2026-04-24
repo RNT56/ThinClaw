@@ -19,6 +19,7 @@ use crate::context::JobContext;
 use crate::secrets::SecretsStore;
 use crate::tools::ToolRegistry;
 use crate::tools::builtin::ShellTool;
+use crate::tools::execution::HostMediatedToolInvoker;
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolMetadata, ToolOutput, ToolSchema,
 };
@@ -567,6 +568,7 @@ pub async fn load_user_tools_from_dir(
     safety: Option<&SafetyConfig>,
     wasm_runtime: Option<Arc<WasmToolRuntime>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    tool_invoker: Option<Arc<HostMediatedToolInvoker>>,
 ) -> UserToolLoadResults {
     let mut results = UserToolLoadResults::default();
 
@@ -595,6 +597,9 @@ pub async fn load_user_tools_from_dir(
         let mut loader = WasmToolLoader::new(runtime, Arc::clone(&registry));
         if let Some(secrets) = secrets_store {
             loader = loader.with_secrets_store(secrets);
+        }
+        if let Some(invoker) = tool_invoker {
+            loader = loader.with_tool_invoker(invoker);
         }
         loader
     });

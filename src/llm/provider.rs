@@ -196,6 +196,8 @@ pub struct CompletionRequest {
     pub stop_sequences: Option<Vec<String>>,
     /// Extended thinking / reasoning configuration.
     pub thinking: ThinkingConfig,
+    /// Desired behavior when a provider cannot produce native stream deltas.
+    pub stream_policy: StreamPolicy,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     pub metadata: std::collections::HashMap<String, String>,
 }
@@ -211,6 +213,7 @@ impl CompletionRequest {
             temperature: None,
             stop_sequences: None,
             thinking: ThinkingConfig::Disabled,
+            stream_policy: StreamPolicy::AllowSimulated,
             metadata: std::collections::HashMap::new(),
         }
     }
@@ -251,6 +254,12 @@ impl CompletionRequest {
     /// Set the thinking configuration directly.
     pub fn set_thinking(mut self, config: ThinkingConfig) -> Self {
         self.thinking = config;
+        self
+    }
+
+    /// Set streaming policy for `complete_stream()`.
+    pub fn with_stream_policy(mut self, policy: StreamPolicy) -> Self {
+        self.stream_policy = policy;
         self
     }
 }
@@ -321,6 +330,8 @@ pub struct ToolCompletionRequest {
     pub tool_choice: Option<String>,
     /// Extended thinking / reasoning configuration.
     pub thinking: ThinkingConfig,
+    /// Desired behavior when a provider cannot produce native stream deltas.
+    pub stream_policy: StreamPolicy,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
     pub metadata: std::collections::HashMap<String, String>,
 }
@@ -337,6 +348,7 @@ impl ToolCompletionRequest {
             temperature: None,
             tool_choice: None,
             thinking: ThinkingConfig::Disabled,
+            stream_policy: StreamPolicy::AllowSimulated,
             metadata: std::collections::HashMap::new(),
         }
     }
@@ -385,6 +397,12 @@ impl ToolCompletionRequest {
         self.thinking = config;
         self
     }
+
+    /// Set streaming policy for `complete_stream_with_tools()`.
+    pub fn with_stream_policy(mut self, policy: StreamPolicy) -> Self {
+        self.stream_policy = policy;
+        self
+    }
 }
 
 /// Response from a completion with potential tool calls.
@@ -411,6 +429,58 @@ pub struct ModelMetadata {
     pub id: String,
     /// Total context window size in tokens.
     pub context_length: Option<u32>,
+}
+
+/// How a provider can service a streaming request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamSupport {
+    /// Provider uses its native streaming endpoint/adapter.
+    Native,
+    /// Provider can only simulate streaming from a completed response.
+    Simulated,
+    /// Provider cannot stream and should fail streaming requests.
+    Unsupported,
+}
+
+impl StreamSupport {
+    pub fn is_native(self) -> bool {
+        matches!(self, Self::Native)
+    }
+
+    pub fn is_available(self) -> bool {
+        !matches!(self, Self::Unsupported)
+    }
+}
+
+impl Default for StreamSupport {
+    fn default() -> Self {
+        Self::Simulated
+    }
+}
+
+/// Streaming behavior requested by a caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamPolicy {
+    /// Prefer native streaming but allow a simulated fallback if needed.
+    PreferNative,
+    /// Native or simulated streaming are both acceptable.
+    AllowSimulated,
+    /// Fail unless the provider can produce native stream chunks.
+    RequireNative,
+}
+
+impl StreamPolicy {
+    pub fn allows_simulated(self) -> bool {
+        matches!(self, Self::PreferNative | Self::AllowSimulated)
+    }
+}
+
+impl Default for StreamPolicy {
+    fn default() -> Self {
+        Self::AllowSimulated
+    }
 }
 
 /// A single chunk in a streaming LLM response.
@@ -479,8 +549,19 @@ pub trait LlmProvider: Send + Sync {
         &self,
         request: CompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
+        match self.stream_support_for_model(request.model.as_deref()) {
+            StreamSupport::Native | StreamSupport::Simulated
+                if request.stream_policy.allows_simulated() => {}
+            StreamSupport::Native => {}
+            StreamSupport::Simulated | StreamSupport::Unsupported => {
+                return Err(LlmError::StreamingUnsupported {
+                    provider: self.model_name().to_string(),
+                    model: self.effective_model_name(request.model.as_deref()),
+                });
+            }
+        }
         let resp = self.complete(request).await?;
-        Ok(simulate_stream_from_response(
+        Ok(crate::llm::streaming::simulate_stream_from_response(
             resp.content,
             resp.provider_model,
             resp.cost_usd,
@@ -499,8 +580,19 @@ pub trait LlmProvider: Send + Sync {
         &self,
         request: ToolCompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
+        match self.stream_support_for_model(request.model.as_deref()) {
+            StreamSupport::Native | StreamSupport::Simulated
+                if request.stream_policy.allows_simulated() => {}
+            StreamSupport::Native => {}
+            StreamSupport::Simulated | StreamSupport::Unsupported => {
+                return Err(LlmError::StreamingUnsupported {
+                    provider: self.model_name().to_string(),
+                    model: self.effective_model_name(request.model.as_deref()),
+                });
+            }
+        }
         let resp = self.complete_with_tools(request).await?;
-        Ok(simulate_stream_from_response(
+        Ok(crate::llm::streaming::simulate_stream_from_response(
             resp.content.unwrap_or_default(),
             resp.provider_model,
             resp.cost_usd,
@@ -512,10 +604,23 @@ pub trait LlmProvider: Send + Sync {
         ))
     }
 
+    /// How this provider can service streaming requests for its active model.
+    fn stream_support(&self) -> StreamSupport {
+        StreamSupport::Simulated
+    }
+
+    /// How this provider can service streaming requests for a specific model.
+    fn stream_support_for_model(&self, _requested_model: Option<&str>) -> StreamSupport {
+        self.stream_support()
+    }
+
     /// Whether this provider supports native token-level streaming.
-    /// Used by the OpenAI-compat endpoint to set the `x-thinclaw-streaming` header.
+    ///
+    /// This remains as a compatibility helper for older call sites. New code
+    /// should use `stream_support()` so native and simulated streams are not
+    /// conflated.
     fn supports_streaming(&self) -> bool {
-        false
+        self.stream_support().is_native()
     }
 
     /// Whether this provider supports native streaming for a specific request model.
@@ -524,7 +629,7 @@ pub trait LlmProvider: Send + Sync {
     /// streaming capability. Runtime-routed providers can override this to
     /// resolve the exact request target before answering.
     fn supports_streaming_for_model(&self, _requested_model: Option<&str>) -> bool {
-        self.supports_streaming()
+        self.stream_support_for_model(_requested_model).is_native()
     }
 
     /// List available models from the provider.
@@ -581,125 +686,6 @@ pub trait LlmProvider: Send + Sync {
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         let (input_cost, output_cost) = self.cost_per_token();
         input_cost * Decimal::from(input_tokens) + output_cost * Decimal::from(output_tokens)
-    }
-}
-
-/// Simulate a streaming response by word-chunking a completed response.
-///
-/// Used as the default implementation for providers that don't support
-/// native token-level streaming.
-fn simulate_stream_from_response(
-    content: String,
-    provider_model: Option<String>,
-    cost_usd: Option<f64>,
-    thinking_content: Option<String>,
-    tool_calls: Vec<ToolCall>,
-    input_tokens: u32,
-    output_tokens: u32,
-    finish_reason: FinishReason,
-) -> StreamChunkStream {
-    Box::pin(futures::stream::unfold(
-        SimState::new(
-            content,
-            provider_model,
-            cost_usd,
-            thinking_content,
-            tool_calls,
-            input_tokens,
-            output_tokens,
-            finish_reason,
-        ),
-        |mut state| async move {
-            // Phase 1: Emit reasoning deltas
-            if let Some(ref mut thinking) = state.thinking {
-                if !thinking.is_empty() {
-                    let chunk = std::mem::take(thinking);
-                    state.thinking = None;
-                    return Some((Ok(StreamChunk::ReasoningDelta(chunk)), state));
-                }
-                state.thinking = None;
-            }
-
-            // Phase 2: Emit content word-by-word
-            if !state.words.is_empty() {
-                let word = state.words.remove(0);
-                return Some((Ok(StreamChunk::Text(word)), state));
-            }
-
-            // Phase 3: Emit tool calls
-            if !state.tool_calls.is_empty() {
-                let tc = state.tool_calls.remove(0);
-                return Some((Ok(StreamChunk::ToolCall(tc)), state));
-            }
-
-            // Phase 4: Done
-            if !state.done {
-                state.done = true;
-                return Some((
-                    Ok(StreamChunk::Done {
-                        provider_model: state.provider_model.clone(),
-                        cost_usd: state.cost_usd,
-                        input_tokens: state.input_tokens,
-                        output_tokens: state.output_tokens,
-                        finish_reason: state.finish_reason,
-                    }),
-                    state,
-                ));
-            }
-
-            None
-        },
-    ))
-}
-
-/// Internal state for the simulated stream.
-struct SimState {
-    provider_model: Option<String>,
-    cost_usd: Option<f64>,
-    thinking: Option<String>,
-    words: Vec<String>,
-    tool_calls: Vec<ToolCall>,
-    input_tokens: u32,
-    output_tokens: u32,
-    finish_reason: FinishReason,
-    done: bool,
-}
-
-impl SimState {
-    fn new(
-        content: String,
-        provider_model: Option<String>,
-        cost_usd: Option<f64>,
-        thinking: Option<String>,
-        tool_calls: Vec<ToolCall>,
-        input_tokens: u32,
-        output_tokens: u32,
-        finish_reason: FinishReason,
-    ) -> Self {
-        // Split content into word-boundary chunks, keeping ~20 char groups
-        let mut words = Vec::new();
-        let mut buf = String::new();
-        for word in content.split_inclusive(char::is_whitespace) {
-            buf.push_str(word);
-            if buf.len() >= 20 {
-                words.push(std::mem::take(&mut buf));
-            }
-        }
-        if !buf.is_empty() {
-            words.push(buf);
-        }
-
-        Self {
-            provider_model,
-            cost_usd,
-            thinking,
-            words,
-            tool_calls,
-            input_tokens,
-            output_tokens,
-            finish_reason,
-            done: false,
-        }
     }
 }
 
@@ -775,6 +761,65 @@ pub fn sanitize_tool_messages(messages: &mut [ChatMessage]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::streaming::simulate_stream_from_response;
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+
+    struct StreamPolicyTestProvider {
+        support: StreamSupport,
+    }
+
+    impl StreamPolicyTestProvider {
+        fn new(support: StreamSupport) -> Self {
+            Self { support }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for StreamPolicyTestProvider {
+        fn model_name(&self) -> &str {
+            "stream-policy-test"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: "simulated content".to_string(),
+                provider_model: Some("stream-policy-test".to_string()),
+                cost_usd: Some(0.0),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 2,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("tool content".to_string()),
+                provider_model: Some("stream-policy-test".to_string()),
+                cost_usd: Some(0.0),
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 2,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        fn stream_support(&self) -> StreamSupport {
+            self.support
+        }
+    }
 
     #[test]
     fn test_sanitize_preserves_valid_pairs() {
@@ -882,6 +927,67 @@ mod tests {
         // tool result at index 0 has no preceding assistant(tool_calls) → orphaned
         assert_eq!(messages[0].role, Role::User);
         assert!(messages[0].content.contains("[Tool `search` returned:"));
+    }
+
+    #[tokio::test]
+    async fn stream_policy_allows_simulated_default_fallback() {
+        use futures::StreamExt;
+
+        let provider = StreamPolicyTestProvider::new(StreamSupport::Simulated);
+        let request = CompletionRequest::new(vec![ChatMessage::user("hello")])
+            .with_stream_policy(StreamPolicy::AllowSimulated);
+
+        let mut stream = provider.complete_stream(request).await.unwrap();
+        let mut text = String::new();
+        let mut saw_done = false;
+        while let Some(chunk) = stream.next().await {
+            match chunk.unwrap() {
+                StreamChunk::Text(delta) => text.push_str(&delta),
+                StreamChunk::Done {
+                    provider_model,
+                    input_tokens,
+                    output_tokens,
+                    finish_reason,
+                    ..
+                } => {
+                    saw_done = true;
+                    assert_eq!(provider_model.as_deref(), Some("stream-policy-test"));
+                    assert_eq!(input_tokens, 1);
+                    assert_eq!(output_tokens, 2);
+                    assert_eq!(finish_reason, FinishReason::Stop);
+                }
+                other => panic!("unexpected chunk: {other:?}"),
+            }
+        }
+
+        assert_eq!(text, "simulated content");
+        assert!(saw_done);
+    }
+
+    #[tokio::test]
+    async fn stream_policy_require_native_rejects_simulated_provider() {
+        let provider = StreamPolicyTestProvider::new(StreamSupport::Simulated);
+        let request = CompletionRequest::new(vec![ChatMessage::user("hello")])
+            .with_stream_policy(StreamPolicy::RequireNative);
+
+        let error = match provider.complete_stream(request).await {
+            Ok(_) => panic!("expected streaming unsupported error"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, LlmError::StreamingUnsupported { .. }));
+    }
+
+    #[tokio::test]
+    async fn stream_policy_rejects_unsupported_provider() {
+        let provider = StreamPolicyTestProvider::new(StreamSupport::Unsupported);
+        let request = CompletionRequest::new(vec![ChatMessage::user("hello")])
+            .with_stream_policy(StreamPolicy::AllowSimulated);
+
+        let error = match provider.complete_stream(request).await {
+            Ok(_) => panic!("expected streaming unsupported error"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, LlmError::StreamingUnsupported { .. }));
     }
 
     #[tokio::test]

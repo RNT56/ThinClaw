@@ -21,8 +21,8 @@ use tokio::sync::Mutex;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamSupport,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Configuration for the circuit breaker.
@@ -84,7 +84,7 @@ impl BreakerState {
 /// succeeds the circuit closes, otherwise it reopens.
 pub struct CircuitBreakerProvider {
     inner: Arc<dyn LlmProvider>,
-    state: Mutex<BreakerState>,
+    state: Arc<Mutex<BreakerState>>,
     config: CircuitBreakerConfig,
 }
 
@@ -92,7 +92,7 @@ impl CircuitBreakerProvider {
     pub fn new(inner: Arc<dyn LlmProvider>, config: CircuitBreakerConfig) -> Self {
         Self {
             inner,
-            state: Mutex::new(BreakerState::new()),
+            state: Arc::new(Mutex::new(BreakerState::new())),
             config,
         }
     }
@@ -209,6 +209,114 @@ impl CircuitBreakerProvider {
     }
 }
 
+async fn record_success_state(
+    state: &Mutex<BreakerState>,
+    config: &CircuitBreakerConfig,
+    provider: &str,
+) {
+    let mut state = state.lock().await;
+    match state.state {
+        CircuitState::Closed => {
+            state.consecutive_failures = 0;
+        }
+        CircuitState::HalfOpen => {
+            state.half_open_successes += 1;
+            if state.half_open_successes >= config.half_open_successes_needed {
+                state.state = CircuitState::Closed;
+                state.consecutive_failures = 0;
+                state.opened_at = None;
+                tracing::info!(provider, "Circuit breaker: HalfOpen -> Closed (recovered)");
+            }
+        }
+        CircuitState::Open => {
+            state.state = CircuitState::Closed;
+            state.consecutive_failures = 0;
+            state.opened_at = None;
+        }
+    }
+}
+
+async fn record_failure_state(
+    state: &Mutex<BreakerState>,
+    config: &CircuitBreakerConfig,
+    provider: &str,
+    err: &LlmError,
+) {
+    if !is_transient(err) {
+        return;
+    }
+
+    let mut state = state.lock().await;
+    match state.state {
+        CircuitState::Closed => {
+            state.consecutive_failures += 1;
+            if state.consecutive_failures >= config.failure_threshold {
+                state.state = CircuitState::Open;
+                state.opened_at = Some(Instant::now());
+                tracing::warn!(
+                    provider,
+                    failures = state.consecutive_failures,
+                    "Circuit breaker: Closed -> Open"
+                );
+            }
+        }
+        CircuitState::HalfOpen => {
+            state.state = CircuitState::Open;
+            state.opened_at = Some(Instant::now());
+            state.half_open_successes = 0;
+            tracing::warn!(provider, "Circuit breaker: HalfOpen -> Open (probe failed)");
+        }
+        CircuitState::Open => {}
+    }
+}
+
+fn wrap_breaker_stream(
+    mut stream: crate::llm::StreamChunkStream,
+    state: Arc<Mutex<BreakerState>>,
+    config: CircuitBreakerConfig,
+    provider: String,
+) -> crate::llm::StreamChunkStream {
+    Box::pin(async_stream::stream! {
+        use futures::StreamExt;
+        let mut finished = false;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(crate::llm::StreamChunk::Done {
+                    provider_model,
+                    cost_usd,
+                    input_tokens,
+                    output_tokens,
+                    finish_reason,
+                }) => {
+                    finished = true;
+                    record_success_state(&state, &config, &provider).await;
+                    yield Ok(crate::llm::StreamChunk::Done {
+                        provider_model,
+                        cost_usd,
+                        input_tokens,
+                        output_tokens,
+                        finish_reason,
+                    });
+                }
+                Err(error) => {
+                    record_failure_state(&state, &config, &provider, &error).await;
+                    yield Err(error);
+                    break;
+                }
+                other => yield other,
+            }
+        }
+
+        if !finished {
+            let error = LlmError::RequestFailed {
+                provider: provider.clone(),
+                reason: "stream ended before Done chunk".to_string(),
+            };
+            record_failure_state(&state, &config, &provider, &error).await;
+        }
+    })
+}
+
 /// Returns `true` for errors that indicate the provider is degraded
 /// (server errors, rate limits, network failures, auth infrastructure down).
 ///
@@ -305,15 +413,15 @@ impl LlmProvider for CircuitBreakerProvider {
         request: CompletionRequest,
     ) -> Result<crate::llm::StreamChunkStream, LlmError> {
         self.check_allowed().await?;
-        // Record success/failure on the initial connection attempt.
-        // Mid-stream errors can't be tracked (the stream is consumed by the
-        // caller), but connection-level failures should still count toward
-        // the circuit breaker threshold.
+        // Start failures count immediately; stream success/failure is recorded
+        // by the wrapper once the caller consumes Done or a midstream error.
         match self.inner.complete_stream(request).await {
-            Ok(stream) => {
-                self.record_success().await;
-                Ok(stream)
-            }
+            Ok(stream) => Ok(wrap_breaker_stream(
+                stream,
+                Arc::clone(&self.state),
+                self.config.clone(),
+                self.inner.model_name().to_string(),
+            )),
             Err(err) => {
                 self.record_failure(&err).await;
                 Err(err)
@@ -327,10 +435,12 @@ impl LlmProvider for CircuitBreakerProvider {
     ) -> Result<crate::llm::StreamChunkStream, LlmError> {
         self.check_allowed().await?;
         match self.inner.complete_stream_with_tools(request).await {
-            Ok(stream) => {
-                self.record_success().await;
-                Ok(stream)
-            }
+            Ok(stream) => Ok(wrap_breaker_stream(
+                stream,
+                Arc::clone(&self.state),
+                self.config.clone(),
+                self.inner.model_name().to_string(),
+            )),
             Err(err) => {
                 self.record_failure(&err).await;
                 Err(err)
@@ -341,6 +451,14 @@ impl LlmProvider for CircuitBreakerProvider {
     fn supports_streaming(&self) -> bool {
         self.inner.supports_streaming()
     }
+
+    fn stream_support(&self) -> StreamSupport {
+        self.inner.stream_support()
+    }
+
+    fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
+        self.inner.stream_support_for_model(requested_model)
+    }
 }
 
 #[cfg(test)]
@@ -348,6 +466,64 @@ mod tests {
     use super::*;
 
     use crate::testing::StubLlm;
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+
+    struct MidstreamErrorProvider;
+
+    #[async_trait]
+    impl LlmProvider for MidstreamErrorProvider {
+        fn model_name(&self) -> &str {
+            "midstream-error"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: Some(0.0),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: Some(0.0),
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: crate::llm::FinishReason::Stop,
+            })
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<crate::llm::StreamChunkStream, LlmError> {
+            Ok(Box::pin(futures::stream::once(async {
+                Err(LlmError::RequestFailed {
+                    provider: "midstream-error".to_string(),
+                    reason: "stream failed".to_string(),
+                })
+            })))
+        }
+    }
 
     fn make_request() -> CompletionRequest {
         CompletionRequest::new(vec![crate::llm::ChatMessage::user("hello")])
@@ -476,6 +652,18 @@ mod tests {
 
         // Probe fails (stub still failing)
         let _ = cb.complete(make_request()).await;
+        assert_eq!(cb.circuit_state().await, CircuitState::Open);
+    }
+
+    #[tokio::test]
+    async fn stream_error_records_circuit_failure() {
+        use futures::StreamExt;
+
+        let cb = CircuitBreakerProvider::new(Arc::new(MidstreamErrorProvider), fast_config(1));
+
+        let mut stream = cb.complete_stream(make_request()).await.unwrap();
+        assert!(stream.next().await.unwrap().is_err());
+
         assert_eq!(cb.circuit_state().await, CircuitState::Open);
     }
 

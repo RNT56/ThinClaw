@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Releases prior to v0.13.0 were published under the IronClaw name and are not listed here.
 > See the [IronClaw releases](https://github.com/nearai/ironclaw/releases) for earlier history.
 
+## [Unreleased] - 2026-04-24
+
+### Added
+
+- ACP v1 compatibility work for editor clients, including typed wire messages, JSON-RPC transcript coverage, prompt/session lifecycle handling, permission round-tripping, client filesystem/terminal bridges, MCP stdio descriptor wiring, and stdout cleanliness checks.
+- AgentEnv and research campaign plumbing with benchmark adapters, Research WebUI/API surfaces, and trajectory metadata for token/logprob capture when providers support it.
+- Extension manifest foundations for tool, channel, memory, context, and native-plugin contributions, with native plugin loading gated behind explicit unsafe configuration and signature metadata.
+- WASM tool host-mediated invocation support through declared aliases with policy, approval, timeout, recursion-depth, and audit controls.
+- Provider-native streaming capability metadata and streaming paths across the LLM stack, with simulated streaming retained only as an explicit fallback.
+- Release and deployment improvements for Linux, Docker Compose, gateway access, readiness probes, and build-profile documentation.
+
+### Changed
+
+- ACP capability advertisement now tracks implemented and tested behavior instead of exposing placeholder features.
+- Setup wizard tests and docs now agree on the documented 12-step quick setup flow.
+- User-tools documentation now prefers the canonical `~/.thinclaw/user-tools/` path while preserving the legacy underscore path as an alias.
+
+### Fixed
+
+- Docker availability detection no longer hangs when Docker Desktop or compatible runtimes leave `docker version`/`docker info` blocked; CLI probes now have killable per-command timeouts.
+- Dispatcher streaming tests now model native streaming support explicitly, matching the production gate that avoids fake progressive streaming for non-native providers.
+- ACP local validation, default build checks, feature-profile checks, and the broad library suite are green with the Docker hang fixed.
+
 ## [0.13.6](https://github.com/RNT56/ThinClaw/releases/tag/v0.13.6) - 2026-04-14
 
 ### Added

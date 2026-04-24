@@ -5,9 +5,8 @@
 //! - **Linux**: systemd user unit at `~/.config/systemd/user/thinclaw.service`
 //! - **Windows**: Service Control Manager entry backed by a ThinClaw wrapper
 //!
-//! The installed service runs `thinclaw run` by default, or `thinclaw run --no-onboard`
-//! only when the operator explicitly forces a headless install before onboarding,
-//! and is configured to restart automatically on failure.
+//! The installed service runs `thinclaw run --no-onboard` and is configured to
+//! restart automatically on failure.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -64,25 +63,30 @@ fn install() -> Result<()> {
         println!();
     }
 
+    guard_remote_gateway_install(force_install)?;
+
     #[cfg(target_os = "macos")]
     {
-        install_macos(force_install)
+        install_macos(force_install)?;
     }
 
     #[cfg(target_os = "linux")]
     {
-        install_linux(force_install)
+        install_linux(force_install)?;
     }
 
     #[cfg(target_os = "windows")]
     {
-        windows_impl::install()
+        windows_impl::install()?;
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         bail!("Service management is only supported on macOS, Linux, and Windows");
     }
+
+    print_service_install_summary();
+    Ok(())
 }
 
 fn start() -> Result<()> {
@@ -201,12 +205,62 @@ fn onboarding_blocker() -> Option<String> {
     }
 }
 
-fn service_run_args(force_no_onboard: bool) -> Vec<&'static str> {
-    let mut args = vec!["run"];
-    if force_no_onboard || onboarding_blocker().is_some() {
-        args.push("--no-onboard");
+fn service_run_args(_force_no_onboard: bool) -> Vec<&'static str> {
+    vec!["run", "--no-onboard"]
+}
+
+fn guard_remote_gateway_install(force_install: bool) -> Result<()> {
+    let _ = dotenvy::dotenv();
+    let _ = dotenvy::from_path(crate::platform::state_paths().env_file);
+
+    let settings = crate::settings::Settings::load();
+    let access =
+        crate::platform::gateway_access::GatewayAccessInfo::from_env_and_settings(Some(&settings));
+
+    if remote_gateway_explicitly_configured(&settings)
+        && access.enabled
+        && access.auth_token.is_none()
+        && !force_install
+    {
+        bail!(
+            "Service install blocked: remote gateway is enabled without GATEWAY_AUTH_TOKEN. Run `thinclaw onboard --profile remote` or set a long random token in {}.",
+            crate::platform::state_paths().env_file.display()
+        );
     }
-    args
+
+    if access.cli_enabled {
+        println!("WARNING: CLI_ENABLED is true in the current environment.");
+        println!("  The installed service will set CLI_ENABLED=false to avoid stdin EOF shutdown.");
+        println!();
+    }
+
+    Ok(())
+}
+
+fn remote_gateway_explicitly_configured(settings: &crate::settings::Settings) -> bool {
+    std::env::var_os("GATEWAY_ENABLED").is_some()
+        || std::env::var_os("GATEWAY_HOST").is_some()
+        || std::env::var_os("GATEWAY_PORT").is_some()
+        || std::env::var_os("GATEWAY_AUTH_TOKEN").is_some()
+        || settings.channels.gateway_enabled.is_some()
+        || settings.channels.gateway_host.is_some()
+        || settings.channels.gateway_port.is_some()
+        || settings.channels.gateway_auth_token.is_some()
+}
+
+fn print_service_install_summary() {
+    let settings = crate::settings::Settings::load();
+    let access =
+        crate::platform::gateway_access::GatewayAccessInfo::from_env_and_settings(Some(&settings));
+    let env_path = crate::platform::state_paths().env_file;
+
+    println!("  Env file: {}", env_path.display());
+    println!("  Runtime command: thinclaw run --no-onboard");
+    println!("  WebUI URL: {}", access.local_url());
+    if let Some(url) = access.token_url(false) {
+        println!("  Token URL: {}", url);
+    }
+    println!("  SSH tunnel: {}", access.ssh_tunnel_command());
 }
 
 #[cfg(target_os = "macos")]
@@ -252,6 +306,10 @@ fn install_macos(force_no_onboard: bool) -> Result<()> {
     <string>{home}</string>
     <key>PATH</key>
     <string>{path}</string>
+    <key>CLI_ENABLED</key>
+    <string>false</string>
+    <key>THINCLAW_SERVICE_MANAGER</key>
+    <string>launchd</string>
   </dict>
   <key>StandardOutPath</key>
   <string>{stdout}</string>
@@ -297,6 +355,8 @@ fn install_linux(force_no_onboard: bool) -> Result<()> {
          \n\
          [Service]\n\
          Type=simple\n\
+         Environment=CLI_ENABLED=false\n\
+         Environment=THINCLAW_SERVICE_MANAGER=systemd\n\
          ExecStart=\"{exe}\" {exec_args}\n\
          Restart=always\n\
          RestartSec=3\n\
@@ -831,6 +891,7 @@ mod windows_impl {
             cmd.arg(arg);
         }
         cmd.env("THINCLAW_SERVICE_MANAGER", "windows")
+            .env("CLI_ENABLED", "false")
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .stdin(Stdio::null());

@@ -104,6 +104,8 @@ pub struct DockerDetection {
 /// daemon is installed but not running.  Without this ceiling the startup
 /// path would block for 120+ seconds (the bollard default request timeout).
 const DOCKER_DETECT_TIMEOUT_SECS: u64 = 10;
+#[cfg(any(windows, target_os = "macos"))]
+const DOCKER_CLI_PROBE_TIMEOUT_SECS: u64 = 3;
 
 /// Check whether Docker is installed and running.
 ///
@@ -165,49 +167,72 @@ pub async fn check_docker() -> DockerDetection {
 fn docker_binary_exists() -> bool {
     #[cfg(unix)]
     {
-        std::process::Command::new("which")
-            .arg("docker")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        command_status_success_with_timeout("which", &["docker"], std::time::Duration::from_secs(1))
     }
     #[cfg(windows)]
     {
-        std::process::Command::new("where")
-            .arg("docker")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        command_status_success_with_timeout("where", &["docker"], std::time::Duration::from_secs(1))
+    }
+}
+
+fn command_status_success_with_timeout(
+    command: &str,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> bool {
+    let mut child = match std::process::Command::new(command)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
     }
 }
 
 #[cfg(any(windows, target_os = "macos"))]
 fn docker_cli_daemon_reachable() -> bool {
     let docker = crate::util::resolve_binary("docker");
-    let stdout = std::process::Stdio::null();
-    let stderr = std::process::Stdio::null();
+    let timeout = std::time::Duration::from_secs(DOCKER_CLI_PROBE_TIMEOUT_SECS);
 
     // `docker version` requires daemon reachability for server fields.
-    let version_ok = std::process::Command::new(&docker)
-        .args(["version", "--format", "{{.Server.Version}}"])
-        .stdout(stdout)
-        .stderr(stderr)
-        .status()
-        .is_ok_and(|s| s.success());
+    let version_ok = command_status_success_with_timeout(
+        &docker,
+        &["version", "--format", "{{.Server.Version}}"],
+        timeout,
+    );
 
     if version_ok {
         return true;
     }
 
     // Fallback for environments where `docker version --format` behaves differently.
-    std::process::Command::new(&docker)
-        .args(["info", "--format", "{{.ServerVersion}}"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    command_status_success_with_timeout(
+        &docker,
+        &["info", "--format", "{{.ServerVersion}}"],
+        timeout,
+    )
 }
 
 #[cfg(test)]
@@ -253,5 +278,19 @@ mod tests {
             DockerStatus::Available | DockerStatus::NotInstalled | DockerStatus::NotRunning => {}
             DockerStatus::Disabled => panic!("check_docker should never return Disabled"),
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn command_status_timeout_kills_hung_probe() {
+        let started = std::time::Instant::now();
+        let ok = command_status_success_with_timeout(
+            "sh",
+            &["-c", "sleep 5"],
+            std::time::Duration::from_millis(100),
+        );
+
+        assert!(!ok);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 }

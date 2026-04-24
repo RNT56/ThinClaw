@@ -31,6 +31,10 @@ impl GatewayAuthSource {
             Self::TrustedProxy => "trusted_proxy",
         }
     }
+
+    fn allows_compat_overrides(&self) -> bool {
+        matches!(self, Self::BearerHeader | Self::BearerQuery)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,7 +196,11 @@ pub(crate) async fn request_identity_with_overrides(
         }
         identity.compatibility_fallback = true;
     }
-    identity.with_compat_overrides(requested_principal_id, requested_actor_id)
+    if identity.auth_source.allows_compat_overrides() {
+        identity.with_compat_overrides(requested_principal_id, requested_actor_id)
+    } else {
+        identity
+    }
 }
 
 #[cfg(test)]
@@ -579,6 +587,8 @@ mod tests {
             llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
+            skill_remote_hub: None,
+            skill_quarantine: None,
             chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
@@ -589,6 +599,52 @@ mod tests {
             secrets_store: None,
             channel_manager: None,
         }
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_identity_ignores_compatibility_overrides() {
+        let state = test_gateway_state("gateway-user", "gateway-actor", None);
+        let identity = GatewayRequestIdentity::new(
+            "proxy-user",
+            "proxy-user",
+            GatewayAuthSource::TrustedProxy,
+            false,
+        );
+
+        let resolved = request_identity_with_overrides(
+            &state,
+            &identity,
+            Some("other-user"),
+            Some("other-actor"),
+        )
+        .await;
+
+        assert_eq!(resolved.principal_id, "proxy-user");
+        assert_eq!(resolved.actor_id, "proxy-user");
+        assert!(!resolved.compatibility_fallback);
+    }
+
+    #[tokio::test]
+    async fn bearer_identity_still_accepts_compatibility_overrides() {
+        let state = test_gateway_state("gateway-user", "gateway-actor", None);
+        let identity = GatewayRequestIdentity::new(
+            "gateway-user",
+            "gateway-actor",
+            GatewayAuthSource::BearerHeader,
+            true,
+        );
+
+        let resolved = request_identity_with_overrides(
+            &state,
+            &identity,
+            Some("other-user"),
+            Some("other-actor"),
+        )
+        .await;
+
+        assert_eq!(resolved.principal_id, "other-user");
+        assert_eq!(resolved.actor_id, "other-actor");
+        assert!(resolved.compatibility_fallback);
     }
 
     #[tokio::test]

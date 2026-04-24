@@ -10,6 +10,7 @@ use crate::error::LlmError;
 use crate::llm::cost_tracker::{CostEntry, CostTracker};
 use crate::llm::model_guidance;
 use crate::llm::prompt_stack::PromptStack;
+use crate::llm::streaming::merge_streamed_tool_calls;
 use crate::llm::usage_tracking::mark_reasoning_request;
 use crate::llm::{
     ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
@@ -234,46 +235,6 @@ pub struct RespondOutput {
     pub finish_reason: crate::llm::FinishReason,
     /// Extended thinking / chain-of-thought content from the LLM, if available.
     pub thinking_content: Option<String>,
-}
-
-fn merge_streamed_tool_calls(
-    mut tool_calls: Vec<ToolCall>,
-    partial_tool_calls: std::collections::HashMap<u32, (String, String, String)>,
-) -> Vec<ToolCall> {
-    for (_idx, (id, name, args)) in partial_tool_calls {
-        if name.is_empty() {
-            continue;
-        }
-
-        let arguments: serde_json::Value =
-            serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
-
-        let safe_id = if id.trim().is_empty() {
-            format!("call_{}", uuid::Uuid::new_v4().simple())
-        } else {
-            id
-        };
-
-        if let Some(existing) = tool_calls.iter_mut().find(|tc| tc.id == safe_id) {
-            if existing.name.is_empty() {
-                existing.name = name;
-            }
-            if existing.arguments.is_null() && !arguments.is_null() {
-                existing.arguments = arguments;
-            }
-            continue;
-        }
-
-        tool_calls.push(ToolCall {
-            id: safe_id,
-            name,
-            arguments,
-        });
-    }
-
-    let mut seen_ids = std::collections::HashSet::new();
-    tool_calls.retain(|tc| seen_ids.insert(tc.id.clone()));
-    tool_calls
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

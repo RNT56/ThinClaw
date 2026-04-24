@@ -672,6 +672,7 @@ mod tests {
             Arc::new(ToolRegistry::new()),
             None,
             None,
+            None,
             std::path::PathBuf::from("/tmp/thinclaw-test-tools"),
             std::path::PathBuf::from("/tmp/thinclaw-test-channels"),
             "test".to_string(),

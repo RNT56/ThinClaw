@@ -867,12 +867,27 @@ impl Default for PromptSettings {
 pub struct ExtensionsSettings {
     #[serde(default = "default_extensions_user_tools_dir")]
     pub user_tools_dir: String,
+    #[serde(default)]
+    pub allow_native_plugins: bool,
+    #[serde(default = "default_true")]
+    pub require_plugin_signatures: bool,
+    #[serde(default)]
+    pub trusted_manifest_keys: Vec<String>,
+    #[serde(default)]
+    pub trusted_manifest_public_keys: HashMap<String, String>,
+    #[serde(default)]
+    pub native_plugin_allowlist_dirs: Vec<String>,
 }
 
 impl Default for ExtensionsSettings {
     fn default() -> Self {
         Self {
             user_tools_dir: default_extensions_user_tools_dir(),
+            allow_native_plugins: false,
+            require_plugin_signatures: true,
+            trusted_manifest_keys: Vec::new(),
+            trusted_manifest_public_keys: HashMap::new(),
+            native_plugin_allowlist_dirs: Vec::new(),
         }
     }
 }
@@ -1523,6 +1538,14 @@ pub struct ChannelSettings {
     pub apple_mail_mark_as_read: bool,
 
     // === Web Gateway ===
+    /// Whether the Web Gateway is enabled.
+    #[serde(default)]
+    pub gateway_enabled: Option<bool>,
+
+    /// Web Gateway bind host (default: 127.0.0.1).
+    #[serde(default)]
+    pub gateway_host: Option<String>,
+
     /// Web Gateway port (default: 3000).
     #[serde(default)]
     pub gateway_port: Option<u16>,
@@ -1530,6 +1553,10 @@ pub struct ChannelSettings {
     /// Web Gateway auth token.
     #[serde(default)]
     pub gateway_auth_token: Option<String>,
+
+    /// Whether the interactive CLI/REPL channel is enabled.
+    #[serde(default)]
+    pub cli_enabled: Option<bool>,
 
     /// Enabled WASM channels by name.
     /// Channels not in this list but present in the channels directory will still load.
@@ -1600,8 +1627,11 @@ impl Default for ChannelSettings {
             apple_mail_poll_interval: None,
             apple_mail_unread_only: true,
             apple_mail_mark_as_read: true,
+            gateway_enabled: None,
+            gateway_host: None,
             gateway_port: None,
             gateway_auth_token: None,
+            cli_enabled: None,
             wasm_channels: Vec::new(),
             wasm_channels_enabled: true,
             wasm_channels_dir: None,

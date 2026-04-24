@@ -154,10 +154,15 @@ impl ChannelsConfig {
             None
         };
 
-        let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", true)?;
+        let gateway_enabled = parse_bool_env(
+            "GATEWAY_ENABLED",
+            settings.channels.gateway_enabled.unwrap_or(true),
+        )?;
         let gateway = if gateway_enabled {
             Some(GatewayConfig {
-                host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),
+                host: optional_env("GATEWAY_HOST")?
+                    .or(settings.channels.gateway_host.clone())
+                    .unwrap_or_else(|| "127.0.0.1".to_string()),
                 port: optional_env("GATEWAY_PORT")?
                     .map(|s| {
                         s.parse::<u16>().map_err(|e| ConfigError::InvalidValue {
@@ -240,6 +245,7 @@ impl ChannelsConfig {
 
         let cli_enabled = optional_env("CLI_ENABLED")?
             .map(|s| s.to_lowercase() != "false" && s != "0")
+            .or(settings.channels.cli_enabled)
             .unwrap_or(true);
 
         Ok(Self {

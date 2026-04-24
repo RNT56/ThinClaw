@@ -3737,6 +3737,35 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
                 metadata_json,
             }
         }
+        StatusUpdate::Plan { entries } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!(
+                "[plan] {}",
+                serde_json::to_string(entries).unwrap_or_default()
+            ),
+            metadata_json,
+        },
+        StatusUpdate::Usage {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            model,
+        } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!(
+                "[usage] {} input + {} output tokens{}{}",
+                input_tokens,
+                output_tokens,
+                cost_usd
+                    .map(|cost| format!(", ${cost:.6}"))
+                    .unwrap_or_default(),
+                model
+                    .as_deref()
+                    .map(|model| format!(" ({model})"))
+                    .unwrap_or_default()
+            ),
+            metadata_json,
+        },
         StatusUpdate::ApprovalNeeded {
             request_id,
             tool_name,

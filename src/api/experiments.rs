@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{Duration as TokioDuration, interval};
 use uuid::Uuid;
 
+use crate::agent::env::{
+    AgentAction, EnvRunner, SkillBenchCase, SkillBenchEnv, TerminalBenchCase, TerminalBenchEnv,
+    Trajectory,
+};
 use crate::agent::run_artifact::{digest_json, digest_text};
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
 use crate::agent::{AgentRunArtifact, AgentRunStatus};
@@ -4413,6 +4417,18 @@ async fn execute_local_trial(
     trial.started_at = Some(Utc::now());
     trial.updated_at = Utc::now();
 
+    if let Some(config) = agent_env_benchmark_config(runner)? {
+        return execute_agent_env_benchmark_trial(
+            config,
+            &run_root,
+            started_at,
+            &log_path,
+            &artifact_dir,
+            trial,
+        )
+        .await;
+    }
+
     let env_grants = resolved_runner_env_grants(user_id, runner).await;
     let backend = experiment_execution_backend(settings, runner);
     let mut log = String::new();
@@ -4518,6 +4534,143 @@ async fn execute_local_trial(
             "summary_json_path": summary_manifest_path,
         }),
     })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "benchmark", rename_all = "snake_case")]
+enum AgentEnvBenchmarkConfig {
+    TerminalBench {
+        #[serde(default)]
+        cases: Vec<TerminalBenchCase>,
+    },
+    SkillBench {
+        #[serde(default)]
+        cases: Vec<SkillBenchCase>,
+    },
+}
+
+fn agent_env_benchmark_config(
+    runner: &ExperimentRunnerProfile,
+) -> ApiResult<Option<AgentEnvBenchmarkConfig>> {
+    let source = runner
+        .backend_config
+        .get("agent_env")
+        .or_else(|| runner.backend_config.get("benchmark_config"))
+        .unwrap_or(&runner.backend_config);
+    if !source.get("benchmark").is_some() {
+        return Ok(None);
+    }
+    serde_json::from_value(source.clone())
+        .map(Some)
+        .map_err(|err| ApiError::InvalidInput(format!("Invalid AgentEnv benchmark config: {err}")))
+}
+
+async fn execute_agent_env_benchmark_trial(
+    config: AgentEnvBenchmarkConfig,
+    run_root: &Path,
+    started_at: std::time::Instant,
+    log_path: &Path,
+    artifact_dir: &Path,
+    trial: &ExperimentTrial,
+) -> ApiResult<ExperimentRunnerCompletion> {
+    let trajectories = match config {
+        AgentEnvBenchmarkConfig::TerminalBench { cases } => {
+            let cases = cases
+                .into_iter()
+                .map(|mut case| {
+                    if case.cwd.is_none() {
+                        case.cwd = Some(run_root.to_path_buf());
+                    }
+                    case
+                })
+                .collect::<Vec<_>>();
+            let mut runner = EnvRunner::new(TerminalBenchEnv::new(cases))
+                .with_artifact_root(artifact_dir.join("agent_env_runs"));
+            runner
+                .evaluate(1, |_| {
+                    vec![AgentAction::UserMessage {
+                        content: "run terminal_bench".to_string(),
+                    }]
+                })
+                .await
+                .map_err(|err| ApiError::Internal(err.to_string()))?
+        }
+        AgentEnvBenchmarkConfig::SkillBench { cases } => {
+            let mut runner = EnvRunner::new(SkillBenchEnv::new(cases))
+                .with_artifact_root(artifact_dir.join("agent_env_runs"));
+            runner
+                .evaluate(1, |_| {
+                    vec![AgentAction::UserMessage {
+                        content: "run skill_bench".to_string(),
+                    }]
+                })
+                .await
+                .map_err(|err| ApiError::Internal(err.to_string()))?
+        }
+    };
+
+    let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
+    let score = average_trajectory_score(&trajectories);
+    let trajectory_path =
+        artifact_dir.join(format!("{}-agent-env-trajectory.json", trial.id.simple()));
+    let trajectory_json = serde_json::to_string_pretty(&trajectories)
+        .map_err(|err| ApiError::Internal(err.to_string()))?;
+    tokio::fs::write(&trajectory_path, &trajectory_json)
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))?;
+    let log = render_agent_env_log(&trajectories);
+    tokio::fs::write(log_path, &log)
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))?;
+
+    Ok(ExperimentRunnerCompletion {
+        exit_code: Some(if score >= 1.0 { 0 } else { 1 }),
+        metrics_json: serde_json::json!({
+            "score": score,
+            "episodes": trajectories.len(),
+        }),
+        summary: Some(format!(
+            "AgentEnv benchmark completed with score {score:.3}."
+        )),
+        runtime_ms: Some(runtime_ms),
+        attributed_cost_usd: None,
+        log_preview_path: Some(log_path.to_string_lossy().to_string()),
+        artifact_manifest_json: serde_json::json!({
+            "stage": "agent_env_benchmark",
+            "trajectory_json_path": trajectory_path.to_string_lossy(),
+        }),
+    })
+}
+
+fn average_trajectory_score(trajectories: &[Trajectory]) -> f64 {
+    if trajectories.is_empty() {
+        0.0
+    } else {
+        trajectories
+            .iter()
+            .map(|trajectory| trajectory.score)
+            .sum::<f64>()
+            / trajectories.len() as f64
+    }
+}
+
+fn render_agent_env_log(trajectories: &[Trajectory]) -> String {
+    let mut log = String::new();
+    for trajectory in trajectories {
+        log.push_str(&format!(
+            "== {} {} score {:.3} ==\n",
+            trajectory.env_name, trajectory.episode_id, trajectory.score
+        ));
+        for step in &trajectory.steps {
+            log.push_str(&format!(
+                "reward={:.3} done={}\n{}\n",
+                step.reward,
+                step.done,
+                step.response.as_deref().unwrap_or_default()
+            ));
+        }
+    }
+    log
 }
 
 async fn restore_campaign_worktree_after_trial(
@@ -6609,6 +6762,80 @@ mod tests {
                 .is_empty(),
             "baseline run should restore the campaign worktree to a clean state"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_env_terminal_bench_completion_writes_metrics_and_artifact() {
+        let dir = TempDir::new().expect("tempdir");
+        let run_root = dir.path().join("run");
+        let artifact_dir = dir.path().join("artifacts");
+        std::fs::create_dir_all(&run_root).expect("run root");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact root");
+        let log_path = dir.path().join("bench.log");
+        let now = Utc::now();
+        let trial = ExperimentTrial {
+            id: Uuid::new_v4(),
+            campaign_id: Uuid::new_v4(),
+            sequence: 1,
+            candidate_commit: None,
+            parent_best_commit: None,
+            status: ExperimentTrialStatus::Running,
+            runner_backend: ExperimentRunnerBackend::LocalDocker,
+            exit_code: None,
+            metrics_json: serde_json::json!({}),
+            summary: None,
+            decision_reason: None,
+            artifact_manifest_json: serde_json::json!({}),
+            log_preview_path: None,
+            reviewer_decision: None,
+            runtime_ms: None,
+            attributed_cost_usd: None,
+            llm_cost_usd: None,
+            runner_cost_usd: None,
+            hypothesis: None,
+            mutation_summary: None,
+            provider_job_id: None,
+            provider_job_metadata: serde_json::json!({}),
+            started_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let completion = super::execute_agent_env_benchmark_trial(
+            super::AgentEnvBenchmarkConfig::TerminalBench {
+                cases: vec![crate::agent::env::TerminalBenchCase {
+                    name: "echo".to_string(),
+                    command: "printf agent-env-ok".to_string(),
+                    cwd: None,
+                    expected_stdout_contains: vec!["agent-env-ok".to_string()],
+                    expected_exit_code: Some(0),
+                    timeout_secs: 5,
+                }],
+            },
+            &run_root,
+            std::time::Instant::now(),
+            &log_path,
+            &artifact_dir,
+            &trial,
+        )
+        .await
+        .expect("agent env benchmark completion");
+
+        assert_eq!(completion.exit_code, Some(0));
+        assert_eq!(completion.metrics_json["score"], 1.0);
+        assert_eq!(
+            completion.artifact_manifest_json["stage"],
+            serde_json::json!("agent_env_benchmark")
+        );
+        let trajectory_path = Path::new(
+            completion.artifact_manifest_json["trajectory_json_path"]
+                .as_str()
+                .expect("trajectory path"),
+        );
+        assert!(trajectory_path.exists());
+        let log = std::fs::read_to_string(log_path).expect("read log");
+        assert!(log.contains("agent-env-ok"));
     }
 
     #[tokio::test]

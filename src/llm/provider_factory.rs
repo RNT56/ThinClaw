@@ -14,6 +14,7 @@ use super::{
     CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig, FailoverProvider,
     LeaseConfig, LeaseSelectionStrategy, LlmProvider, ProviderLeaseEntry, ResponseCacheConfig,
     RetryConfig, RetryProvider, RigAdapter, SmartRoutingConfig, SmartRoutingProvider,
+    StreamSupport,
 };
 use crate::config::{LlmBackend, LlmConfig};
 use crate::error::LlmError;
@@ -338,6 +339,11 @@ fn create_provider_for_catalog_entry_with_api_key(
         provider: provider_slug.to_string(),
         reason: format!("Unknown provider '{}' in catalog", provider_slug),
     })?;
+    let stream_support = if endpoint.supports_streaming {
+        StreamSupport::Native
+    } else {
+        StreamSupport::Unsupported
+    };
 
     // Retrieve API key from the injected vars overlay
     let api_key_str = if let Some(api_key_override) = api_key_override {
@@ -384,7 +390,11 @@ fn create_provider_for_catalog_entry_with_api_key(
                 provider_slug,
                 model
             );
-            Ok(Arc::new(RigAdapter::new(m, model)))
+            Ok(Arc::new(RigAdapter::new_with_stream_support(
+                m,
+                model,
+                stream_support,
+            )))
         }
         ApiStyle::Anthropic => {
             // Native Anthropic provider
@@ -405,7 +415,14 @@ fn create_provider_for_catalog_entry_with_api_key(
                 provider_slug,
                 model
             );
-            Ok(Arc::new(RigAdapter::new(m, model)))
+            Ok(Arc::new(
+                RigAdapter::new_with_prompt_caching_and_stream_support(
+                    m,
+                    model,
+                    true,
+                    stream_support,
+                ),
+            ))
         }
         ApiStyle::OpenAiCompatible => {
             // OpenAI-compatible endpoint (groq, gemini, mistral, xai, etc.)
@@ -430,7 +447,11 @@ fn create_provider_for_catalog_entry_with_api_key(
                 endpoint.base_url,
                 model
             );
-            Ok(Arc::new(RigAdapter::new(m, model)))
+            Ok(Arc::new(RigAdapter::new_with_stream_support(
+                m,
+                model,
+                stream_support,
+            )))
         }
         ApiStyle::Ollama => {
             // Ollama doesn't need an API key
@@ -457,7 +478,11 @@ fn create_provider_for_catalog_entry_with_api_key(
                 base_url,
                 model
             );
-            Ok(Arc::new(RigAdapter::new(m, model)))
+            Ok(Arc::new(RigAdapter::new_with_stream_support(
+                m,
+                model,
+                stream_support,
+            )))
         }
     }
 }

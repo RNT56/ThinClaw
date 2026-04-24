@@ -40,6 +40,7 @@ use std::sync::Arc;
 use tokio::fs;
 
 use crate::secrets::SecretsStore;
+use crate::tools::execution::HostMediatedToolInvoker;
 use crate::tools::registry::{ToolRegistry, WasmRegistrationError, WasmToolRegistration};
 use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
 use crate::tools::wasm::{
@@ -80,6 +81,7 @@ pub struct WasmToolLoader {
     runtime: Arc<WasmToolRuntime>,
     registry: Arc<ToolRegistry>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    tool_invoker: Option<Arc<HostMediatedToolInvoker>>,
 }
 
 impl WasmToolLoader {
@@ -89,12 +91,19 @@ impl WasmToolLoader {
             runtime,
             registry,
             secrets_store: None,
+            tool_invoker: None,
         }
     }
 
     /// Set the secrets store for credential injection in WASM tools.
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Set the host-mediated tool invoker used by WASM `tool_invoke`.
+    pub fn with_tool_invoker(mut self, invoker: Arc<HostMediatedToolInvoker>) -> Self {
+        self.tool_invoker = Some(invoker);
         self
     }
 
@@ -153,6 +162,7 @@ impl WasmToolLoader {
                 schema: None,
                 secrets_store: self.secrets_store.clone(),
                 oauth_refresh,
+                tool_invoker: self.tool_invoker.clone(),
             })
             .await?;
 
@@ -263,7 +273,13 @@ impl WasmToolLoader {
         tool_name: &str,
     ) -> Result<(), WasmLoadError> {
         self.registry
-            .register_wasm_from_storage(store, &self.runtime, user_id, tool_name)
+            .register_wasm_from_storage(
+                store,
+                &self.runtime,
+                user_id,
+                tool_name,
+                self.tool_invoker.clone(),
+            )
             .await?;
 
         tracing::info!(

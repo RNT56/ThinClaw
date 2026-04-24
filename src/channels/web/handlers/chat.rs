@@ -912,6 +912,8 @@ mod tests {
             llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
+            skill_remote_hub: None,
+            skill_quarantine: None,
             chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,

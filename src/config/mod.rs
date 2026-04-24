@@ -255,6 +255,12 @@ impl Config {
         Self::from_env_with_toml(None).await
     }
 
+    /// Build config from explicit settings in tests without mutating process env.
+    #[cfg(test)]
+    pub(crate) async fn from_test_settings(settings: &Settings) -> Result<Self, ConfigError> {
+        Self::build(settings, false).await
+    }
+
     /// Load from env with an optional TOML config file overlay.
     pub async fn from_env_with_toml(
         toml_path: Option<&std::path::Path>,

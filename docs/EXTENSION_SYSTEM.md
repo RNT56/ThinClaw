@@ -14,6 +14,7 @@ This document is the canonical overview for those boundaries. For the public-fac
 |---|---|---|---|
 | WASM tool | Loaded inside ThinClaw's WASM runtime | Sandboxed, host-mediated | `thinclaw tool ...` |
 | WASM channel | Loaded inside ThinClaw's WASM channel runtime | Sandboxed, host-mediated | registry / channel setup path |
+| Native plugin | Loaded as `.so`/`.dylib` through C ABI JSON v1 | Unsafe, disabled by default, allowlisted, signed | broad plugin manifest |
 | MCP server | External process or remote service | Operator-trusted, not sandboxed | `thinclaw mcp ...` |
 
 ## Do Not Blur These Flows
@@ -42,6 +43,19 @@ MCP is not the sandboxed extension path.
 - MCP servers run as external processes or remote services.
 - They are configured and trusted by the operator.
 - They can still be a great integration path, but they should be described as operator-trusted execution, not as isolated plugins.
+
+### Native plugins
+
+Native plugins are the exceptional unsafe path for integrations that cannot fit inside WASM.
+
+- `extensions.allow_native_plugins` must be true.
+- `extensions.require_plugin_signatures` is true by default; native loading verifies signed broad plugin manifests against `extensions.trusted_manifest_public_keys`.
+- dynamic libraries must live under `extensions.native_plugin_allowlist_dirs`.
+- native artifacts can declare a `sha256`; when present it is checked before `libloading` opens the library.
+- the only supported ABI is C ABI JSON v1 via `thinclaw_native_plugin_invoke_v1`.
+- requests and responses cross the boundary as bounded JSON byte buffers.
+
+Broad plugin manifests can contribute tools, channels, memory providers, context providers, and native plugins. Native contributions must declare `abi = "c_abi_json_v1"`, `abiVersion = 1`, an artifact id, and non-zero request/response byte limits.
 
 ## Installation And Auth Surface
 
@@ -129,6 +143,7 @@ The agent-facing learning surface now includes:
 - `external_memory_setup`
 - `external_memory_status`
 - `external_memory_recall`
+- `external_memory_export`
 - `external_memory_off`
 
 These tools are operator-trusted settings/configuration flows layered on top of the existing external-memory provider runtime.

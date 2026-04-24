@@ -1809,7 +1809,7 @@ impl DesktopAutonomyManager {
                     }
                 }
                 notes.push(
-                    "Ubuntu/Debian desktop prerequisites: sudo apt install python3 python3-gi python3-pyatspi libreoffice libreoffice-script-provider-python evolution evolution-data-server-bin xdotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick at-spi2-core libglib2.0-bin"
+                    "Ubuntu/Debian desktop prerequisites: sudo apt install python3 python3-gi python3-pyatspi libreoffice libreoffice-script-provider-python evolution evolution-data-server-bin xdotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam"
                         .to_string(),
                 );
                 for (name, module) in [("pyatspi_module", "pyatspi"), ("pygobject_module", "gi")] {
@@ -1972,6 +1972,13 @@ impl DesktopAutonomyManager {
             });
         }
 
+        if matches!(self.bridge_backend(), DesktopBridgeBackend::LinuxPython) {
+            return Ok(DedicatedUserBootstrap {
+                blocking_reason: Some("unsupported_deployment_mode".to_string()),
+                ..Default::default()
+            });
+        }
+
         let username = self
             .config
             .target_username
@@ -1987,21 +1994,11 @@ impl DesktopAutonomyManager {
             ..Default::default()
         };
 
-        if matches!(self.bridge_backend(), DesktopBridgeBackend::LinuxPython) {
-            bootstrap.blocking_reason = Some("unsupported_deployment_mode".to_string());
-            return Ok(bootstrap);
-        }
-
         let exists = self.user_exists(&username).await?;
         if !exists {
             if !self.has_privileged_bootstrap().await {
                 bootstrap.blocking_reason =
                     Some(dedicated_bootstrap_blocking_reason(false, false, false).to_string());
-                return Ok(bootstrap);
-            }
-
-            if matches!(self.bridge_backend(), DesktopBridgeBackend::LinuxPython) {
-                bootstrap.blocking_reason = Some("unsupported_deployment_mode".to_string());
                 return Ok(bootstrap);
             }
 

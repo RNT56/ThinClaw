@@ -24,20 +24,22 @@ use crate::error::LlmError;
 use crate::llm::costs;
 use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, StreamChunk,
-    StreamChunkStream, ThinkingConfig, ToolCall as IronToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition as IronToolDefinition,
+    StreamChunkStream, StreamPolicy, StreamSupport, ThinkingConfig, ToolCall as IronToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition as IronToolDefinition,
 };
+use crate::llm::streaming::{normalize_tool_name, simulate_stream_from_response};
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
-pub struct RigAdapter<M: CompletionModel> {
+pub struct RigAdapter<M: CompletionModel + 'static> {
     model: M,
     model_name: String,
     input_cost: Decimal,
     output_cost: Decimal,
     prompt_caching: bool,
+    stream_support: StreamSupport,
 }
 
-impl<M: CompletionModel> RigAdapter<M> {
+impl<M: CompletionModel + 'static> RigAdapter<M> {
     /// Create a new adapter wrapping the given rig-core model.
     pub fn new(model: M, model_name: impl Into<String>) -> Self {
         Self::new_with_prompt_caching(model, model_name, false)
@@ -50,6 +52,30 @@ impl<M: CompletionModel> RigAdapter<M> {
         model_name: impl Into<String>,
         prompt_caching: bool,
     ) -> Self {
+        Self::new_with_prompt_caching_and_stream_support(
+            model,
+            model_name,
+            prompt_caching,
+            StreamSupport::Native,
+        )
+    }
+
+    /// Create a new adapter with an explicit streaming capability.
+    pub fn new_with_stream_support(
+        model: M,
+        model_name: impl Into<String>,
+        stream_support: StreamSupport,
+    ) -> Self {
+        Self::new_with_prompt_caching_and_stream_support(model, model_name, false, stream_support)
+    }
+
+    /// Create a new adapter with explicit prompt-caching and streaming metadata.
+    pub fn new_with_prompt_caching_and_stream_support(
+        model: M,
+        model_name: impl Into<String>,
+        prompt_caching: bool,
+        stream_support: StreamSupport,
+    ) -> Self {
         let name = model_name.into();
         let (input_cost, output_cost) =
             costs::model_cost(&name).unwrap_or_else(costs::default_cost);
@@ -59,7 +85,49 @@ impl<M: CompletionModel> RigAdapter<M> {
             input_cost,
             output_cost,
             prompt_caching,
+            stream_support,
         }
+    }
+
+    fn streaming_policy_error(&self) -> LlmError {
+        crate::llm::streaming::native_required_error(
+            self.model_name.clone(),
+            self.active_model_name(),
+        )
+    }
+
+    async fn simulated_stream_from_completion(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<StreamChunkStream, LlmError> {
+        let resp = self.complete(request).await?;
+        Ok(simulate_stream_from_response(
+            resp.content,
+            resp.provider_model,
+            resp.cost_usd,
+            resp.thinking_content,
+            vec![],
+            resp.input_tokens,
+            resp.output_tokens,
+            resp.finish_reason,
+        ))
+    }
+
+    async fn simulated_stream_from_tool_completion(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<StreamChunkStream, LlmError> {
+        let resp = self.complete_with_tools(request).await?;
+        Ok(simulate_stream_from_response(
+            resp.content.unwrap_or_default(),
+            resp.provider_model,
+            resp.cost_usd,
+            resp.thinking_content,
+            resp.tool_calls,
+            resp.input_tokens,
+            resp.output_tokens,
+            resp.finish_reason,
+        ))
     }
 }
 
@@ -846,14 +914,25 @@ where
         })
     }
 
-    fn supports_streaming(&self) -> bool {
-        true
+    fn stream_support(&self) -> StreamSupport {
+        self.stream_support
     }
 
     async fn complete_stream(
         &self,
         request: CompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
+        if self.stream_support != StreamSupport::Native {
+            return match self.stream_support {
+                StreamSupport::Simulated
+                    if request.stream_policy != StreamPolicy::RequireNative =>
+                {
+                    self.simulated_stream_from_completion(request).await
+                }
+                _ => Err(self.streaming_policy_error()),
+            };
+        }
+
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history, cache_hint_requested) = convert_messages(&messages);
@@ -897,6 +976,17 @@ where
         &self,
         request: ToolCompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
+        if self.stream_support != StreamSupport::Native {
+            return match self.stream_support {
+                StreamSupport::Simulated
+                    if request.stream_policy != StreamPolicy::RequireNative =>
+                {
+                    self.simulated_stream_from_tool_completion(request).await
+                }
+                _ => Err(self.streaming_policy_error()),
+            };
+        }
+
         let known_tool_names: HashSet<String> =
             request.tools.iter().map(|t| t.name.clone()).collect();
 
@@ -978,25 +1068,6 @@ where
             known_tool_names,
         ))
     }
-}
-
-/// Normalize a tool call name returned by an OpenAI-compatible provider.
-///
-/// Some proxies (e.g. VibeProxy) prepend `proxy_` to tool names.
-/// If the returned name doesn't match any known tool but stripping a
-/// `proxy_` prefix yields a match, use the stripped version.
-fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
-    if known_tools.contains(name) {
-        return name.to_string();
-    }
-
-    if let Some(stripped) = name.strip_prefix("proxy_")
-        && known_tools.contains(stripped)
-    {
-        return stripped.to_string();
-    }
-
-    name.to_string()
 }
 
 /// Convert a rig-core StreamingCompletionResponse into our StreamChunkStream.

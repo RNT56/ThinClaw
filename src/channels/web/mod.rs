@@ -34,7 +34,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::agent::SessionManager;
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, StreamMode,
+};
 use crate::config::GatewayConfig;
 use crate::db::Database;
 use crate::error::ChannelError;
@@ -71,6 +73,30 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
         StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk { content, thread_id },
         StatusUpdate::Status(msg) => SseEvent::Status {
             message: msg,
+            thread_id,
+        },
+        StatusUpdate::Plan { entries } => SseEvent::Status {
+            message: serde_json::to_string(&entries).unwrap_or_else(|_| "plan update".to_string()),
+            thread_id,
+        },
+        StatusUpdate::Usage {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            model,
+        } => SseEvent::Status {
+            message: format!(
+                "usage: {} input + {} output tokens{}{}",
+                input_tokens,
+                output_tokens,
+                cost_usd
+                    .map(|cost| format!(", ${cost:.6}"))
+                    .unwrap_or_default(),
+                model
+                    .as_deref()
+                    .map(|model| format!(" ({model})"))
+                    .unwrap_or_default()
+            ),
             thread_id,
         },
         StatusUpdate::JobStarted {
@@ -332,6 +358,8 @@ impl GatewayChannel {
             llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
+            skill_remote_hub: None,
+            skill_quarantine: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
@@ -375,6 +403,8 @@ impl GatewayChannel {
             llm_runtime: self.state.llm_runtime.clone(),
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
+            skill_remote_hub: self.state.skill_remote_hub.clone(),
+            skill_quarantine: self.state.skill_quarantine.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
@@ -476,6 +506,21 @@ impl GatewayChannel {
         self
     }
 
+    /// Inject refreshable remote skill discovery for GitHub taps and marketplaces.
+    pub fn with_skill_remote_hub(mut self, hub: crate::skills::SharedRemoteSkillHub) -> Self {
+        self.rebuild_state(|s| s.skill_remote_hub = Some(hub));
+        self
+    }
+
+    /// Inject the skill quarantine manager for inspection and publish scans.
+    pub fn with_skill_quarantine(
+        mut self,
+        quarantine: Arc<crate::skills::quarantine::QuarantineManager>,
+    ) -> Self {
+        self.rebuild_state(|s| s.skill_quarantine = Some(quarantine));
+        self
+    }
+
     /// Inject the LLM provider for OpenAI-compatible API proxy.
     pub fn with_llm_provider(mut self, llm: Arc<dyn crate::llm::LlmProvider>) -> Self {
         self.rebuild_state(|s| s.llm_provider = Some(llm));
@@ -563,6 +608,10 @@ impl Channel for GatewayChannel {
             "Web chat supports markdown-style formatting and fenced code blocks. Prefer short sections and readable spacing for longer answers."
                 .to_string(),
         )
+    }
+
+    fn stream_mode(&self) -> StreamMode {
+        StreamMode::EventChunks
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {

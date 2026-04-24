@@ -87,6 +87,17 @@ pub enum ChatMessage {
         result: Option<String>,
         is_error: bool,
     },
+    /// Structured note from the agent (warning, question, interim_result).
+    AgentNote {
+        content: String,
+        note_type: String,
+    },
+    /// Sub-agent lifecycle card.
+    SubagentCard {
+        name: String,
+        detail: String,
+        success: Option<bool>,
+    },
 }
 
 /// Action returned by key handler.
@@ -146,6 +157,8 @@ pub struct TuiApp {
     last_ctrl_c: Option<Instant>,
     /// Exit requested by a slash command.
     pending_exit: bool,
+    /// Whether an approval prompt is awaiting a yes/no/always response.
+    pending_approval: bool,
     /// Channel for sending user messages out.
     outgoing_tx: mpsc::Sender<TuiEvent>,
     /// Channel for receiving status updates.
@@ -158,6 +171,8 @@ pub struct TuiApp {
     spinner: KawaiiSpinner,
     /// Tick counter for animation timing.
     animation_tick: u64,
+    /// Timestamp of last meaningful activity (for idle display).
+    last_activity: Instant,
 }
 
 /// Events the TUI sends to the agent controller.
@@ -199,6 +214,38 @@ pub enum TuiUpdate {
     },
     /// Error.
     Error(String),
+    /// Structured message from the agent (question, warning, interim result).
+    AgentMessage {
+        content: String,
+        message_type: String,
+    },
+    /// Sub-agent spawned.
+    SubagentSpawned { name: String, task: String },
+    /// Sub-agent progress.
+    SubagentProgress { name: String, message: String },
+    /// Sub-agent completed.
+    SubagentCompleted {
+        name: String,
+        success: bool,
+        duration_ms: u64,
+    },
+    /// Background job started.
+    JobStarted {
+        title: String,
+        job_id: String,
+        browse_url: String,
+    },
+    /// Extension auth required.
+    AuthRequired {
+        extension_name: String,
+        instructions: Option<String>,
+    },
+    /// Extension auth completed.
+    AuthCompleted {
+        extension_name: String,
+        success: bool,
+        message: String,
+    },
 }
 
 impl TuiApp {
@@ -231,12 +278,14 @@ impl TuiApp {
             show_thinking: true,
             last_ctrl_c: None,
             pending_exit: false,
+            pending_approval: false,
             outgoing_tx,
             incoming_rx,
             total_chat_lines: 0,
             startup_message: build_startup_message(&settings),
             spinner,
             animation_tick: 0,
+            last_activity: Instant::now(),
         }
     }
 
@@ -353,6 +402,11 @@ impl TuiApp {
             (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
                 self.messages.clear();
                 self.scroll_offset = 0;
+                KeyAction::Continue
+            }
+            // Ctrl+B: back-navigate (close last detail card)
+            (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
+                self.close_last_detail_card();
                 KeyAction::Continue
             }
             // Ctrl+Enter: always submit regardless of content
@@ -500,6 +554,28 @@ impl TuiApp {
             return;
         }
 
+        // Check for approval response when approval is pending
+        if self.pending_approval {
+            let lower = text.trim().to_ascii_lowercase();
+            if matches!(lower.as_str(), "yes" | "y" | "no" | "n" | "always" | "a") {
+                self.pending_approval = false;
+                let label = match lower.as_str() {
+                    "yes" | "y" => "Approved",
+                    "no" | "n" => "Denied",
+                    "always" | "a" => "Approved for session",
+                    _ => "Responded",
+                };
+                self.push_info(label);
+                let _ = self
+                    .outgoing_tx
+                    .send(TuiEvent::UserMessage(text.to_string()))
+                    .await;
+                return;
+            }
+            // Non-approval text clears the approval state
+            self.pending_approval = false;
+        }
+
         // Regular message → send to agent
         self.messages.push(ChatMessage::User {
             text: text.to_string(),
@@ -521,6 +597,7 @@ impl TuiApp {
     }
 
     fn handle_update(&mut self, update: TuiUpdate) {
+        self.last_activity = Instant::now();
         match update {
             TuiUpdate::StreamChunk(chunk) => {
                 if let Some(stream) = &mut self.active_stream {
@@ -597,17 +674,102 @@ impl TuiApp {
                 tool_name,
                 description,
             } => {
+                self.pending_approval = true;
                 self.messages.push(ChatMessage::Warning {
-                    text: format!("Approval needed: {} — {}", tool_name, description),
+                    text: format!(
+                        "Approval needed: {tool_name} — {description}\n\
+                         Type yes (y) / no (n) / always (a) to respond.",
+                    ),
                 });
-                self.status_text = format!("Awaiting approval for {tool_name}");
+                self.status_text = format!("⚠ Awaiting approval for {tool_name}");
+                self.scroll_offset = u16::MAX;
             }
             TuiUpdate::Error(msg) => {
                 self.active_stream = None;
-                self.messages.push(ChatMessage::Error {
-                    text: msg,
-                });
+                self.messages.push(ChatMessage::Error { text: msg });
                 self.status_text = "Needs attention".to_string();
+            }
+            TuiUpdate::AgentMessage {
+                content,
+                message_type,
+            } => {
+                self.messages.push(ChatMessage::AgentNote {
+                    content,
+                    note_type: message_type,
+                });
+                self.scroll_offset = u16::MAX;
+            }
+            TuiUpdate::SubagentSpawned { name, task } => {
+                self.messages.push(ChatMessage::SubagentCard {
+                    name: name.clone(),
+                    detail: format!("task: {task}"),
+                    success: None,
+                });
+                self.status_text = format!("Sub-agent '{name}' running");
+                self.scroll_offset = u16::MAX;
+            }
+            TuiUpdate::SubagentProgress { name, message } => {
+                self.status_text = format!("Sub-agent '{name}': {message}");
+            }
+            TuiUpdate::SubagentCompleted {
+                name,
+                success,
+                duration_ms,
+            } => {
+                let secs = duration_ms as f64 / 1000.0;
+                let detail = if success {
+                    format!("completed in {secs:.1}s")
+                } else {
+                    format!("failed after {secs:.1}s")
+                };
+                self.messages.push(ChatMessage::SubagentCard {
+                    name: name.clone(),
+                    detail,
+                    success: Some(success),
+                });
+                self.status_text = if success {
+                    format!("Sub-agent '{name}' done")
+                } else {
+                    format!("Sub-agent '{name}' failed")
+                };
+                self.scroll_offset = u16::MAX;
+            }
+            TuiUpdate::JobStarted {
+                title,
+                job_id,
+                browse_url,
+            } => {
+                self.messages.push(ChatMessage::Info {
+                    text: format!("Job started: {title} ({job_id})\n{browse_url}"),
+                });
+                self.status_text = format!("Job '{title}' running");
+                self.scroll_offset = u16::MAX;
+            }
+            TuiUpdate::AuthRequired {
+                extension_name,
+                instructions,
+            } => {
+                let detail = instructions.unwrap_or_default();
+                self.messages.push(ChatMessage::Warning {
+                    text: format!("Authentication required for {extension_name}\n{detail}"),
+                });
+                self.status_text = format!("Auth needed: {extension_name}");
+                self.scroll_offset = u16::MAX;
+            }
+            TuiUpdate::AuthCompleted {
+                extension_name,
+                success,
+                message,
+            } => {
+                if success {
+                    self.messages.push(ChatMessage::Info {
+                        text: format!("{extension_name}: {message}"),
+                    });
+                } else {
+                    self.messages.push(ChatMessage::Error {
+                        text: format!("{extension_name}: {message}"),
+                    });
+                }
             }
         }
     }
@@ -796,8 +958,7 @@ impl TuiApp {
     }
 
     fn push_info(&mut self, text: impl Into<String>) {
-        self.messages
-            .push(ChatMessage::Info { text: text.into() });
+        self.messages.push(ChatMessage::Info { text: text.into() });
         self.scroll_offset = u16::MAX;
     }
 
@@ -809,8 +970,7 @@ impl TuiApp {
 
     #[allow(dead_code)]
     fn push_error(&mut self, text: impl Into<String>) {
-        self.messages
-            .push(ChatMessage::Error { text: text.into() });
+        self.messages.push(ChatMessage::Error { text: text.into() });
         self.scroll_offset = u16::MAX;
     }
 
@@ -820,11 +980,15 @@ impl TuiApp {
             return;
         }
 
-        if let Some(index) = self
-            .messages
-            .iter()
-            .rposition(|message| !matches!(message, ChatMessage::User { .. } | ChatMessage::Info { .. } | ChatMessage::Warning { .. } | ChatMessage::Error { .. }))
-        {
+        if let Some(index) = self.messages.iter().rposition(|message| {
+            !matches!(
+                message,
+                ChatMessage::User { .. }
+                    | ChatMessage::Info { .. }
+                    | ChatMessage::Warning { .. }
+                    | ChatMessage::Error { .. }
+            )
+        }) {
             self.messages.remove(index);
             self.scroll_offset = u16::MAX;
             self.status_text = "Closed last detail card".to_string();
@@ -923,6 +1087,16 @@ impl From<StatusUpdate> for TuiUpdate {
             },
             StatusUpdate::ToolCompleted { .. } => TuiUpdate::Status("Ready".to_string()),
             StatusUpdate::Status(text) => TuiUpdate::Status(text),
+            StatusUpdate::Plan { entries } => TuiUpdate::Status(
+                serde_json::to_string(&entries).unwrap_or_else(|_| "Plan updated".to_string()),
+            ),
+            StatusUpdate::Usage {
+                input_tokens,
+                output_tokens,
+                ..
+            } => TuiUpdate::Status(format!(
+                "Usage: {input_tokens} input / {output_tokens} output tokens"
+            )),
             StatusUpdate::Error { message, .. } => TuiUpdate::Error(message),
             StatusUpdate::ApprovalNeeded {
                 tool_name,
@@ -932,7 +1106,79 @@ impl From<StatusUpdate> for TuiUpdate {
                 tool_name,
                 description,
             },
-            _ => TuiUpdate::Status(String::new()),
+            StatusUpdate::AgentMessage {
+                content,
+                message_type,
+            } => TuiUpdate::AgentMessage {
+                content,
+                message_type,
+            },
+            StatusUpdate::SubagentSpawned { name, task, .. } => {
+                TuiUpdate::SubagentSpawned { name, task }
+            }
+            StatusUpdate::SubagentProgress { message, .. } => TuiUpdate::SubagentProgress {
+                name: String::new(),
+                message,
+            },
+            StatusUpdate::SubagentCompleted {
+                name,
+                success,
+                duration_ms,
+                ..
+            } => TuiUpdate::SubagentCompleted {
+                name,
+                success,
+                duration_ms,
+            },
+            StatusUpdate::JobStarted {
+                job_id,
+                title,
+                browse_url,
+            } => TuiUpdate::JobStarted {
+                title,
+                job_id,
+                browse_url,
+            },
+            StatusUpdate::AuthRequired {
+                extension_name,
+                instructions,
+                ..
+            } => TuiUpdate::AuthRequired {
+                extension_name,
+                instructions,
+            },
+            StatusUpdate::AuthCompleted {
+                extension_name,
+                success,
+                message,
+                ..
+            } => TuiUpdate::AuthCompleted {
+                extension_name,
+                success,
+                message,
+            },
+            StatusUpdate::CanvasAction(ref action) => {
+                let summary = match action {
+                    crate::tools::builtin::CanvasAction::Show {
+                        panel_id, title, ..
+                    } => format!("Canvas: show \"{}\" ({})", title, panel_id),
+                    crate::tools::builtin::CanvasAction::Update { panel_id, .. } => {
+                        format!("Canvas: update ({})", panel_id)
+                    }
+                    crate::tools::builtin::CanvasAction::Dismiss { panel_id } => {
+                        format!("Canvas: dismiss ({})", panel_id)
+                    }
+                    crate::tools::builtin::CanvasAction::Notify { message, .. } => {
+                        format!("Canvas: {}", message)
+                    }
+                };
+                TuiUpdate::Status(summary)
+            }
+            // Lifecycle events are informational; the TUI already shows
+            // streaming indicators via active_stream.
+            StatusUpdate::LifecycleStart { .. } | StatusUpdate::LifecycleEnd { .. } => {
+                TuiUpdate::Status(String::new())
+            }
         }
     }
 }

@@ -452,6 +452,38 @@ impl SkillRegistry {
         load_and_validate_skill(&skill_dir.join("SKILL.md"), trust, source).await
     }
 
+    /// Validate an existing SKILL.md file or skill directory without mutating registry state.
+    pub async fn validate_skill_file(
+        path: &Path,
+        trust: SkillTrust,
+        source: SkillSource,
+    ) -> Result<(String, LoadedSkill), SkillRegistryError> {
+        let skill_path = if path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+            path.to_path_buf()
+        } else {
+            path.join("SKILL.md")
+        };
+        load_and_validate_skill(&skill_path, trust, source).await
+    }
+
+    /// Validate SKILL.md content without writing it to disk or mutating registry state.
+    pub async fn validate_skill_content(
+        content: &str,
+        trust: SkillTrust,
+        source: SkillSource,
+    ) -> Result<(String, LoadedSkill), SkillRegistryError> {
+        if content.len() as u64 > MAX_PROMPT_FILE_SIZE {
+            return Err(SkillRegistryError::FileTooLarge {
+                name: "(inline content)".to_string(),
+                size: content.len() as u64,
+                max: MAX_PROMPT_FILE_SIZE,
+            });
+        }
+        let normalized_content = normalize_line_endings(content);
+        validate_normalized_skill_content("(inline content)", &normalized_content, trust, source)
+            .await
+    }
+
     /// Commit a prepared skill into the in-memory registry.
     ///
     /// This is a fast, synchronous operation that only adds to the Vec.
@@ -805,6 +837,21 @@ async fn load_and_validate_skill(
     // Normalize line endings before parsing to handle CRLF
     let normalized_content = normalize_line_endings(&raw_content);
 
+    validate_normalized_skill_content(
+        &path.display().to_string(),
+        &normalized_content,
+        trust,
+        source,
+    )
+    .await
+}
+
+async fn validate_normalized_skill_content(
+    error_name: &str,
+    normalized_content: &str,
+    trust: SkillTrust,
+    source: SkillSource,
+) -> Result<(String, LoadedSkill), SkillRegistryError> {
     // Parse SKILL.md
     let parsed = parse_skill_md(&normalized_content).map_err(|e: SkillParseError| match e {
         SkillParseError::InvalidName { ref name } => SkillRegistryError::ParseError {
@@ -812,7 +859,7 @@ async fn load_and_validate_skill(
             reason: e.to_string(),
         },
         _ => SkillRegistryError::ParseError {
-            name: path.display().to_string(),
+            name: error_name.to_string(),
             reason: e.to_string(),
         },
     })?;
@@ -1081,6 +1128,52 @@ mod tests {
         let mut registry = SkillRegistry::new(dir.path().to_path_buf());
         let loaded = registry.discover_all().await;
         assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_validate_skill_file_does_not_mutate_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("checked-skill");
+        fs::create_dir(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: checked-skill\n---\n\nChecked prompt.\n",
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::new(dir.path().to_path_buf());
+        let (name, loaded) = SkillRegistry::validate_skill_file(
+            &skill_dir,
+            SkillTrust::Installed,
+            SkillSource::External(skill_dir.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(name, "checked-skill");
+        assert_eq!(loaded.trust, SkillTrust::Installed);
+        assert_eq!(registry.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_validate_skill_content_reuses_token_budget_rules() {
+        let big_prompt = "word ".repeat(4000);
+        let content = format!(
+            "---\nname: content-budget\nactivation:\n  max_context_tokens: 100\n---\n\n{}",
+            big_prompt
+        );
+
+        let result = SkillRegistry::validate_skill_content(
+            &content,
+            SkillTrust::Installed,
+            SkillSource::External(PathBuf::from(".")),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(SkillRegistryError::TokenBudgetExceeded { .. })
+        ));
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 
 - New to ThinClaw: go to [../README.md](../README.md)
 - Running ThinClaw yourself: go to [DEPLOYMENT.md](DEPLOYMENT.md)
+- Running on a specific host: macOS, Windows, Linux, Pi OS Lite, Docker, and remote access live under [deploy/](deploy/)
 - Running reckless desktop autonomy: go to [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md)
 - Understanding identity, packs, and `/personality`: go to [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
 - Understanding memory, continuity, and `/compress`: go to [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
@@ -27,6 +28,12 @@ Use this page to pick the right path for your role instead of relying on whichev
 ### Operators
 
 - [DEPLOYMENT.md](DEPLOYMENT.md)
+- [deploy/macos.md](deploy/macos.md)
+- [deploy/windows.md](deploy/windows.md)
+- [deploy/linux.md](deploy/linux.md)
+- [deploy/raspberry-pi-os-lite.md](deploy/raspberry-pi-os-lite.md)
+- [deploy/docker.md](deploy/docker.md)
+- [deploy/remote-access.md](deploy/remote-access.md)
 - [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md)
 - [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
 - [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
@@ -72,7 +79,9 @@ Use this page to pick the right path for your role instead of relying on whichev
 | AgentEnv eval and SFT framework | [AGENT_ENV.md](AGENT_ENV.md) |
 | Shared cross-surface command vocabulary | [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md) |
 | Onboarding and setup behavior | [../src/setup/README.md](../src/setup/README.md) |
-| Deployment and remote access | [DEPLOYMENT.md](DEPLOYMENT.md) |
+| Deployment decision tree | [DEPLOYMENT.md](DEPLOYMENT.md) |
+| Platform-specific deploy runbooks | [deploy/](deploy/) |
+| Remote gateway and tunnel access | [deploy/remote-access.md](deploy/remote-access.md) |
 | Channel architecture | [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md) |
 | Security and trust | [SECURITY.md](SECURITY.md) |
 | Extension architecture | [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md) |

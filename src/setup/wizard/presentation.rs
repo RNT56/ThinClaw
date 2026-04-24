@@ -1,7 +1,7 @@
 //! Presentation wizard steps: Web UI theming and observability.
 
 use crate::branding::skin::CliSkin;
-use crate::setup::prompts::{confirm, print_info, print_success, select_one};
+use crate::setup::prompts::{confirm, print_info, print_success, print_warning, select_one};
 use crate::terminal_branding::set_runtime_cli_skin_override;
 
 use super::{SetupError, SetupWizard};
@@ -54,6 +54,14 @@ impl SetupWizard {
         );
         crate::setup::prompts::print_blank_line();
 
+        if matches!(
+            self.selected_profile,
+            super::OnboardingProfile::RemoteServer
+        ) {
+            self.step_remote_web_ui_access()?;
+            crate::setup::prompts::print_blank_line();
+        }
+
         if !confirm("Customize web UI appearance?", false).map_err(SetupError::Io)? {
             print_info(
                 "Keeping the default cockpit presentation: system theme, default accent color, and branding shown.",
@@ -99,6 +107,58 @@ impl SetupWizard {
             theme,
             if show_branding { "shown" } else { "hidden" }
         ));
+
+        Ok(())
+    }
+
+    fn step_remote_web_ui_access(&mut self) -> Result<(), SetupError> {
+        print_info("Remote WebUI access stays private by default through an SSH tunnel.");
+        let options = [
+            "SSH tunnel (recommended)  - bind 127.0.0.1 and forward the port from your laptop",
+            "Private LAN / Tailscale   - bind 0.0.0.0 and use the token URL on a trusted network",
+            "Reverse proxy / public    - keep token auth; TLS, proxy, and firewall are operator-owned",
+        ];
+        let choice = select_one("Remote WebUI access", &options).map_err(SetupError::Io)?;
+
+        self.settings.channels.gateway_enabled = Some(true);
+        self.settings.channels.gateway_port =
+            Some(self.settings.channels.gateway_port.unwrap_or(3000));
+        self.settings.channels.cli_enabled = Some(false);
+        self.ensure_gateway_auth_token();
+
+        match choice {
+            1 => {
+                self.settings.channels.gateway_host = Some("0.0.0.0".to_string());
+                print_warning(
+                    "Gateway will listen on all interfaces. Keep this to a private LAN or tailnet.",
+                );
+            }
+            2 => {
+                self.settings.channels.gateway_host = Some("127.0.0.1".to_string());
+                print_warning(
+                    "Reverse proxy/public exposure needs TLS, firewall rules, and proxy auth outside ThinClaw.",
+                );
+            }
+            _ => {
+                self.settings.channels.gateway_host = Some("127.0.0.1".to_string());
+            }
+        }
+
+        let access = crate::platform::gateway_access::GatewayAccessInfo::from_env_and_settings(
+            Some(&self.settings),
+        );
+        print_success("Remote gateway bootstrap configured.");
+        print_info(&format!("Bind: {}", access.bind_display()));
+        print_info(&format!("Local URL: {}", access.local_url()));
+        if access.is_loopback() {
+            print_info(&format!("SSH tunnel: {}", access.ssh_tunnel_command()));
+        }
+        if let Some(url) = access.token_url(true) {
+            print_info(&format!("Token URL: {}", url));
+        }
+        print_info(
+            "Service handoff: run `thinclaw run --no-onboard`, or install/start the OS service after onboarding.",
+        );
 
         Ok(())
     }

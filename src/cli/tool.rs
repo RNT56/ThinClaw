@@ -743,9 +743,14 @@ async fn auth_tool_oauth(
 
     println!("  Opening browser for {} login...", display_name);
     println!();
+    if oauth_defaults::ssh_or_headless_detected() {
+        oauth_defaults::print_ssh_callback_hint();
+        println!();
+    }
 
     if let Err(e) = open::that(&auth_request.auth_url) {
         println!("  Could not open browser: {}", e);
+        oauth_defaults::print_ssh_callback_hint();
         println!("  Please open this URL manually:");
         println!("  {}", auth_request.auth_url);
     }

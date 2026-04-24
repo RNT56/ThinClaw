@@ -3,6 +3,7 @@
 //! Windows support is added through this layer so macOS/Linux behavior can
 //! remain stable while individual call sites move off ad-hoc platform checks.
 
+pub mod gateway_access;
 pub mod linux_readiness;
 pub mod paths;
 pub mod secure_store;
@@ -210,6 +211,42 @@ pub fn linux_screen_capture_available() -> bool {
         .any(|command| executable_available(command))
 }
 
+fn linux_video_device_available() -> bool {
+    std::fs::read_dir("/dev")
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .any(|entry| entry.file_name().to_string_lossy().starts_with("video"))
+}
+
+fn linux_audio_source_hint_available() -> bool {
+    let xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from);
+    let pipewire_runtime_dir =
+        std::env::var_os("PIPEWIRE_RUNTIME_DIR").map(std::path::PathBuf::from);
+
+    std::env::var_os("THINCLAW_MICROPHONE_DEVICE").is_some()
+        || std::env::var_os("PULSE_SERVER").is_some()
+        || pipewire_runtime_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("pipewire-0").exists())
+        || xdg_runtime_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("pipewire-0").exists() || dir.join("pulse/native").exists())
+        || std::path::Path::new("/proc/asound/cards").exists()
+        || std::path::Path::new("/dev/snd").exists()
+        || executable_available("arecord")
+        || executable_available("pactl")
+}
+
+fn linux_geoclue_service_hint_available() -> bool {
+    [
+        "/usr/share/dbus-1/system-services/org.freedesktop.GeoClue2.service",
+        "/usr/local/share/dbus-1/system-services/org.freedesktop.GeoClue2.service",
+    ]
+    .iter()
+    .any(|path| std::path::Path::new(path).exists())
+}
+
 /// Supported service manager kinds for the current host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceManagerKind {
@@ -224,6 +261,7 @@ pub enum ServiceManagerKind {
 pub enum SecureStoreKind {
     OsSecureStore,
     EnvOnly,
+    Unavailable,
 }
 
 /// Device/runtime capabilities exposed by the local host.
@@ -261,12 +299,15 @@ impl PlatformCapabilities {
         let secure_store = SecureStoreKind::OsSecureStore;
         #[cfg(target_os = "linux")]
         let secure_store = if std::env::var_os("SECRETS_MASTER_KEY").is_some()
-            || (std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none()
-                && std::env::var_os("XDG_RUNTIME_DIR").is_none())
+            && env_flag_enabled("THINCLAW_ALLOW_ENV_MASTER_KEY")
         {
             SecureStoreKind::EnvOnly
-        } else {
+        } else if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+            || std::env::var_os("XDG_RUNTIME_DIR").is_some()
+        {
             SecureStoreKind::OsSecureStore
+        } else {
+            SecureStoreKind::Unavailable
         };
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         let secure_store = SecureStoreKind::EnvOnly;
@@ -293,6 +334,17 @@ impl PlatformCapabilities {
         } else {
             any_command_available(&["microsoft-edge", "microsoft-edge-stable", "msedge"])
         };
+        let linux_screen_capture_available =
+            cfg!(target_os = "linux") && linux_screen_capture_available();
+        let linux_camera_capture_available = cfg!(target_os = "linux")
+            && any_command_available(&["ffmpeg", "fswebcam"])
+            && linux_video_device_available();
+        let linux_microphone_capture_available = cfg!(target_os = "linux")
+            && executable_available("ffmpeg")
+            && linux_audio_source_hint_available();
+        let linux_native_location_available = cfg!(target_os = "linux")
+            && executable_available("gdbus")
+            && linux_geoclue_service_hint_available();
 
         Self {
             shell,
@@ -306,16 +358,22 @@ impl PlatformCapabilities {
             apple_mail_supported: cfg!(target_os = "macos"),
             devices: DeviceCapabilities {
                 full_screen_capture: cfg!(target_os = "macos")
-                    || (cfg!(target_os = "linux") && linux_screen_capture_available())
+                    || linux_screen_capture_available
                     || cfg!(target_os = "windows"),
                 interactive_screen_capture: cfg!(target_os = "macos")
-                    || (cfg!(target_os = "linux") && linux_screen_capture_available()),
-                window_screen_capture: cfg!(target_os = "macos")
-                    || (cfg!(target_os = "linux") && linux_screen_capture_available()),
-                camera_capture: any_command_available(&["ffmpeg", "fswebcam"]),
-                microphone_capture: any_command_available(&["ffmpeg"]),
-                native_location: cfg!(target_os = "macos")
-                    || (cfg!(target_os = "linux") && executable_available("gdbus")),
+                    || linux_screen_capture_available,
+                window_screen_capture: cfg!(target_os = "macos") || linux_screen_capture_available,
+                camera_capture: if cfg!(target_os = "linux") {
+                    linux_camera_capture_available
+                } else {
+                    any_command_available(&["ffmpeg", "fswebcam"])
+                },
+                microphone_capture: if cfg!(target_os = "linux") {
+                    linux_microphone_capture_available
+                } else {
+                    any_command_available(&["ffmpeg"])
+                },
+                native_location: cfg!(target_os = "macos") || linux_native_location_available,
             },
         }
     }

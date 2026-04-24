@@ -16,6 +16,7 @@
 name: Release
 permissions:
   "contents": "write"
+  "packages": "write"
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -288,7 +289,7 @@ jobs:
       - name: Install Rust toolchain + wasm target
         run: |
           rustup target add wasm32-wasip2
-          cargo install cargo-component --locked || true
+          cargo install cargo-component --locked
       - uses: swatinem/rust-cache@v2
         with:
           key: wasm-extensions
@@ -297,10 +298,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/wasm-bundles
+          : > target/wasm-bundles/checksums.txt
+          manifest_count=0
+          bundle_count=0
 
           # Process each manifest in registry/tools/ and registry/channels/
           for manifest in registry/tools/*.json registry/channels/*.json; do
             [ -f "$manifest" ] || continue
+            manifest_count=$((manifest_count + 1))
 
             name=$(jq -r '.name' "$manifest")
             source_dir=$(jq -r '.source.dir' "$manifest")
@@ -308,17 +313,22 @@ jobs:
             crate_name=$(jq -r '.source.crate_name' "$manifest")
 
             if [ ! -d "$source_dir" ]; then
-              echo "::warning::Source dir '$source_dir' not found for '$name', skipping"
-              continue
+              echo "::error::Source dir '$source_dir' not found for '$name'"
+              exit 1
+            fi
+            if [ ! -f "$source_dir/Cargo.toml" ]; then
+              echo "::error::Cargo manifest missing at '$source_dir/Cargo.toml' for '$name'"
+              exit 1
+            fi
+            if [ ! -f "$source_dir/$caps_file" ]; then
+              echo "::error::Capabilities file missing at '$source_dir/$caps_file' for '$name'"
+              exit 1
             fi
 
             echo "=== Building $name from $source_dir ==="
 
             # Build WASM component
-            cargo component build --release --manifest-path "$source_dir/Cargo.toml" || {
-              echo "::warning::Build failed for '$name', skipping"
-              continue
-            }
+            cargo component build --release --manifest-path "$source_dir/Cargo.toml"
 
             # Find the built WASM file (Cargo uses underscores in artifact names)
             wasm_artifact="${crate_name//-/_}"
@@ -332,33 +342,37 @@ jobs:
             done
 
             if [ -z "$wasm_path" ]; then
-              echo "::warning::No WASM output found for '$name', skipping"
-              continue
+              echo "::error::No WASM output found for '$name'"
+              exit 1
             fi
 
             # Copy files with standardized names for the archive
             cp "$wasm_path" "target/wasm-bundles/${name}.wasm"
-
-            caps_path="$source_dir/$caps_file"
-            if [ -f "$caps_path" ]; then
-              cp "$caps_path" "target/wasm-bundles/${name}.capabilities.json"
-            else
-              echo "::warning::No capabilities file at '$caps_path' for '$name'"
-            fi
+            cp "$source_dir/$caps_file" "target/wasm-bundles/${name}.capabilities.json"
 
             # Create tar.gz bundle
             bundle="target/wasm-bundles/${name}-wasm32-wasip2.tar.gz"
-            (cd target/wasm-bundles && if [ -f "${name}.capabilities.json" ]; then tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm" "${name}.capabilities.json"; else tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm"; fi)
+            (cd target/wasm-bundles && tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm" "${name}.capabilities.json")
 
             # Compute SHA256
             sha256=$(sha256sum "$bundle" | cut -d' ' -f1)
             echo "$sha256  ${name}-wasm32-wasip2.tar.gz" >> target/wasm-bundles/checksums.txt
+            bundle_count=$((bundle_count + 1))
 
             # Clean up intermediate files
             rm -f "target/wasm-bundles/${name}.wasm" "target/wasm-bundles/${name}.capabilities.json"
 
             echo "  -> $bundle ($sha256)"
           done
+
+          if [ "$manifest_count" -eq 0 ]; then
+            echo "::error::No WASM extension manifests found"
+            exit 1
+          fi
+          if [ "$bundle_count" -ne "$manifest_count" ]; then
+            echo "::error::Built $bundle_count WASM bundles for $manifest_count manifests"
+            exit 1
+          fi
 
           echo "=== WASM bundles built ==="
           ls -la target/wasm-bundles/
@@ -369,6 +383,45 @@ jobs:
           path: |
             target/wasm-bundles/*.tar.gz
             target/wasm-bundles/checksums.txt
+          if-no-files-found: error
+
+  publish-container-images:
+    needs:
+      - plan
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Set lowercase image ref
+        id: image
+        shell: bash
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BUILD_FEATURES=full
+          tags: |
+            ${{ steps.image.outputs.ref }}:${{ needs.plan.outputs.tag }}
+            ${{ steps.image.outputs.ref }}:latest
 
   # Determines if we should publish/announce
   host:
@@ -378,8 +431,9 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - build-wasm-extensions
+      - publish-container-images
     # Only run if we're "publishing", and only if plan, local, global, and wasm didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.windows-runtime-smoke.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.windows-runtime-smoke.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') && needs.publish-container-images.result == 'success' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

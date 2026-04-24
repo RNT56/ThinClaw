@@ -3,6 +3,10 @@
 # Quick start:
 #   cp env.example .env
 #   # Edit .env: set GATEWAY_AUTH_TOKEN and at least one LLM key
+#   docker compose pull thinclaw
+#   docker compose up -d
+#
+# Source-build fallback:
 #   docker compose up -d --build
 #
 # Scrappy connects via: http://<server-ip>:3000
@@ -10,6 +14,7 @@
 
 services:
   thinclaw:
+    image: ${THINCLAW_IMAGE:-ghcr.io/rnt56/thinclaw:latest}
     build:
       context: ..  # ThinClaw/ directory (one level up from deploy/)
       dockerfile: Dockerfile

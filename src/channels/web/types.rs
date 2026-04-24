@@ -935,6 +935,59 @@ pub struct SkillTrustRequest {
     pub trust: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SkillInspectRequest {
+    #[serde(default)]
+    pub include_content: Option<bool>,
+    #[serde(default)]
+    pub include_files: Option<bool>,
+    #[serde(default)]
+    pub audit: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillPublishRequest {
+    pub target_repo: String,
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+    #[serde(default)]
+    pub remote_write: Option<bool>,
+    #[serde(default)]
+    pub confirm_remote_write: Option<bool>,
+    #[serde(default)]
+    pub approve_risky: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillTapAddRequest {
+    pub repo: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub trust_level: Option<String>,
+    #[serde(default)]
+    pub replace: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillTapRemoveRequest {
+    pub repo: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillTapRefreshRequest {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 // --- Auth Token ---
 
 /// Request to submit an auth token for an extension (dedicated endpoint).

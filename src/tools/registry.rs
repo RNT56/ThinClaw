@@ -25,20 +25,23 @@ use crate::tools::builtin::{AgentBrowserTool, BrowserTool};
 use crate::tools::builtin::{
     AgentThinkTool, AppleMailTool, ApplyPatchTool, CancelJobTool, CanvasTool, ClarifyTool,
     CreateAgentTool, CreateJobTool, DesktopAutonomyTool, DeviceInfoTool, EchoTool,
-    EmitUserMessageTool, ExecuteCodeTool, ExternalMemoryOffTool, ExternalMemoryRecallTool,
-    ExternalMemorySetupTool, ExternalMemoryStatusTool, GrepTool, HomeAssistantTool, HttpTool,
-    JobEventsTool, JobPromptTool, JobStatusTool, JsonTool, LearningFeedbackTool,
-    LearningHistoryTool, LearningOutcomesTool, LearningProposalReviewTool, LearningStatusTool,
-    ListAgentsTool, ListDirTool, ListJobsTool, LlmListModelsTool, LlmSelectTool, MemoryDeleteTool,
-    MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool, MessageAgentTool, MoaTool,
-    ProcessTool, PromptManageTool, PromptQueue, ReadFileTool, RemoveAgentTool, SearchFilesTool,
-    SendMessageTool, SessionSearchTool, SharedModelOverride, SharedProcessRegistry,
-    SharedTodoStore, ShellTool, SkillAuditTool, SkillInstallTool, SkillListTool, SkillManageTool,
-    SkillPromoteTrustTool, SkillReadTool, SkillReloadTool, SkillRemoveTool, SkillSearchTool,
-    SkillSnapshotTool, SkillUpdateTool, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool,
+    EmitUserMessageTool, ExecuteCodeTool, ExternalMemoryExportTool, ExternalMemoryOffTool,
+    ExternalMemoryRecallTool, ExternalMemorySetupTool, ExternalMemoryStatusTool, GrepTool,
+    HomeAssistantTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
+    LearningFeedbackTool, LearningHistoryTool, LearningOutcomesTool, LearningProposalReviewTool,
+    LearningStatusTool, ListAgentsTool, ListDirTool, ListJobsTool, LlmListModelsTool,
+    LlmSelectTool, MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool,
+    MemoryWriteTool, MessageAgentTool, MoaTool, ProcessTool, PromptManageTool, PromptQueue,
+    ReadFileTool, RemoveAgentTool, SearchFilesTool, SendMessageTool, SessionSearchTool,
+    SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, SkillAuditTool,
+    SkillCheckTool, SkillInspectTool, SkillInstallTool, SkillListTool, SkillManageTool,
+    SkillPromoteTrustTool, SkillPublishTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
+    SkillSearchTool, SkillSnapshotTool, SkillTapAddTool, SkillTapListTool, SkillTapRefreshTool,
+    SkillTapRemoveTool, SkillUpdateTool, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool,
     ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool,
     VisionAnalyzeTool, WriteFileTool,
 };
+use crate::tools::execution::HostMediatedToolInvoker;
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDescriptor, ToolDomain, ToolExecutionLane, ToolProfile};
 use crate::tools::user_tool::{UserToolLoadResults, load_user_tools_from_dir};
@@ -86,11 +89,18 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "routine_history",
     "skill_list",
     "skill_read",
+    "skill_inspect",
     "skill_search",
+    "skill_check",
     "skill_install",
     "skill_update",
     "skill_audit",
     "skill_snapshot",
+    "skill_publish",
+    "skill_tap_list",
+    "skill_tap_add",
+    "skill_tap_remove",
+    "skill_tap_refresh",
     "skill_remove",
     "skill_trust_promote",
     "tts",
@@ -118,6 +128,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "learning_feedback",
     "learning_proposal_review",
     "external_memory_recall",
+    "external_memory_export",
     "external_memory_setup",
     "external_memory_off",
     "external_memory_status",
@@ -144,16 +155,23 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
 const IMPLICIT_CAPABILITY_TOOLS: &[&str] = &["agent_think", "emit_user_message"];
 const HIDDEN_BY_DEFAULT_TOOL_NAMES: &[&str] = &[
     "external_memory_recall",
+    "external_memory_export",
     "external_memory_setup",
     "external_memory_off",
     "external_memory_status",
 ];
 const SKILL_ADMIN_TOOLS: &[&str] = &[
     "skill_search",
+    "skill_check",
     "skill_install",
     "skill_update",
     "skill_audit",
     "skill_snapshot",
+    "skill_publish",
+    "skill_tap_list",
+    "skill_tap_add",
+    "skill_tap_remove",
+    "skill_tap_refresh",
     "skill_remove",
     "skill_reload",
     "skill_trust_promote",
@@ -851,9 +869,14 @@ impl ToolRegistry {
         &self,
         registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
         catalog: Arc<SkillCatalog>,
-        remote_hub: Option<Arc<crate::skills::remote_source::RemoteSkillHub>>,
+        remote_hub: Option<crate::skills::SharedRemoteSkillHub>,
         quarantine: Arc<crate::skills::quarantine::QuarantineManager>,
+        store: Option<Arc<dyn Database>>,
     ) {
+        self.register_sync(Arc::new(SkillInspectTool::new(
+            Arc::clone(&registry),
+            Arc::clone(&quarantine),
+        )));
         self.register_sync(Arc::new(SkillReadTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillListTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillSearchTool::new(
@@ -861,6 +884,7 @@ impl ToolRegistry {
             Arc::clone(&catalog),
             remote_hub.clone(),
         )));
+        self.register_sync(Arc::new(SkillCheckTool::new(Arc::clone(&quarantine))));
         self.register_sync(Arc::new(SkillInstallTool::new(
             Arc::clone(&registry),
             Arc::clone(&catalog),
@@ -878,10 +902,32 @@ impl ToolRegistry {
             Arc::clone(&quarantine),
         )));
         self.register_sync(Arc::new(SkillSnapshotTool::new(Arc::clone(&registry))));
+        self.register_sync(Arc::new(SkillPublishTool::new(
+            Arc::clone(&registry),
+            remote_hub.clone(),
+            Arc::clone(&quarantine),
+            store.clone(),
+        )));
+        self.register_sync(Arc::new(SkillTapListTool::new(
+            store.clone(),
+            remote_hub.clone(),
+        )));
+        self.register_sync(Arc::new(SkillTapAddTool::new(
+            store.clone(),
+            remote_hub.clone(),
+        )));
+        self.register_sync(Arc::new(SkillTapRemoveTool::new(
+            store.clone(),
+            remote_hub.clone(),
+        )));
+        self.register_sync(Arc::new(SkillTapRefreshTool::new(
+            store,
+            remote_hub.clone(),
+        )));
         self.register_sync(Arc::new(SkillRemoveTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillReloadTool::new(Arc::clone(&registry))));
         self.register_sync(Arc::new(SkillPromoteTrustTool::new(registry)));
-        tracing::info!("Registered 10 skill management tools");
+        tracing::info!("Registered 17 skill management tools");
     }
 
     /// Register learning tools for prompt mutation and learning-ledger access.
@@ -927,6 +973,9 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ExternalMemoryRecallTool::new(Arc::clone(
             &orchestrator,
         ))));
+        self.register_sync(Arc::new(ExternalMemoryExportTool::new(Arc::clone(
+            &orchestrator,
+        ))));
         self.register_sync(Arc::new(ExternalMemorySetupTool::new(Arc::clone(
             &orchestrator,
         ))));
@@ -937,7 +986,7 @@ impl ToolRegistry {
             &orchestrator,
         ))));
         self.register_sync(Arc::new(LearningProposalReviewTool::new(orchestrator)));
-        count += 9;
+        count += 10;
 
         tracing::info!("Registered {} learning tools", count);
     }
@@ -1218,6 +1267,7 @@ impl ToolRegistry {
         safety: Option<&SafetyConfig>,
         wasm_runtime: Option<Arc<WasmToolRuntime>>,
         secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+        tool_invoker: Option<Arc<HostMediatedToolInvoker>>,
     ) -> UserToolLoadResults {
         load_user_tools_from_dir(
             Arc::clone(self),
@@ -1227,6 +1277,7 @@ impl ToolRegistry {
             safety,
             wasm_runtime,
             secrets_store,
+            tool_invoker,
         )
         .await
     }
@@ -1323,6 +1374,9 @@ impl ToolRegistry {
         if let Some(oauth) = reg.oauth_refresh {
             wrapper = wrapper.with_oauth_refresh(oauth);
         }
+        if let Some(invoker) = reg.tool_invoker {
+            wrapper = wrapper.with_tool_invoker(invoker);
+        }
 
         // Register the tool
         self.register(Arc::new(wrapper)).await;
@@ -1367,6 +1421,7 @@ impl ToolRegistry {
         runtime: &Arc<WasmToolRuntime>,
         user_id: &str,
         name: &str,
+        tool_invoker: Option<Arc<HostMediatedToolInvoker>>,
     ) -> Result<(), WasmRegistrationError> {
         // Load tool with integrity verification
         let tool_with_binary = store
@@ -1393,6 +1448,7 @@ impl ToolRegistry {
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
             secrets_store: None,
             oauth_refresh: None,
+            tool_invoker,
         })
         .await
         .map_err(WasmRegistrationError::Wasm)?;
@@ -1438,6 +1494,8 @@ pub struct WasmToolRegistration<'a> {
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     pub oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Optional host-mediated bridge for WASM tool_invoke aliases.
+    pub tool_invoker: Option<Arc<HostMediatedToolInvoker>>,
 }
 
 impl Default for ToolRegistry {

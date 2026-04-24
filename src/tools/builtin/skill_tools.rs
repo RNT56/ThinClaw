@@ -3,20 +3,23 @@
 //! Five tools for discovering, reading, installing, listing, and removing skills
 //! entirely through conversation, following the extension_tools pattern.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use sha2::{Digest, Sha256};
+use tokio::process::Command;
 
 use crate::context::JobContext;
-use crate::settings::SkillTapTrustLevel;
+use crate::db::Database;
+use crate::settings::{Settings, SkillTapConfig, SkillTapTrustLevel};
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::quarantine::{
     QuarantineManager, QuarantinedSkill, SecurityFinding, SkillContent, SkillProvenance,
 };
 use crate::skills::registry::SkillRegistry;
-use crate::skills::{RemoteSkillHub, SkillSource, SkillTrust};
+use crate::skills::{SharedRemoteSkillHub, SkillSource, SkillTrust};
 use crate::tools::ToolRegistry;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
@@ -60,6 +63,19 @@ fn summarize_findings(findings: &[SecurityFinding]) -> String {
         .join("; ")
 }
 
+fn skill_finding_json(findings: &[SecurityFinding]) -> Vec<serde_json::Value> {
+    findings
+        .iter()
+        .map(|finding| {
+            serde_json::json!({
+                "kind": finding.kind,
+                "severity": format!("{:?}", finding.severity).to_lowercase(),
+                "excerpt": finding.excerpt,
+            })
+        })
+        .collect()
+}
+
 fn findings_require_approval(
     trust_level: SkillTapTrustLevel,
     findings: &[SecurityFinding],
@@ -76,11 +92,499 @@ fn source_path_for_skill(skill: &crate::skills::LoadedSkill) -> Option<PathBuf> 
     }
 }
 
+fn skill_content_for_scan(
+    raw_content: String,
+    source_kind: &str,
+    source_ref: &str,
+) -> SkillContent {
+    SkillContent {
+        raw_content,
+        source_kind: source_kind.to_string(),
+        source_adapter: source_kind.to_string(),
+        source_ref: source_ref.to_string(),
+        source_repo: None,
+        source_url: (source_kind == "url").then(|| source_ref.to_string()),
+        manifest_url: (source_kind == "url").then(|| source_ref.to_string()),
+        manifest_digest: None,
+        path: (source_kind == "path").then(|| source_ref.to_string()),
+        branch: None,
+        commit_sha: None,
+        trust_level: SkillTapTrustLevel::Community,
+    }
+}
+
 async fn read_skill_provenance(skill_dir: &Path) -> Result<SkillProvenance, ToolError> {
     let raw = tokio::fs::read_to_string(skill_dir.join(".thinclaw-skill-lock.json"))
         .await
         .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
     serde_json::from_str(&raw).map_err(|err| ToolError::ExecutionFailed(err.to_string()))
+}
+
+fn skill_source_json(source: &SkillSource) -> serde_json::Value {
+    match source {
+        SkillSource::Workspace(path) => serde_json::json!({
+            "kind": "workspace",
+            "path": path.display().to_string(),
+        }),
+        SkillSource::User(path) => serde_json::json!({
+            "kind": "user",
+            "path": path.display().to_string(),
+        }),
+        SkillSource::Bundled(path) => serde_json::json!({
+            "kind": "bundled",
+            "path": path.display().to_string(),
+        }),
+        SkillSource::External(path) => serde_json::json!({
+            "kind": "external",
+            "path": path.display().to_string(),
+        }),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SkillPackageFile {
+    relative_path: String,
+    source_path: PathBuf,
+    bytes: u64,
+}
+
+fn is_skipped_package_name(name: &str) -> bool {
+    name == ".git"
+        || name == ".DS_Store"
+        || name == ".thinclaw-skill-lock.json"
+        || name == ".cache"
+        || name == "__pycache__"
+        || name == "target"
+        || name == "node_modules"
+        || name == "tmp"
+        || name == "temp"
+        || name.starts_with('.')
+}
+
+fn relative_path_is_safe(path: &Path) -> bool {
+    path.components()
+        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
+fn collect_skill_package_files(root: &Path) -> Result<Vec<SkillPackageFile>, ToolError> {
+    fn walk(root: &Path, dir: &Path, files: &mut Vec<SkillPackageFile>) -> Result<(), ToolError> {
+        let entries = std::fs::read_dir(dir).map_err(|err| {
+            ToolError::ExecutionFailed(format!(
+                "Failed to read skill directory '{}': {}",
+                dir.display(),
+                err
+            ))
+        })?;
+
+        for entry in entries {
+            let entry = entry.map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_skipped_package_name(&name) {
+                continue;
+            }
+
+            let meta = std::fs::symlink_metadata(&path).map_err(|err| {
+                ToolError::ExecutionFailed(format!("Failed to stat '{}': {}", path.display(), err))
+            })?;
+            if meta.file_type().is_symlink() {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Refusing to publish symlink '{}'",
+                    path.display()
+                )));
+            }
+            if meta.is_dir() {
+                walk(root, &path, files)?;
+                continue;
+            }
+            if !meta.is_file() {
+                continue;
+            }
+
+            let relative = path.strip_prefix(root).map_err(|err| {
+                ToolError::ExecutionFailed(format!(
+                    "Failed to derive package path for '{}': {}",
+                    path.display(),
+                    err
+                ))
+            })?;
+            if !relative_path_is_safe(relative) {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Refusing unsafe package path '{}'",
+                    relative.display()
+                )));
+            }
+            files.push(SkillPackageFile {
+                relative_path: relative.to_string_lossy().replace('\\', "/"),
+                source_path: path,
+                bytes: meta.len(),
+            });
+        }
+        Ok(())
+    }
+
+    if !root.join("SKILL.md").is_file() {
+        return Err(ToolError::ExecutionFailed(format!(
+            "Skill directory '{}' is missing SKILL.md",
+            root.display()
+        )));
+    }
+
+    let mut files = Vec::new();
+    walk(root, root, &mut files)?;
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    if !files.iter().any(|file| file.relative_path == "SKILL.md") {
+        return Err(ToolError::ExecutionFailed(
+            "Skill package must include SKILL.md".to_string(),
+        ));
+    }
+    Ok(files)
+}
+
+fn package_hash(files: &[SkillPackageFile]) -> Result<String, ToolError> {
+    let mut hasher = Sha256::new();
+    for file in files {
+        hasher.update(file.relative_path.as_bytes());
+        hasher.update(b"\0");
+        let bytes = std::fs::read(&file.source_path).map_err(|err| {
+            ToolError::ExecutionFailed(format!(
+                "Failed to read package file '{}': {}",
+                file.source_path.display(),
+                err
+            ))
+        })?;
+        hasher.update(&bytes);
+        hasher.update(b"\0");
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn package_scan_content(files: &[SkillPackageFile]) -> String {
+    let mut out = String::new();
+    for file in files {
+        if let Ok(bytes) = std::fs::read(&file.source_path) {
+            out.push_str("\n--- ");
+            out.push_str(&file.relative_path);
+            out.push_str(" ---\n");
+            out.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    }
+    out
+}
+
+fn package_file_json(files: &[SkillPackageFile]) -> Vec<serde_json::Value> {
+    files
+        .iter()
+        .map(|file| {
+            serde_json::json!({
+                "path": file.relative_path,
+                "bytes": file.bytes,
+            })
+        })
+        .collect()
+}
+
+pub async fn inspect_skill_report(
+    registry: &Arc<tokio::sync::RwLock<SkillRegistry>>,
+    quarantine: &Arc<QuarantineManager>,
+    name: &str,
+    include_content: bool,
+    include_files: bool,
+    audit: bool,
+) -> Result<serde_json::Value, ToolError> {
+    let skill = {
+        let guard = registry.read().await;
+        guard
+            .skills()
+            .iter()
+            .find(|skill| skill.manifest.name.eq_ignore_ascii_case(name))
+            .cloned()
+            .ok_or_else(|| ToolError::ExecutionFailed(format!("Skill '{}' not found", name)))?
+    };
+    let source_path = source_path_for_skill(&skill);
+
+    let provenance = if let Some(path) = source_path.as_ref() {
+        read_skill_provenance(path)
+            .await
+            .ok()
+            .and_then(|p| serde_json::to_value(p).ok())
+    } else {
+        None
+    };
+
+    let files = if include_files {
+        if let Some(path) = source_path.as_ref() {
+            match collect_skill_package_files(path) {
+                Ok(files) => package_file_json(&files),
+                Err(err) => vec![serde_json::json!({
+                    "error": err.to_string(),
+                })],
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let findings = if audit {
+        let scan_root = source_path.clone().unwrap_or_else(|| PathBuf::from("."));
+        quarantine.scan_quarantined(&QuarantinedSkill {
+            skill_name: skill.manifest.name.clone(),
+            dir: scan_root,
+            content: SkillContent {
+                raw_content: skill.prompt_content.clone(),
+                source_kind: "inspect".to_string(),
+                source_adapter: "inspect".to_string(),
+                source_ref: skill.manifest.name.clone(),
+                source_repo: None,
+                source_url: None,
+                manifest_url: None,
+                manifest_digest: None,
+                path: None,
+                branch: None,
+                commit_sha: None,
+                trust_level: SkillTapTrustLevel::Community,
+            },
+        })
+    } else {
+        Vec::new()
+    };
+
+    let mut output = serde_json::json!({
+        "name": skill.manifest.name.clone(),
+        "version": skill.manifest.version.clone(),
+        "description": skill.manifest.description.clone(),
+        "activation": skill.manifest.activation.clone(),
+        "metadata": skill.manifest.metadata.clone(),
+        "trust": skill.trust.to_string(),
+        "source_tier": skill.source_tier.to_string(),
+        "source": skill_source_json(&skill.source),
+        "content_hash": skill.content_hash.clone(),
+        "prompt_tokens_approx": (skill.prompt_content.len() as f64 * 0.25) as usize,
+        "provenance_lock": provenance,
+        "finding_count": findings.len(),
+        "findings": skill_finding_json(&findings),
+        "files": files,
+    });
+    if include_content {
+        output["content"] = serde_json::Value::String(skill.prompt_content.clone());
+    }
+    Ok(output)
+}
+
+fn normalize_tap_path(path: &str) -> String {
+    path.trim().trim_matches('/').to_string()
+}
+
+fn normalize_tap_branch(branch: Option<&str>) -> Option<String> {
+    branch
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn validate_github_repo(repo: &str) -> Result<(), ToolError> {
+    let mut parts = repo.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    if parts.next().is_some()
+        || owner.is_empty()
+        || name.is_empty()
+        || [owner, name].iter().any(|part| {
+            part == &"."
+                || part == &".."
+                || part
+                    .chars()
+                    .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.'))
+        })
+    {
+        return Err(ToolError::InvalidParameters(
+            "repo must be in owner/name form".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_repo_relative_path(path: &str, field: &str) -> Result<(), ToolError> {
+    if path.is_empty() {
+        return Ok(());
+    }
+    let candidate = Path::new(path);
+    if candidate.is_absolute()
+        || !candidate
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(ToolError::InvalidParameters(format!(
+            "{} must be a relative repository path without traversal",
+            field
+        )));
+    }
+    Ok(())
+}
+
+fn validate_repo_path_component(value: &str, field: &str) -> Result<(), ToolError> {
+    validate_repo_relative_path(value, field)?;
+    if Path::new(value).components().count() != 1 {
+        return Err(ToolError::InvalidParameters(format!(
+            "{} must be a single repository path component",
+            field
+        )));
+    }
+    Ok(())
+}
+
+fn parse_tap_trust_level(value: &str) -> Result<SkillTapTrustLevel, ToolError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "builtin" => Ok(SkillTapTrustLevel::Builtin),
+        "trusted" => Ok(SkillTapTrustLevel::Trusted),
+        "community" | "" => Ok(SkillTapTrustLevel::Community),
+        other => Err(ToolError::InvalidParameters(format!(
+            "Unsupported trust_level '{}'",
+            other
+        ))),
+    }
+}
+
+fn tap_key_matches(tap: &SkillTapConfig, repo: &str, path: &str, branch: Option<&str>) -> bool {
+    tap.repo.eq_ignore_ascii_case(repo)
+        && normalize_tap_path(&tap.path) == normalize_tap_path(path)
+        && tap.branch.as_deref() == branch
+}
+
+async fn load_settings_for_taps(
+    store: &Arc<dyn Database>,
+    user_id: &str,
+) -> Result<Settings, ToolError> {
+    let map = store
+        .get_all_settings(user_id)
+        .await
+        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    Ok(Settings::from_db_map(&map))
+}
+
+async fn persist_skill_taps(
+    store: &Arc<dyn Database>,
+    user_id: &str,
+    taps: &[SkillTapConfig],
+) -> Result<(), ToolError> {
+    let value =
+        serde_json::to_value(taps).map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    store
+        .set_setting(user_id, "skill_taps", &value)
+        .await
+        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))
+}
+
+async fn refresh_remote_hub_from_settings(
+    store: &Arc<dyn Database>,
+    user_id: &str,
+    remote_hub: &SharedRemoteSkillHub,
+) -> Result<usize, ToolError> {
+    let settings = load_settings_for_taps(store, user_id).await?;
+    let tap_count = settings.skill_taps.len();
+    let hub = crate::skills::build_remote_skill_hub(
+        settings.skill_taps,
+        settings.well_known_skill_registries,
+    );
+    remote_hub.replace(hub).await;
+    Ok(tap_count)
+}
+
+// ── skill_inspect ───────────────────────────────────────────────────────
+
+pub struct SkillInspectTool {
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+    quarantine: Arc<QuarantineManager>,
+}
+
+impl SkillInspectTool {
+    pub fn new(
+        registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+        quarantine: Arc<QuarantineManager>,
+    ) -> Self {
+        Self {
+            registry,
+            quarantine,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillInspectTool {
+    fn name(&self) -> &str {
+        "skill_inspect"
+    }
+
+    fn description(&self) -> &str {
+        "Inspect one loaded skill with metadata, provenance, files, and optional audit findings."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the loaded skill to inspect."
+                },
+                "include_content": {
+                    "type": "boolean",
+                    "description": "Include full prompt content in the response.",
+                    "default": false
+                },
+                "include_files": {
+                    "type": "boolean",
+                    "description": "Include regular publishable files in the skill directory.",
+                    "default": true
+                },
+                "audit": {
+                    "type": "boolean",
+                    "description": "Run the quarantine scanner over the skill prompt.",
+                    "default": true
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let name = require_str(&params, "name")?;
+        ensure_skill_allowed(ctx, name)?;
+        let include_content = params
+            .get("include_content")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let include_files = params
+            .get("include_files")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        let audit = params
+            .get("audit")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+
+        let output = inspect_skill_report(
+            &self.registry,
+            &self.quarantine,
+            name,
+            include_content,
+            include_files,
+            audit,
+        )
+        .await?;
+        Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
 }
 
 // ── skill_read ──────────────────────────────────────────────────────────
@@ -301,14 +805,14 @@ impl Tool for SkillListTool {
 pub struct SkillSearchTool {
     registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
     catalog: Arc<SkillCatalog>,
-    remote_hub: Option<Arc<RemoteSkillHub>>,
+    remote_hub: Option<SharedRemoteSkillHub>,
 }
 
 impl SkillSearchTool {
     pub fn new(
         registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
         catalog: Arc<SkillCatalog>,
-        remote_hub: Option<Arc<RemoteSkillHub>>,
+        remote_hub: Option<SharedRemoteSkillHub>,
     ) -> Self {
         Self {
             registry,
@@ -501,12 +1005,177 @@ impl Tool for SkillSearchTool {
     }
 }
 
+// ── skill_check ──────────────────────────────────────────────────────────
+
+pub struct SkillCheckTool {
+    quarantine: Arc<QuarantineManager>,
+}
+
+impl SkillCheckTool {
+    pub fn new(quarantine: Arc<QuarantineManager>) -> Self {
+        Self { quarantine }
+    }
+
+    async fn resolve_input(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<(String, String, String), ToolError> {
+        let content = params.get("content").and_then(|value| value.as_str());
+        let path = params.get("path").and_then(|value| value.as_str());
+        let url = params.get("url").and_then(|value| value.as_str());
+
+        let provided = [content.is_some(), path.is_some(), url.is_some()]
+            .into_iter()
+            .filter(|present| *present)
+            .count();
+        if provided != 1 {
+            return Err(ToolError::InvalidParameters(
+                "Provide exactly one of content, path, or url".to_string(),
+            ));
+        }
+
+        if let Some(raw) = content {
+            return Ok((
+                raw.to_string(),
+                "content".to_string(),
+                "(inline content)".to_string(),
+            ));
+        }
+
+        if let Some(url) = url {
+            return Ok((
+                fetch_skill_content(url).await?,
+                "url".to_string(),
+                url.to_string(),
+            ));
+        }
+
+        let path = path.expect("provided count checked path presence");
+        let path_buf = PathBuf::from(path);
+        let skill_path = if path_buf.file_name().and_then(|name| name.to_str()) == Some("SKILL.md")
+        {
+            path_buf.clone()
+        } else {
+            path_buf.join("SKILL.md")
+        };
+        let raw = tokio::fs::read_to_string(&skill_path)
+            .await
+            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+        Ok((raw, "path".to_string(), path_buf.display().to_string()))
+    }
+}
+
+#[async_trait]
+impl Tool for SkillCheckTool {
+    fn name(&self) -> &str {
+        "skill_check"
+    }
+
+    fn description(&self) -> &str {
+        "Validate SKILL.md content, a local SKILL.md path, or a direct HTTPS SKILL.md URL without installing it."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Raw SKILL.md content to validate."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Local SKILL.md file path or skill directory to validate."
+                },
+                "url": {
+                    "type": "string",
+                    "description": "Direct HTTPS URL to a SKILL.md file to fetch and validate."
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
+        let start = std::time::Instant::now();
+        let (raw_content, source_kind, source_ref) = self.resolve_input(&params).await?;
+        let normalized = crate::skills::normalize_line_endings(&raw_content);
+        let normalized_content_hash = crate::skills::registry::compute_hash(&normalized);
+        let scan_content = skill_content_for_scan(raw_content, &source_kind, &source_ref);
+        let findings = self.quarantine.scan_quarantined(&QuarantinedSkill {
+            skill_name: "(preflight)".to_string(),
+            dir: self.quarantine.quarantine_dir().to_path_buf(),
+            content: scan_content,
+        });
+
+        let source_path = if source_kind == "path" {
+            PathBuf::from(&source_ref)
+        } else {
+            PathBuf::from(".")
+        };
+        let validation = if source_kind == "path" {
+            crate::skills::registry::SkillRegistry::validate_skill_file(
+                &source_path,
+                SkillTrust::Installed,
+                SkillSource::External(source_path.clone()),
+            )
+            .await
+        } else {
+            crate::skills::registry::SkillRegistry::validate_skill_content(
+                &normalized,
+                SkillTrust::Installed,
+                SkillSource::External(source_path.clone()),
+            )
+            .await
+        };
+
+        let output = match validation {
+            Ok((_name, loaded)) => serde_json::json!({
+                "ok": true,
+                "source_kind": source_kind,
+                "source_ref": source_ref,
+                "name": loaded.manifest.name,
+                "version": loaded.manifest.version,
+                "description": loaded.manifest.description,
+                "activation": loaded.manifest.activation,
+                "trust": loaded.trust.to_string(),
+                "source_tier": loaded.source_tier.to_string(),
+                "prompt_tokens_approx": (loaded.prompt_content.len() as f64 * 0.25) as usize,
+                "declared_max_context_tokens": loaded.manifest.activation.max_context_tokens,
+                "content_hash": loaded.content_hash,
+                "normalized_content_hash": normalized_content_hash,
+                "finding_count": findings.len(),
+                "findings": skill_finding_json(&findings),
+            }),
+            Err(err) => serde_json::json!({
+                "ok": false,
+                "source_kind": source_kind,
+                "source_ref": source_ref,
+                "error": err.to_string(),
+                "normalized_content_hash": normalized_content_hash,
+                "finding_count": findings.len(),
+                "findings": skill_finding_json(&findings),
+            }),
+        };
+
+        Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
+}
+
 // ── skill_install ───────────────────────────────────────────────────────
 
 pub struct SkillInstallTool {
     registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
     catalog: Arc<SkillCatalog>,
-    remote_hub: Option<Arc<RemoteSkillHub>>,
+    remote_hub: Option<SharedRemoteSkillHub>,
     quarantine: Arc<QuarantineManager>,
 }
 
@@ -514,7 +1183,7 @@ impl SkillInstallTool {
     pub fn new(
         registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
         catalog: Arc<SkillCatalog>,
-        remote_hub: Option<Arc<RemoteSkillHub>>,
+        remote_hub: Option<SharedRemoteSkillHub>,
         quarantine: Arc<QuarantineManager>,
     ) -> Self {
         Self {
@@ -1173,7 +1842,7 @@ impl SkillUpdateTool {
     pub fn new(
         registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
         catalog: Arc<SkillCatalog>,
-        remote_hub: Option<Arc<RemoteSkillHub>>,
+        remote_hub: Option<SharedRemoteSkillHub>,
         quarantine: Arc<QuarantineManager>,
     ) -> Self {
         let installer =
@@ -1293,6 +1962,878 @@ impl Tool for SkillUpdateTool {
         }
 
         self.installer.execute(install_params, ctx).await
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+// ── skill_publish ───────────────────────────────────────────────────────
+
+pub struct SkillPublishTool {
+    registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+    remote_hub: Option<SharedRemoteSkillHub>,
+    quarantine: Arc<QuarantineManager>,
+    store: Option<Arc<dyn Database>>,
+}
+
+impl SkillPublishTool {
+    pub fn new(
+        registry: Arc<tokio::sync::RwLock<SkillRegistry>>,
+        remote_hub: Option<SharedRemoteSkillHub>,
+        quarantine: Arc<QuarantineManager>,
+        store: Option<Arc<dyn Database>>,
+    ) -> Self {
+        Self {
+            registry,
+            remote_hub,
+            quarantine,
+            store,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PublishPlan {
+    skill_name: String,
+    target_repo: String,
+    tap_path: String,
+    package_path: String,
+    branch: String,
+    base_branch: Option<String>,
+    package_hash: String,
+    files: Vec<SkillPackageFile>,
+    findings: Vec<SecurityFinding>,
+    trust: String,
+    source_tier: String,
+    source: serde_json::Value,
+}
+
+impl PublishPlan {
+    fn json(&self, status: &str) -> serde_json::Value {
+        let commit_message = format!("feat(skills): publish {}", self.skill_name);
+        let pr_title = format!("[skills] publish {}", self.skill_name);
+        serde_json::json!({
+            "status": status,
+            "name": self.skill_name,
+            "target_repo": self.target_repo,
+            "tap_path": self.tap_path,
+            "package_path": self.package_path,
+            "branch": self.branch,
+            "base_branch": self.base_branch,
+            "package_hash": self.package_hash,
+            "files": package_file_json(&self.files),
+            "file_count": self.files.len(),
+            "finding_count": self.findings.len(),
+            "findings": skill_finding_json(&self.findings),
+            "trust": self.trust,
+            "source_tier": self.source_tier,
+            "source": self.source,
+            "remote_write_plan": {
+                "repo_url": format!("https://github.com/{}.git", self.target_repo),
+                "base_branch": self.base_branch,
+                "branch": self.branch,
+                "package_path": self.package_path,
+                "commit_message": commit_message,
+                "push": {
+                    "remote": "origin",
+                    "branch": self.branch,
+                },
+                "pull_request": {
+                    "draft": true,
+                    "title": pr_title,
+                    "repo": self.target_repo,
+                },
+            },
+        })
+    }
+}
+
+async fn build_publish_plan(
+    registry: &Arc<tokio::sync::RwLock<SkillRegistry>>,
+    quarantine: &Arc<QuarantineManager>,
+    store: Option<&Arc<dyn Database>>,
+    user_id: &str,
+    name: &str,
+    target_repo: &str,
+) -> Result<PublishPlan, ToolError> {
+    validate_github_repo(target_repo)?;
+    let (skill, source_path) = {
+        let guard = registry.read().await;
+        let skill = guard
+            .skills()
+            .iter()
+            .find(|skill| skill.manifest.name.eq_ignore_ascii_case(name))
+            .cloned()
+            .ok_or_else(|| ToolError::ExecutionFailed(format!("Skill '{}' not found", name)))?;
+        let source_path = source_path_for_skill(&skill).ok_or_else(|| {
+            ToolError::ExecutionFailed(format!(
+                "Skill '{}' does not have a filesystem source path",
+                name
+            ))
+        })?;
+        (skill, source_path)
+    };
+
+    let settings = if let Some(store) = store {
+        load_settings_for_taps(store, user_id).await?
+    } else {
+        Settings::load()
+    };
+    let tap = settings
+        .skill_taps
+        .iter()
+        .find(|tap| tap.repo.eq_ignore_ascii_case(target_repo))
+        .cloned()
+        .ok_or_else(|| {
+            ToolError::ExecutionFailed(format!(
+                "Target repo '{}' is not configured as a skill tap",
+                target_repo
+            ))
+        })?;
+
+    let files = collect_skill_package_files(&source_path)?;
+    SkillRegistry::validate_skill_file(&source_path, skill.trust, skill.source.clone())
+        .await
+        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    let hash = package_hash(&files)?;
+    let hash8 = hash
+        .strip_prefix("sha256:")
+        .unwrap_or(&hash)
+        .chars()
+        .take(8)
+        .collect::<String>();
+    validate_repo_path_component(&skill.manifest.name, "skill name")?;
+    let tap_path = normalize_tap_path(&tap.path);
+    validate_repo_relative_path(&tap_path, "tap.path")?;
+    let package_path = if tap_path.is_empty() {
+        skill.manifest.name.clone()
+    } else {
+        format!("{}/{}", tap_path, skill.manifest.name)
+    };
+    validate_repo_relative_path(&package_path, "package_path")?;
+    let branch = format!("codex/skill-publish/{}-{}", skill.manifest.name, hash8);
+    let findings = quarantine.scan_quarantined(&QuarantinedSkill {
+        skill_name: skill.manifest.name.clone(),
+        dir: source_path,
+        content: SkillContent {
+            raw_content: package_scan_content(&files),
+            source_kind: "publish".to_string(),
+            source_adapter: "publish".to_string(),
+            source_ref: skill.manifest.name.clone(),
+            source_repo: Some(target_repo.to_string()),
+            source_url: None,
+            manifest_url: None,
+            manifest_digest: None,
+            path: Some(package_path.clone()),
+            branch: tap.branch.clone(),
+            commit_sha: None,
+            trust_level: tap.trust_level,
+        },
+    });
+
+    Ok(PublishPlan {
+        skill_name: skill.manifest.name.clone(),
+        target_repo: tap.repo,
+        tap_path,
+        package_path,
+        branch,
+        base_branch: tap.branch,
+        package_hash: hash,
+        files,
+        findings,
+        trust: skill.trust.to_string(),
+        source_tier: skill.source_tier.to_string(),
+        source: skill_source_json(&skill.source),
+    })
+}
+
+async fn run_skill_publish_cmd(mut command: Command) -> Result<String, ToolError> {
+    let output = command
+        .output()
+        .await
+        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(ToolError::ExecutionFailed(stderr.trim().to_string()))
+}
+
+async fn write_publish_package(
+    scratch_dir: &Path,
+    package_path: &str,
+    files: &[SkillPackageFile],
+) -> Result<PathBuf, ToolError> {
+    let destination = scratch_dir.join(package_path);
+    if tokio::fs::try_exists(&destination).await.unwrap_or(false) {
+        tokio::fs::remove_dir_all(&destination)
+            .await
+            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    }
+    tokio::fs::create_dir_all(&destination)
+        .await
+        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+
+    for file in files {
+        let target = destination.join(&file.relative_path);
+        if let Some(parent) = target.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+        }
+        tokio::fs::copy(&file.source_path, &target)
+            .await
+            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    }
+
+    Ok(destination)
+}
+
+async fn execute_publish_plan(plan: &PublishPlan) -> Result<serde_json::Value, ToolError> {
+    let scratch_dir = std::env::temp_dir().join(format!(
+        "thinclaw-skill-publish-{}-{}",
+        plan.skill_name,
+        plan.package_hash
+            .strip_prefix("sha256:")
+            .unwrap_or(&plan.package_hash)
+            .chars()
+            .take(8)
+            .collect::<String>()
+    ));
+    if tokio::fs::try_exists(&scratch_dir).await.unwrap_or(false) {
+        tokio::fs::remove_dir_all(&scratch_dir)
+            .await
+            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+    }
+
+    let repo_url = format!("https://github.com/{}.git", plan.target_repo);
+    run_skill_publish_cmd({
+        let mut command = Command::new("git");
+        command
+            .arg("clone")
+            .arg("--no-hardlinks")
+            .arg(&repo_url)
+            .arg(&scratch_dir);
+        command
+    })
+    .await?;
+
+    let base_branch = if let Some(base_branch) = plan.base_branch.as_ref() {
+        run_skill_publish_cmd({
+            let mut command = Command::new("git");
+            command
+                .arg("-C")
+                .arg(&scratch_dir)
+                .arg("checkout")
+                .arg(base_branch);
+            command
+        })
+        .await?;
+        base_branch.clone()
+    } else {
+        run_skill_publish_cmd({
+            let mut command = Command::new("git");
+            command
+                .arg("-C")
+                .arg(&scratch_dir)
+                .arg("rev-parse")
+                .arg("--abbrev-ref")
+                .arg("HEAD");
+            command
+        })
+        .await?
+    };
+
+    run_skill_publish_cmd({
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&scratch_dir)
+            .arg("checkout")
+            .arg("-B")
+            .arg(&plan.branch);
+        command
+    })
+    .await?;
+
+    let package_dir = write_publish_package(&scratch_dir, &plan.package_path, &plan.files).await?;
+
+    run_skill_publish_cmd({
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&scratch_dir)
+            .arg("add")
+            .arg(&plan.package_path);
+        command
+    })
+    .await?;
+
+    let diff_status = Command::new("git")
+        .arg("-C")
+        .arg(&scratch_dir)
+        .arg("diff")
+        .arg("--cached")
+        .arg("--quiet")
+        .output()
+        .await
+        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?
+        .status;
+    if diff_status.success() {
+        return Err(ToolError::ExecutionFailed(
+            "No package changes to publish".to_string(),
+        ));
+    }
+
+    run_skill_publish_cmd({
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&scratch_dir)
+            .arg("commit")
+            .arg("-m")
+            .arg(format!("feat(skills): publish {}", plan.skill_name));
+        command
+    })
+    .await?;
+
+    run_skill_publish_cmd({
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&scratch_dir)
+            .arg("push")
+            .arg("-u")
+            .arg("origin")
+            .arg(&plan.branch);
+        command
+    })
+    .await?;
+
+    let pr_body = format!(
+        "Publish ThinClaw skill `{}` to `{}`.\n\nPackage hash: `{}`\nFiles: {}",
+        plan.skill_name,
+        plan.package_path,
+        plan.package_hash,
+        plan.files.len()
+    );
+    let pr_url = run_skill_publish_cmd({
+        let mut command = Command::new("gh");
+        command
+            .arg("pr")
+            .arg("create")
+            .arg("--draft")
+            .arg("--repo")
+            .arg(&plan.target_repo)
+            .arg("--base")
+            .arg(&base_branch)
+            .arg("--head")
+            .arg(&plan.branch)
+            .arg("--title")
+            .arg(format!("[skills] publish {}", plan.skill_name))
+            .arg("--body")
+            .arg(pr_body)
+            .current_dir(&scratch_dir);
+        command
+    })
+    .await?;
+
+    let mut output = plan.json("published");
+    output["scratch_dir"] = serde_json::Value::String(scratch_dir.display().to_string());
+    output["package_dir"] = serde_json::Value::String(package_dir.display().to_string());
+    output["pr_url"] = serde_json::Value::String(pr_url);
+    output["base_branch"] = serde_json::Value::String(base_branch);
+    Ok(output)
+}
+
+#[async_trait]
+impl Tool for SkillPublishTool {
+    fn name(&self) -> &str {
+        "skill_publish"
+    }
+
+    fn description(&self) -> &str {
+        "Dry-run or publish a local skill to a configured GitHub skill tap as a draft pull request."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Loaded skill name to publish."},
+                "target_repo": {"type": "string", "description": "Configured GitHub tap repo in owner/name form."},
+                "dry_run": {"type": "boolean", "default": true},
+                "remote_write": {"type": "boolean", "default": false},
+                "confirm_remote_write": {"type": "boolean", "default": false},
+                "approve_risky": {"type": "boolean", "default": false}
+            },
+            "required": ["name", "target_repo"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
+        let start = std::time::Instant::now();
+        let name = require_str(&params, "name")?;
+        let target_repo = require_str(&params, "target_repo")?.trim().to_string();
+        let dry_run = params
+            .get("dry_run")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        let remote_write = params
+            .get("remote_write")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let confirm_remote_write = params
+            .get("confirm_remote_write")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let approve_risky = params
+            .get("approve_risky")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        let plan = build_publish_plan(
+            &self.registry,
+            &self.quarantine,
+            self.store.as_ref(),
+            &ctx.user_id,
+            name,
+            &target_repo,
+        )
+        .await?;
+
+        if !approve_risky && !plan.findings.is_empty() && remote_write {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Skill '{}' has audit findings: {}. Re-run with approve_risky=true to publish anyway.",
+                plan.skill_name,
+                summarize_findings(&plan.findings)
+            )));
+        }
+
+        let output = if dry_run || !remote_write {
+            plan.json("dry_run")
+        } else if confirm_remote_write {
+            execute_publish_plan(&plan).await?
+        } else {
+            return Err(ToolError::ExecutionFailed(
+                "Remote write requires confirm_remote_write=true".to_string(),
+            ));
+        };
+
+        if let Some(remote_hub) = self.remote_hub.as_ref()
+            && remote_write
+            && confirm_remote_write
+        {
+            let _ = remote_hub.is_enabled().await;
+        }
+
+        Ok(ToolOutput::success(output, start.elapsed()))
+    }
+
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        if params
+            .get("remote_write")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+        {
+            ApprovalRequirement::UnlessAutoApproved
+        } else {
+            ApprovalRequirement::Never
+        }
+    }
+}
+
+// ── skill_tap_* ────────────────────────────────────────────────────────
+
+pub struct SkillTapListTool {
+    store: Option<Arc<dyn Database>>,
+    remote_hub: Option<SharedRemoteSkillHub>,
+}
+
+pub struct SkillTapAddTool {
+    store: Option<Arc<dyn Database>>,
+    remote_hub: Option<SharedRemoteSkillHub>,
+}
+
+pub struct SkillTapRemoveTool {
+    store: Option<Arc<dyn Database>>,
+    remote_hub: Option<SharedRemoteSkillHub>,
+}
+
+pub struct SkillTapRefreshTool {
+    store: Option<Arc<dyn Database>>,
+    remote_hub: Option<SharedRemoteSkillHub>,
+}
+
+impl SkillTapListTool {
+    pub fn new(store: Option<Arc<dyn Database>>, remote_hub: Option<SharedRemoteSkillHub>) -> Self {
+        Self { store, remote_hub }
+    }
+}
+
+impl SkillTapAddTool {
+    pub fn new(store: Option<Arc<dyn Database>>, remote_hub: Option<SharedRemoteSkillHub>) -> Self {
+        Self { store, remote_hub }
+    }
+}
+
+impl SkillTapRemoveTool {
+    pub fn new(store: Option<Arc<dyn Database>>, remote_hub: Option<SharedRemoteSkillHub>) -> Self {
+        Self { store, remote_hub }
+    }
+}
+
+impl SkillTapRefreshTool {
+    pub fn new(store: Option<Arc<dyn Database>>, remote_hub: Option<SharedRemoteSkillHub>) -> Self {
+        Self { store, remote_hub }
+    }
+}
+
+fn tap_json(tap: &SkillTapConfig) -> serde_json::Value {
+    serde_json::json!({
+        "repo": tap.repo.clone(),
+        "path": tap.path.clone(),
+        "branch": tap.branch.clone(),
+        "trust_level": format!("{:?}", tap.trust_level).to_lowercase(),
+    })
+}
+
+fn require_skill_tap_store<'a>(
+    store: &'a Option<Arc<dyn Database>>,
+    tool_name: &str,
+) -> Result<&'a Arc<dyn Database>, ToolError> {
+    store.as_ref().ok_or_else(|| {
+        ToolError::ExecutionFailed(format!(
+            "Tool '{}' requires the settings database",
+            tool_name
+        ))
+    })
+}
+
+fn require_shared_remote_hub<'a>(
+    remote_hub: &'a Option<SharedRemoteSkillHub>,
+    tool_name: &str,
+) -> Result<&'a SharedRemoteSkillHub, ToolError> {
+    remote_hub.as_ref().ok_or_else(|| {
+        ToolError::ExecutionFailed(format!(
+            "Tool '{}' requires the skills remote hub",
+            tool_name
+        ))
+    })
+}
+
+#[async_trait]
+impl Tool for SkillTapListTool {
+    fn name(&self) -> &str {
+        "skill_tap_list"
+    }
+
+    fn description(&self) -> &str {
+        "List configured GitHub skill taps."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "include_health": {"type": "boolean", "default": false}
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
+        let start = std::time::Instant::now();
+        let include_health = params
+            .get("include_health")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let store = require_skill_tap_store(&self.store, self.name())?;
+        let settings = load_settings_for_taps(store, &ctx.user_id).await?;
+        let hub_enabled = if include_health {
+            match self.remote_hub.as_ref() {
+                Some(hub) => Some(hub.is_enabled().await),
+                None => Some(false),
+            }
+        } else {
+            None
+        };
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "taps": settings.skill_taps.iter().map(tap_json).collect::<Vec<_>>(),
+                "count": settings.skill_taps.len(),
+                "hub_enabled": hub_enabled,
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
+}
+
+#[async_trait]
+impl Tool for SkillTapAddTool {
+    fn name(&self) -> &str {
+        "skill_tap_add"
+    }
+
+    fn description(&self) -> &str {
+        "Persist a GitHub skill tap and refresh remote skill discovery."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "GitHub repo in owner/name form."},
+                "path": {"type": "string", "default": ""},
+                "branch": {"type": ["string", "null"], "default": null},
+                "trust_level": {"type": "string", "enum": ["builtin", "trusted", "community"], "default": "community"},
+                "replace": {"type": "boolean", "default": false}
+            },
+            "required": ["repo"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
+        let start = std::time::Instant::now();
+        let store = require_skill_tap_store(&self.store, self.name())?;
+        let remote_hub = require_shared_remote_hub(&self.remote_hub, self.name())?;
+        let repo = require_str(&params, "repo")?.trim().to_string();
+        validate_github_repo(&repo)?;
+        let path = normalize_tap_path(
+            params
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        );
+        validate_repo_relative_path(&path, "path")?;
+        let branch = normalize_tap_branch(params.get("branch").and_then(|value| value.as_str()));
+        let trust_level = parse_tap_trust_level(
+            params
+                .get("trust_level")
+                .and_then(|value| value.as_str())
+                .unwrap_or("community"),
+        )?;
+        let replace = params
+            .get("replace")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let mut settings = load_settings_for_taps(store, &ctx.user_id).await?;
+        let existing_idx = settings
+            .skill_taps
+            .iter()
+            .position(|tap| tap_key_matches(tap, &repo, &path, branch.as_deref()));
+        match (existing_idx, replace) {
+            (Some(idx), true) => {
+                settings.skill_taps[idx] = SkillTapConfig {
+                    repo: repo.clone(),
+                    path: path.clone(),
+                    branch: branch.clone(),
+                    trust_level,
+                };
+            }
+            (Some(_), false) => {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill tap '{}:{}' already exists; use replace=true to update it",
+                    repo, path
+                )));
+            }
+            (None, _) => settings.skill_taps.push(SkillTapConfig {
+                repo: repo.clone(),
+                path: path.clone(),
+                branch: branch.clone(),
+                trust_level,
+            }),
+        }
+        persist_skill_taps(store, &ctx.user_id, &settings.skill_taps).await?;
+        let refreshed_count =
+            refresh_remote_hub_from_settings(store, &ctx.user_id, remote_hub).await?;
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "status": if existing_idx.is_some() { "replaced" } else { "added" },
+                "tap": tap_json(&SkillTapConfig { repo, path, branch, trust_level }),
+                "tap_count": refreshed_count,
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+#[async_trait]
+impl Tool for SkillTapRemoveTool {
+    fn name(&self) -> &str {
+        "skill_tap_remove"
+    }
+
+    fn description(&self) -> &str {
+        "Remove a persisted GitHub skill tap and refresh remote skill discovery."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string"},
+                "path": {"type": "string", "default": ""},
+                "branch": {"type": ["string", "null"], "default": null}
+            },
+            "required": ["repo"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
+        let start = std::time::Instant::now();
+        let store = require_skill_tap_store(&self.store, self.name())?;
+        let remote_hub = require_shared_remote_hub(&self.remote_hub, self.name())?;
+        let repo = require_str(&params, "repo")?.trim().to_string();
+        validate_github_repo(&repo)?;
+        let path = normalize_tap_path(
+            params
+                .get("path")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+        );
+        validate_repo_relative_path(&path, "path")?;
+        let branch = normalize_tap_branch(params.get("branch").and_then(|value| value.as_str()));
+        let mut settings = load_settings_for_taps(store, &ctx.user_id).await?;
+        let before = settings.skill_taps.len();
+        settings
+            .skill_taps
+            .retain(|tap| !tap_key_matches(tap, &repo, &path, branch.as_deref()));
+        if settings.skill_taps.len() == before {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Skill tap '{}:{}' not found",
+                repo, path
+            )));
+        }
+        persist_skill_taps(store, &ctx.user_id, &settings.skill_taps).await?;
+        let refreshed_count =
+            refresh_remote_hub_from_settings(store, &ctx.user_id, remote_hub).await?;
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "status": "removed",
+                "repo": repo,
+                "path": path,
+                "branch": branch,
+                "tap_count": refreshed_count,
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+}
+
+#[async_trait]
+impl Tool for SkillTapRefreshTool {
+    fn name(&self) -> &str {
+        "skill_tap_refresh"
+    }
+
+    fn description(&self) -> &str {
+        "Rebuild remote skill discovery from persisted skill tap settings."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "repo": {"type": ["string", "null"], "default": null},
+                "path": {"type": ["string", "null"], "default": null}
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        ensure_skill_admin_available(ctx, self.name())?;
+        let start = std::time::Instant::now();
+        let store = require_skill_tap_store(&self.store, self.name())?;
+        let remote_hub = require_shared_remote_hub(&self.remote_hub, self.name())?;
+        let repo = params
+            .get("repo")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if let Some(repo) = repo.as_deref() {
+            validate_github_repo(repo)?;
+        }
+        let path = params
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(normalize_tap_path)
+            .filter(|value| !value.is_empty());
+        if let Some(path) = path.as_deref() {
+            validate_repo_relative_path(path, "path")?;
+        }
+
+        if repo.is_some() || path.is_some() {
+            let settings = load_settings_for_taps(store, &ctx.user_id).await?;
+            let matches = settings.skill_taps.iter().any(|tap| {
+                let repo_matches = match repo.as_ref() {
+                    Some(repo) => tap.repo.eq_ignore_ascii_case(repo),
+                    None => true,
+                };
+                let path_matches = match path.as_ref() {
+                    Some(path) => normalize_tap_path(&tap.path) == *path,
+                    None => true,
+                };
+                repo_matches && path_matches
+            });
+            if !matches {
+                return Err(ToolError::ExecutionFailed(
+                    "No configured skill tap matches the requested refresh filter".to_string(),
+                ));
+            }
+        }
+
+        let tap_count = refresh_remote_hub_from_settings(store, &ctx.user_id, remote_hub).await?;
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "status": "refreshed",
+                "tap_count": tap_count,
+                "filter": {
+                    "repo": repo,
+                    "path": path,
+                },
+                "hub_enabled": remote_hub.is_enabled().await,
+            }),
+            start.elapsed(),
+        ))
     }
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
@@ -1708,6 +3249,186 @@ mod tests {
     }
 
     #[test]
+    fn test_skill_check_schema() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = SkillCheckTool::new(test_quarantine());
+        assert_eq!(tool.name(), "skill_check");
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
+        let schema = tool.parameters_schema();
+        assert!(schema["properties"].get("content").is_some());
+        assert!(schema["properties"].get("path").is_some());
+        assert!(schema["properties"].get("url").is_some());
+    }
+
+    #[test]
+    fn test_skill_inspect_publish_and_tap_schemas() {
+        use crate::tools::tool::ApprovalRequirement;
+
+        let inspect = SkillInspectTool::new(test_registry(), test_quarantine());
+        assert_eq!(inspect.name(), "skill_inspect");
+        assert_eq!(
+            inspect.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
+        assert!(
+            inspect.parameters_schema()["properties"]
+                .get("include_files")
+                .is_some()
+        );
+
+        let publish = SkillPublishTool::new(test_registry(), None, test_quarantine(), None);
+        assert_eq!(publish.name(), "skill_publish");
+        assert_eq!(
+            publish.requires_approval(&serde_json::json!({"remote_write": false})),
+            ApprovalRequirement::Never
+        );
+        assert_eq!(
+            publish.requires_approval(&serde_json::json!({"remote_write": true})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+
+        let tap_list = SkillTapListTool::new(None, None);
+        let tap_add = SkillTapAddTool::new(None, None);
+        let tap_remove = SkillTapRemoveTool::new(None, None);
+        let tap_refresh = SkillTapRefreshTool::new(None, None);
+        assert_eq!(tap_list.name(), "skill_tap_list");
+        assert_eq!(tap_add.name(), "skill_tap_add");
+        assert_eq!(tap_remove.name(), "skill_tap_remove");
+        assert_eq!(tap_refresh.name(), "skill_tap_refresh");
+        assert_eq!(
+            tap_list.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
+        assert_eq!(
+            tap_add.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[test]
+    fn test_skill_tap_path_validation_rejects_traversal() {
+        assert!(validate_repo_relative_path("skills/community", "path").is_ok());
+        assert!(validate_repo_relative_path("../outside", "path").is_err());
+        assert!(validate_repo_relative_path("skills/../outside", "path").is_err());
+        assert!(validate_github_repo("owner/repo").is_ok());
+        assert!(validate_github_repo("owner/repo/extra").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_skill_publish_blocked_for_skill_restricted_contexts() {
+        let tool = SkillPublishTool::new(test_registry(), None, test_quarantine(), None);
+        let mut ctx = JobContext::default();
+        ctx.metadata = serde_json::json!({
+            "allowed_skills": ["github"]
+        });
+
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "name": "anything",
+                    "target_repo": "owner/repo"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("not available"));
+    }
+
+    #[tokio::test]
+    async fn test_skill_check_valid_inline_content() {
+        let tool = SkillCheckTool::new(test_quarantine());
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "content": "---\nname: checked-skill\ndescription: Checked\nactivation:\n  keywords: [\"check\"]\n---\nUse this skill for checking.\n"
+                }),
+                &JobContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["ok"], true);
+        assert_eq!(output.result["name"], "checked-skill");
+        assert_eq!(output.result["source_kind"], "content");
+        assert_eq!(output.result["finding_count"], 0);
+        assert!(
+            output.result["normalized_content_hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_check_invalid_inline_content_returns_structured_failure() {
+        let tool = SkillCheckTool::new(test_quarantine());
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "content": "---\nname: bad/name\n---\nBody.\n"
+                }),
+                &JobContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["ok"], false);
+        assert!(
+            output.result["error"]
+                .as_str()
+                .unwrap()
+                .contains("Invalid skill name")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_check_reports_quarantine_findings_without_installing() {
+        let tool = SkillCheckTool::new(test_quarantine());
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "content": "---\nname: risky-skill\n---\nRun curl https://example.com and eval(x).\n"
+                }),
+                &JobContext::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["ok"], true);
+        assert_eq!(output.result["finding_count"], 2);
+        assert!(
+            output.result["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| finding["kind"] == "network_fetch")
+        );
+        assert!(
+            output.result["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|finding| finding["kind"] == "code_execution")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_skill_check_requires_exactly_one_source() {
+        let tool = SkillCheckTool::new(test_quarantine());
+        let err = tool
+            .execute(serde_json::json!({}), &JobContext::default())
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("exactly one"));
+    }
+
+    #[test]
     fn test_skill_remove_schema() {
         use crate::tools::tool::ApprovalRequirement;
         let tool = SkillRemoveTool::new(test_registry());
@@ -1745,6 +3466,107 @@ mod tests {
             output.result["audited"][0]["findings"][0]["kind"],
             "network_fetch"
         );
+    }
+
+    #[tokio::test]
+    async fn test_skill_inspect_reports_files_and_provenance() {
+        let registry = test_registry();
+        registry
+            .write()
+            .await
+            .install_skill(
+                "---\nname: inspectable-skill\nversion: 1.2.3\ndescription: Inspect me\nactivation:\n  keywords: [\"inspect\"]\n---\nInspect prompt.\n",
+            )
+            .await
+            .unwrap();
+
+        let root = {
+            let guard = registry.read().await;
+            source_path_for_skill(guard.find_by_name("inspectable-skill").unwrap()).unwrap()
+        };
+        std::fs::write(root.join("notes.md"), "support notes").unwrap();
+        std::fs::write(
+            root.join(".thinclaw-skill-lock.json"),
+            serde_json::to_vec(&SkillProvenance {
+                source_kind: "github_tap".to_string(),
+                source_adapter: "github_tap".to_string(),
+                source_ref: "github:owner/repo/inspectable-skill".to_string(),
+                source_repo: Some("owner/repo".to_string()),
+                source_url: None,
+                manifest_url: None,
+                manifest_digest: Some("sha".to_string()),
+                path: Some("skills/inspectable-skill/SKILL.md".to_string()),
+                branch: Some("main".to_string()),
+                commit_sha: Some("sha".to_string()),
+                trust_level: SkillTapTrustLevel::Community,
+                downloaded_at: Utc::now().to_rfc3339(),
+                findings: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let quarantine = test_quarantine();
+        let report = inspect_skill_report(
+            &registry,
+            &quarantine,
+            "inspectable-skill",
+            false,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report["name"], "inspectable-skill");
+        assert_eq!(report["provenance_lock"]["source_adapter"], "github_tap");
+        assert!(
+            report["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file["path"] == "notes.md")
+        );
+    }
+
+    #[test]
+    fn test_skill_package_files_exclude_hidden_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("SKILL.md"),
+            "---\nname: packaged\n---\nBody\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("README.md"), "readme").unwrap();
+        std::fs::write(dir.path().join(".DS_Store"), "junk").unwrap();
+        std::fs::write(dir.path().join(".secret"), "hidden").unwrap();
+
+        let files = collect_skill_package_files(dir.path()).unwrap();
+        let paths = files
+            .iter()
+            .map(|file| file.relative_path.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(paths.contains(&"SKILL.md"));
+        assert!(paths.contains(&"README.md"));
+        assert!(!paths.contains(&".DS_Store"));
+        assert!(!paths.contains(&".secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_skill_package_files_reject_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("SKILL.md"),
+            "---\nname: packaged\n---\nBody\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(dir.path().join("SKILL.md"), dir.path().join("linked.md"))
+            .unwrap();
+
+        let err = collect_skill_package_files(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("symlink"));
     }
 
     #[tokio::test]

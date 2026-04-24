@@ -178,6 +178,9 @@ pub enum LlmError {
     #[error("Session expired for provider {provider}")]
     SessionExpired { provider: String },
 
+    #[error("Provider {provider} does not support native streaming for model {model}")]
+    StreamingUnsupported { provider: String, model: String },
+
     #[error("Session renewal failed for provider {provider}: {reason}")]
     SessionRenewalFailed { provider: String, reason: String },
 

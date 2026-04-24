@@ -336,9 +336,49 @@ The `BrowserTool` handles the container lifecycle automatically (start, health-c
 ## Linux Runtime Readiness
 
 Use `thinclaw doctor --profile server` for Ubuntu/Debian server or Docker hosts,
+`thinclaw doctor --profile pi-os-lite-64` for Raspberry Pi OS Lite 64-bit,
 `thinclaw doctor --profile desktop-gnome` for the supported GNOME/X11 desktop
 path, and `thinclaw doctor --profile all-features` before building or running
 with every optional feature enabled.
+
+Raspberry Pi OS Lite 64-bit supports the full headless runtime. Docker, Tailscale,
+camera, microphone, location, and browser automation are optional. Reckless
+desktop autonomy is not supported on Pi OS Lite; keep `DESKTOP_AUTONOMY_ENABLED=false`.
+
+Pi OS Lite quick checks:
+
+```bash
+uname -m                    # expected: aarch64
+cat /etc/os-release         # expected: Raspberry Pi OS / Debian bookworm
+systemctl --version
+thinclaw doctor --profile pi-os-lite-64
+```
+
+Pi OS Lite native service defaults:
+
+```env
+THINCLAW_HOME=/var/lib/thinclaw/.thinclaw
+DATABASE_BACKEND=libsql
+LIBSQL_PATH=/var/lib/thinclaw/.thinclaw/thinclaw.db
+GATEWAY_HOST=0.0.0.0
+GATEWAY_PORT=3000
+THINCLAW_ALLOW_ENV_MASTER_KEY=1
+DESKTOP_AUTONOMY_ENABLED=false
+```
+
+Optional Pi packages:
+
+```bash
+# Useful baseline for source builds and diagnostics
+sudo apt-get install -y build-essential curl git pkg-config ca-certificates
+
+# Optional browser/sandbox fallback
+sudo apt-get install -y docker.io docker-compose-plugin
+sudo systemctl enable --now docker
+
+# Optional private network access
+curl -fsSL https://tailscale.com/install.sh | sh
+```
 
 Important Linux env vars:
 
@@ -355,6 +395,7 @@ THINCLAW_MICROPHONE_DEVICE=default
 THINCLAW_MICROPHONE_BACKEND=auto
 THINCLAW_ALLOW_ENV_MASTER_KEY=1
 SECRETS_MASTER_KEY=hex-encoded-32-byte-key-for-headless-hosts
+DESKTOP_AUTONOMY_ENABLED=false
 ```
 
 `SECRETS_MASTER_KEY` is ignored by default. Use the environment fallback only for headless hosts or containers where Linux Secret Service is not available, and prefer a service-manager secret mechanism over plain shell exports.

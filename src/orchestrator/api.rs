@@ -7,6 +7,8 @@
 //! All endpoints are authenticated via per-job bearer tokens.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -97,20 +99,54 @@ impl OrchestratorApi {
         state: OrchestratorState,
         port: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Self::start_with_shutdown(state, port, std::future::pending()).await
+    }
+
+    pub async fn start_with_shutdown<F>(
+        state: OrchestratorState,
+        port: u16,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let router = Self::router(state);
-        let addr = if cfg!(target_os = "linux") {
-            std::net::SocketAddr::from(([0, 0, 0, 0], port))
-        } else {
-            std::net::SocketAddr::from(([127, 0, 0, 1], port))
-        };
+        let addr = orchestrator_bind_addr(port);
 
         tracing::info!("Orchestrator internal API listening on {}", addr);
 
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, router).await?;
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => listener,
+            Err(error) if cfg!(target_os = "linux") => {
+                let fallback = linux_orchestrator_fallback_bind_addr(port);
+                tracing::warn!(
+                    %addr,
+                    %fallback,
+                    %error,
+                    "Failed to bind orchestrator to Docker bridge address; falling back to all interfaces"
+                );
+                tokio::net::TcpListener::bind(fallback).await?
+            }
+            Err(error) => return Err(Box::new(error)),
+        };
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .await?;
 
         Ok(())
     }
+}
+
+fn orchestrator_bind_addr(port: u16) -> SocketAddr {
+    if cfg!(target_os = "linux") {
+        SocketAddr::from(([172, 17, 0, 1], port))
+    } else {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+}
+
+fn linux_orchestrator_fallback_bind_addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([0, 0, 0, 0], port))
 }
 
 // -- Handlers --
@@ -160,6 +196,11 @@ async fn llm_complete(
     Path(job_id): Path<Uuid>,
     Json(req): Json<ProxyCompletionRequest>,
 ) -> Result<Json<ProxyCompletionResponse>, StatusCode> {
+    if !state.token_store.check_llm_rate_limit(job_id).await {
+        tracing::warn!(job_id = %job_id, "Worker LLM completion rate limited");
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
     let completion_req = CompletionRequest {
         messages: req.messages,
         context_documents: req.context_documents,
@@ -168,6 +209,7 @@ async fn llm_complete(
         temperature: req.temperature,
         stop_sequences: req.stop_sequences,
         thinking: crate::llm::ThinkingConfig::Disabled,
+        stream_policy: crate::llm::StreamPolicy::AllowSimulated,
         metadata: std::collections::HashMap::new(),
     };
 
@@ -191,6 +233,11 @@ async fn llm_complete_with_tools(
     Path(job_id): Path<Uuid>,
     Json(req): Json<ProxyToolCompletionRequest>,
 ) -> Result<Json<ProxyToolCompletionResponse>, StatusCode> {
+    if !state.token_store.check_llm_rate_limit(job_id).await {
+        tracing::warn!(job_id = %job_id, "Worker LLM tool completion rate limited");
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
     let tool_req = ToolCompletionRequest {
         messages: req.messages,
         context_documents: req.context_documents,
@@ -200,6 +247,7 @@ async fn llm_complete_with_tools(
         temperature: req.temperature,
         tool_choice: req.tool_choice,
         thinking: crate::llm::ThinkingConfig::Disabled,
+        stream_policy: crate::llm::StreamPolicy::AllowSimulated,
         metadata: std::collections::HashMap::new(),
     };
 
@@ -579,7 +627,7 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use crate::orchestrator::auth::TokenStore;
+    use crate::orchestrator::auth::{LLM_RATE_LIMIT_MAX_REQUESTS, TokenStore};
     use crate::orchestrator::job_manager::{ContainerJobConfig, ContainerJobManager};
     use crate::testing::StubLlm;
 
@@ -597,6 +645,61 @@ mod tests {
             store: None,
             secrets_store: None,
         }
+    }
+
+    fn completion_body() -> Body {
+        Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "messages": [],
+                "context_documents": [],
+                "model": null,
+                "max_tokens": null,
+                "temperature": null,
+                "stop_sequences": null
+            }))
+            .unwrap(),
+        )
+    }
+
+    fn tool_completion_body() -> Body {
+        Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "messages": [],
+                "context_documents": [],
+                "tools": [],
+                "model": null,
+                "max_tokens": null,
+                "temperature": null,
+                "tool_choice": null
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn orchestrator_bind_addr_uses_docker_bridge_on_linux() {
+        assert_eq!(
+            orchestrator_bind_addr(50051),
+            std::net::SocketAddr::from(([172, 17, 0, 1], 50051))
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn orchestrator_bind_addr_uses_loopback_off_linux() {
+        assert_eq!(
+            orchestrator_bind_addr(50051),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 50051))
+        );
+    }
+
+    #[tokio::test]
+    async fn start_with_shutdown_exits_when_signal_received() {
+        let state = test_state();
+        OrchestratorApi::start_with_shutdown(state, 0, async {})
+            .await
+            .expect("server exits after shutdown signal");
     }
 
     #[tokio::test]
@@ -661,6 +764,74 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         // 404 because no container exists for this job_id, but NOT 401.
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn llm_complete_returns_429_after_per_token_limit() {
+        let state = test_state();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        for _ in 0..LLM_RATE_LIMIT_MAX_REQUESTS {
+            assert!(state.token_store.check_llm_rate_limit(job_id).await);
+        }
+
+        let router = OrchestratorApi::router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/llm/complete", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(completion_body())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn llm_complete_rate_limit_is_isolated_per_job() {
+        let state = test_state();
+        let job_a = Uuid::new_v4();
+        let job_b = Uuid::new_v4();
+        let _token_a = state.token_store.create_token(job_a).await;
+        let token_b = state.token_store.create_token(job_b).await;
+        for _ in 0..LLM_RATE_LIMIT_MAX_REQUESTS {
+            assert!(state.token_store.check_llm_rate_limit(job_a).await);
+        }
+
+        let router = OrchestratorApi::router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/llm/complete", job_b))
+            .header("Authorization", format!("Bearer {}", token_b))
+            .header("Content-Type", "application/json")
+            .body(completion_body())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn llm_complete_with_tools_returns_429_after_per_token_limit() {
+        let state = test_state();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        for _ in 0..LLM_RATE_LIMIT_MAX_REQUESTS {
+            assert!(state.token_store.check_llm_rate_limit(job_id).await);
+        }
+
+        let router = OrchestratorApi::router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/llm/complete_with_tools", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(tool_completion_body())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

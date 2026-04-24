@@ -245,6 +245,7 @@ pub enum ExperimentAutonomyMode {
 pub enum ExperimentRunnerBackend {
     #[default]
     LocalDocker,
+    AgentEnv,
     GenericRemoteRunner,
     Ssh,
     Slurm,
@@ -256,7 +257,7 @@ pub enum ExperimentRunnerBackend {
 
 impl ExperimentRunnerBackend {
     pub fn is_remote(self) -> bool {
-        !matches!(self, Self::LocalDocker)
+        !matches!(self, Self::LocalDocker | Self::AgentEnv)
     }
 
     pub fn is_gpu_cloud(self) -> bool {
@@ -266,6 +267,7 @@ impl ExperimentRunnerBackend {
     pub fn slug(self) -> &'static str {
         match self {
             Self::LocalDocker => "local_docker",
+            Self::AgentEnv => "agent_env",
             Self::GenericRemoteRunner => "generic_remote_runner",
             Self::Ssh => "ssh",
             Self::Slurm => "slurm",

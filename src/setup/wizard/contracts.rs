@@ -46,13 +46,20 @@ impl GuideTopic {
 }
 
 /// High-level onboarding intent profile used to prefill recommended defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum OnboardingProfile {
+    #[value(name = "balanced")]
     #[default]
     Balanced,
+    #[value(name = "local-private", alias = "local-and-private")]
     LocalAndPrivate,
+    #[value(name = "builder-coding", alias = "builder-and-coding")]
     BuilderAndCoding,
+    #[value(name = "channel-first")]
     ChannelFirst,
+    #[value(name = "remote", alias = "remote-server")]
+    RemoteServer,
+    #[value(name = "custom", alias = "custom-advanced")]
     CustomAdvanced,
 }
 
@@ -63,6 +70,7 @@ impl OnboardingProfile {
             Self::LocalAndPrivate => "Local & Private",
             Self::BuilderAndCoding => "Builder & Coding",
             Self::ChannelFirst => "Channel-First",
+            Self::RemoteServer => "Remote / SSH Host",
             Self::CustomAdvanced => "Custom / Advanced",
         }
     }
@@ -80,6 +88,9 @@ impl OnboardingProfile {
             }
             Self::ChannelFirst => {
                 "Prioritize inbound and outbound channels so ThinClaw can meet you where you already work."
+            }
+            Self::RemoteServer => {
+                "Run ThinClaw as a safe headless/service runtime on a Raspberry Pi, Mac Mini, VPS, or SSH-managed host with WebUI access through a tunnel by default."
             }
             Self::CustomAdvanced => {
                 "Start from a neutral baseline with minimal profile assumptions so you can choose the stack, routing, and trust boundaries step by step."

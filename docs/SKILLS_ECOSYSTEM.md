@@ -40,11 +40,18 @@ The runtime now exposes these skill-management tools:
 
 - `skill_list`
 - `skill_read`
+- `skill_inspect`
 - `skill_search`
+- `skill_check`
 - `skill_install`
 - `skill_update`
 - `skill_audit`
 - `skill_snapshot`
+- `skill_publish`
+- `skill_tap_list`
+- `skill_tap_add`
+- `skill_tap_remove`
+- `skill_tap_refresh`
 - `skill_remove`
 - `skill_reload`
 - `skill_trust_promote`
@@ -55,10 +62,29 @@ The runtime now exposes these skill-management tools:
 Externally sourced installs pass through the quarantine manager before landing in the install directory.
 
 - risky findings are surfaced before install for community-trust sources
+- `skill_check` validates inline content, local paths, or direct HTTPS `SKILL.md` URLs without installing
 - approved installs persist a `.thinclaw-skill-lock.json` provenance record next to `SKILL.md`
 - `skill_update` uses that provenance lock when it is available
 - `skill_audit` re-runs the content scanner without removing or mutating the skill
 - `skill_snapshot` writes a point-in-time JSON manifest to `~/.thinclaw/skills/.hub/`
+
+## Inspect, Taps, And Publishing
+
+`skill_inspect` returns a loaded skill report with metadata, source/trust fields, provenance lock details, publishable file inventory, and optional quarantine findings. It is read-only and honors restricted agent `allowed_skills` contexts.
+
+GitHub skill taps are persisted in the settings DB under `skill_taps` and use the existing `SkillTapConfig` shape: `repo`, `path`, optional `branch`, and `trust_level`. `skill_tap_add`, `skill_tap_remove`, and `skill_tap_refresh` rebuild the shared remote hub so search and install see current tap state without restarting. Config-file overlays can still seed or override startup settings.
+
+`skill_publish` is dry-run by default. A dry run validates the local skill package, runs the quarantine scanner, confirms the target repo is a configured tap, and returns the target repo/path, publishable file list, content hash, trust/source details, and draft PR plan. Remote writes require all of the following:
+
+- `remote_write=true`
+- `confirm_remote_write=true`
+- tool approval from the caller
+- a configured GitHub tap matching `target_repo`
+- local `git` and authenticated `gh`
+
+The publish package is written to `<tap.path>/<skill-name>/`. It includes `SKILL.md` and regular non-hidden support files, and excludes provenance locks, hidden files, VCS/cache/temp directories, symlinks, and traversal paths. Remote publishing clones the tap repo, creates `codex/skill-publish/<skill-name>-<hash8>`, commits the package, pushes the branch, and opens a draft PR with `gh pr create`.
+
+The Skills HTTP API exposes matching inspect, publish, tap list/add/remove/refresh routes. Mutating routes require `X-Confirm-Action: true`; publish only mutates when `remote_write=true`.
 
 ## Generated Skills
 

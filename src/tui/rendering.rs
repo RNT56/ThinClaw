@@ -197,15 +197,26 @@ impl TuiApp {
     }
 
     fn render_input(&mut self, frame: &mut Frame, area: Rect) {
+        let (border_style, title) = if self.pending_approval {
+            (
+                self.skin.warn_style(),
+                format!(
+                    " Approval pending — yes/no/always ({}) ",
+                    self.skin.prompt_symbol()
+                ),
+            )
+        } else {
+            (
+                self.skin.accent_style(),
+                format!(" Command bay ({}) ", self.skin.prompt_symbol()),
+            )
+        };
         self.textarea.set_block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(self.skin.accent_style())
+                .border_style(border_style)
                 .border_type(self.skin.tui_border_type())
-                .title(Span::styled(
-                    format!(" Command bay ({}) ", self.skin.prompt_symbol()),
-                    self.skin.title_style(),
-                )),
+                .title(Span::styled(title, self.skin.title_style())),
         );
         frame.render_widget(&self.textarea, area);
     }
@@ -213,6 +224,8 @@ impl TuiApp {
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         let indicator_spans = if self.active_stream.is_some() {
             self.spinner.to_spans(&self.skin)
+        } else if self.pending_approval {
+            vec![Span::styled("⚠ ", self.skin.warn_style().bold())]
         } else {
             vec![Span::styled("○ ", self.skin.border_soft_style())]
         };
@@ -229,6 +242,19 @@ impl TuiApp {
             format!("agent {}", self.agent_id),
             self.skin.muted_style(),
         ));
+
+        // Show idle time when not streaming
+        if self.active_stream.is_none() {
+            let idle_secs = self.last_activity.elapsed().as_secs();
+            if idle_secs >= 60 {
+                let mins = idle_secs / 60;
+                status_spans.push(Span::styled(" · ", self.skin.border_soft_style()));
+                status_spans.push(Span::styled(
+                    format!("{mins}m idle"),
+                    self.skin.muted_style(),
+                ));
+            }
+        }
 
         // When gradient is enabled, color each character of the status line
         // with a left-to-right accent→border gradient for a premium feel.
@@ -277,6 +303,13 @@ impl TuiApp {
                 | ChatMessage::Warning { text }
                 | ChatMessage::Error { text } => {
                     count += text.lines().count() as u16;
+                }
+                ChatMessage::AgentNote { content, .. } => {
+                    count += 3; // header + footer + spacing
+                    count += content.lines().count().min(20) as u16;
+                }
+                ChatMessage::SubagentCard { .. } => {
+                    count += 3; // header + detail + footer
                 }
             }
             count += 1;
@@ -398,6 +431,57 @@ impl TuiApp {
                             Span::styled(line, self.skin.bad_style()),
                         ]));
                     }
+                }
+                ChatMessage::AgentNote { content, note_type } => {
+                    let (header_label, header_style) = match note_type.as_str() {
+                        "warning" => ("agent warning", self.skin.warn_style()),
+                        "question" => ("agent question", self.skin.accent_style()),
+                        "interim_result" => ("agent interim result", self.skin.good_style()),
+                        _ => ("agent note", self.skin.accent_soft_style()),
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled("┌─ ", header_style),
+                        Span::styled(header_label, header_style),
+                        Span::styled(" ─", header_style),
+                    ]));
+                    for line in content.lines().take(20) {
+                        lines.push(Line::from(vec![
+                            Span::styled("│ ", self.skin.border_soft_style()),
+                            Span::styled(line, self.skin.body_style()),
+                        ]));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        "└────────────────────────────────",
+                        self.skin.muted_style(),
+                    )));
+                }
+                ChatMessage::SubagentCard {
+                    name,
+                    detail,
+                    success,
+                } => {
+                    let header_style = match success {
+                        Some(true) => self.skin.good_style(),
+                        Some(false) => self.skin.bad_style(),
+                        None => self.skin.accent_style(),
+                    };
+                    let marker = match success {
+                        Some(true) => "✓",
+                        Some(false) => "✖",
+                        None => "▶",
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled("┌─ ", header_style),
+                        Span::styled(format!("{marker} sub-agent: {name}"), header_style),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::styled("│ ", self.skin.border_soft_style()),
+                        Span::styled(detail, self.skin.muted_style()),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        "└────────────────────────────────",
+                        self.skin.muted_style(),
+                    )));
                 }
             }
             lines.push(Line::from(""));

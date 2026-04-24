@@ -21,12 +21,16 @@ pub mod discovery;
 pub mod ext_health_monitor;
 pub mod lifecycle_hooks;
 pub mod manager;
+pub mod manifest;
 pub mod manifest_validator;
+pub mod native;
 pub mod registry;
 pub mod signing;
 
 pub use discovery::OnlineDiscovery;
 pub use manager::ExtensionManager;
+pub use manifest::{PluginManifest, validate_plugin_manifest};
+pub use native::NativePluginRuntime;
 pub use registry::ExtensionRegistry;
 
 use serde::{Deserialize, Serialize};

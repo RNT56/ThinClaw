@@ -94,6 +94,10 @@ pub struct GatewayState {
     pub skill_registry: Option<Arc<tokio::sync::RwLock<crate::skills::SkillRegistry>>>,
     /// Skill catalog for searching the ClawHub registry.
     pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
+    /// Refreshable remote skill hub for GitHub taps and marketplace adapters.
+    pub skill_remote_hub: Option<crate::skills::SharedRemoteSkillHub>,
+    /// Skill quarantine manager for inspection and publish scans.
+    pub skill_quarantine: Option<Arc<crate::skills::quarantine::QuarantineManager>>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.
@@ -512,9 +516,27 @@ pub async fn start_server(
         .route("/api/skills", get(skills_list_handler))
         .route("/api/skills/search", post(skills_search_handler))
         .route("/api/skills/install", post(skills_install_handler))
+        .route("/api/skills/taps", get(skill_taps_list_handler))
+        .route("/api/skills/taps", post(skill_taps_add_handler))
+        .route(
+            "/api/skills/taps/remove",
+            axum::routing::post(skill_taps_remove_handler),
+        )
+        .route(
+            "/api/skills/taps/refresh",
+            axum::routing::post(skill_taps_refresh_handler),
+        )
         .route(
             "/api/skills/{name}",
             axum::routing::delete(skills_remove_handler),
+        )
+        .route(
+            "/api/skills/{name}/inspect",
+            axum::routing::post(skills_inspect_handler),
+        )
+        .route(
+            "/api/skills/{name}/publish",
+            axum::routing::post(skills_publish_handler),
         )
         .route(
             "/api/skills/{name}/trust",
@@ -609,8 +631,9 @@ pub async fn start_server(
     // origins are allowed, since the gateway is a local-first service.
     // When binding to 0.0.0.0 (unspecified), also allow 127.0.0.1 since
     // "http://0.0.0.0" is not a valid browser origin.
+    let cors_port = bound_addr.port();
     let mut origins: Vec<axum::http::HeaderValue> = vec![
-        format!("http://localhost:{}", addr.port())
+        format!("http://localhost:{cors_port}")
             .parse()
             .expect("valid origin"),
     ];
@@ -618,7 +641,7 @@ pub async fn start_server(
     // browsers can't use as an origin).
     if !addr.ip().is_unspecified() {
         origins.push(
-            format!("http://{}:{}", addr.ip(), addr.port())
+            format!("http://{}:{cors_port}", addr.ip())
                 .parse()
                 .expect("valid origin"),
         );
@@ -627,7 +650,7 @@ pub async fn start_server(
     // via http://127.0.0.1:<port> aren't blocked.
     if addr.ip().is_unspecified() {
         origins.push(
-            format!("http://127.0.0.1:{}", addr.port())
+            format!("http://127.0.0.1:{cors_port}")
                 .parse()
                 .expect("valid origin"),
         );
@@ -1384,6 +1407,8 @@ mod tests {
             llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
+            skill_remote_hub: None,
+            skill_quarantine: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
@@ -1482,6 +1507,8 @@ mod tests {
             llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
+            skill_remote_hub: None,
+            skill_quarantine: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,

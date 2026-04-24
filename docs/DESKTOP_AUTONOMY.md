@@ -92,7 +92,7 @@ thinclaw doctor --profile desktop-gnome
 sudo apt install python3 python3-gi python3-pyatspi libreoffice \
   libreoffice-script-provider-python evolution evolution-data-server-bin \
   xdotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick \
-  at-spi2-core libglib2.0-bin
+  at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam
 ```
 
 ## Tool Surfaces

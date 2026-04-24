@@ -14,7 +14,7 @@ use crate::db::Database;
 use crate::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamChunkStream,
-    ToolCompletionRequest, ToolCompletionResponse,
+    StreamSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 use crate::llm::provider_factory::{
     build_provider_chain, create_llm_provider, create_provider_for_catalog_entry_with_settings,
@@ -533,6 +533,18 @@ impl RuntimeLlmProvider {
 
         if let Some(model) = requested_model {
             let provider = self.manager.provider_for_model_spec(model, &snapshot)?;
+            if routing_context
+                .map(|ctx| ctx.requires_streaming)
+                .unwrap_or(false)
+                && !provider
+                    .stream_support_for_model(Some(model))
+                    .is_available()
+            {
+                return Err(LlmError::StreamingUnsupported {
+                    provider: provider.model_name().to_string(),
+                    model: model.trim().to_string(),
+                });
+            }
             let telemetry_key = format!("unknown|unknown|{}", model.trim());
             return Ok(ResolvedRoute {
                 provider,
@@ -792,17 +804,24 @@ impl LlmProvider for RuntimeLlmProvider {
         self.current_provider().supports_streaming()
     }
 
-    fn supports_streaming_for_model(&self, requested_model: Option<&str>) -> bool {
+    fn stream_support(&self) -> StreamSupport {
+        self.current_provider().stream_support()
+    }
+
+    fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
         let snapshot = self.manager.snapshot();
         self.provider_for_request(requested_model, None, None)
-            .map(|route| route.provider.supports_streaming())
+            .map(|route| route.provider.stream_support_for_model(requested_model))
             .unwrap_or_else(|_| match self.role {
-                RuntimeProviderRole::Primary => snapshot.llm.supports_streaming(),
-                RuntimeProviderRole::Cheap => snapshot
-                    .cheap_llm
-                    .unwrap_or(snapshot.llm)
-                    .supports_streaming(),
+                RuntimeProviderRole::Primary => snapshot.llm.stream_support(),
+                RuntimeProviderRole::Cheap => {
+                    snapshot.cheap_llm.unwrap_or(snapshot.llm).stream_support()
+                }
             })
+    }
+
+    fn supports_streaming_for_model(&self, requested_model: Option<&str>) -> bool {
+        self.stream_support_for_model(requested_model).is_native()
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -2711,7 +2730,21 @@ fn route_target_known_cost_per_m_usd(target: &str) -> f64 {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::settings::ProviderModelSlots;
+    use crate::settings::{ProviderModelSlots, SecretsMasterKeySource};
+
+    async fn advisor_executor_test_config() -> Config {
+        let mut settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://localhost:12345/v1".to_string()),
+            selected_model: Some("gpt-5.4".to_string()),
+            ..Settings::default()
+        };
+        settings.secrets.master_key_source = SecretsMasterKeySource::None;
+
+        Config::from_test_settings(&settings)
+            .await
+            .expect("config should load without touching the OS keychain")
+    }
 
     #[test]
     fn resolved_completion_request_clears_model_override() {
@@ -2990,28 +3023,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn advisor_target_primary_resolves_to_primary_provider_in_advisor_executor() {
-        let config = {
-            let _env_guard = crate::config::helpers::lock_env();
-            // SAFETY: guarded by crate-wide ENV_MUTEX.
-            unsafe {
-                std::env::set_var("LLM_BACKEND", "openai_compatible");
-                std::env::set_var("LLM_BASE_URL", "http://localhost:12345/v1");
-                std::env::set_var("LLM_MODEL", "gpt-5.4");
-                std::env::set_var(
-                    "SECRETS_MASTER_KEY",
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                );
-            }
-            let loaded = Config::from_env().await.expect("config should load");
-            // SAFETY: guarded by crate-wide ENV_MUTEX.
-            unsafe {
-                std::env::remove_var("LLM_BACKEND");
-                std::env::remove_var("LLM_BASE_URL");
-                std::env::remove_var("LLM_MODEL");
-                std::env::remove_var("SECRETS_MASTER_KEY");
-            }
-            loaded
-        };
+        let config = advisor_executor_test_config().await;
 
         let mut providers = ProvidersSettings {
             enabled: vec!["openai_compatible".to_string()],
@@ -3043,26 +3055,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn advisor_executor_status_reports_readiness_and_targets() {
-        let config = {
-            let _env_guard = crate::config::helpers::lock_env();
-            unsafe {
-                std::env::set_var("LLM_BACKEND", "openai_compatible");
-                std::env::set_var("LLM_BASE_URL", "http://localhost:12345/v1");
-                std::env::set_var("LLM_MODEL", "gpt-5.4");
-                std::env::set_var(
-                    "SECRETS_MASTER_KEY",
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                );
-            }
-            let loaded = Config::from_env().await.expect("config should load");
-            unsafe {
-                std::env::remove_var("LLM_BACKEND");
-                std::env::remove_var("LLM_BASE_URL");
-                std::env::remove_var("LLM_MODEL");
-                std::env::remove_var("SECRETS_MASTER_KEY");
-            }
-            loaded
-        };
+        let config = advisor_executor_test_config().await;
 
         let mut providers = ProvidersSettings {
             enabled: vec!["openai_compatible".to_string()],
@@ -3103,26 +3096,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn advisor_ready_callback_reports_current_readiness_immediately() {
-        let config = {
-            let _env_guard = crate::config::helpers::lock_env();
-            unsafe {
-                std::env::set_var("LLM_BACKEND", "openai_compatible");
-                std::env::set_var("LLM_BASE_URL", "http://localhost:12345/v1");
-                std::env::set_var("LLM_MODEL", "gpt-5.4");
-                std::env::set_var(
-                    "SECRETS_MASTER_KEY",
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                );
-            }
-            let loaded = Config::from_env().await.expect("config should load");
-            unsafe {
-                std::env::remove_var("LLM_BACKEND");
-                std::env::remove_var("LLM_BASE_URL");
-                std::env::remove_var("LLM_MODEL");
-                std::env::remove_var("SECRETS_MASTER_KEY");
-            }
-            loaded
-        };
+        let config = advisor_executor_test_config().await;
 
         let mut providers = ProvidersSettings {
             enabled: vec!["openai_compatible".to_string()],

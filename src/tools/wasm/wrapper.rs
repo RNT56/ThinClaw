@@ -20,6 +20,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiVie
 use crate::context::JobContext;
 use crate::safety::{LeakAction, LeakDetector, LeakScanResult};
 use crate::secrets::SecretsStore;
+use crate::tools::execution::HostMediatedToolInvoker;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::credential_injector::{
@@ -109,6 +110,12 @@ struct StoreData {
     /// Dedicated tokio runtime for HTTP requests, lazily initialized.
     /// Reused across multiple `http_request` calls within one execution.
     http_runtime: Option<tokio::runtime::Runtime>,
+    /// Dedicated tokio runtime for host-mediated tool invocations.
+    tool_runtime: Option<tokio::runtime::Runtime>,
+    /// Optional policy-aware bridge for invoking host tools through aliases.
+    tool_invoker: Option<Arc<HostMediatedToolInvoker>>,
+    /// Parent job context used to preserve user/workspace scope.
+    job_context: JobContext,
 }
 
 impl StoreData {
@@ -118,6 +125,8 @@ impl StoreData {
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
         available_secret_names: HashSet<String>,
+        tool_invoker: Option<Arc<HostMediatedToolInvoker>>,
+        job_context: JobContext,
     ) -> Self {
         // Minimal WASI context: no filesystem, no env vars (security)
         let wasi = WasiCtxBuilder::new().build();
@@ -132,6 +141,9 @@ impl StoreData {
             host_credentials,
             leak_events: Vec::new(),
             http_runtime: None,
+            tool_runtime: None,
+            tool_invoker,
+            job_context,
         }
     }
 
@@ -560,14 +572,27 @@ impl near::agent::host::Host for StoreData {
         result.map_err(|e| self.redact_credentials(&e))
     }
 
-    fn tool_invoke(&mut self, alias: String, _params_json: String) -> Result<String, String> {
+    fn tool_invoke(&mut self, alias: String, params_json: String) -> Result<String, String> {
         // Validate capability and resolve alias
-        let _real_name = self.host_state.check_tool_invoke_allowed(&alias)?;
+        let real_name = self.host_state.check_tool_invoke_allowed(&alias)?;
         self.host_state.record_tool_invoke()?;
 
-        // Tool invocation requires async context and access to the tool registry,
-        // which aren't available inside a synchronous WASM callback.
-        Err("Tool invocation from WASM tools is not yet supported".to_string())
+        let invoker = self
+            .tool_invoker
+            .clone()
+            .ok_or_else(|| "Tool invocation from WASM tools is not configured".to_string())?;
+
+        if self.tool_runtime.is_none() {
+            self.tool_runtime = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to create tool invocation runtime: {e}"))?,
+            );
+        }
+        let rt = self.tool_runtime.as_ref().expect("just initialized");
+        rt.block_on(invoker.invoke_json(&self.job_context, &real_name, &params_json))
+            .map_err(|err| err.to_string())
     }
 
     fn secret_exists(&mut self, name: String) -> bool {
@@ -597,6 +622,8 @@ pub struct WasmToolWrapper {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Optional host-mediated bridge for tool_invoke aliases.
+    tool_invoker: Option<Arc<HostMediatedToolInvoker>>,
 }
 
 impl WasmToolWrapper {
@@ -615,6 +642,7 @@ impl WasmToolWrapper {
             credentials: HashMap::new(),
             secrets_store: None,
             oauth_refresh: None,
+            tool_invoker: None,
         }
     }
 
@@ -655,6 +683,12 @@ impl WasmToolWrapper {
         self
     }
 
+    /// Set the host-mediated tool invoker for WASM `tool_invoke`.
+    pub fn with_tool_invoker(mut self, invoker: Arc<HostMediatedToolInvoker>) -> Self {
+        self.tool_invoker = Some(invoker);
+        self
+    }
+
     /// Get the resource limits for this tool.
     pub fn limits(&self) -> &ResourceLimits {
         &self.prepared.limits
@@ -687,6 +721,7 @@ impl WasmToolWrapper {
         context_json: Option<String>,
         host_credentials: Vec<ResolvedHostCredential>,
         available_secret_names: HashSet<String>,
+        job_context: JobContext,
     ) -> Result<
         (
             String,
@@ -705,6 +740,8 @@ impl WasmToolWrapper {
             self.credentials.clone(),
             host_credentials,
             available_secret_names,
+            self.tool_invoker.clone(),
+            job_context,
         );
         let mut store = Store::new(engine, store_data);
 
@@ -827,6 +864,8 @@ impl Tool for WasmToolWrapper {
         let description = self.description.clone();
         let schema = self.schema.clone();
         let credentials = self.credentials.clone();
+        let tool_invoker = self.tool_invoker.clone();
+        let job_context = ctx.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -839,6 +878,7 @@ impl Tool for WasmToolWrapper {
                 credentials,
                 secrets_store: None, // Not needed in blocking task
                 oauth_refresh: None, // Already used above for pre-refresh
+                tool_invoker,
             };
 
             tokio::task::spawn_blocking(move || {
@@ -847,6 +887,7 @@ impl Tool for WasmToolWrapper {
                     context_json,
                     host_credentials,
                     available_secret_names,
+                    job_context,
                 )
             })
             .await
@@ -1309,6 +1350,7 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 mod tests {
     use std::sync::Arc;
 
+    use crate::context::JobContext;
     use crate::tools::wasm::capabilities::Capabilities;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
 
@@ -1390,6 +1432,8 @@ mod tests {
             HashMap::new(),
             host_credentials,
             HashSet::new(),
+            None,
+            JobContext::default(),
         );
 
         // Should inject for matching host
@@ -1430,6 +1474,8 @@ mod tests {
             HashMap::new(),
             host_credentials,
             HashSet::new(),
+            None,
+            JobContext::default(),
         );
 
         let mut headers = HashMap::new();
@@ -1457,6 +1503,8 @@ mod tests {
             HashMap::new(),
             host_credentials,
             HashSet::new(),
+            None,
+            JobContext::default(),
         );
 
         let text = "Error: request to https://api.example.com?key=super-secret-token failed";
@@ -1812,5 +1860,156 @@ mod tests {
         // 8.8.8.8 (Google DNS) is public
         let result = super::reject_private_ip("https://8.8.8.8/dns-query");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_tool_invoke_reports_missing_invoker_after_alias_check() {
+        use crate::tools::wasm::wrapper::StoreData;
+        use std::collections::{HashMap, HashSet};
+
+        let mut aliases = HashMap::new();
+        aliases.insert("echo_alias".to_string(), "echo".to_string());
+        let mut store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default().with_tool_invoke(aliases),
+            HashMap::new(),
+            Vec::new(),
+            HashSet::new(),
+            None,
+            JobContext::default(),
+        );
+
+        let err = <StoreData as super::near::agent::host::Host>::tool_invoke(
+            &mut store_data,
+            "echo_alias".to_string(),
+            "{}".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("not configured"));
+    }
+
+    #[test]
+    fn test_tool_invoke_rejects_unknown_alias_before_invoker() {
+        use crate::tools::wasm::wrapper::StoreData;
+        use std::collections::{HashMap, HashSet};
+
+        let mut store_data = StoreData::new(
+            1024 * 1024,
+            Capabilities::default().with_tool_invoke(HashMap::new()),
+            HashMap::new(),
+            Vec::new(),
+            HashSet::new(),
+            None,
+            JobContext::default(),
+        );
+
+        let err = <StoreData as super::near::agent::host::Host>::tool_invoke(
+            &mut store_data,
+            "missing".to_string(),
+            "{}".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("Unknown tool alias"));
+    }
+
+    #[tokio::test]
+    async fn test_wasm_tool_invoke_smoke_calls_registered_tool() {
+        use std::collections::HashMap;
+        use std::path::{Path, PathBuf};
+        use std::process::Command;
+
+        use crate::config::SafetyConfig;
+        use crate::safety::SafetyLayer;
+        use crate::tools::builtin::EchoTool;
+        use crate::tools::execution::HostMediatedToolInvoker;
+        use crate::tools::{
+            Tool, ToolExecutionLane, ToolProfile, ToolRegistry,
+            wasm::{WasmRuntimeConfig, WasmToolRuntime, WasmToolWrapper},
+        };
+
+        fn repo_root() -> PathBuf {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        }
+
+        fn cargo_component_available() -> bool {
+            Command::new("cargo")
+                .args(["component", "--version"])
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false)
+        }
+
+        fn build_smoke_component(fixture_dir: &Path) -> PathBuf {
+            let status = Command::new("cargo")
+                .args(["component", "build", "--release"])
+                .current_dir(fixture_dir)
+                .status()
+                .expect("run cargo component build for WASM tool_invoke fixture");
+            assert!(status.success(), "WASM tool_invoke fixture build failed");
+
+            let wasm_path = fixture_dir
+                .join("target")
+                .join("wasm32-wasip1")
+                .join("release")
+                .join("wasm_tool_invoke_smoke.wasm");
+            assert!(
+                wasm_path.exists(),
+                "WASM tool_invoke fixture did not produce {}",
+                wasm_path.display()
+            );
+            wasm_path
+        }
+
+        if !cargo_component_available() {
+            eprintln!("skipping WASM tool_invoke component smoke: cargo-component is unavailable");
+            return;
+        }
+
+        let fixture_dir = repo_root()
+            .join("tests")
+            .join("fixtures")
+            .join("wasm-tool-invoke-smoke");
+        let wasm_path = build_smoke_component(&fixture_dir);
+        let wasm_bytes = std::fs::read(&wasm_path).expect("read WASM tool_invoke fixture");
+
+        let mut config = WasmRuntimeConfig::for_testing();
+        config.default_limits = config.default_limits.with_memory(2 * 1024 * 1024);
+        let runtime = Arc::new(WasmToolRuntime::new(config).unwrap());
+        let prepared = runtime
+            .prepare("tool_invoke_smoke", &wasm_bytes, None)
+            .await
+            .expect("prepare WASM tool_invoke fixture");
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register_builtin(Arc::new(EchoTool)).await;
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig::default()));
+        let invoker = Arc::new(HostMediatedToolInvoker::new(
+            Arc::clone(&tools),
+            safety,
+            ToolExecutionLane::WorkerRuntime,
+            ToolProfile::ExplicitOnly,
+        ));
+
+        let mut aliases = HashMap::new();
+        aliases.insert("echo_alias".to_string(), "echo".to_string());
+        let wrapper = WasmToolWrapper::new(
+            runtime,
+            prepared,
+            Capabilities::default().with_tool_invoke(aliases),
+        )
+        .with_tool_invoker(invoker);
+
+        let output = wrapper
+            .execute(serde_json::json!({}), &JobContext::default())
+            .await
+            .expect("execute WASM tool_invoke fixture");
+
+        assert_eq!(output.result["invoked"], serde_json::json!(true));
+        assert_eq!(
+            output.result["output"],
+            serde_json::json!("hello from wasm tool_invoke")
+        );
     }
 }

@@ -20,7 +20,7 @@ This document does not own deployment or broader trust architecture. Use `docs/D
 Explicit onboarding:
 
 ```bash
-thinclaw onboard [--skip-auth] [--channels-only] [--guide[=<topic>]] [--ui auto|cli|tui]
+thinclaw onboard [--skip-auth] [--channels-only] [--guide[=<topic>]] [--ui auto|cli|tui] [--profile <profile>]
 ```
 
 Full reset:
@@ -105,6 +105,26 @@ the Quick/Advanced selector first.
 - `thinclaw onboard --guide ai` jumps directly to AI & Models
 - Valid topics: `menu`, `ai`, `channels`, `agent`, `tools`, `automation`, `runtime`
 
+### `--profile <profile>`
+
+Preselects the onboarding profile and skips the Profile prompt. Valid values:
+`balanced`, `local-private`, `builder-coding`, `channel-first`, `remote`, and
+`custom`.
+
+Use `thinclaw onboard --profile remote` for Raspberry Pi, Mac Mini, VPS, or
+SSH-managed hosts. This profile configures a service-safe runtime:
+
+- `CLI_ENABLED=false`
+- `GATEWAY_ENABLED=true`
+- `GATEWAY_HOST=127.0.0.1` by default for SSH tunnel access
+- `GATEWAY_PORT=3000` unless already configured
+- generated `GATEWAY_AUTH_TOKEN` when missing
+- local libSQL database unless the operator chooses another backend
+- env-backed secrets fallback writes `THINCLAW_ALLOW_ENV_MASTER_KEY=1` when selected
+
+The remote Web UI step offers SSH tunnel, private LAN/Tailscale, and reverse
+proxy/public access modes. The default is SSH tunnel.
+
 ### `reset`
 
 Runs a destructive reset intended for recovery or clean-room re-onboarding. The command:
@@ -117,12 +137,13 @@ It does not uninstall the ThinClaw binary or remove launchd, systemd, or Windows
 
 ### Profile Lanes
 
-The Profile step currently offers five onboarding lanes:
+The Profile step currently offers six onboarding lanes:
 
 - `Balanced` for the standard first-run path
 - `Local & Private` for a local-first, lower-dependency setup
 - `Builder & Coding` for stronger planning, routing, and tool-heavy work
 - `Channel-First` for messaging reachability and notification routing
+- `Remote / SSH Host` for headless/service hosts reached over SSH, LAN, or tailnet
 - `Custom / Advanced` for a neutral baseline with minimal profile-driven defaults
 
 `Custom / Advanced` does not add a different step plan. It runs the same wizard,
@@ -139,15 +160,17 @@ and the onboarding TUI shell, but it is not one single 26-step path anymore.
 Quick Setup is the default reduced path. It currently includes:
 
 1. Choose Your Cockpit Skin
-2. Primary Model Provider
-3. Advisor Model (Primary)
-4. Agent Name & Personality
-5. Primary Channel
-6. Channel Verification
-7. Autonomy Level
-8. Worker Sandbox
-9. Coding Workers
-10. Finish
+2. Choose Your Setup Lane
+3. Agent Name & Personality
+4. Primary Model Provider
+5. Advisor Model (Primary)
+6. Primary Channel
+7. Channel Verification
+8. Autonomy Level
+9. Worker Sandbox
+10. Coding Workers
+11. Web UI
+12. Finish
 
 The quick path also applies the existing auto-configured runtime defaults and
 quick notification defaults between those visible steps, which is why the user
@@ -194,6 +217,9 @@ section immediately.
 Bootstrap and runtime settings do not all live in one place.
 
 - bootstrap values such as database connection details live in `~/.thinclaw/.env`
+- service/gateway bootstrap values such as `GATEWAY_ENABLED`, `GATEWAY_HOST`,
+  `GATEWAY_PORT`, `GATEWAY_AUTH_TOKEN`, and `CLI_ENABLED` also live in
+  `~/.thinclaw/.env`
 - encrypted credentials and related secure material use the secrets path
 - broader runtime settings are persisted in the database-backed settings store
 
@@ -233,6 +259,8 @@ Profile behavior is intentionally asymmetric:
 - The CLI wizard and onboarding TUI shell must use the same step plan and validation logic.
 - The CLI wizard and onboarding TUI shell must keep the same readiness framing and follow-up semantics.
 - Onboarding must clearly point to both local runtime entrypoints: `thinclaw` and `thinclaw tui`.
+- Remote onboarding must point to `thinclaw run --no-onboard`, service commands,
+  and `thinclaw gateway access` instead of implying an interactive REPL handoff.
 - Setup docs must not claim a different step or phase shape than the code.
 
 ## High-Value Setup Areas

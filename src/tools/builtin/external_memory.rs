@@ -7,6 +7,16 @@ use crate::context::JobContext;
 use crate::settings::LearningProviderSettings;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
+fn config_value_to_string(value: serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
+
 fn active_provider_status<'a>(
     active_provider: Option<&str>,
     statuses: &'a [ProviderHealthStatus],
@@ -206,7 +216,8 @@ impl Tool for ExternalMemorySetupTool {
     }
 
     fn description(&self) -> &str {
-        "Configure and optionally activate an external memory provider such as Honcho or Zep."
+        "Configure and optionally activate an external memory provider such as Honcho, Zep, \
+         Mem0, OpenMemory, Letta, Chroma, Qdrant, or custom_http."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -215,7 +226,7 @@ impl Tool for ExternalMemorySetupTool {
             "properties": {
                 "provider": {
                     "type": "string",
-                    "description": "Provider slug (for example honcho, zep, or a registered custom provider)."
+                    "description": "Provider slug: honcho, zep, mem0, openmemory, letta, chroma, qdrant, or custom_http."
                 },
                 "base_url": {
                     "type": "string",
@@ -228,6 +239,26 @@ impl Tool for ExternalMemorySetupTool {
                 "api_key_env": {
                     "type": "string",
                     "description": "Optional environment variable name holding the API key."
+                },
+                "embedding_url": {
+                    "type": "string",
+                    "description": "Embedding endpoint for vector stores such as Chroma or Qdrant."
+                },
+                "collection": {
+                    "type": "string",
+                    "description": "Qdrant collection name."
+                },
+                "collection_id": {
+                    "type": "string",
+                    "description": "Chroma collection UUID."
+                },
+                "agent_id": {
+                    "type": "string",
+                    "description": "Provider-side agent identifier for Mem0 or Letta."
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "Optional provider-side user identifier; defaults to the ThinClaw principal."
                 },
                 "enabled": {
                     "type": "boolean",
@@ -281,7 +312,7 @@ impl Tool for ExternalMemorySetupTool {
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|(key, value)| value.as_str().map(|value| (key, value.to_string())))
+            .filter_map(|(key, value)| config_value_to_string(value).map(|value| (key, value)))
             .collect::<std::collections::HashMap<_, _>>();
         if let Some(base_url) = params.get("base_url").and_then(|value| value.as_str()) {
             config.insert("base_url".to_string(), base_url.to_string());
@@ -291,6 +322,17 @@ impl Tool for ExternalMemorySetupTool {
         }
         if let Some(api_key_env) = params.get("api_key_env").and_then(|value| value.as_str()) {
             config.insert("api_key_env".to_string(), api_key_env.to_string());
+        }
+        for key in [
+            "embedding_url",
+            "collection",
+            "collection_id",
+            "agent_id",
+            "user_id",
+        ] {
+            if let Some(value) = params.get(key).and_then(|value| value.as_str()) {
+                config.insert(key.to_string(), value.to_string());
+            }
         }
         let provider_settings = LearningProviderSettings {
             enabled,
@@ -321,6 +363,97 @@ impl Tool for ExternalMemorySetupTool {
                 "active": activate,
                 "active_status": active_status,
                 "providers": statuses,
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+}
+
+pub struct ExternalMemoryExportTool {
+    orchestrator: Arc<LearningOrchestrator>,
+}
+
+impl ExternalMemoryExportTool {
+    pub fn new(orchestrator: Arc<LearningOrchestrator>) -> Self {
+        Self { orchestrator }
+    }
+}
+
+#[async_trait]
+impl Tool for ExternalMemoryExportTool {
+    fn name(&self) -> &str {
+        "external_memory_export"
+    }
+
+    fn description(&self) -> &str {
+        "Export an explicit memory payload to the active external memory provider. Use this \
+         for durable facts, user preferences, or important session summaries that should be \
+         mirrored outside local workspace memory."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Memory content to export."
+                },
+                "payload": {
+                    "type": "object",
+                    "description": "Structured memory payload. Used when content is omitted."
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        let payload = params
+            .get("payload")
+            .cloned()
+            .or_else(|| {
+                params
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .map(|content| serde_json::json!({"content": content}))
+            })
+            .ok_or_else(|| {
+                ToolError::InvalidParameters(
+                    "external_memory_export requires content or payload".to_string(),
+                )
+            })?;
+
+        let settings = self.orchestrator.load_settings_for_user(&ctx.user_id).await;
+        let statuses = self.orchestrator.provider_health(&ctx.user_id).await;
+        let active_status = active_provider_status(
+            settings.providers.active_provider_name().as_deref(),
+            &statuses,
+        )?;
+        ensure_active_provider_healthy(active_status)?;
+
+        let provider = self
+            .orchestrator
+            .export_provider_payload(&ctx.user_id, &payload)
+            .await
+            .map_err(ToolError::ExecutionFailed)?;
+
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "provider": provider,
+                "status": "exported",
             }),
             start.elapsed(),
         ))

@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
@@ -1237,8 +1238,8 @@ impl Agent {
                 .as_ref()
                 .and_then(|runtime| runtime.advisor_config_for_messages(&context_messages))
                 .is_some();
-            if advisor_ready_for_turn {
-                if let Some((trigger, checkpoint, blocked_signature)) = self
+            if advisor_ready_for_turn
+                && let Some((trigger, checkpoint, blocked_signature)) = self
                     .next_auto_advisor_trigger(
                         runtime_status.as_ref(),
                         &context_messages,
@@ -1246,23 +1247,22 @@ impl Agent {
                         consecutive_same_calls,
                         last_call_signature,
                     )
-                {
-                    self.inject_auto_advisor_consultation(
-                        trigger,
-                        checkpoint,
-                        blocked_signature,
-                        &mut advisor_state,
-                        &mut context_messages,
-                        &session,
-                        thread_id,
-                        message,
-                        advisor_call_budget.as_ref(),
-                        &mut last_call_signature,
-                        &mut consecutive_same_calls,
-                    )
-                    .await?;
-                    continue;
-                }
+            {
+                self.inject_auto_advisor_consultation(
+                    trigger,
+                    checkpoint,
+                    blocked_signature,
+                    &mut advisor_state,
+                    &mut context_messages,
+                    &session,
+                    thread_id,
+                    message,
+                    advisor_call_budget.as_ref(),
+                    &mut last_call_signature,
+                    &mut consecutive_same_calls,
+                )
+                .await?;
+                continue;
             }
             let use_tool_phase_synthesis = tool_phase_synthesis_enabled(
                 runtime_status.as_ref(),
@@ -2657,8 +2657,19 @@ impl Agent {
         } else {
             crate::channels::StreamMode::None
         };
-        let use_streaming =
-            options.stream_to_user && channel_stream_mode != crate::channels::StreamMode::None;
+        let native_streaming_available = reasoning.current_llm().supports_streaming_for_model(None);
+        let use_streaming = options.stream_to_user
+            && channel_stream_mode != crate::channels::StreamMode::None
+            && native_streaming_available;
+        if options.stream_to_user
+            && channel_stream_mode != crate::channels::StreamMode::None
+            && !native_streaming_available
+        {
+            tracing::debug!(
+                channel = %message.channel,
+                "Skipping progressive streaming because the selected provider is not native-streaming capable"
+            );
+        }
 
         if options.emit_progress_status {
             let _ = self
@@ -2699,9 +2710,23 @@ impl Agent {
                 let consumer_channels = Arc::clone(&channels);
                 let consumer_ch_name = message.channel.clone();
                 let consumer_md = message.metadata.clone();
+                let saw_event_chunk = Arc::new(AtomicBool::new(false));
+                let consumer_saw_event_chunk = Arc::clone(&saw_event_chunk);
 
                 let consumer_handle = tokio::spawn(async move {
                     while let Some(chunk) = chunk_rx.recv().await {
+                        if mode == crate::channels::StreamMode::EventChunks {
+                            consumer_saw_event_chunk.store(true, Ordering::Relaxed);
+                            let _ = consumer_channels
+                                .send_status(
+                                    &consumer_ch_name,
+                                    StatusUpdate::StreamChunk(chunk),
+                                    &consumer_md,
+                                )
+                                .await;
+                            continue;
+                        }
+
                         let mut d = consumer_draft.lock().await;
                         let should_send = d.append(&chunk);
                         if should_send {
@@ -2746,9 +2771,27 @@ impl Agent {
 
                 let _ = consumer_handle.await;
 
+                if mode == crate::channels::StreamMode::EventChunks {
+                    let marker = if stream_result.is_ok() {
+                        "stream_complete"
+                    } else {
+                        "stream_error"
+                    };
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status(marker.to_string()),
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
                 let was_streamed = {
                     let d = draft.lock().await;
-                    if d.overflow {
+                    if mode == crate::channels::StreamMode::EventChunks {
+                        saw_event_chunk.load(Ordering::Relaxed)
+                    } else if d.overflow {
                         if let Some(ref msg_id) = d.message_id {
                             tracing::info!(
                                 msg_id = %msg_id,
@@ -2907,6 +2950,21 @@ impl Agent {
                 Ok(crate::hooks::HookOutcome::Continue { .. }) => {}
                 Ok(crate::hooks::HookOutcome::Reject { reason }) => {
                     tracing::info!(reason = %reason, "AfterLlmOutput hook rejected response");
+                    let streamed_msg_id = if streamed_text {
+                        persistent_draft
+                            .lock()
+                            .await
+                            .as_ref()
+                            .and_then(|draft| draft.message_id.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(msg_id) = streamed_msg_id {
+                        let _ = self
+                            .channels
+                            .delete_message(&message.channel, &msg_id, &message.metadata)
+                            .await;
+                    }
                     return Err(crate::error::Error::Hook(
                         crate::hooks::HookError::Rejected {
                             reason: format!("AfterLlmOutput hook rejected: {}", reason),
@@ -2915,6 +2973,21 @@ impl Agent {
                 }
                 Err(crate::hooks::HookError::Rejected { reason }) => {
                     tracing::info!(reason = %reason, "AfterLlmOutput hook rejected response");
+                    let streamed_msg_id = if streamed_text {
+                        persistent_draft
+                            .lock()
+                            .await
+                            .as_ref()
+                            .and_then(|draft| draft.message_id.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(msg_id) = streamed_msg_id {
+                        let _ = self
+                            .channels
+                            .delete_message(&message.channel, &msg_id, &message.metadata)
+                            .await;
+                    }
                     return Err(crate::error::Error::Hook(
                         crate::hooks::HookError::Rejected {
                             reason: format!("AfterLlmOutput hook rejected: {}", reason),
@@ -2935,6 +3008,22 @@ impl Agent {
             output.usage.input_tokens,
             output.usage.output_tokens,
         );
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::Usage {
+                    input_tokens: output.usage.input_tokens,
+                    output_tokens: output.usage.output_tokens,
+                    cost_usd: None,
+                    model: output
+                        .routed_model_name
+                        .clone()
+                        .or_else(|| Some(model_name.clone())),
+                },
+                &message.metadata,
+            )
+            .await;
 
         if let Some(ref policy_lock) = self.deps.routing_policy {
             let latency_ms = llm_start.elapsed().as_millis() as f64;
@@ -3264,9 +3353,7 @@ impl Agent {
         consecutive_same_calls: u32,
         last_call_signature: Option<u64>,
     ) -> Option<(AdvisorAutoTrigger, String, Option<u64>)> {
-        let Some(status) = runtime_status else {
-            return None;
-        };
+        let status = runtime_status?;
         if !status.advisor_ready
             || status.advisor_auto_escalation_mode == AdvisorAutoEscalationMode::ManualOnly
         {
@@ -3499,11 +3586,12 @@ mod tests {
     use crate::hooks::HookRegistry;
     use crate::llm::{
         ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
-        ThinkingConfig, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+        StreamSupport, ThinkingConfig, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
     };
     use crate::safety::SafetyLayer;
     use crate::settings::{
         AdvisorAutoEscalationMode, ProviderModelSlots, ProvidersSettings, RoutingMode,
+        SecretsMasterKeySource, Settings,
     };
     use crate::tools::{ApprovalRequirement, Tool, ToolOutput, ToolRegistry};
 
@@ -3569,14 +3657,24 @@ mod tests {
         model_name: String,
         responses: Mutex<VecDeque<ScriptedResponse>>,
         requests: Mutex<Vec<CapturedRequest>>,
+        stream_support: StreamSupport,
     }
 
     impl ScriptedLlm {
         fn new(model_name: impl Into<String>, responses: Vec<ScriptedResponse>) -> Self {
+            Self::with_stream_support(model_name, responses, StreamSupport::Simulated)
+        }
+
+        fn with_stream_support(
+            model_name: impl Into<String>,
+            responses: Vec<ScriptedResponse>,
+            stream_support: StreamSupport,
+        ) -> Self {
             Self {
                 model_name: model_name.into(),
                 responses: Mutex::new(VecDeque::from(responses)),
                 requests: Mutex::new(Vec::new()),
+                stream_support,
             }
         }
 
@@ -3622,6 +3720,10 @@ mod tests {
 
         fn cost_per_token(&self) -> (Decimal, Decimal) {
             (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        fn stream_support(&self) -> StreamSupport {
+            self.stream_support
         }
 
         async fn complete(
@@ -3900,36 +4002,22 @@ mod tests {
         .await
     }
 
-    #[allow(clippy::await_holding_lock)]
     async fn make_runtime_manager_for_mode(
         tool_phase_synthesis_enabled: bool,
         tool_phase_primary_thinking_enabled: bool,
         routing_mode: RoutingMode,
         advisor_max_calls: u32,
     ) -> Arc<crate::llm::runtime_manager::LlmRuntimeManager> {
-        let config = {
-            let _env_guard = crate::config::helpers::lock_env();
-            // SAFETY: guarded by crate-wide ENV_MUTEX.
-            unsafe {
-                std::env::set_var("LLM_BACKEND", "openai_compatible");
-                std::env::set_var("LLM_BASE_URL", "http://localhost:12345/v1");
-                std::env::set_var("LLM_MODEL", "gpt-5.4");
-                // Avoid keychain probes in tests (can block/hang in CI/local).
-                std::env::set_var(
-                    "SECRETS_MASTER_KEY",
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                );
-            }
-            let loaded = Config::from_env().await.expect("config should load");
-            // SAFETY: guarded by crate-wide ENV_MUTEX.
-            unsafe {
-                std::env::remove_var("LLM_BACKEND");
-                std::env::remove_var("LLM_BASE_URL");
-                std::env::remove_var("LLM_MODEL");
-                std::env::remove_var("SECRETS_MASTER_KEY");
-            }
-            loaded
+        let mut settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://localhost:12345/v1".to_string()),
+            selected_model: Some("gpt-5.4".to_string()),
+            ..Settings::default()
         };
+        settings.secrets.master_key_source = SecretsMasterKeySource::None;
+        let config = Config::from_test_settings(&settings)
+            .await
+            .expect("config should load");
 
         let mut providers = ProvidersSettings {
             enabled: vec!["openai_compatible".to_string()],
@@ -4300,13 +4388,14 @@ mod tests {
                 ),
             ],
         ));
-        let cheap = Arc::new(ScriptedLlm::new(
+        let cheap = Arc::new(ScriptedLlm::with_stream_support(
             "cheap-model",
             vec![ScriptedResponse::text_with_thinking(
                 "Cheap final answer",
                 FinishReason::Stop,
                 "visible synthesis thought",
             )],
+            StreamSupport::Native,
         ));
         let runtime = make_runtime_manager(true, true).await;
         let tools = Arc::new(ToolRegistry::new());

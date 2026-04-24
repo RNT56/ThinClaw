@@ -21,6 +21,8 @@ These flags can be appended to almost any command:
 - `thinclaw tui`: Launches the agent inside the full-screen terminal UI.
 - `thinclaw onboard`: Launches the interactive onboarding wizard to configure the agent, set up the database, and link your first provider.
   - `--ui tui`: Forces the onboarding to run in full-screen mode.
+  - `--profile remote`: Preselects the Remote / SSH Host lane for Raspberry Pi, Mac Mini, VPS, and other SSH-managed hosts.
+  - Other profile values: `balanced`, `local-private`, `builder-coding`, `channel-first`, and `custom`.
 - `thinclaw reset`: Completely wipes ThinClaw's local database and state so you can start fresh.
 - `thinclaw update`: Checks for updates and performs a self-update.
 
@@ -40,6 +42,7 @@ These flags can be appended to almost any command:
   - `rotate-master`: Generate a new OS secure-store master key, re-encrypt active v2 secrets, and advance the local key version.
 - `thinclaw channels`: Manage messaging channel configurations (Telegram, Discord, etc.).
 - `thinclaw gateway`: Manage the built-in web gateway settings.
+  - `access [--show-token]`: Print the bind address, WebUI URL, token URL, SSH tunnel command, auth status, health status, and service-safe warnings.
 
 ## Extensions & Tools
 
@@ -78,9 +81,9 @@ These flags can be appended to almost any command:
 - `thinclaw message`: Send a message to the agent directly from the CLI without starting the interactive prompt.
 - `thinclaw pairing`: DM pairing logic to approve inbound requests from unknown senders on supported channels.
 - `thinclaw logs`: Query, tail, and filter system logs.
-- `thinclaw doctor`: Probe external dependencies and validate the current configuration. On Linux, add `--profile server`, `--profile desktop-gnome`, or `--profile all-features`.
+- `thinclaw doctor`: Probe external dependencies and validate the current configuration. On Linux, add `--profile server`, `--profile remote`, `--profile pi-os-lite-64`, `--profile desktop-gnome`, or `--profile all-features`.
 - `thinclaw status`: Show system health and diagnostics. On Linux, the same `--profile` values summarize runtime readiness.
-- `thinclaw service`: (Mac/Linux only) Manage the OS background service.
+- `thinclaw service`: Manage the OS background service through launchd, systemd, or the Windows Service Control Manager.
   - `install`: Install ThinClaw as a system service.
   - `start`: Start the background service.
   - `stop`: Stop the background service.

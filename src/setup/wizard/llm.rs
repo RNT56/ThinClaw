@@ -1902,7 +1902,9 @@ impl SetupWizard {
             super::OnboardingProfile::BuilderAndCoding => {
                 Some(crate::settings::RoutingMode::AdvisorExecutor)
             }
-            super::OnboardingProfile::Balanced | super::OnboardingProfile::ChannelFirst => {
+            super::OnboardingProfile::Balanced
+            | super::OnboardingProfile::ChannelFirst
+            | super::OnboardingProfile::RemoteServer => {
                 Some(crate::settings::RoutingMode::CheapSplit)
             }
             super::OnboardingProfile::CustomAdvanced => None,

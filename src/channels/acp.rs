@@ -23,7 +23,8 @@ use uuid::Uuid;
 
 use crate::agent::{Agent, Submission};
 use crate::channels::{
-    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, mint_session_key,
+    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, StreamMode,
+    mint_session_key,
 };
 use crate::error::ChannelError;
 use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
@@ -170,7 +171,12 @@ pub mod wire {
             config_options: Value,
         },
         SessionInfoUpdate {
-            session: Value,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            title: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            updated_at: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none", rename = "_meta")]
+            meta: Option<Value>,
         },
         Plan {
             entries: Vec<Value>,
@@ -571,14 +577,21 @@ impl AcpConnectionState {
         }
     }
 
-    async fn start_prompt_waiter(&self, session_id: &str) -> oneshot::Receiver<PromptCompletion> {
+    async fn start_prompt_waiter(
+        &self,
+        session_id: &str,
+    ) -> Result<oneshot::Receiver<PromptCompletion>, JsonRpcError> {
         let (tx, rx) = oneshot::channel();
-        self.inner
-            .write()
-            .await
-            .prompt_waiters
-            .insert(session_id.to_string(), tx);
-        rx
+        let mut inner = self.inner.write().await;
+        if inner.prompt_waiters.contains_key(session_id) {
+            return Err(json_rpc_error(
+                -32000,
+                format!("ACP session already has an active prompt turn: {session_id}"),
+                None,
+            ));
+        }
+        inner.prompt_waiters.insert(session_id.to_string(), tx);
+        Ok(rx)
     }
 
     async fn take_prompt_waiter(
@@ -652,20 +665,12 @@ pub async fn client_read_text_file(
         return Ok(None);
     }
 
-    let mut params = json!({
-        "sessionId": session_id,
-        "path": path
+    let params = wire::to_value(wire::ReadTextFileRequest {
+        session_id: session_id.to_string(),
+        path: path.to_string(),
+        line,
+        limit,
     });
-    if let Some(line) = line
-        && let Some(obj) = params.as_object_mut()
-    {
-        obj.insert("line".to_string(), json!(line));
-    }
-    if let Some(limit) = limit
-        && let Some(obj) = params.as_object_mut()
-    {
-        obj.insert("limit".to_string(), json!(limit));
-    }
 
     let result = bridge
         .state
@@ -710,10 +715,10 @@ pub async fn client_write_text_file(
         .send_client_request(
             &bridge.writer_tx,
             "fs/write_text_file",
-            json!({
-                "sessionId": session_id,
-                "path": path,
-                "content": content
+            wire::to_value(wire::WriteTextFileRequest {
+                session_id: session_id.to_string(),
+                path: path.to_string(),
+                content: content.to_string(),
             }),
             ACP_CLIENT_REQUEST_TIMEOUT,
         )
@@ -738,20 +743,23 @@ pub async fn client_execute_terminal(
 
     let env = extra_env
         .iter()
-        .map(|(name, value)| json!({ "name": name, "value": value }))
+        .map(|(name, value)| wire::TerminalEnvVar {
+            name: name.clone(),
+            value: value.clone(),
+        })
         .collect::<Vec<_>>();
     let create_result = bridge
         .state
         .send_client_request(
             &bridge.writer_tx,
             "terminal/create",
-            json!({
-                "sessionId": session_id,
-                "command": "sh",
-                "args": ["-lc", command],
-                "cwd": cwd,
-                "env": env,
-                "outputByteLimit": ACP_TERMINAL_OUTPUT_LIMIT
+            wire::to_value(wire::TerminalCreateRequest {
+                session_id: session_id.to_string(),
+                command: "sh".to_string(),
+                args: vec!["-lc".to_string(), command.to_string()],
+                cwd: cwd.map(str::to_string),
+                env,
+                output_byte_limit: ACP_TERMINAL_OUTPUT_LIMIT,
             }),
             ACP_CLIENT_REQUEST_TIMEOUT,
         )
@@ -763,35 +771,59 @@ pub async fn client_execute_terminal(
         .ok_or_else(|| "ACP terminal/create response missing terminalId".to_string())?
         .to_string();
 
+    let terminal_id_params = || {
+        wire::to_value(wire::TerminalIdRequest {
+            session_id: session_id.to_string(),
+            terminal_id: terminal_id.clone(),
+        })
+    };
+
     let wait_result = bridge
         .state
         .send_client_request(
             &bridge.writer_tx,
             "terminal/wait_for_exit",
-            json!({ "sessionId": session_id, "terminalId": terminal_id }),
+            terminal_id_params(),
             timeout.saturating_add(Duration::from_secs(5)),
         )
         .await;
 
-    let timed_out = wait_result.is_err();
-    if timed_out {
-        let _ = bridge
-            .state
-            .send_client_request(
-                &bridge.writer_tx,
-                "terminal/kill",
-                json!({ "sessionId": session_id, "terminalId": terminal_id }),
-                ACP_CLIENT_REQUEST_TIMEOUT,
-            )
-            .await;
-    }
+    let mut timed_out = false;
+    let wait_exit_status = match wait_result {
+        Ok(result) => Some(result),
+        Err(error) if is_client_request_timeout(&error) => {
+            timed_out = true;
+            let _ = bridge
+                .state
+                .send_client_request(
+                    &bridge.writer_tx,
+                    "terminal/kill",
+                    terminal_id_params(),
+                    ACP_CLIENT_REQUEST_TIMEOUT,
+                )
+                .await;
+            None
+        }
+        Err(error) => {
+            let _ = bridge
+                .state
+                .send_client_request(
+                    &bridge.writer_tx,
+                    "terminal/release",
+                    terminal_id_params(),
+                    ACP_CLIENT_REQUEST_TIMEOUT,
+                )
+                .await;
+            return Err(format_json_rpc_error(error));
+        }
+    };
 
     let output_result = bridge
         .state
         .send_client_request(
             &bridge.writer_tx,
             "terminal/output",
-            json!({ "sessionId": session_id, "terminalId": terminal_id }),
+            terminal_id_params(),
             ACP_CLIENT_REQUEST_TIMEOUT,
         )
         .await
@@ -801,7 +833,7 @@ pub async fn client_execute_terminal(
         .send_client_request(
             &bridge.writer_tx,
             "terminal/release",
-            json!({ "sessionId": session_id, "terminalId": terminal_id }),
+            terminal_id_params(),
             ACP_CLIENT_REQUEST_TIMEOUT,
         )
         .await;
@@ -818,7 +850,7 @@ pub async fn client_execute_terminal(
     let exit_status = output_result
         .get("exitStatus")
         .filter(|value| !value.is_null())
-        .or_else(|| wait_result.as_ref().ok());
+        .or_else(|| wait_exit_status.as_ref());
     let exit_code = exit_status
         .and_then(|status| status.get("exitCode"))
         .and_then(Value::as_i64);
@@ -835,6 +867,10 @@ pub async fn client_execute_terminal(
         signal,
         truncated,
     }))
+}
+
+fn is_client_request_timeout(error: &JsonRpcError) -> bool {
+    error.code == -32000 && error.message.contains("timed out")
 }
 
 fn format_json_rpc_error(error: JsonRpcError) -> String {
@@ -955,6 +991,10 @@ impl Channel for AcpChannel {
             send_outbound(&self.outbound_tx, message)?;
         }
         Ok(())
+    }
+
+    fn stream_mode(&self) -> StreamMode {
+        StreamMode::EventChunks
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
@@ -1226,6 +1266,16 @@ struct SessionSetModeRequest {
     _meta: Option<Value>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionSetConfigOptionRequest {
+    session_id: String,
+    config_id: String,
+    value: Value,
+    #[serde(default, rename = "_meta")]
+    _meta: Option<Value>,
+}
+
 async fn handle_json_rpc(
     agent: Arc<Agent>,
     writer_tx: &OutboundTx,
@@ -1249,6 +1299,7 @@ async fn handle_json_rpc(
         "session/close" => handle_close_session(agent, state, &request.params).await,
         "session/cancel" => handle_cancel_session(agent, state, &request.params).await,
         "session/set_mode" => handle_set_mode(writer_tx, state, &request.params).await,
+        "session/set_config_option" => handle_set_config_option(state, &request.params).await,
         "session/prompt" => handle_prompt(agent, writer_tx, state, &request.params).await,
         _ => Err(json_rpc_error(
             -32601,
@@ -1311,7 +1362,8 @@ async fn handle_client_response(
     };
 
     let outcome = permission_outcome_from_result(&result);
-    if outcome.outcome == "cancelled" {
+    let (approved, always, cancelled) = permission_decision_from_outcome(&outcome);
+    if cancelled {
         state.mark_cancelled(&pending.session_id).await;
         state
             .complete_prompt(&pending.session_id, wire::StopReason::Cancelled)
@@ -1319,13 +1371,6 @@ async fn handle_client_response(
         interrupt_acp_session(agent, state, &pending.session_id).await;
         return;
     }
-
-    let (approved, always) = match outcome.option_id.as_deref().unwrap_or_default() {
-        "allow-once" => (true, false),
-        "allow-always" => (true, true),
-        "reject-once" | "reject" => (false, false),
-        _ => (false, false),
-    };
 
     approve_pending_tool(agent, writer_tx, state, &pending, approved, always).await;
 }
@@ -1428,6 +1473,18 @@ fn permission_outcome_from_result(result: &Value) -> wire::PermissionOutcome {
     wire::PermissionOutcome {
         outcome: "cancelled".to_string(),
         option_id: None,
+    }
+}
+
+fn permission_decision_from_outcome(outcome: &wire::PermissionOutcome) -> (bool, bool, bool) {
+    if outcome.outcome == "cancelled" {
+        return (false, false, true);
+    }
+    match outcome.option_id.as_deref().unwrap_or_default() {
+        "allow-once" => (true, false, false),
+        "allow-always" => (true, true, false),
+        "reject-once" | "reject" => (false, false, false),
+        _ => (false, false, false),
     }
 }
 
@@ -1736,6 +1793,44 @@ async fn handle_set_mode(
     Ok(json!({ "modes": session_modes(&request.mode_id) }))
 }
 
+async fn handle_set_config_option(
+    state: &AcpSharedState,
+    params: &Value,
+) -> Result<Value, JsonRpcError> {
+    state.ensure_initialized().await?;
+    let request: SessionSetConfigOptionRequest =
+        serde_json::from_value(params.clone()).map_err(|err| {
+            json_rpc_error(
+                -32602,
+                format!("Invalid session/set_config_option params: {err}"),
+                None,
+            )
+        })?;
+    let Some(session) = state.get_session(&request.session_id).await else {
+        return Err(json_rpc_error(
+            -32004,
+            format!("Unknown ACP session: {}", request.session_id),
+            None,
+        ));
+    };
+    if session.closed {
+        return Err(json_rpc_error(
+            -32004,
+            format!("ACP session is closed: {}", request.session_id),
+            None,
+        ));
+    }
+
+    Err(json_rpc_error(
+        -32602,
+        format!(
+            "Unsupported ACP session config option '{}' with value {}",
+            request.config_id, request.value
+        ),
+        Some(json!({ "configOptions": session_config_options() })),
+    ))
+}
+
 async fn handle_prompt(
     agent: Arc<Agent>,
     writer_tx: &OutboundTx,
@@ -1768,17 +1863,34 @@ async fn handle_prompt(
         ));
     }
 
-    let prompt = prompt_to_text(&request.prompt);
+    let prompt = prompt_to_text_result(&request.prompt)?;
     if prompt.trim().is_empty() {
         return Err(json_rpc_error(-32602, "prompt must include text", None));
     }
+    let was_untitled = session.title.is_none();
+    let prompt_rx = state.start_prompt_waiter(&request.session_id).await?;
     state.clear_cancelled(&request.session_id).await;
     state.mark_session_touched(&request.session_id).await;
     state
         .append_transcript(&request.session_id, "user", prompt.clone())
         .await;
+    if was_untitled && let Some(updated_session) = state.get_session(&request.session_id).await {
+        if let Err(error) = send_outbound(
+            writer_tx,
+            session_update(
+                &request.session_id,
+                session_info_update(
+                    updated_session.title.clone(),
+                    Some(updated_session.updated_at.to_rfc3339()),
+                    Some(json!({ "messageCount": updated_session.transcript.len() })),
+                ),
+            ),
+        ) {
+            let _ = state.take_prompt_waiter(&request.session_id).await;
+            return Err(json_rpc_error(-32000, error.to_string(), None));
+        }
+    }
 
-    let prompt_rx = state.start_prompt_waiter(&request.session_id).await;
     let metadata = acp_metadata_with_cwd(&request.session_id, &session.cwd);
     let message = IncomingMessage::new(ACP_CHANNEL_NAME, ACP_USER_ID, prompt)
         .with_thread(request.session_id.clone())
@@ -1790,6 +1902,7 @@ async fn handle_prompt(
         Err(error) => {
             let message = error.to_string();
             if let Some(stop_reason) = wire::StopReason::from_error_text(&message) {
+                let _ = state.take_prompt_waiter(&request.session_id).await;
                 let _ = send_outbound(
                     writer_tx,
                     session_update(
@@ -1803,6 +1916,7 @@ async fn handle_prompt(
                 );
                 return Ok(prompt_response(stop_reason));
             }
+            let _ = state.take_prompt_waiter(&request.session_id).await;
             return Err(json_rpc_error(-32000, message, None));
         }
     };
@@ -2305,49 +2419,69 @@ fn acp_cwd_from_metadata(metadata: &Value) -> Option<&str> {
         .filter(|cwd| Path::new(cwd).is_absolute())
 }
 
-fn prompt_to_text(prompt: &Value) -> String {
+fn prompt_to_text_result(prompt: &Value) -> Result<String, JsonRpcError> {
     match prompt {
-        Value::String(text) => text.clone(),
-        Value::Array(blocks) => blocks
+        Value::String(text) => Ok(text.clone()),
+        Value::Array(blocks) => Ok(blocks
             .iter()
-            .filter_map(content_block_to_text)
+            .map(content_block_to_text_result)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
             .collect::<Vec<_>>()
-            .join("\n\n"),
-        other => content_block_to_text(other).unwrap_or_default(),
+            .join("\n\n")),
+        other => Ok(content_block_to_text_result(other)?.unwrap_or_default()),
     }
 }
 
-fn content_block_to_text(block: &Value) -> Option<String> {
+fn content_block_to_text_result(block: &Value) -> Result<Option<String>, JsonRpcError> {
     let kind = block
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
     match kind {
-        "text" => block
+        "text" => Ok(block
             .get("text")
             .and_then(Value::as_str)
-            .map(str::to_string),
+            .map(str::to_string)),
         "resource" => {
-            let resource = block.get("resource")?;
+            let resource = block.get("resource").ok_or_else(|| {
+                json_rpc_error(-32602, "resource content block missing resource", None)
+            })?;
             if let Some(text) = resource.get("text").and_then(Value::as_str) {
-                Some(format_resource_text(resource, text))
+                Ok(Some(format_resource_text(resource, text)))
             } else {
-                resource
+                Ok(resource
                     .get("uri")
                     .and_then(Value::as_str)
-                    .map(|uri| format!("Context resource: {uri}"))
+                    .map(|uri| format!("Context resource: {uri}")))
             }
         }
-        "resource_link" | "resourceLink" => block
-            .get("uri")
-            .or_else(|| {
-                block
-                    .get("resource")
-                    .and_then(|resource| resource.get("uri"))
-            })
-            .and_then(Value::as_str)
-            .map(|uri| format!("Context resource: {uri}")),
-        _ => None,
+        "resource_link" | "resourceLink" => {
+            let uri = block
+                .get("uri")
+                .or_else(|| {
+                    block
+                        .get("resource")
+                        .and_then(|resource| resource.get("uri"))
+                })
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    json_rpc_error(-32602, "resource_link content block missing uri", None)
+                })?;
+            Ok(Some(format!("Context resource: {uri}")))
+        }
+        "image" | "audio" => Err(json_rpc_error(
+            -32602,
+            format!("ACP prompt content type '{kind}' is not advertised by this ThinClaw build"),
+            None,
+        )),
+        "" => Ok(None),
+        other => Err(json_rpc_error(
+            -32602,
+            format!("Unsupported ACP prompt content type: {other}"),
+            None,
+        )),
     }
 }
 
@@ -2386,6 +2520,27 @@ async fn status_to_acp_messages(
                 "toolCallId": format!("status_{}", state.next_counter()),
                 "status": "in_progress",
                 "content": [tool_content_text(content)]
+            }),
+        )],
+        StatusUpdate::Plan { entries } => vec![session_update(
+            session_id,
+            wire::to_value(wire::SessionUpdate::Plan { entries }),
+        )],
+        StatusUpdate::Usage {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            model,
+        } => vec![session_update(
+            session_id,
+            wire::to_value(wire::SessionUpdate::UsageUpdate {
+                usage: json!({
+                    "inputTokens": input_tokens,
+                    "outputTokens": output_tokens,
+                    "totalTokens": input_tokens as u64 + output_tokens as u64,
+                    "costUsd": cost_usd,
+                    "model": model
+                }),
             }),
         )],
         StatusUpdate::StreamChunk(content) => {
@@ -2663,6 +2818,18 @@ fn session_info(session: &AcpSessionState) -> Value {
     })
 }
 
+fn session_info_update(
+    title: Option<String>,
+    updated_at: Option<String>,
+    meta: Option<Value>,
+) -> Value {
+    wire::to_value(wire::SessionUpdate::SessionInfoUpdate {
+        title,
+        updated_at,
+        meta,
+    })
+}
+
 fn session_modes(current_mode_id: &str) -> Value {
     json!({
         "currentModeId": current_mode_id,
@@ -2795,11 +2962,19 @@ mod tests {
             { "type": "resource", "resource": { "uri": "file:///tmp/a.rs", "text": "fn main() {}" } },
             { "type": "resourceLink", "uri": "file:///tmp/b.rs" }
         ]);
-        let text = prompt_to_text(&prompt);
+        let text = prompt_to_text_result(&prompt).expect("prompt text");
         assert!(text.contains("Review this"));
         assert!(text.contains("file:///tmp/a.rs"));
         assert!(text.contains("fn main()"));
         assert!(text.contains("file:///tmp/b.rs"));
+    }
+
+    #[test]
+    fn prompt_to_text_rejects_unadvertised_media() {
+        let err = prompt_to_text_result(&json!([{ "type": "image", "data": "abc" }]))
+            .expect_err("image prompts are not advertised");
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("not advertised"));
     }
 
     #[tokio::test]
@@ -2881,6 +3056,124 @@ mod tests {
         assert_eq!(listed["nextCursor"], Value::Null);
     }
 
+    #[tokio::test]
+    async fn session_set_config_option_is_known_but_rejects_unadvertised_options() {
+        let state = Arc::new(AcpConnectionState::default());
+        let _ = handle_initialize(
+            &state,
+            &json!({ "protocolVersion": 1, "clientCapabilities": {} }),
+        )
+        .await
+        .expect("initialize");
+        let created = handle_new_session(
+            None,
+            None,
+            &state,
+            &json!({ "cwd": "/tmp", "mcpServers": [] }),
+        )
+        .await
+        .expect("new session");
+        let err = handle_set_config_option(
+            &state,
+            &json!({
+                "sessionId": created["sessionId"],
+                "configId": "model",
+                "value": "fast"
+            }),
+        )
+        .await
+        .expect_err("no config options are currently advertised");
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.data.unwrap()["configOptions"], json!([]));
+
+        let err = handle_set_config_option(
+            &state,
+            &json!({
+                "sessionId": created["sessionId"],
+                "configId": "approval",
+                "value": { "mode": "ask" }
+            }),
+        )
+        .await
+        .expect_err("non-string config values should still parse before rejection");
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.data.unwrap()["configOptions"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn session_load_replays_in_process_transcript_in_order() {
+        let state = Arc::new(AcpConnectionState::default());
+        let _ = handle_initialize(
+            &state,
+            &json!({ "protocolVersion": 1, "clientCapabilities": {} }),
+        )
+        .await
+        .expect("initialize");
+        let session_id = Uuid::new_v4().to_string();
+        let mut session =
+            AcpSessionState::new(session_id.clone(), "/tmp/project".to_string(), Vec::new());
+        session.transcript.push(AcpTranscriptEntry {
+            role: "user".to_string(),
+            content: "first prompt".to_string(),
+            created_at: Utc::now(),
+        });
+        session.transcript.push(AcpTranscriptEntry {
+            role: "assistant".to_string(),
+            content: "first answer".to_string(),
+            created_at: Utc::now(),
+        });
+        state.upsert_session(session).await;
+
+        let (writer_tx, mut writer_rx) = mpsc::unbounded_channel();
+        let loaded = handle_load_session(
+            None,
+            &writer_tx,
+            &state,
+            &json!({
+                "sessionId": session_id,
+                "cwd": "/tmp/project",
+                "mcpServers": []
+            }),
+        )
+        .await
+        .expect("load session");
+
+        assert_eq!(loaded["_meta"]["replayedMessages"], json!(2));
+        let first = writer_rx.recv().await.expect("first replay");
+        let second = writer_rx.recv().await.expect("second replay");
+        assert_eq!(first["method"], json!("session/update"));
+        assert_eq!(
+            first["params"]["update"]["sessionUpdate"],
+            json!("user_message_chunk")
+        );
+        assert_eq!(
+            first["params"]["update"]["content"]["text"],
+            json!("first prompt")
+        );
+        assert_eq!(
+            second["params"]["update"]["sessionUpdate"],
+            json!("agent_message_chunk")
+        );
+        assert_eq!(
+            second["params"]["update"]["content"]["text"],
+            json!("first answer")
+        );
+        let first_params: wire::SessionUpdateParams =
+            serde_json::from_value(first["params"].clone()).expect("typed first replay");
+        let second_params: wire::SessionUpdateParams =
+            serde_json::from_value(second["params"].clone()).expect("typed second replay");
+        assert!(matches!(
+            first_params.update,
+            wire::SessionUpdate::UserMessageChunk { .. }
+        ));
+        assert!(matches!(
+            second_params.update,
+            wire::SessionUpdate::AgentMessageChunk { .. }
+        ));
+
+        unregister_client_bridge(&session_id).await;
+    }
+
     #[test]
     fn session_metadata_carries_cwd_to_tools() {
         let metadata = acp_metadata_with_cwd("sess_test", "/tmp/project");
@@ -2919,6 +3212,300 @@ mod tests {
             .expect("deliver response");
 
         assert_eq!(waiter.await.expect("join")["content"], json!("ok"));
+    }
+
+    #[tokio::test]
+    async fn client_request_waiter_times_out_and_cleans_state() {
+        let state = Arc::new(AcpConnectionState::default());
+        let (writer_tx, mut writer_rx) = mpsc::unbounded_channel();
+        let err = state
+            .send_client_request(
+                &writer_tx,
+                "fs/read_text_file",
+                json!({ "path": "/tmp/a.rs" }),
+                Duration::from_millis(5),
+            )
+            .await
+            .expect_err("missing client response should time out");
+
+        assert_eq!(err.code, -32000);
+        assert!(err.message.contains("timed out"));
+        let outbound = writer_rx.recv().await.expect("outbound request");
+        let request_id = json_rpc_id_key(&outbound["id"]);
+        assert!(
+            state
+                .take_pending_client_request(&request_id)
+                .await
+                .is_none(),
+            "timeout should clear pending request waiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_prompt_waiter_rejects_second_turn_for_same_session() {
+        let state = Arc::new(AcpConnectionState::default());
+        let _first = state
+            .start_prompt_waiter("sess_test")
+            .await
+            .expect("first prompt waiter");
+        let err = state
+            .start_prompt_waiter("sess_test")
+            .await
+            .expect_err("second active prompt waiter should fail");
+        assert_eq!(err.code, -32000);
+        assert!(err.message.contains("active prompt turn"));
+    }
+
+    async fn reply_to_next_client_request(
+        state: &AcpSharedState,
+        writer_rx: &mut mpsc::UnboundedReceiver<Value>,
+        expected_method: &str,
+        result: Value,
+    ) -> Value {
+        let outbound = writer_rx.recv().await.expect("outbound client request");
+        assert_eq!(outbound["jsonrpc"], json!("2.0"));
+        assert_eq!(outbound["method"], json!(expected_method));
+        let request_id = json_rpc_id_key(&outbound["id"]);
+        let tx = state
+            .take_pending_client_request(&request_id)
+            .await
+            .expect("pending client request");
+        tx.send(AcpClientResponse::Result(result))
+            .expect("deliver client response");
+        outbound
+    }
+
+    async fn reply_to_next_client_request_error(
+        state: &AcpSharedState,
+        writer_rx: &mut mpsc::UnboundedReceiver<Value>,
+        expected_method: &str,
+        error: JsonRpcErrorValue,
+    ) -> Value {
+        let outbound = writer_rx.recv().await.expect("outbound client request");
+        assert_eq!(outbound["jsonrpc"], json!("2.0"));
+        assert_eq!(outbound["method"], json!(expected_method));
+        let request_id = json_rpc_id_key(&outbound["id"]);
+        let tx = state
+            .take_pending_client_request(&request_id)
+            .await
+            .expect("pending client request");
+        tx.send(AcpClientResponse::Error(error))
+            .expect("deliver client error");
+        outbound
+    }
+
+    #[tokio::test]
+    async fn client_fs_bridge_correlates_read_and_write_requests() {
+        let state = Arc::new(AcpConnectionState::default());
+        let _ = handle_initialize(
+            &state,
+            &json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {
+                    "fs": { "readTextFile": true, "writeTextFile": true }
+                }
+            }),
+        )
+        .await
+        .expect("initialize");
+        let session_id = Uuid::new_v4().to_string();
+        let (writer_tx, mut writer_rx) = mpsc::unbounded_channel();
+        register_client_bridge(&session_id, &writer_tx, &state).await;
+
+        let read_session_id = session_id.clone();
+        let read = tokio::spawn(async move {
+            client_read_text_file(&read_session_id, "/tmp/a.rs", Some(2), Some(5))
+                .await
+                .expect("read file")
+        });
+        let read_request = reply_to_next_client_request(
+            &state,
+            &mut writer_rx,
+            "fs/read_text_file",
+            json!({ "content": "hello" }),
+        )
+        .await;
+        let read_params: wire::ReadTextFileRequest =
+            serde_json::from_value(read_request["params"].clone()).expect("read params");
+        assert_eq!(read_params.session_id, session_id);
+        assert_eq!(read_params.path, "/tmp/a.rs");
+        assert_eq!(read_params.line, Some(2));
+        assert_eq!(read_params.limit, Some(5));
+        assert_eq!(read.await.expect("read join"), Some("hello".to_string()));
+
+        let write_session_id = session_id.clone();
+        let write = tokio::spawn(async move {
+            client_write_text_file(&write_session_id, "/tmp/a.rs", "new text")
+                .await
+                .expect("write file")
+        });
+        let write_request =
+            reply_to_next_client_request(&state, &mut writer_rx, "fs/write_text_file", json!({}))
+                .await;
+        let write_params: wire::WriteTextFileRequest =
+            serde_json::from_value(write_request["params"].clone()).expect("write params");
+        assert_eq!(write_params.path, "/tmp/a.rs");
+        assert_eq!(write_params.content, "new text");
+        assert_eq!(write.await.expect("write join"), Some(()));
+
+        unregister_client_bridge(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn client_terminal_bridge_runs_create_wait_output_release_sequence() {
+        let state = Arc::new(AcpConnectionState::default());
+        let _ = handle_initialize(
+            &state,
+            &json!({
+                "protocolVersion": 1,
+                "clientCapabilities": { "terminal": true }
+            }),
+        )
+        .await
+        .expect("initialize");
+        let session_id = Uuid::new_v4().to_string();
+        let (writer_tx, mut writer_rx) = mpsc::unbounded_channel();
+        register_client_bridge(&session_id, &writer_tx, &state).await;
+
+        let mut env = HashMap::new();
+        env.insert("A".to_string(), "B".to_string());
+        let terminal_session_id = session_id.clone();
+        let execution = tokio::spawn(async move {
+            client_execute_terminal(
+                &terminal_session_id,
+                "echo ok",
+                Some("/tmp"),
+                Duration::from_secs(1),
+                &env,
+            )
+            .await
+            .expect("terminal execution")
+        });
+
+        let create_request = reply_to_next_client_request(
+            &state,
+            &mut writer_rx,
+            "terminal/create",
+            json!({ "terminalId": "term_1" }),
+        )
+        .await;
+        let create_params: wire::TerminalCreateRequest =
+            serde_json::from_value(create_request["params"].clone()).expect("create params");
+        assert_eq!(create_params.session_id, session_id);
+        assert_eq!(create_params.command, "sh");
+        assert_eq!(create_params.args, vec!["-lc", "echo ok"]);
+        assert_eq!(create_params.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(create_params.env[0].name, "A");
+
+        let wait_request = reply_to_next_client_request(
+            &state,
+            &mut writer_rx,
+            "terminal/wait_for_exit",
+            json!({ "exitCode": 0 }),
+        )
+        .await;
+        let wait_params: wire::TerminalIdRequest =
+            serde_json::from_value(wait_request["params"].clone()).expect("wait params");
+        assert_eq!(wait_params.terminal_id, "term_1");
+
+        let output_request = reply_to_next_client_request(
+            &state,
+            &mut writer_rx,
+            "terminal/output",
+            json!({ "output": "ok\n", "truncated": false }),
+        )
+        .await;
+        let output_params: wire::TerminalIdRequest =
+            serde_json::from_value(output_request["params"].clone()).expect("output params");
+        assert_eq!(output_params.terminal_id, "term_1");
+
+        let release_request =
+            reply_to_next_client_request(&state, &mut writer_rx, "terminal/release", json!({}))
+                .await;
+        let release_params: wire::TerminalIdRequest =
+            serde_json::from_value(release_request["params"].clone()).expect("release params");
+        assert_eq!(release_params.terminal_id, "term_1");
+
+        let execution = execution
+            .await
+            .expect("terminal join")
+            .expect("terminal should use client bridge");
+        assert_eq!(execution.terminal_id, "term_1");
+        assert_eq!(execution.output, "ok\n");
+        assert_eq!(execution.exit_code, Some(0));
+        assert_eq!(execution.signal, None);
+        assert!(!execution.truncated);
+
+        unregister_client_bridge(&session_id).await;
+    }
+
+    #[tokio::test]
+    async fn client_terminal_wait_error_returns_error_without_output_or_kill() {
+        let state = Arc::new(AcpConnectionState::default());
+        let _ = handle_initialize(
+            &state,
+            &json!({
+                "protocolVersion": 1,
+                "clientCapabilities": { "terminal": true }
+            }),
+        )
+        .await
+        .expect("initialize");
+        let session_id = Uuid::new_v4().to_string();
+        let (writer_tx, mut writer_rx) = mpsc::unbounded_channel();
+        register_client_bridge(&session_id, &writer_tx, &state).await;
+
+        let terminal_session_id = session_id.clone();
+        let execution = tokio::spawn(async move {
+            let env = HashMap::new();
+            client_execute_terminal(
+                &terminal_session_id,
+                "echo ok",
+                Some("/tmp"),
+                Duration::from_secs(1),
+                &env,
+            )
+            .await
+        });
+
+        reply_to_next_client_request(
+            &state,
+            &mut writer_rx,
+            "terminal/create",
+            json!({ "terminalId": "term_1" }),
+        )
+        .await;
+        reply_to_next_client_request_error(
+            &state,
+            &mut writer_rx,
+            "terminal/wait_for_exit",
+            JsonRpcErrorValue {
+                code: -32010,
+                message: "terminal failed".to_string(),
+                data: Some(json!({ "terminalId": "term_1" })),
+            },
+        )
+        .await;
+        let release_request =
+            reply_to_next_client_request(&state, &mut writer_rx, "terminal/release", json!({}))
+                .await;
+        let release_params: wire::TerminalIdRequest =
+            serde_json::from_value(release_request["params"].clone()).expect("release params");
+        assert_eq!(release_params.terminal_id, "term_1");
+
+        let err = execution
+            .await
+            .expect("terminal join")
+            .expect_err("wait client error should fail terminal bridge");
+        assert!(err.contains("terminal failed"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), writer_rx.recv())
+                .await
+                .is_err(),
+            "terminal wait client errors should not request output or kill"
+        );
+
+        unregister_client_bridge(&session_id).await;
     }
 
     #[test]
@@ -3061,6 +3648,308 @@ mod tests {
     }
 
     #[test]
+    fn session_info_update_uses_official_flat_fields() {
+        let update = session_info_update(
+            Some("Implement ACP".to_string()),
+            Some("2026-04-24T12:00:00Z".to_string()),
+            Some(json!({ "messageCount": 1 })),
+        );
+
+        assert_eq!(update["sessionUpdate"], json!("session_info_update"));
+        assert_eq!(update["title"], json!("Implement ACP"));
+        assert_eq!(update["updatedAt"], json!("2026-04-24T12:00:00Z"));
+        assert_eq!(update["_meta"]["messageCount"], json!(1));
+        assert_eq!(update["session"], Value::Null);
+
+        let params = wire::SessionUpdateParams {
+            session_id: "sess_test".to_string(),
+            update: serde_json::from_value(update).expect("session_info_update wire shape"),
+        };
+        assert!(matches!(
+            params.update,
+            wire::SessionUpdate::SessionInfoUpdate { .. }
+        ));
+    }
+
+    #[test]
+    fn json_rpc_responses_preserve_id_shapes_and_stay_ndjson() {
+        let numeric = success_response(Some(json!(42)), json!({ "ok": true }));
+        assert_eq!(numeric["jsonrpc"], json!("2.0"));
+        assert_eq!(numeric["id"], json!(42));
+        assert_eq!(numeric["result"]["ok"], json!(true));
+
+        let string = error_response(
+            Some(json!("client-req-1")),
+            -32602,
+            "Invalid params".to_string(),
+            Some(json!({ "field": "cwd" })),
+        );
+        assert_eq!(string["id"], json!("client-req-1"));
+        assert_eq!(string["error"]["code"], json!(-32602));
+        assert_eq!(string["error"]["data"]["field"], json!("cwd"));
+
+        for message in [numeric, string] {
+            let line = serde_json::to_string(&message).expect("serialize response");
+            assert!(!line.contains('\n'), "ACP stdout must remain NDJSON");
+            let reparsed: Value = serde_json::from_str(&line).expect("response is valid JSON");
+            assert_eq!(reparsed["jsonrpc"], json!("2.0"));
+        }
+    }
+
+    #[test]
+    fn permission_request_shape_round_trips_through_wire_type() {
+        let request = client_request(
+            json!("perm-1"),
+            "session/request_permission",
+            json!({
+                "sessionId": "sess_test",
+                "toolCall": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_1",
+                    "title": "Approval needed: shell",
+                    "kind": "execute",
+                    "status": "pending",
+                    "rawInput": { "command": "cargo test" }
+                },
+                "options": permission_options()
+            }),
+        );
+
+        assert_eq!(request["jsonrpc"], json!("2.0"));
+        assert_eq!(request["id"], json!("perm-1"));
+        assert_eq!(request["method"], json!("session/request_permission"));
+        let params: wire::RequestPermissionParams =
+            serde_json::from_value(request["params"].clone()).expect("permission params");
+        assert_eq!(params.session_id, "sess_test");
+        assert_eq!(params.tool_call["toolCallId"], json!("call_1"));
+        assert_eq!(params.options.len(), 3);
+        assert!(
+            params
+                .options
+                .iter()
+                .any(|option| option.option_id == "allow-once")
+        );
+        assert!(
+            params
+                .options
+                .iter()
+                .any(|option| option.option_id == "allow-always")
+        );
+        assert!(
+            params
+                .options
+                .iter()
+                .any(|option| option.option_id == "reject-once")
+        );
+    }
+
+    #[test]
+    fn client_bridge_payloads_match_typed_wire_requests() {
+        let read = wire::to_value(wire::ReadTextFileRequest {
+            session_id: "sess_test".to_string(),
+            path: "/tmp/a.rs".to_string(),
+            line: Some(10),
+            limit: Some(20),
+        });
+        let read: wire::ReadTextFileRequest =
+            serde_json::from_value(read).expect("read_text_file params");
+        assert_eq!(read.session_id, "sess_test");
+        assert_eq!(read.path, "/tmp/a.rs");
+        assert_eq!(read.line, Some(10));
+        assert_eq!(read.limit, Some(20));
+
+        let write = wire::to_value(wire::WriteTextFileRequest {
+            session_id: "sess_test".to_string(),
+            path: "/tmp/a.rs".to_string(),
+            content: "fn main() {}\n".to_string(),
+        });
+        let write: wire::WriteTextFileRequest =
+            serde_json::from_value(write).expect("write_text_file params");
+        assert_eq!(write.content, "fn main() {}\n");
+
+        let terminal = wire::to_value(wire::TerminalCreateRequest {
+            session_id: "sess_test".to_string(),
+            command: "sh".to_string(),
+            args: vec!["-lc".to_string(), "echo ok".to_string()],
+            cwd: Some("/tmp".to_string()),
+            env: vec![wire::TerminalEnvVar {
+                name: "A".to_string(),
+                value: "B".to_string(),
+            }],
+            output_byte_limit: ACP_TERMINAL_OUTPUT_LIMIT,
+        });
+        let terminal: wire::TerminalCreateRequest =
+            serde_json::from_value(terminal).expect("terminal/create params");
+        assert_eq!(terminal.command, "sh");
+        assert_eq!(terminal.args, vec!["-lc", "echo ok"]);
+        assert_eq!(terminal.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(terminal.env[0].name, "A");
+        assert_eq!(terminal.output_byte_limit, ACP_TERMINAL_OUTPUT_LIMIT);
+
+        let terminal_id = wire::to_value(wire::TerminalIdRequest {
+            session_id: "sess_test".to_string(),
+            terminal_id: "term_1".to_string(),
+        });
+        let terminal_id: wire::TerminalIdRequest =
+            serde_json::from_value(terminal_id).expect("terminal id params");
+        assert_eq!(terminal_id.terminal_id, "term_1");
+    }
+
+    #[tokio::test]
+    async fn status_updates_round_trip_through_typed_session_update_variants() {
+        let state = Arc::new(AcpConnectionState::default());
+        let session_id = "sess_test";
+        state
+            .upsert_session(AcpSessionState::new(
+                session_id.to_string(),
+                "/tmp".to_string(),
+                Vec::new(),
+            ))
+            .await;
+
+        let cases = vec![
+            (
+                StatusUpdate::Thinking("thinking".to_string()),
+                "agent_thought_chunk",
+            ),
+            (
+                StatusUpdate::Status("running".to_string()),
+                "tool_call_update",
+            ),
+            (
+                StatusUpdate::Plan {
+                    entries: vec![json!({ "content": "Inspect files", "status": "pending" })],
+                },
+                "plan",
+            ),
+            (
+                StatusUpdate::Usage {
+                    input_tokens: 3,
+                    output_tokens: 5,
+                    cost_usd: Some(0.0001),
+                    model: Some("test-model".to_string()),
+                },
+                "usage_update",
+            ),
+            (
+                StatusUpdate::StreamChunk("chunk".to_string()),
+                "agent_message_chunk",
+            ),
+            (
+                StatusUpdate::ToolStarted {
+                    name: "shell".to_string(),
+                    parameters: Some(json!({ "command": "true" })),
+                },
+                "tool_call",
+            ),
+            (
+                StatusUpdate::ToolResult {
+                    name: "shell".to_string(),
+                    preview: "stdout".to_string(),
+                },
+                "tool_call_update",
+            ),
+            (
+                StatusUpdate::ToolCompleted {
+                    name: "shell".to_string(),
+                    success: true,
+                    result_preview: Some("done".to_string()),
+                },
+                "tool_call_update",
+            ),
+            (
+                StatusUpdate::AgentMessage {
+                    content: "persistent".to_string(),
+                    message_type: "info".to_string(),
+                },
+                "agent_message_chunk",
+            ),
+            (
+                StatusUpdate::Error {
+                    message: "failed".to_string(),
+                    code: Some("llm".to_string()),
+                },
+                "agent_message_chunk",
+            ),
+            (
+                StatusUpdate::SubagentSpawned {
+                    agent_id: "sub_1".to_string(),
+                    name: "researcher".to_string(),
+                    task: "look".to_string(),
+                    task_packet: crate::agent::subagent_executor::SubagentTaskPacket::default(),
+                    allowed_tools: Vec::new(),
+                    allowed_skills: Vec::new(),
+                    memory_mode: "provided_context_only".to_string(),
+                    tool_mode: "explicit_only".to_string(),
+                    skill_mode: "explicit_only".to_string(),
+                },
+                "tool_call",
+            ),
+            (
+                StatusUpdate::SubagentProgress {
+                    agent_id: "sub_1".to_string(),
+                    message: "working".to_string(),
+                    category: "thinking".to_string(),
+                },
+                "tool_call_update",
+            ),
+            (
+                StatusUpdate::SubagentCompleted {
+                    agent_id: "sub_1".to_string(),
+                    name: "researcher".to_string(),
+                    success: true,
+                    response: "done".to_string(),
+                    duration_ms: 12,
+                    iterations: 1,
+                    task_packet: crate::agent::subagent_executor::SubagentTaskPacket::default(),
+                    allowed_tools: Vec::new(),
+                    allowed_skills: Vec::new(),
+                    memory_mode: "provided_context_only".to_string(),
+                    tool_mode: "explicit_only".to_string(),
+                    skill_mode: "explicit_only".to_string(),
+                },
+                "tool_call_update",
+            ),
+        ];
+
+        for (status, expected_update) in cases {
+            let messages = status_to_acp_messages(&state, session_id, status).await;
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0]["method"], json!("session/update"));
+            assert_eq!(
+                messages[0]["params"]["update"]["sessionUpdate"],
+                json!(expected_update)
+            );
+            let params: wire::SessionUpdateParams =
+                serde_json::from_value(messages[0]["params"].clone())
+                    .expect("status update should match typed wire shape");
+            assert_eq!(params.session_id, session_id);
+        }
+
+        let approval = status_to_acp_messages(
+            &state,
+            session_id,
+            StatusUpdate::ApprovalNeeded {
+                request_id: Uuid::new_v4().to_string(),
+                tool_name: "shell".to_string(),
+                description: "approve shell".to_string(),
+                parameters: json!({ "command": "true" }),
+            },
+        )
+        .await;
+        assert_eq!(approval.len(), 2);
+        let update_params: wire::SessionUpdateParams =
+            serde_json::from_value(approval[0]["params"].clone()).expect("approval update");
+        assert!(matches!(
+            update_params.update,
+            wire::SessionUpdate::ToolCall { .. }
+        ));
+        let permission_params: wire::RequestPermissionParams =
+            serde_json::from_value(approval[1]["params"].clone()).expect("approval request");
+        assert_eq!(permission_params.session_id, session_id);
+    }
+
+    #[test]
     fn prompt_response_uses_typed_stop_reason_values() {
         assert_eq!(
             prompt_response(wire::StopReason::Cancelled)["stopReason"],
@@ -3081,6 +3970,69 @@ mod tests {
     }
 
     #[test]
+    fn all_emitted_wire_update_variants_round_trip() {
+        let updates = vec![
+            wire::SessionUpdate::UserMessageChunk {
+                content: wire::ContentBlock::text("user"),
+            },
+            wire::SessionUpdate::AgentMessageChunk {
+                content: wire::ContentBlock::text("agent"),
+            },
+            wire::SessionUpdate::AgentThoughtChunk {
+                content: wire::ContentBlock::text("thought"),
+            },
+            wire::SessionUpdate::ToolCall {
+                tool_call_id: "call_1".to_string(),
+                title: "shell".to_string(),
+                kind: "execute".to_string(),
+                status: "pending".to_string(),
+                raw_input: json!({ "command": "true" }),
+                meta: Some(json!({ "approvalNeeded": false })),
+            },
+            wire::SessionUpdate::ToolCallUpdate {
+                tool_call_id: "call_1".to_string(),
+                status: "completed".to_string(),
+                content: Some(vec![wire::ToolContentBlock::text("ok")]),
+                meta: None,
+            },
+            wire::SessionUpdate::CurrentModeUpdate {
+                current_mode_id: "ask".to_string(),
+            },
+            wire::SessionUpdate::ConfigOptionUpdate {
+                config_options: json!([]),
+            },
+            wire::SessionUpdate::SessionInfoUpdate {
+                title: Some("ACP".to_string()),
+                updated_at: Some("2026-04-24T12:00:00Z".to_string()),
+                meta: Some(json!({ "messageCount": 1 })),
+            },
+            wire::SessionUpdate::Plan {
+                entries: vec![json!({ "content": "Run tests", "status": "pending" })],
+            },
+            wire::SessionUpdate::UsageUpdate {
+                usage: json!({ "inputTokens": 1, "outputTokens": 2, "totalTokens": 3 }),
+            },
+        ];
+
+        for update in updates {
+            let message = wire::JsonRpcNotification {
+                jsonrpc: "2.0",
+                method: "session/update",
+                params: wire::SessionUpdateParams {
+                    session_id: "sess_test".to_string(),
+                    update,
+                },
+            };
+            let line = serde_json::to_string(&message).expect("serialize update");
+            assert!(!line.contains('\n'));
+            let value: Value = serde_json::from_str(&line).expect("valid JSON");
+            let params: wire::SessionUpdateParams =
+                serde_json::from_value(value["params"].clone()).expect("wire update params");
+            assert_eq!(params.session_id, "sess_test");
+        }
+    }
+
+    #[test]
     fn permission_outcome_accepts_editor_response_variants() {
         let nested = permission_outcome_from_result(
             &json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } }),
@@ -3092,5 +4044,31 @@ mod tests {
             permission_outcome_from_result(&json!({ "outcome": "selected", "optionId": "reject" }));
         assert_eq!(direct.outcome, "selected");
         assert_eq!(direct.option_id.as_deref(), Some("reject"));
+
+        assert_eq!(
+            permission_decision_from_outcome(&direct),
+            (false, false, false)
+        );
+        assert_eq!(
+            permission_decision_from_outcome(&wire::PermissionOutcome {
+                outcome: "selected".to_string(),
+                option_id: Some("allow-once".to_string()),
+            }),
+            (true, false, false)
+        );
+        assert_eq!(
+            permission_decision_from_outcome(&wire::PermissionOutcome {
+                outcome: "selected".to_string(),
+                option_id: Some("allow-always".to_string()),
+            }),
+            (true, true, false)
+        );
+        assert_eq!(
+            permission_decision_from_outcome(&wire::PermissionOutcome {
+                outcome: "cancelled".to_string(),
+                option_id: None,
+            }),
+            (false, false, true)
+        );
     }
 }

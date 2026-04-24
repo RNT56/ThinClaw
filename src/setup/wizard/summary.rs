@@ -121,7 +121,23 @@ impl SetupWizard {
             self.settings.tunnel.public_url.is_some() || self.settings.tunnel.provider.is_some();
 
         println!("  Channels:");
-        println!("    - CLI/TUI: enabled");
+        let cli_enabled = self.settings.channels.cli_enabled.unwrap_or(true);
+        println!(
+            "    - CLI/TUI: {}",
+            if cli_enabled { "enabled" } else { "disabled" }
+        );
+        if self.settings.channels.gateway_enabled.unwrap_or(true) {
+            let access = crate::platform::gateway_access::GatewayAccessInfo::from_env_and_settings(
+                Some(&self.settings),
+            );
+            println!("    - Web Gateway: enabled ({})", access.bind_display());
+            if let Some(url) = access.token_url(false) {
+                println!("      Token URL: {}", url);
+            }
+            if access.is_loopback() {
+                println!("      SSH tunnel: {}", access.ssh_tunnel_command());
+            }
+        }
 
         if self.settings.channels.http_enabled {
             let port = self.settings.channels.http_port.unwrap_or(8080);

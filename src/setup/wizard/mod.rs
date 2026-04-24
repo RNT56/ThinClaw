@@ -60,6 +60,8 @@ pub struct SetupConfig {
     pub ui_mode: UiMode,
     /// Optional guided settings topic.
     pub guide_topic: Option<GuideTopic>,
+    /// Optional profile supplied by the CLI.
+    pub profile: Option<OnboardingProfile>,
     /// When true, save settings and return without continuing into runtime.
     pub pause_after_completion: bool,
 }
@@ -71,6 +73,7 @@ impl Default for SetupConfig {
             channels_only: false,
             ui_mode: UiMode::Auto,
             guide_topic: None,
+            profile: None,
             pause_after_completion: false,
         }
     }
@@ -151,6 +154,7 @@ impl SetupWizard {
 
     /// Create a wizard with custom configuration.
     pub fn with_config(config: SetupConfig) -> Self {
+        let selected_profile = config.profile.unwrap_or_default();
         Self {
             config,
             settings: Settings::default(),
@@ -160,7 +164,7 @@ impl SetupWizard {
             db_backend: None,
             secrets_crypto: None,
             llm_api_key: None,
-            selected_profile: OnboardingProfile::default(),
+            selected_profile,
             plan: None,
             step_statuses: BTreeMap::new(),
             followups: Vec::new(),
@@ -209,6 +213,9 @@ impl SetupWizard {
     }
 
     pub(super) fn primary_runtime_command(&self) -> &'static str {
+        if matches!(self.selected_profile, OnboardingProfile::RemoteServer) {
+            return "thinclaw run --no-onboard";
+        }
         match self.runtime_ui_mode() {
             UiMode::Tui => "thinclaw tui",
             UiMode::Cli | UiMode::Auto => "thinclaw",
@@ -216,6 +223,13 @@ impl SetupWizard {
     }
 
     pub(super) fn runtime_handoff_summary(&self) -> String {
+        if matches!(self.selected_profile, OnboardingProfile::RemoteServer) {
+            return if self.should_continue_to_runtime() {
+                "ThinClaw will now continue into `thinclaw run --no-onboard` with the service-safe remote runtime settings from this run.".to_string()
+            } else {
+                "Settings are saved. Start the remote runtime with `thinclaw run --no-onboard` or install/start the OS service.".to_string()
+            };
+        }
         if self.should_continue_to_runtime() {
             format!(
                 "ThinClaw will now continue into `{}` using the settings from this run.",
@@ -228,6 +242,17 @@ impl SetupWizard {
     }
 
     pub(super) fn what_next_commands(&self) -> Vec<String> {
+        if matches!(self.selected_profile, OnboardingProfile::RemoteServer) {
+            return vec![
+                "Service-safe runtime: thinclaw run --no-onboard".to_string(),
+                "Install OS service: thinclaw service install".to_string(),
+                "Start OS service: thinclaw service start".to_string(),
+                "Show WebUI access: thinclaw gateway access".to_string(),
+                "Show full token URL: thinclaw gateway access --show-token".to_string(),
+                "Remote diagnostics: thinclaw doctor --profile remote".to_string(),
+                "Reopen remote onboarding: thinclaw onboard --profile remote".to_string(),
+            ];
+        }
         let mut commands = vec![
             format!("Primary runtime: {}", self.primary_runtime_command()),
             "Standard CLI runtime: thinclaw".to_string(),
@@ -356,7 +381,7 @@ impl SetupWizard {
         } else {
             phases.push(WizardPhase {
                 id: Phase::WelcomeProfile,
-                step_ids: vec![Step::CliSkin, Step::AgentIdentity],
+                step_ids: vec![Step::CliSkin, Step::Profile, Step::AgentIdentity],
             });
             phases.push(WizardPhase {
                 id: Phase::AiStack,
@@ -369,6 +394,10 @@ impl SetupWizard {
             phases.push(WizardPhase {
                 id: Phase::CapabilitiesAutomation,
                 step_ids: vec![Step::ToolApproval, Step::DockerSandbox, Step::CodingWorkers],
+            });
+            phases.push(WizardPhase {
+                id: Phase::ExperienceOperations,
+                step_ids: vec![Step::WebUi],
             });
             phases.push(WizardPhase {
                 id: Phase::Finish,
@@ -908,6 +937,7 @@ impl SetupWizard {
             }
             WizardStepId::Profile => {
                 self.step_profile()?;
+                self.apply_profile_defaults();
                 Ok(StepStatus::Completed)
             }
             WizardStepId::Database => {
@@ -1207,6 +1237,7 @@ impl SetupWizard {
         if !matches!(ui_mode, UiMode::Cli | UiMode::Tui)
             || self.config.channels_only
             || self.config.guide_topic.is_some()
+            || self.config.profile.is_some()
         {
             return Ok(());
         }
@@ -1240,6 +1271,11 @@ impl SetupWizard {
     }
 
     async fn apply_run_mode_defaults(&mut self) -> Result<(), SetupError> {
+        if let Some(profile) = self.config.profile {
+            self.selected_profile = profile;
+            self.apply_profile_defaults();
+        }
+
         if self.is_quick_setup() {
             self.auto_configure_quick_runtime_defaults().await?;
         } else if self.config.channels_only || self.is_guide_mode() {
@@ -1250,11 +1286,22 @@ impl SetupWizard {
     }
 
     fn step_profile(&mut self) -> Result<(), SetupError> {
+        if let Some(profile) = self.config.profile {
+            self.selected_profile = profile;
+            print_success(&format!(
+                "Using the {} profile from --profile.",
+                self.selected_profile.title()
+            ));
+            print_info(self.selected_profile.description());
+            return Ok(());
+        }
+
         let options = [
             "Balanced            - calm defaults for most first runs",
             "Local & Private     - prefer local models and fewer external services",
             "Builder & Coding    - bias for tools, coding, and stronger routing",
             "Channel-First       - prioritize reachability and notification setup",
+            "Remote / SSH Host   - safe service runtime with WebUI access via SSH tunnel",
             "Custom / Advanced   - start neutral and tune each major choice directly",
         ];
         print_info("Choose the lane that best matches the system you want to leave setup with.");
@@ -1263,7 +1310,8 @@ impl SetupWizard {
             1 => OnboardingProfile::LocalAndPrivate,
             2 => OnboardingProfile::BuilderAndCoding,
             3 => OnboardingProfile::ChannelFirst,
-            4 => OnboardingProfile::CustomAdvanced,
+            4 => OnboardingProfile::RemoteServer,
+            5 => OnboardingProfile::CustomAdvanced,
             _ => OnboardingProfile::Balanced,
         };
 
@@ -1332,8 +1380,70 @@ impl SetupWizard {
                 }
                 self.settings.routines_enabled = true;
             }
+            OnboardingProfile::RemoteServer => {
+                self.settings.skills_enabled = true;
+                self.settings.observability_backend = "none".to_string();
+                self.settings.providers.smart_routing_enabled = true;
+                if self.settings.providers.routing_mode == crate::settings::RoutingMode::PrimaryOnly
+                {
+                    self.settings.providers.routing_mode = crate::settings::RoutingMode::CheapSplit;
+                }
+                self.settings.routines_enabled = true;
+                self.settings.heartbeat.enabled = false;
+                self.settings.channels.cli_enabled = Some(false);
+                self.settings.channels.gateway_enabled = Some(true);
+                let gateway_host = self.remote_gateway_host_or_loopback().to_string();
+                self.settings.channels.gateway_host = Some(gateway_host);
+                self.settings.channels.gateway_port =
+                    Some(self.settings.channels.gateway_port.unwrap_or(3000));
+                self.ensure_gateway_auth_token();
+                if self.settings.database_backend.is_none() {
+                    self.settings.database_backend = Some("libsql".to_string());
+                }
+                if self.settings.libsql_path.is_none() {
+                    self.settings.libsql_path = Some(
+                        crate::config::default_libsql_path()
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+                if self.settings.secrets_master_key_source == crate::settings::KeySource::Env {
+                    self.settings.secrets.allow_env_master_key = true;
+                    self.settings.secrets.master_key_source =
+                        crate::settings::SecretsMasterKeySource::Env;
+                }
+            }
             OnboardingProfile::CustomAdvanced => {}
         }
+    }
+
+    fn ensure_gateway_auth_token(&mut self) {
+        let has_token = self
+            .settings
+            .channels
+            .gateway_auth_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty());
+        if has_token {
+            return;
+        }
+
+        use rand::Rng;
+        let token: String = rand::thread_rng()
+            .sample_iter(&rand::distributions::Alphanumeric)
+            .take(48)
+            .map(char::from)
+            .collect();
+        self.settings.channels.gateway_auth_token = Some(token);
+    }
+
+    fn remote_gateway_host_or_loopback(&self) -> &str {
+        self.settings
+            .channels
+            .gateway_host
+            .as_deref()
+            .filter(|host| !host.trim().is_empty())
+            .unwrap_or("127.0.0.1")
     }
 
     fn configured_channel_names(&self) -> Vec<String> {
@@ -1436,7 +1546,6 @@ impl SetupWizard {
 
     async fn step_channel_verification(&mut self) -> Result<usize, SetupError> {
         let mut issues = 0usize;
-        let secrets = self.init_secrets_context().await.ok();
         self.verified_channels.clear();
 
         self.remove_followup("channel-verification");
@@ -1461,6 +1570,8 @@ impl SetupWizard {
             );
             return Ok(1);
         }
+
+        let secrets = self.init_secrets_context().await.ok();
 
         if self.settings.channels.http_enabled {
             let host = self
@@ -1999,6 +2110,7 @@ mod tests {
             channels_only: false,
             ui_mode: UiMode::Cli,
             guide_topic: None,
+            profile: None,
             pause_after_completion: false,
         };
         let wizard = SetupWizard::with_config(config);
@@ -2013,11 +2125,11 @@ mod tests {
     }
 
     #[test]
-    fn test_quick_setup_plan_uses_ten_steps() {
+    fn test_quick_setup_plan_uses_documented_twelve_steps() {
         let wizard = SetupWizard::new();
         let plan = wizard.build_plan();
 
-        assert_eq!(plan.steps.len(), 10);
+        assert_eq!(plan.steps.len(), 12);
         assert!(
             !plan
                 .steps
@@ -2292,6 +2404,61 @@ mod tests {
         assert_eq!(wizard.settings.providers.advisor_max_calls, 4);
     }
 
+    #[test]
+    fn test_remote_profile_applies_service_safe_gateway_defaults() {
+        let mut wizard = SetupWizard::new();
+        wizard.selected_profile = OnboardingProfile::RemoteServer;
+
+        wizard.apply_profile_defaults();
+
+        assert_eq!(wizard.settings.channels.cli_enabled, Some(false));
+        assert_eq!(wizard.settings.channels.gateway_enabled, Some(true));
+        assert_eq!(
+            wizard.settings.channels.gateway_host.as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(wizard.settings.channels.gateway_port, Some(3000));
+        assert!(
+            wizard
+                .settings
+                .channels
+                .gateway_auth_token
+                .as_deref()
+                .is_some_and(|token| token.len() >= 32)
+        );
+        assert_eq!(wizard.settings.database_backend.as_deref(), Some("libsql"));
+    }
+
+    #[test]
+    fn test_cli_supplied_remote_profile_is_preselected() {
+        let wizard = SetupWizard::with_config(SetupConfig {
+            profile: Some(OnboardingProfile::RemoteServer),
+            ..SetupConfig::default()
+        });
+
+        assert_eq!(wizard.selected_profile, OnboardingProfile::RemoteServer);
+    }
+
+    #[test]
+    fn test_remote_bootstrap_env_writes_gateway_and_cli_keys() {
+        let temp = tempdir().expect("temp thinclaw home");
+        let _guard = EnvGuard::set("THINCLAW_HOME", temp.path().to_string_lossy().into_owned());
+        let mut wizard = SetupWizard::new();
+        wizard.selected_profile = OnboardingProfile::RemoteServer;
+        wizard.apply_profile_defaults();
+        wizard.settings.onboard_completed = true;
+
+        wizard.write_bootstrap_env().expect("write bootstrap env");
+
+        let env_path = temp.path().join(".env");
+        let content = std::fs::read_to_string(env_path).expect("read bootstrap env");
+        assert!(content.contains("GATEWAY_ENABLED=\"true\""));
+        assert!(content.contains("GATEWAY_HOST=\"127.0.0.1\""));
+        assert!(content.contains("GATEWAY_PORT=\"3000\""));
+        assert!(content.contains("GATEWAY_AUTH_TOKEN=\""));
+        assert!(content.contains("CLI_ENABLED=\"false\""));
+    }
+
     #[tokio::test]
     async fn test_fetch_anthropic_models_static_fallback() {
         // With no API key, should return static defaults
@@ -2381,6 +2548,19 @@ mod tests {
     }
 
     impl EnvGuard {
+        fn set(key: &'static str, value: String) -> Self {
+            let env_guard = lock_env();
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self {
+                _env_guard: env_guard,
+                key,
+                original,
+            }
+        }
+
         fn clear(key: &'static str) -> Self {
             let env_guard = lock_env();
             let original = std::env::var(key).ok();

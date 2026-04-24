@@ -35,7 +35,9 @@ impl SetupWizard {
         let default_bundle = match self.selected_profile {
             super::OnboardingProfile::LocalAndPrivate => 0,
             super::OnboardingProfile::BuilderAndCoding => 2,
-            super::OnboardingProfile::Balanced | super::OnboardingProfile::ChannelFirst => 1,
+            super::OnboardingProfile::Balanced
+            | super::OnboardingProfile::ChannelFirst
+            | super::OnboardingProfile::RemoteServer => 1,
             super::OnboardingProfile::CustomAdvanced => 0,
         };
         let bundle_options = [

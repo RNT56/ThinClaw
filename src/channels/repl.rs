@@ -43,7 +43,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::agent::truncate_for_preview;
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, StreamMode,
+};
 use crate::error::ChannelError;
 use crate::terminal_branding::{TerminalBranding, resolve_cli_skin_name};
 use crate::tui::skin::CliSkin;
@@ -456,6 +458,10 @@ impl Channel for ReplChannel {
         None
     }
 
+    fn stream_mode(&self) -> StreamMode {
+        StreamMode::EventChunks
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(32);
         let single_message = self.single_message.clone();
@@ -706,7 +712,9 @@ impl Channel for ReplChannel {
         match status {
             StatusUpdate::Thinking(msg) => {
                 let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
-                eprintln!("  {muted}\u{25CB} {display}{reset}");
+                let spinner_frame = skin.resolved_spinner_frames();
+                let frame_char = spinner_frame.first().copied().unwrap_or("⠋");
+                eprintln!("  {accent}{frame_char}{reset} {muted}{display}{reset}");
             }
             StatusUpdate::ToolStarted { name, .. } => {
                 eprintln!("  {warn}\u{25CB} {}{reset}", skin.tool_label(&name));
@@ -747,6 +755,32 @@ impl Channel for ReplChannel {
                 if debug || msg.contains("approval") || msg.contains("Approval") {
                     let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
                     eprintln!("  {muted}{display}{reset}");
+                }
+            }
+            StatusUpdate::Plan { entries } => {
+                if debug {
+                    let display = serde_json::to_string(&entries)
+                        .unwrap_or_else(|_| "plan update".to_string());
+                    eprintln!("  {muted}{display}{reset}");
+                }
+            }
+            StatusUpdate::Usage {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                model,
+            } => {
+                if debug {
+                    let cost = cost_usd
+                        .map(|cost| format!(" ${cost:.6}"))
+                        .unwrap_or_default();
+                    let model = model
+                        .as_deref()
+                        .map(|model| format!(" {model}"))
+                        .unwrap_or_default();
+                    eprintln!(
+                        "  {muted}usage:{model} {input_tokens} in / {output_tokens} out{cost}{reset}"
+                    );
                 }
             }
             StatusUpdate::ApprovalNeeded {

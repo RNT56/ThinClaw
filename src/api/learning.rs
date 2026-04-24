@@ -255,10 +255,13 @@ fn to_provider_item(
 ) -> LearningProviderHealthItem {
     LearningProviderHealthItem {
         provider: health.provider,
+        active: health.active,
         enabled: health.enabled,
         healthy: health.healthy,
+        readiness: health.readiness.as_str().to_string(),
         latency_ms: health.latency_ms,
         error: health.error,
+        capabilities: health.capabilities,
         metadata: health.metadata,
     }
 }
@@ -520,8 +523,12 @@ pub struct LearningOutcomeEvaluateNowResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct LearningProviderHealthItem {
     pub provider: String,
+    pub active: bool,
     pub enabled: bool,
     pub healthy: bool,
+    pub readiness: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

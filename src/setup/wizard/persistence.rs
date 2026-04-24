@@ -75,6 +75,9 @@ impl SetupWizard {
             {
                 env_vars.push(("SECRETS_MASTER_KEY", key));
             }
+            if self.settings.secrets.allow_env_master_key {
+                env_vars.push(("THINCLAW_ALLOW_ENV_MASTER_KEY", "1".to_string()));
+            }
         }
 
         // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
@@ -247,11 +250,20 @@ impl SetupWizard {
         }
 
         // Web Gateway env vars
+        if let Some(enabled) = self.settings.channels.gateway_enabled {
+            env_vars.push(("GATEWAY_ENABLED", enabled.to_string()));
+        }
+        if let Some(ref host) = self.settings.channels.gateway_host {
+            env_vars.push(("GATEWAY_HOST", host.clone()));
+        }
         if let Some(ref port) = self.settings.channels.gateway_port {
             env_vars.push(("GATEWAY_PORT", port.to_string()));
         }
         if let Some(ref token) = self.settings.channels.gateway_auth_token {
             env_vars.push(("GATEWAY_AUTH_TOKEN", token.clone()));
+        }
+        if let Some(enabled) = self.settings.channels.cli_enabled {
+            env_vars.push(("CLI_ENABLED", enabled.to_string()));
         }
 
         // Smart Routing env vars

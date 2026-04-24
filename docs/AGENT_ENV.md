@@ -6,16 +6,19 @@
 
 - `AgentEnv`: async trait with `reset`, `step`, `score`, `is_terminal`, and `export_trajectory`.
 - `AgentLoopEnv`: concrete environment backed by `Agent::handle_message_external`.
+- `TerminalBenchEnv`: command-case benchmark environment with stdout/exit-code scoring.
+- `SkillBenchEnv`: skill-content benchmark environment with deterministic readiness checks.
 - `EnvRunner`: scripted evaluator, SFT JSONL collector, and OpenAI-compatible local serving wrapper.
-- `Trajectory`: serializable rollout record with steps, rewards, and metadata.
+- `Trajectory`: serializable rollout record with steps, rewards, metadata, and optional token/logprob capture capability flags.
 
 ## Phase 1 Modes
 
 - `evaluate`: run scripted episodes and persist `agent_env` artifacts.
 - `collect_sft_jsonl`: keep positive trajectories and write chat-format JSONL.
 - `serve_openai_compatible`: expose `/v1/chat/completions` for eval harnesses that speak OpenAI-compatible chat.
+- Research campaigns: use an `agent_env` runner with `backend_config.benchmark` set to `terminal_bench` or `skill_bench`; the completion path persists trajectory JSON plus normal experiment metrics.
 
-Phase 2 is deliberately deferred: exact token IDs, logprobs, and managed RL server integration should build on top of stable trajectory collection rather than landing in the first tranche.
+Exact token IDs and logprobs are captured only when the active provider can supply them. Unsupported providers keep the trajectory fields present but set capability flags false instead of emitting synthetic exact-token data.
 
 ## Rewarding
 

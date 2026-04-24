@@ -45,17 +45,17 @@ Messaging, cron/routine, broad channel-control, and sub-agent tools are intentio
 
 ## Compatibility Notes
 
-`session/prompt` accepts ACP text and resource blocks. Resource text is inlined; resource links are passed as context references. ThinClaw emits `session/update` notifications for assistant chunks, tool starts/results, status/thought updates, sub-agent status fallbacks, mode changes, and approval-needed states. Stop reasons are serialized through typed ACP wire models; current core support covers `end_turn`, `cancelled`, and mapped provider refusal/length errors.
+`session/prompt` accepts ACP text and resource blocks. Resource text is inlined; resource links are passed as context references. ThinClaw emits `session/update` notifications for assistant chunks, reasoning/thought chunks, structured plan and usage updates when the core produces them, tool starts/results, status fallbacks, sub-agent status fallbacks, mode changes, session info changes, and approval-needed states. Stop reasons are serialized through typed ACP wire models; current core support covers `end_turn`, `cancelled`, `max_tokens`, `max_turn_requests`, and mapped provider refusal/length errors.
 
-When a tool requires approval, ThinClaw sends an ACP `session/request_permission` client request and waits for the result before completing the prompt turn. The response is bridged back into the existing ThinClaw pending-approval flow, so allow-once, allow-always, reject, and cancelled outcomes share the normal approval machinery. `session/list` and `session/load` use persisted ThinClaw conversation metadata when the database is enabled; with `--no-db`, load/list are limited to sessions active in the current ACP process.
+When a tool requires approval, ThinClaw sends an ACP `session/request_permission` client request and waits for the result before completing the prompt turn. The response is bridged back into the existing ThinClaw pending-approval flow, so allow-once, allow-always, reject, cancelled, and timeout outcomes share the normal approval/cancel machinery. `session/list` and `session/load` use persisted ThinClaw conversation metadata when the database is enabled; with `--no-db`, load/list are limited to sessions active in the current ACP process. A session can have one active prompt turn at a time; concurrent turns for the same session are rejected instead of overwriting cancellation or approval waiters.
 
-ThinClaw advertises image/audio prompt support as disabled until the media pipeline is deliberately wired into ACP. If a client advertises filesystem or terminal support, `read_file`, `write_file`, and `shell` route through the ACP client APIs; otherwise they fall back to host-side tools when ThinClaw policy allows it. ACP stdio MCP server descriptors are translated into session-scoped ThinClaw MCP configs and activated through the extension manager; HTTP/SSE MCP transports are rejected because this ACP build does not advertise them.
+ThinClaw advertises image/audio prompt support as disabled until the media pipeline is deliberately wired into ACP. If a client advertises filesystem or terminal support, `read_file`, `write_file`, and `shell` route through the typed ACP client APIs; otherwise they fall back to host-side tools when ThinClaw policy allows it. ACP terminal wait client errors are surfaced as bridge errors, while actual wait timeouts trigger `terminal/kill` before output/release cleanup. ACP stdio MCP server descriptors are translated into session-scoped ThinClaw MCP configs and activated through the extension manager; HTTP/SSE MCP transports are rejected because this ACP build does not advertise them.
 
 `session/resume` is retained as a compatibility handler, but it is not advertised as an ACP v1 core capability.
 
 ## Remaining Acceptance Gates
 
-- Golden JSON-RPC transcripts for initialize, new, prompt, permissions, cancel, close, list, and load
-- Schema validation for every emitted ACP message shape
+- Full subprocess golden JSON-RPC transcripts for prompt, permissions, cancel, close, list, and load
+- Schema validation against the published ACP schema, beyond the current typed serde conformance tests
 - Real Zed and VS Code ACP smoke tests
 - Native provider/cancel propagation deeper than the existing ThinClaw interrupt path

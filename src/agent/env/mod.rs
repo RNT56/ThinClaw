@@ -8,11 +8,13 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::{Json, Router, extract::State, routing::post};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -50,8 +52,28 @@ pub struct TrajectoryStep {
     pub reward: f64,
     pub done: bool,
     pub at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_capture: Option<TokenTrajectoryCapture>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenTrajectoryCapture {
+    #[serde(default)]
+    pub exact_tokens_supported: bool,
+    #[serde(default)]
+    pub logprobs_supported: bool,
+    #[serde(default)]
+    pub token_ids: Vec<u32>,
+    #[serde(default)]
+    pub tokens: Vec<String>,
+    #[serde(default)]
+    pub logprobs: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +198,7 @@ impl AgentEnv for AgentLoopEnv {
             reward,
             done: self.terminal,
             at: Utc::now(),
+            token_capture: None,
             metadata: serde_json::json!({}),
         };
         self.steps.push(step);
@@ -209,6 +232,322 @@ impl AgentEnv for AgentLoopEnv {
             metadata: serde_json::json!({
                 "session_key": self.session_key,
                 "phase": "eval_sft_phase_1",
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalBenchCase {
+    pub name: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub expected_stdout_contains: Vec<String>,
+    #[serde(default)]
+    pub expected_exit_code: Option<i32>,
+    #[serde(default = "default_terminal_bench_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+fn default_terminal_bench_timeout_secs() -> u64 {
+    30
+}
+
+pub struct TerminalBenchEnv {
+    name: String,
+    episode_id: String,
+    cases: Vec<TerminalBenchCase>,
+    cursor: usize,
+    steps: Vec<TrajectoryStep>,
+    observations: Vec<String>,
+    terminal: bool,
+}
+
+impl TerminalBenchEnv {
+    pub fn new(cases: Vec<TerminalBenchCase>) -> Self {
+        Self {
+            name: "terminal_bench".to_string(),
+            episode_id: Uuid::new_v4().to_string(),
+            cases,
+            cursor: 0,
+            steps: Vec::new(),
+            observations: Vec::new(),
+            terminal: false,
+        }
+    }
+
+    fn state(&self) -> EnvState {
+        EnvState {
+            episode_id: self.episode_id.clone(),
+            observations: self.observations.clone(),
+            metadata: serde_json::json!({
+                "benchmark": "terminal_bench",
+                "case_index": self.cursor,
+                "case_count": self.cases.len(),
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl AgentEnv for TerminalBenchEnv {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn reset(&mut self) -> EnvState {
+        self.episode_id = Uuid::new_v4().to_string();
+        self.cursor = 0;
+        self.steps.clear();
+        self.observations.clear();
+        self.terminal = self.cases.is_empty();
+        self.state()
+    }
+
+    async fn step(&mut self, action: AgentAction) -> anyhow::Result<StepResult> {
+        if self.terminal {
+            return Ok(StepResult {
+                state: self.state(),
+                response: None,
+                reward: 0.0,
+                done: true,
+                metadata: serde_json::json!({ "terminal": true }),
+            });
+        }
+        let Some(case) = self.cases.get(self.cursor).cloned() else {
+            self.terminal = true;
+            return Ok(StepResult {
+                state: self.state(),
+                response: None,
+                reward: 0.0,
+                done: true,
+                metadata: serde_json::json!({ "terminal": true }),
+            });
+        };
+
+        let output = tokio::time::timeout(Duration::from_secs(case.timeout_secs), async {
+            let mut command = Command::new("sh");
+            command.arg("-lc").arg(&case.command);
+            if let Some(cwd) = &case.cwd {
+                command.current_dir(cwd);
+            }
+            command.output().await
+        })
+        .await??;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(-1);
+        let stdout_ok = case
+            .expected_stdout_contains
+            .iter()
+            .all(|needle| stdout.contains(needle));
+        let exit_ok = case
+            .expected_exit_code
+            .map_or(output.status.success(), |expected| expected == exit_code);
+        let reward = if stdout_ok && exit_ok { 1.0 } else { 0.0 };
+        let response = format!("stdout:\n{stdout}\nstderr:\n{stderr}");
+        self.observations.push(response.clone());
+        self.cursor += 1;
+        self.terminal = self.cursor >= self.cases.len();
+        let done = self.terminal;
+        let metadata = serde_json::json!({
+            "case": case.name,
+            "exit_code": exit_code,
+            "stdout_ok": stdout_ok,
+            "exit_ok": exit_ok,
+        });
+        self.steps.push(TrajectoryStep {
+            action,
+            response: Some(response.clone()),
+            reward,
+            done,
+            at: Utc::now(),
+            token_capture: None,
+            metadata: metadata.clone(),
+        });
+
+        Ok(StepResult {
+            state: self.state(),
+            response: Some(response),
+            reward,
+            done,
+            metadata,
+        })
+    }
+
+    fn score(&self) -> f64 {
+        if self.steps.is_empty() {
+            0.0
+        } else {
+            self.steps.iter().map(|step| step.reward).sum::<f64>() / self.steps.len() as f64
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
+    async fn export_trajectory(&self) -> Trajectory {
+        Trajectory {
+            env_name: self.name.clone(),
+            episode_id: self.episode_id.clone(),
+            score: self.score(),
+            steps: self.steps.clone(),
+            metadata: serde_json::json!({
+                "benchmark": "terminal_bench",
+                "case_count": self.cases.len(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillBenchCase {
+    pub name: String,
+    pub skill_content: String,
+    #[serde(default)]
+    pub required_substrings: Vec<String>,
+}
+
+pub struct SkillBenchEnv {
+    name: String,
+    episode_id: String,
+    cases: Vec<SkillBenchCase>,
+    cursor: usize,
+    steps: Vec<TrajectoryStep>,
+    observations: Vec<String>,
+    terminal: bool,
+}
+
+impl SkillBenchEnv {
+    pub fn new(cases: Vec<SkillBenchCase>) -> Self {
+        Self {
+            name: "skill_bench".to_string(),
+            episode_id: Uuid::new_v4().to_string(),
+            cases,
+            cursor: 0,
+            steps: Vec::new(),
+            observations: Vec::new(),
+            terminal: false,
+        }
+    }
+
+    fn state(&self) -> EnvState {
+        EnvState {
+            episode_id: self.episode_id.clone(),
+            observations: self.observations.clone(),
+            metadata: serde_json::json!({
+                "benchmark": "skill_bench",
+                "case_index": self.cursor,
+                "case_count": self.cases.len(),
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl AgentEnv for SkillBenchEnv {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn reset(&mut self) -> EnvState {
+        self.episode_id = Uuid::new_v4().to_string();
+        self.cursor = 0;
+        self.steps.clear();
+        self.observations.clear();
+        self.terminal = self.cases.is_empty();
+        self.state()
+    }
+
+    async fn step(&mut self, action: AgentAction) -> anyhow::Result<StepResult> {
+        if self.terminal {
+            return Ok(StepResult {
+                state: self.state(),
+                response: None,
+                reward: 0.0,
+                done: true,
+                metadata: serde_json::json!({ "terminal": true }),
+            });
+        }
+        let Some(case) = self.cases.get(self.cursor).cloned() else {
+            self.terminal = true;
+            return Ok(StepResult {
+                state: self.state(),
+                response: None,
+                reward: 0.0,
+                done: true,
+                metadata: serde_json::json!({ "terminal": true }),
+            });
+        };
+        let has_heading = case.skill_content.contains("# ");
+        let has_body = case.skill_content.lines().count() > 1;
+        let required_ok = case
+            .required_substrings
+            .iter()
+            .all(|needle| case.skill_content.contains(needle));
+        let reward = if has_heading && has_body && required_ok {
+            1.0
+        } else {
+            0.0
+        };
+        let response = if reward >= 1.0 {
+            format!("skill bench '{}' passed", case.name)
+        } else {
+            format!("skill bench '{}' failed", case.name)
+        };
+        self.observations.push(response.clone());
+        self.cursor += 1;
+        self.terminal = self.cursor >= self.cases.len();
+        let done = self.terminal;
+        let metadata = serde_json::json!({
+            "case": case.name,
+            "has_heading": has_heading,
+            "has_body": has_body,
+            "required_ok": required_ok,
+        });
+        self.steps.push(TrajectoryStep {
+            action,
+            response: Some(response.clone()),
+            reward,
+            done,
+            at: Utc::now(),
+            token_capture: None,
+            metadata: metadata.clone(),
+        });
+
+        Ok(StepResult {
+            state: self.state(),
+            response: Some(response),
+            reward,
+            done,
+            metadata,
+        })
+    }
+
+    fn score(&self) -> f64 {
+        if self.steps.is_empty() {
+            0.0
+        } else {
+            self.steps.iter().map(|step| step.reward).sum::<f64>() / self.steps.len() as f64
+        }
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+
+    async fn export_trajectory(&self) -> Trajectory {
+        Trajectory {
+            env_name: self.name.clone(),
+            episode_id: self.episode_id.clone(),
+            score: self.score(),
+            steps: self.steps.clone(),
+            metadata: serde_json::json!({
+                "benchmark": "skill_bench",
+                "case_count": self.cases.len(),
             }),
         }
     }
@@ -396,5 +735,87 @@ mod tests {
         assert_eq!(heuristic_reward(Some("")), 0.0);
         assert!(heuristic_reward(Some("Error: failed")) < 0.5);
         assert_eq!(heuristic_reward(Some("All set")), 1.0);
+    }
+
+    #[test]
+    fn trajectory_step_serializes_exact_token_capture_capabilities() {
+        let step = TrajectoryStep {
+            action: AgentAction::UserMessage {
+                content: "hello".to_string(),
+            },
+            response: Some("world".to_string()),
+            reward: 1.0,
+            done: true,
+            at: Utc::now(),
+            token_capture: Some(TokenTrajectoryCapture {
+                exact_tokens_supported: true,
+                logprobs_supported: true,
+                token_ids: vec![1, 2],
+                tokens: vec!["hello".to_string(), "world".to_string()],
+                logprobs: vec![-0.1, -0.2],
+                provider: Some("test".to_string()),
+                model: Some("model".to_string()),
+            }),
+            metadata: serde_json::json!({}),
+        };
+
+        let value = serde_json::to_value(step).expect("serialize step");
+        assert_eq!(value["token_capture"]["exact_tokens_supported"], true);
+        let first_logprob = value["token_capture"]["logprobs"][0]
+            .as_f64()
+            .expect("first logprob should serialize as a float");
+        assert!((first_logprob - -0.1).abs() < 0.000_001);
+    }
+
+    #[tokio::test]
+    async fn terminal_bench_env_runs_command_cases() {
+        let mut env = TerminalBenchEnv::new(vec![TerminalBenchCase {
+            name: "echo".to_string(),
+            command: "printf bench-ok".to_string(),
+            cwd: None,
+            expected_stdout_contains: vec!["bench-ok".to_string()],
+            expected_exit_code: Some(0),
+            timeout_secs: 5,
+        }]);
+
+        let state = env.reset().await;
+        assert_eq!(
+            state.metadata["benchmark"],
+            serde_json::json!("terminal_bench")
+        );
+        let result = env
+            .step(AgentAction::UserMessage {
+                content: "run".to_string(),
+            })
+            .await
+            .expect("terminal bench step");
+        assert!(result.done);
+        assert_eq!(result.reward, 1.0);
+        assert_eq!(env.score(), 1.0);
+        let trajectory = env.export_trajectory().await;
+        assert_eq!(
+            trajectory.metadata["benchmark"],
+            serde_json::json!("terminal_bench")
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_bench_env_scores_skill_content() {
+        let mut env = SkillBenchEnv::new(vec![SkillBenchCase {
+            name: "skill".to_string(),
+            skill_content: "# Test Skill\nDo the thing.".to_string(),
+            required_substrings: vec!["Do the thing".to_string()],
+        }]);
+        env.reset().await;
+        let result = env
+            .step(AgentAction::UserMessage {
+                content: "check".to_string(),
+            })
+            .await
+            .expect("skill bench step");
+        assert!(result.done);
+        assert_eq!(result.reward, 1.0);
+        let trajectory = env.export_trajectory().await;
+        assert_eq!(trajectory.env_name, "skill_bench");
     }
 }

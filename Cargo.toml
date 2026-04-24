@@ -161,6 +161,7 @@ base64 = "0.22.1"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
 lru = "0.16.3"
+libloading = "0.8"
 
 # HTML to Markdown conversion (feature gated)
 html-to-markdown-rs = { version = "2.3", optional = true }
@@ -322,6 +323,10 @@ ci = "github"
 installers = ["shell", "powershell", "npm", "msi"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Production release artifacts include the full non-desktop/headless runtime
+# used by Pi OS Lite native installs: gateway, channels, tunnels, Docker
+# sandbox/browser fallback, ACP, Nostr, libSQL, and Postgres.
+features = ["full"]
 # The archive format to use for windows builds (defaults .zip)
 windows-archive = ".tar.gz"
 # The archive format to use for non-windows builds (defaults .tar.xz)

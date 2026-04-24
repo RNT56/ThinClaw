@@ -14,6 +14,74 @@ use crate::tools::{
     ToolRegistry,
 };
 
+const WASM_TOOL_INVOKE_DEPTH_KEY: &str = "wasm_tool_invoke_depth";
+const MAX_WASM_TOOL_INVOKE_DEPTH: u64 = 4;
+
+/// Policy-aware tool invocation bridge for host-mediated runtimes such as WASM.
+#[derive(Clone)]
+pub struct HostMediatedToolInvoker {
+    tools: Arc<ToolRegistry>,
+    safety: Arc<SafetyLayer>,
+    lane: ToolExecutionLane,
+    default_profile: ToolProfile,
+}
+
+impl HostMediatedToolInvoker {
+    pub fn new(
+        tools: Arc<ToolRegistry>,
+        safety: Arc<SafetyLayer>,
+        lane: ToolExecutionLane,
+        default_profile: ToolProfile,
+    ) -> Self {
+        Self {
+            tools,
+            safety,
+            lane,
+            default_profile,
+        }
+    }
+
+    pub async fn invoke_json(
+        &self,
+        job_ctx: &JobContext,
+        tool_name: &str,
+        params_json: &str,
+    ) -> Result<String, Error> {
+        let params = serde_json::from_str::<serde_json::Value>(params_json)
+            .map_err(|err| tool_invalid_params(tool_name, format!("Invalid JSON params: {err}")))?;
+        let job_ctx = wasm_tool_invoke_context(job_ctx, tool_name)?;
+
+        let prepared = match prepare_tool_call(ToolPrepareRequest {
+            tools: &self.tools,
+            safety: &self.safety,
+            job_ctx: &job_ctx,
+            tool_name,
+            params: &params,
+            lane: self.lane,
+            default_profile: self.default_profile,
+            profile_override: Some(ToolProfile::ExplicitOnly),
+            approval_mode: ToolApprovalMode::Interactive {
+                auto_approve_tools: false,
+                session_auto_approved: false,
+            },
+            hooks: None,
+        })
+        .await?
+        {
+            ToolPrepareOutcome::Ready(prepared) => prepared,
+            ToolPrepareOutcome::NeedsApproval(_) => {
+                return Err(tool_execution_failed(
+                    tool_name,
+                    "Tool invocation from WASM requires approval and was blocked".to_string(),
+                ));
+            }
+        };
+
+        let output = execute_tool_call(&prepared, &self.safety, &job_ctx).await?;
+        Ok(output.sanitized_content)
+    }
+}
+
 /// Hook execution context for a tool preparation request.
 pub struct ToolHookConfig<'a> {
     pub registry: &'a HookRegistry,
@@ -300,6 +368,38 @@ fn approval_required(requirement: ApprovalRequirement, mode: ToolApprovalMode) -
     }
 }
 
+fn wasm_tool_invoke_context(job_ctx: &JobContext, tool_name: &str) -> Result<JobContext, Error> {
+    let depth = job_ctx
+        .metadata
+        .get(WASM_TOOL_INVOKE_DEPTH_KEY)
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    if depth >= MAX_WASM_TOOL_INVOKE_DEPTH {
+        return Err(tool_execution_failed(
+            tool_name,
+            format!(
+                "WASM tool invocation recursion depth exceeded limit of {MAX_WASM_TOOL_INVOKE_DEPTH}"
+            ),
+        ));
+    }
+
+    let mut next = job_ctx.clone();
+    let mut metadata = match next.metadata {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    metadata.insert(
+        "allowed_tools".to_string(),
+        serde_json::json!([tool_name.to_string()]),
+    );
+    metadata.insert(
+        WASM_TOOL_INVOKE_DEPTH_KEY.to_string(),
+        serde_json::json!(depth + 1),
+    );
+    next.metadata = serde_json::Value::Object(metadata);
+    Ok(next)
+}
+
 async fn run_tool_hook(
     hooks: &HookRegistry,
     tool_name: &str,
@@ -507,7 +607,8 @@ pub fn approval_class_from_requirement(requirement: ApprovalRequirement) -> Tool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::{ToolDomain, ToolMetadata, ToolSideEffectLevel};
+    use crate::config::SafetyConfig;
+    use crate::tools::{ToolDomain, ToolError, ToolMetadata, ToolOutput, ToolSideEffectLevel};
 
     fn descriptor(name: &str) -> ToolDescriptor {
         ToolDescriptor {
@@ -558,5 +659,144 @@ mod tests {
             ToolProfile::Acp,
             &serde_json::json!({})
         ));
+    }
+
+    struct TestTool {
+        name: &'static str,
+        schema: serde_json::Value,
+        approval: ApprovalRequirement,
+        output: serde_json::Value,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for TestTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "test tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            self.schema.clone()
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                self.output.clone(),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            self.approval
+        }
+    }
+
+    fn host_invoker(registry: Arc<ToolRegistry>) -> HostMediatedToolInvoker {
+        HostMediatedToolInvoker::new(
+            registry,
+            Arc::new(SafetyLayer::new(&SafetyConfig::default())),
+            ToolExecutionLane::WorkerRuntime,
+            ToolProfile::ExplicitOnly,
+        )
+    }
+
+    #[tokio::test]
+    async fn host_invoker_rejects_invalid_schema() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register_builtin(Arc::new(TestTool {
+                name: "schema_tool",
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string" }
+                    },
+                    "required": ["message"]
+                }),
+                approval: ApprovalRequirement::Never,
+                output: serde_json::json!({"ok": true}),
+            }))
+            .await;
+
+        let err = host_invoker(registry)
+            .invoke_json(&JobContext::default(), "schema_tool", r#"{"message": 1}"#)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("Invalid parameters"));
+    }
+
+    #[tokio::test]
+    async fn host_invoker_blocks_tools_that_need_approval() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register_builtin(Arc::new(TestTool {
+                name: "approval_tool",
+                schema: serde_json::json!({ "type": "object" }),
+                approval: ApprovalRequirement::UnlessAutoApproved,
+                output: serde_json::json!({"should_not_run": true}),
+            }))
+            .await;
+
+        let err = host_invoker(registry)
+            .invoke_json(&JobContext::default(), "approval_tool", "{}")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("requires approval"));
+    }
+
+    #[tokio::test]
+    async fn host_invoker_returns_sanitized_json_output() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register_builtin(Arc::new(TestTool {
+                name: "echo_json",
+                schema: serde_json::json!({ "type": "object" }),
+                approval: ApprovalRequirement::Never,
+                output: serde_json::json!({"message": "hello"}),
+            }))
+            .await;
+
+        let output = host_invoker(registry)
+            .invoke_json(&JobContext::default(), "echo_json", "{}")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output).unwrap(),
+            serde_json::json!({"message": "hello"})
+        );
+    }
+
+    #[tokio::test]
+    async fn host_invoker_caps_recursive_depth() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register_builtin(Arc::new(TestTool {
+                name: "recursive_tool",
+                schema: serde_json::json!({ "type": "object" }),
+                approval: ApprovalRequirement::Never,
+                output: serde_json::json!({"ok": true}),
+            }))
+            .await;
+        let mut ctx = JobContext::default();
+        ctx.metadata = serde_json::json!({
+            WASM_TOOL_INVOKE_DEPTH_KEY: MAX_WASM_TOOL_INVOKE_DEPTH
+        });
+
+        let err = host_invoker(registry)
+            .invoke_json(&ctx, "recursive_tool", "{}")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("recursion depth exceeded"));
     }
 }

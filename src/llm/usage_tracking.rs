@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -13,7 +15,7 @@ use crate::llm::cost_tracker::{CostEntry, CostTracker};
 use crate::llm::costs;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamChunk,
-    StreamChunkStream, ToolCompletionRequest, ToolCompletionResponse,
+    StreamChunkStream, StreamSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 pub const USAGE_TRACKING_OWNER_KEY: &str = "thinclaw.usage_tracking.owner";
@@ -157,6 +159,127 @@ async fn record_usage(
         if let Err(error) = db.create_experiment_model_usage(&record).await {
             tracing::debug!(%error, "Failed to persist experiment model usage record");
         }
+    }
+}
+
+#[derive(Clone)]
+enum StreamUsageMode {
+    Full {
+        tracker: Arc<tokio::sync::Mutex<CostTracker>>,
+        db: Option<Arc<dyn Database>>,
+        guard: Option<Arc<CostGuard>>,
+        metadata: HashMap<String, String>,
+        fallback_model: String,
+    },
+    GuardOnly {
+        guard: Arc<CostGuard>,
+        fallback_model: String,
+    },
+}
+
+impl StreamUsageMode {
+    async fn record(
+        &self,
+        provider_model: Option<String>,
+        cost_usd: Option<f64>,
+        input_tokens: u32,
+        output_tokens: u32,
+        latency_ms: Option<u64>,
+        success: bool,
+    ) {
+        match self {
+            Self::Full {
+                tracker,
+                db,
+                guard,
+                metadata,
+                fallback_model,
+            } => {
+                record_usage(
+                    tracker,
+                    db.as_ref(),
+                    guard.as_ref(),
+                    metadata,
+                    fallback_model,
+                    provider_model.as_deref(),
+                    cost_usd,
+                    input_tokens,
+                    output_tokens,
+                    latency_ms,
+                    success,
+                )
+                .await;
+            }
+            Self::GuardOnly {
+                guard,
+                fallback_model,
+            } => {
+                record_guard_only(
+                    guard,
+                    fallback_model,
+                    provider_model.as_deref(),
+                    cost_usd,
+                    input_tokens,
+                    output_tokens,
+                )
+                .await;
+            }
+        }
+    }
+}
+
+struct StreamUsageRecorder {
+    mode: StreamUsageMode,
+    started: Instant,
+    recorded: AtomicBool,
+}
+
+impl StreamUsageRecorder {
+    fn new(mode: StreamUsageMode, started: Instant) -> Self {
+        Self {
+            mode,
+            started,
+            recorded: AtomicBool::new(false),
+        }
+    }
+
+    async fn record(
+        &self,
+        provider_model: Option<String>,
+        cost_usd: Option<f64>,
+        input_tokens: u32,
+        output_tokens: u32,
+        success: bool,
+    ) {
+        if self.recorded.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.mode
+            .record(
+                provider_model,
+                cost_usd,
+                input_tokens,
+                output_tokens,
+                Some(self.started.elapsed().as_millis() as u64),
+                success,
+            )
+            .await;
+    }
+}
+
+impl Drop for StreamUsageRecorder {
+    fn drop(&mut self) {
+        if self.recorded.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let mode = self.mode.clone();
+        let latency_ms = Some(self.started.elapsed().as_millis() as u64);
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            mode.record(None, None, 0, 0, latency_ms, false).await;
+        });
     }
 }
 
@@ -396,15 +519,36 @@ impl LlmProvider for UsageTrackingProvider {
         request: CompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
         let metadata = request.metadata.clone();
-        let started = std::time::Instant::now();
-        let mut stream = self.inner.complete_stream(request).await?;
+        let started = Instant::now();
+        let mut stream = match self.inner.complete_stream(request).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.track_completion(
+                    &metadata,
+                    None,
+                    None,
+                    0,
+                    0,
+                    Some(started.elapsed().as_millis() as u64),
+                    false,
+                )
+                .await;
+                return Err(error);
+            }
+        };
         if metadata_is_reasoning_owned(&metadata) {
             // Still need CostGuard recording for budget enforcement, even
             // though Reasoning handles CostTracker itself.
             if let Some(ref guard) = self.guard {
-                let guard = Arc::clone(guard);
-                let fallback_model = self.inner.active_model_name();
+                let recorder = StreamUsageRecorder::new(
+                    StreamUsageMode::GuardOnly {
+                        guard: Arc::clone(guard),
+                        fallback_model: self.inner.active_model_name(),
+                    },
+                    started,
+                );
                 let wrapped = async_stream::stream! {
+                    let recorder = recorder;
                     while let Some(chunk) = stream.next().await {
                         match chunk {
                             Ok(StreamChunk::Done {
@@ -414,13 +558,12 @@ impl LlmProvider for UsageTrackingProvider {
                                 output_tokens,
                                 finish_reason,
                             }) => {
-                                record_guard_only(
-                                    &guard,
-                                    &fallback_model,
-                                    provider_model.as_deref(),
+                                recorder.record(
+                                    provider_model.clone(),
                                     cost_usd,
                                     input_tokens,
                                     output_tokens,
+                                    true,
                                 ).await;
                                 yield Ok(StreamChunk::Done {
                                     provider_model,
@@ -431,15 +574,9 @@ impl LlmProvider for UsageTrackingProvider {
                                 });
                             }
                             Err(error) => {
-                                record_guard_only(
-                                    &guard,
-                                    &fallback_model,
-                                    None,
-                                    None,
-                                    0,
-                                    0,
-                                ).await;
+                                recorder.record(None, None, 0, 0, false).await;
                                 yield Err(error);
+                                break;
                             }
                             other => yield other,
                         }
@@ -449,11 +586,18 @@ impl LlmProvider for UsageTrackingProvider {
             }
             return Ok(stream);
         }
-        let tracker = Arc::clone(&self.tracker);
-        let db = self.db.as_ref().map(Arc::clone);
-        let guard = self.guard.as_ref().map(Arc::clone);
-        let fallback_model = self.inner.active_model_name();
+        let recorder = StreamUsageRecorder::new(
+            StreamUsageMode::Full {
+                tracker: Arc::clone(&self.tracker),
+                db: self.db.as_ref().map(Arc::clone),
+                guard: self.guard.as_ref().map(Arc::clone),
+                metadata,
+                fallback_model: self.inner.active_model_name(),
+            },
+            started,
+        );
         let wrapped = async_stream::stream! {
+            let recorder = recorder;
             while let Some(chunk) = stream.next().await {
                 match chunk {
                     Ok(StreamChunk::Done {
@@ -463,17 +607,11 @@ impl LlmProvider for UsageTrackingProvider {
                         output_tokens,
                         finish_reason,
                     }) => {
-                        record_usage(
-                            &tracker,
-                            db.as_ref(),
-                            guard.as_ref(),
-                            &metadata,
-                            &fallback_model,
-                            provider_model.as_deref(),
+                        recorder.record(
+                            provider_model.clone(),
                             cost_usd,
                             input_tokens,
                             output_tokens,
-                            Some(started.elapsed().as_millis() as u64),
                             true,
                         )
                         .await;
@@ -486,21 +624,9 @@ impl LlmProvider for UsageTrackingProvider {
                         });
                     }
                     Err(error) => {
-                        record_usage(
-                            &tracker,
-                            db.as_ref(),
-                            guard.as_ref(),
-                            &metadata,
-                            &fallback_model,
-                            None,
-                            None,
-                            0,
-                            0,
-                            Some(started.elapsed().as_millis() as u64),
-                            false,
-                        )
-                        .await;
+                        recorder.record(None, None, 0, 0, false).await;
                         yield Err(error);
+                        break;
                     }
                     other => yield other,
                 }
@@ -514,13 +640,34 @@ impl LlmProvider for UsageTrackingProvider {
         request: ToolCompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
         let metadata = request.metadata.clone();
-        let started = std::time::Instant::now();
-        let mut stream = self.inner.complete_stream_with_tools(request).await?;
+        let started = Instant::now();
+        let mut stream = match self.inner.complete_stream_with_tools(request).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.track_completion(
+                    &metadata,
+                    None,
+                    None,
+                    0,
+                    0,
+                    Some(started.elapsed().as_millis() as u64),
+                    false,
+                )
+                .await;
+                return Err(error);
+            }
+        };
         if metadata_is_reasoning_owned(&metadata) {
             if let Some(ref guard) = self.guard {
-                let guard = Arc::clone(guard);
-                let fallback_model = self.inner.active_model_name();
+                let recorder = StreamUsageRecorder::new(
+                    StreamUsageMode::GuardOnly {
+                        guard: Arc::clone(guard),
+                        fallback_model: self.inner.active_model_name(),
+                    },
+                    started,
+                );
                 let wrapped = async_stream::stream! {
+                    let recorder = recorder;
                     while let Some(chunk) = stream.next().await {
                         match chunk {
                             Ok(StreamChunk::Done {
@@ -530,13 +677,12 @@ impl LlmProvider for UsageTrackingProvider {
                                 output_tokens,
                                 finish_reason,
                             }) => {
-                                record_guard_only(
-                                    &guard,
-                                    &fallback_model,
-                                    provider_model.as_deref(),
+                                recorder.record(
+                                    provider_model.clone(),
                                     cost_usd,
                                     input_tokens,
                                     output_tokens,
+                                    true,
                                 ).await;
                                 yield Ok(StreamChunk::Done {
                                     provider_model,
@@ -547,15 +693,9 @@ impl LlmProvider for UsageTrackingProvider {
                                 });
                             }
                             Err(error) => {
-                                record_guard_only(
-                                    &guard,
-                                    &fallback_model,
-                                    None,
-                                    None,
-                                    0,
-                                    0,
-                                ).await;
+                                recorder.record(None, None, 0, 0, false).await;
                                 yield Err(error);
+                                break;
                             }
                             other => yield other,
                         }
@@ -565,11 +705,18 @@ impl LlmProvider for UsageTrackingProvider {
             }
             return Ok(stream);
         }
-        let tracker = Arc::clone(&self.tracker);
-        let db = self.db.as_ref().map(Arc::clone);
-        let guard = self.guard.as_ref().map(Arc::clone);
-        let fallback_model = self.inner.active_model_name();
+        let recorder = StreamUsageRecorder::new(
+            StreamUsageMode::Full {
+                tracker: Arc::clone(&self.tracker),
+                db: self.db.as_ref().map(Arc::clone),
+                guard: self.guard.as_ref().map(Arc::clone),
+                metadata,
+                fallback_model: self.inner.active_model_name(),
+            },
+            started,
+        );
         let wrapped = async_stream::stream! {
+            let recorder = recorder;
             while let Some(chunk) = stream.next().await {
                 match chunk {
                     Ok(StreamChunk::Done {
@@ -579,17 +726,11 @@ impl LlmProvider for UsageTrackingProvider {
                         output_tokens,
                         finish_reason,
                     }) => {
-                        record_usage(
-                            &tracker,
-                            db.as_ref(),
-                            guard.as_ref(),
-                            &metadata,
-                            &fallback_model,
-                            provider_model.as_deref(),
+                        recorder.record(
+                            provider_model.clone(),
                             cost_usd,
                             input_tokens,
                             output_tokens,
-                            Some(started.elapsed().as_millis() as u64),
                             true,
                         )
                         .await;
@@ -602,21 +743,9 @@ impl LlmProvider for UsageTrackingProvider {
                         });
                     }
                     Err(error) => {
-                        record_usage(
-                            &tracker,
-                            db.as_ref(),
-                            guard.as_ref(),
-                            &metadata,
-                            &fallback_model,
-                            None,
-                            None,
-                            0,
-                            0,
-                            Some(started.elapsed().as_millis() as u64),
-                            false,
-                        )
-                        .await;
+                        recorder.record(None, None, 0, 0, false).await;
                         yield Err(error);
+                        break;
                     }
                     other => yield other,
                 }
@@ -631,6 +760,14 @@ impl LlmProvider for UsageTrackingProvider {
 
     fn supports_streaming_for_model(&self, requested_model: Option<&str>) -> bool {
         self.inner.supports_streaming_for_model(requested_model)
+    }
+
+    fn stream_support(&self) -> StreamSupport {
+        self.inner.stream_support()
+    }
+
+    fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
+        self.inner.stream_support_for_model(requested_model)
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {

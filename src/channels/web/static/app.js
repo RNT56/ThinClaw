@@ -454,6 +454,37 @@ const RESEARCH_GPU_CLOUDS = [
   },
 ];
 
+const RESEARCH_AGENT_ENV_TEMPLATES = {
+  terminal_bench: {
+    name: 'AgentEnv Terminal Bench',
+    backendConfig: {
+      benchmark: 'terminal_bench',
+      cases: [
+        {
+          name: 'smoke',
+          command: 'printf bench-ok',
+          expectedStdoutContains: ['bench-ok'],
+          expectedExitCode: 0,
+          timeoutSecs: 30,
+        },
+      ],
+    },
+  },
+  skill_bench: {
+    name: 'AgentEnv Skill Bench',
+    backendConfig: {
+      benchmark: 'skill_bench',
+      cases: [
+        {
+          name: 'skill-readiness',
+          skillContent: '# Skill Name\\n\\nDescribe when to use this skill and the concrete workflow.',
+          requiredSubstrings: ['when to use', 'workflow'],
+        },
+      ],
+    },
+  },
+};
+
 // --- Tool Activity State ---
 let _activeGroup = null;
 let _activeToolCards = {};
@@ -6560,6 +6591,12 @@ function researchLaunchModeForBackend(backend, backendConfig) {
   const normalized = String(backend || '').toLowerCase();
   const config = parseResearchObject(backendConfig);
   switch (normalized) {
+    case 'agent_env':
+      return {
+        label: 'AgentEnv benchmark',
+        detail: config.benchmark ? 'Runs through EnvRunner with durable trajectory artifacts.' : 'Add backend_config.benchmark to select terminal_bench or skill_bench.',
+        className: config.benchmark ? 'completed' : 'pending',
+      };
     case 'local_docker':
       return {
         label: 'Local container',
@@ -6634,10 +6671,10 @@ function researchRunnerProviderState(runner) {
   }
   const backend = String(runner.backend || '').toLowerCase();
   if (!isResearchGpuCloudBackend(backend)) {
-    if (backend === 'local_docker') {
+    if (backend === 'local_docker' || backend === 'agent_env') {
       return {
         label: 'No cloud secret needed',
-        detail: 'Local runner; no external provider account required.',
+        detail: backend === 'agent_env' ? 'EnvRunner benchmark; no external provider account required.' : 'Local runner; no external provider account required.',
         className: 'completed',
       };
     }
@@ -7196,6 +7233,29 @@ function applyResearchGpuCloudTemplate(slug) {
   });
 }
 
+function applyResearchAgentEnvTemplate(kind) {
+  const template = RESEARCH_AGENT_ENV_TEMPLATES[kind];
+  if (!template) {
+    showToast('Unknown AgentEnv benchmark: ' + kind, 'error');
+    return;
+  }
+  const runnerName = document.getElementById('research-runner-name');
+  const runnerBackend = document.getElementById('research-runner-backend');
+  const runnerImage = document.getElementById('research-runner-image');
+  const runnerBackendConfig = document.getElementById('research-runner-backend-config');
+  const runnerGpu = document.getElementById('research-runner-gpu');
+  const runnerEnv = document.getElementById('research-runner-env');
+  const runnerSecrets = document.getElementById('research-runner-secrets');
+  if (runnerName) runnerName.value = template.name;
+  if (runnerBackend) runnerBackend.value = 'agent_env';
+  if (runnerImage) runnerImage.value = '';
+  if (runnerBackendConfig) runnerBackendConfig.value = JSON.stringify(template.backendConfig, null, 2);
+  if (runnerGpu) runnerGpu.value = '{}';
+  if (runnerEnv) runnerEnv.value = '{}';
+  if (runnerSecrets) runnerSecrets.value = '';
+  showToast(template.name + ' template applied', 'success');
+}
+
 function launchResearchGpuCloudTestJob(slug) {
   const config = getResearchGpuCloudConfig(slug);
   if (!config) {
@@ -7424,6 +7484,7 @@ function renderResearchRunners() {
       : '-';
     const launchMode = researchLaunchModeForBackend(runner.backend, runner.backend_config);
     const providerState = researchRunnerProviderState(runner);
+    const benchmark = researchRunnerBenchmarkLabel(runner);
     return '<tr data-record-id="research-runner:' + escapeHtml(runner.id) + '">'
       + '<td>' + escapeHtml(runner.name) + '</td>'
       + '<td>' + escapeHtml(runner.backend) + '</td>'
@@ -7432,12 +7493,26 @@ function renderResearchRunners() {
       + '<td title="' + escapeHtml(runner.image_or_runtime || '-') + '">' + escapeHtml(trimResearchText(runner.image_or_runtime || '-', 40)) + '</td>'
       + '<td title="' + escapeHtml(gpu) + '">' + escapeHtml(gpu) + '</td>'
       + '<td><span class="badge ' + providerState.className + '">' + escapeHtml(providerState.label) + '</span><div class="research-table-note">' + escapeHtml(providerState.detail) + '</div></td>'
+      + '<td title="' + escapeHtml(benchmark.detail) + '">' + escapeHtml(benchmark.label) + '</td>'
       + '<td><div class="research-actions-cell">'
       + '<button class="btn-restart" onclick="validateResearchRunner(\'' + escapeJsString(runner.id) + '\')">Validate</button>'
       + '<button class="btn-cancel" onclick="deleteResearchRunner(\'' + escapeJsString(runner.id) + '\', \'' + escapeJsString(runner.name) + '\')">Delete</button>'
       + '</div></td>'
       + '</tr>';
   }).join('');
+}
+
+function researchRunnerBenchmarkLabel(runner) {
+  const config = parseResearchObject(runner ? runner.backend_config : null);
+  const benchmark = String(config.benchmark || '').trim();
+  if (!benchmark) {
+    return { label: '-', detail: '-' };
+  }
+  const cases = Array.isArray(config.cases) ? config.cases.length : 0;
+  return {
+    label: benchmark + (cases ? ' (' + cases + ')' : ''),
+    detail: cases ? cases + ' benchmark case(s) configured.' : 'Benchmark configured without explicit cases.',
+  };
 }
 
 function renderResearchCampaigns() {
@@ -9248,8 +9323,11 @@ function addMcpServer(options) {
 
 // --- Skills ---
 
+var skillTaps = [];
+
 function loadSkills() {
   var skillsList = document.getElementById('skills-list');
+  loadSkillTaps();
   apiFetch('/api/skills').then(function(data) {
     if (!data.skills || data.skills.length === 0) {
       skillsList.innerHTML = '<div class="empty-state">No skills installed</div>';
@@ -9307,6 +9385,18 @@ function renderSkillCard(skill) {
   var isWorkspace = skill.source && skill.source.indexOf('Workspace') === 0;
   var isInstalled = skill.trust.toLowerCase() === 'installed';
   var isTrusted = skill.trust.toLowerCase() === 'trusted';
+
+  var inspectBtn = document.createElement('button');
+  inspectBtn.className = 'btn-ext';
+  inspectBtn.textContent = 'Inspect';
+  inspectBtn.addEventListener('click', function() { openSkillInspectModal(skill.name); });
+  actions.appendChild(inspectBtn);
+
+  var publishBtn = document.createElement('button');
+  publishBtn.className = 'btn-ext';
+  publishBtn.textContent = 'Publish';
+  publishBtn.addEventListener('click', function() { openSkillPublishModal(skill.name); });
+  actions.appendChild(publishBtn);
 
   if (!isWorkspace) {
     // Trust/Untrust toggle for non-workspace skills
@@ -9655,6 +9745,196 @@ function reloadAllSkills() {
     loadSkills();
   }).catch(function(err) {
     showToast('Reload all failed: ' + err.message, 'error');
+  });
+}
+
+function loadSkillTaps() {
+  var list = document.getElementById('skill-taps-list');
+  if (!list) return;
+  apiFetch('/api/skills/taps').then(function(data) {
+    skillTaps = data.taps || [];
+    renderSkillTaps(skillTaps, data.hub_enabled);
+  }).catch(function(err) {
+    list.innerHTML = '<div class="empty-state">Failed to load taps: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderSkillTaps(taps, hubEnabled) {
+  var list = document.getElementById('skill-taps-list');
+  if (!list) return;
+  if (!taps || taps.length === 0) {
+    list.innerHTML = '<div class="empty-state">No GitHub taps configured</div>';
+    return;
+  }
+  list.innerHTML = '';
+  taps.forEach(function(tap) {
+    var card = document.createElement('div');
+    card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card skill-card';
+    var path = tap.path || '';
+    var branch = tap.branch || '';
+    card.innerHTML =
+      '<div class="ext-header ui-resource-header">'
+      + '<span class="ext-name ui-resource-name">' + escapeHtml(tap.repo) + '</span>'
+      + '<span class="skill-trust trust-installed">' + escapeHtml(tap.trust_level || 'community') + '</span>'
+      + '</div>'
+      + '<div class="ext-desc ui-resource-meta">' + escapeHtml(path || '(repo root)') + (branch ? ' @ ' + escapeHtml(branch) : '') + '</div>'
+      + '<div class="ext-keywords ui-resource-note">Remote hub: ' + (hubEnabled ? 'enabled' : 'not ready') + '</div>';
+    var actions = document.createElement('div');
+    actions.className = 'ext-actions ui-resource-actions';
+    var remove = document.createElement('button');
+    remove.className = 'btn-ext remove';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', function() {
+      removeSkillTap(tap.repo, path, branch || null);
+    });
+    actions.appendChild(remove);
+    card.appendChild(actions);
+    list.appendChild(card);
+  });
+}
+
+function addSkillTapFromForm() {
+  var repo = document.getElementById('skill-tap-repo').value.trim();
+  var path = document.getElementById('skill-tap-path').value.trim();
+  var branch = document.getElementById('skill-tap-branch').value.trim();
+  var trust = document.getElementById('skill-tap-trust').value;
+  if (!repo) {
+    showToast('Tap repo is required', 'error');
+    return;
+  }
+  apiFetch('/api/skills/taps', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: { repo: repo, path: path, branch: branch || null, trust_level: trust },
+  }).then(function() {
+    showToast('Added skill tap ' + repo, 'success');
+    document.getElementById('skill-tap-repo').value = '';
+    document.getElementById('skill-tap-path').value = '';
+    document.getElementById('skill-tap-branch').value = '';
+    loadSkillTaps();
+  }).catch(function(err) {
+    showToast('Tap add failed: ' + err.message, 'error');
+  });
+}
+
+function removeSkillTap(repo, path, branch) {
+  if (!confirm('Remove skill tap "' + repo + '"?')) return;
+  apiFetch('/api/skills/taps/remove', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: { repo: repo, path: path || '', branch: branch || null },
+  }).then(function() {
+    showToast('Removed skill tap ' + repo, 'success');
+    loadSkillTaps();
+  }).catch(function(err) {
+    showToast('Tap remove failed: ' + err.message, 'error');
+  });
+}
+
+function refreshSkillTaps() {
+  apiFetch('/api/skills/taps/refresh', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: {},
+  }).then(function(res) {
+    showToast('Refreshed ' + (res.tap_count || 0) + ' tap(s)', 'success');
+    loadSkillTaps();
+  }).catch(function(err) {
+    showToast('Tap refresh failed: ' + err.message, 'error');
+  });
+}
+
+function openSkillInspectModal(name) {
+  apiFetch('/api/skills/' + encodeURIComponent(name) + '/inspect', {
+    method: 'POST',
+    body: { include_files: true, audit: true },
+  }).then(function(data) {
+    closeConfigureModal();
+    var dialog = document.createElement('dialog');
+    dialog.className = 'configure-dialog skill-inspect-dialog';
+    dialog.addEventListener('cancel', function(event) {
+      event.preventDefault();
+      closeConfigureModal();
+    });
+    var modal = document.createElement('div');
+    modal.className = 'configure-modal';
+    modal.innerHTML =
+      '<h3 class="ui-panel-title" id="skill-inspect-title">' + escapeHtml(data.name) + '</h3>'
+      + '<p class="ui-panel-desc">' + escapeHtml(data.description || '') + '</p>'
+      + '<div class="ui-panel ui-panel--subtle"><pre style="white-space:pre-wrap;max-height:420px;overflow:auto;">'
+      + escapeHtml(JSON.stringify(data, null, 2))
+      + '</pre></div>'
+      + '<div class="configure-actions"><button class="btn-ext" id="skill-inspect-close">Close</button></div>';
+    dialog.setAttribute('aria-labelledby', 'skill-inspect-title');
+    dialog.appendChild(modal);
+    document.body.appendChild(dialog);
+    modal.querySelector('#skill-inspect-close').addEventListener('click', closeConfigureModal);
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', 'open');
+  }).catch(function(err) {
+    showToast('Inspect failed: ' + err.message, 'error');
+  });
+}
+
+function openSkillPublishModal(name) {
+  closeConfigureModal();
+  var taps = skillTaps || [];
+  var options = taps.map(function(tap) {
+    return '<option value="' + escapeHtml(tap.repo) + '">' + escapeHtml(tap.repo + (tap.path ? '/' + tap.path : '')) + '</option>';
+  }).join('');
+  var dialog = document.createElement('dialog');
+  dialog.className = 'configure-dialog skill-publish-dialog';
+  dialog.addEventListener('cancel', function(event) {
+    event.preventDefault();
+    closeConfigureModal();
+  });
+  var modal = document.createElement('div');
+  modal.className = 'configure-modal';
+  modal.innerHTML =
+    '<h3 class="ui-panel-title" id="skill-publish-title">Publish ' + escapeHtml(name) + '</h3>'
+    + '<p class="ui-panel-desc">Dry-run first, then publish a draft PR to a configured GitHub tap.</p>'
+    + '<label class="admin-field admin-field--wide"><span class="admin-field-label">Target tap</span><select id="skill-publish-target">' + options + '</select></label>'
+    + '<div class="ui-panel ui-panel--subtle"><pre id="skill-publish-preview" style="white-space:pre-wrap;max-height:360px;overflow:auto;">Run a dry-run to preview the publish plan.</pre></div>'
+    + '<div class="configure-actions"><button class="btn-ext" id="skill-publish-dry-run">Dry Run</button><button class="btn-ext install" id="skill-publish-confirm">Publish PR</button><button class="btn-ext" id="skill-publish-cancel">Close</button></div>';
+  dialog.setAttribute('aria-labelledby', 'skill-publish-title');
+  dialog.appendChild(modal);
+  document.body.appendChild(dialog);
+  var preview = modal.querySelector('#skill-publish-preview');
+  var target = modal.querySelector('#skill-publish-target');
+  if (!taps.length) {
+    preview.textContent = 'No GitHub taps configured. Add a tap before publishing.';
+  }
+  modal.querySelector('#skill-publish-dry-run').addEventListener('click', function() {
+    if (!target.value) return;
+    runSkillPublish(name, target.value, true, preview);
+  });
+  modal.querySelector('#skill-publish-confirm').addEventListener('click', function() {
+    if (!target.value) return;
+    if (!confirm('Publish "' + name + '" to ' + target.value + ' as a draft PR?')) return;
+    runSkillPublish(name, target.value, false, preview);
+  });
+  modal.querySelector('#skill-publish-cancel').addEventListener('click', closeConfigureModal);
+  if (typeof dialog.showModal === 'function') dialog.showModal();
+  else dialog.setAttribute('open', 'open');
+}
+
+function runSkillPublish(name, targetRepo, dryRun, preview) {
+  preview.textContent = dryRun ? 'Building dry-run plan...' : 'Publishing draft PR...';
+  apiFetch('/api/skills/' + encodeURIComponent(name) + '/publish', {
+    method: 'POST',
+    headers: dryRun ? {} : { 'X-Confirm-Action': 'true' },
+    body: {
+      target_repo: targetRepo,
+      dry_run: dryRun,
+      remote_write: !dryRun,
+      confirm_remote_write: !dryRun,
+    },
+  }).then(function(res) {
+    preview.textContent = JSON.stringify(res, null, 2);
+    showToast(dryRun ? 'Publish dry-run complete' : 'Draft PR created', 'success');
+  }).catch(function(err) {
+    preview.textContent = err.message;
+    showToast('Publish failed: ' + err.message, 'error');
   });
 }
 
@@ -10034,6 +10314,17 @@ const SETTINGS_SCHEMA = {
       { key: 'experiments.allow_remote_runners', label: 'Allow remote runners', type: 'bool', desc: 'Permit SSH, Slurm, Kubernetes, RunPod, and generic remote lease runners.' },
       { key: 'experiments.ui_visibility', label: 'UI visibility', type: 'select', options: [{ value: 'hidden_until_enabled', label: 'Hidden until enabled' }], desc: 'Advanced-only visibility policy for the Research tab.' },
       { key: 'experiments.default_promotion_mode', label: 'Default promotion mode', type: 'select', options: [{ value: 'branch_pr_draft', label: 'Branch + draft PR' }], desc: 'Default promotion target when a campaign finishes with a best candidate.' },
+    ]
+  },
+  'Extensions': {
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 2v20"/><path d="M2 12h20"/><path d="m4.93 4.93 14.14 14.14"/><path d="m19.07 4.93-14.14 14.14"/></svg>',
+    fields: [
+      { key: 'extensions.user_tools_dir', label: 'User tools dir', type: 'text', desc: 'Canonical operator-trusted user tool directory.' },
+      { key: 'extensions.allow_native_plugins', label: 'Native plugins', type: 'bool', desc: 'Allow unsafe .so/.dylib plugin loading after manifest and allowlist checks.' },
+      { key: 'extensions.require_plugin_signatures', label: 'Require signatures', type: 'bool', desc: 'Require ed25519 signatures for broad plugin manifests.' },
+      { key: 'extensions.native_plugin_allowlist_dirs', label: 'Native allowlist dirs', type: 'json', desc: 'JSON array of directories that may contain native plugin libraries.' },
+      { key: 'extensions.trusted_manifest_keys', label: 'Trusted key IDs', type: 'json', desc: 'JSON array of trusted plugin manifest key IDs.' },
+      { key: 'extensions.trusted_manifest_public_keys', label: 'Trusted public keys', type: 'json', desc: 'JSON object mapping key IDs to hex ed25519 public keys.' },
     ]
   },
 };
@@ -13234,6 +13525,33 @@ function renderSettingField(field) {
       saveSetting(field.key, val);
     });
     controlWrap.appendChild(select);
+  } else if (field.type === 'json') {
+    const textarea = document.createElement('textarea');
+    textarea.className = 'setting-input';
+    textarea.rows = 4;
+    textarea.value = currentValue == null ? '' : JSON.stringify(currentValue, null, 2);
+    textarea.placeholder = field.nullable ? 'Not set' : '';
+    const saveJsonSetting = () => {
+      const raw = textarea.value.trim();
+      if (!raw && field.nullable) {
+        saveSetting(field.key, null);
+        return;
+      }
+      try {
+        const parsed = raw ? JSON.parse(raw) : {};
+        saveSetting(field.key, parsed);
+      } catch (_) {
+        showToast(field.label + ' must be valid JSON.', 'error');
+      }
+    };
+    textarea.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        saveJsonSetting();
+        textarea.blur();
+      }
+    });
+    textarea.addEventListener('blur', saveJsonSetting);
+    controlWrap.appendChild(textarea);
   } else {
     const input = document.createElement('input');
     input.type = 'text';

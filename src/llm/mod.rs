@@ -37,6 +37,7 @@ pub mod route_planner;
 pub mod routing_policy;
 pub mod runtime_manager;
 pub mod smart_routing;
+pub mod streaming;
 pub mod turn_analysis;
 pub mod usage_tracking;
 
@@ -48,8 +49,9 @@ pub use failover::{
 pub use prompt_stack::{PromptLayer, PromptStack};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
-    Role, StreamChunk, StreamChunkStream, ThinkingConfig, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition, ToolResult, sanitize_tool_messages,
+    Role, StreamChunk, StreamChunkStream, StreamPolicy, StreamSupport, ThinkingConfig, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
+    sanitize_tool_messages,
 };
 pub use provider_factory::{build_provider_chain, create_llm_provider};
 pub use reasoning::{

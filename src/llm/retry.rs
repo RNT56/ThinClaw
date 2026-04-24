@@ -14,8 +14,8 @@ use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamSupport,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Returns `true` if the `LlmError` is transient and the request should be retried.
@@ -238,6 +238,14 @@ impl LlmProvider for RetryProvider {
 
     fn supports_streaming(&self) -> bool {
         self.inner.supports_streaming()
+    }
+
+    fn stream_support(&self) -> StreamSupport {
+        self.inner.stream_support()
+    }
+
+    fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
+        self.inner.stream_support_for_model(requested_model)
     }
 }
 

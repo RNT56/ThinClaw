@@ -532,6 +532,7 @@
                         <label class="research-field-label" for="research-runner-backend">Backend</label>
                         <select id="research-runner-backend" class="research-input">
                           <option value="local_docker">local_docker</option>
+                          <option value="agent_env">agent_env</option>
                           <option value="generic_remote_runner">generic_remote_runner</option>
                           <option value="ssh">ssh</option>
                           <option value="slurm">slurm</option>
@@ -552,6 +553,10 @@
                     </div>
                     <details class="research-advanced">
                       <summary>Advanced runner config</summary>
+                      <div class="research-actions">
+                        <button class="btn-restart" type="button" onclick="applyResearchAgentEnvTemplate('terminal_bench')">Terminal Bench</button>
+                        <button class="btn-restart" type="button" onclick="applyResearchAgentEnvTemplate('skill_bench')">Skill Bench</button>
+                      </div>
                       <div class="research-form-grid research-form-grid--compact">
                         <div>
                           <label class="research-field-label" for="research-runner-backend-config">Backend config (JSON)</label>
@@ -595,6 +600,7 @@
                         <th>Image/runtime</th>
                         <th>GPU</th>
                         <th>Provider state</th>
+                        <th>Benchmark</th>
                         <th>Actions</th>
                       </tr>
                     </thead>
@@ -1104,6 +1110,43 @@
                 <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)">
               </label>
               <button onclick="installSkillFromForm()">Install</button>
+            </div>
+          </section>
+          <section class="ui-panel ui-panel-stack skills-taps-panel">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">GitHub Skill Taps</h3>
+                <p class="ui-panel-desc">Manage repositories used for federated skill discovery and publish draft PRs.</p>
+              </div>
+              <div class="ui-panel-actions">
+                <button class="btn-ext" onclick="refreshSkillTaps()">Refresh</button>
+              </div>
+            </div>
+            <div class="ext-install-form">
+              <label class="admin-field">
+                <span class="admin-field-label">Repo</span>
+                <input type="text" id="skill-tap-repo" placeholder="owner/repo">
+              </label>
+              <label class="admin-field">
+                <span class="admin-field-label">Path</span>
+                <input type="text" id="skill-tap-path" placeholder="skills">
+              </label>
+              <label class="admin-field">
+                <span class="admin-field-label">Branch</span>
+                <input type="text" id="skill-tap-branch" placeholder="default">
+              </label>
+              <label class="admin-field">
+                <span class="admin-field-label">Trust</span>
+                <select id="skill-tap-trust">
+                  <option value="community">Community</option>
+                  <option value="trusted">Trusted</option>
+                  <option value="builtin">Builtin</option>
+                </select>
+              </label>
+              <button onclick="addSkillTapFromForm()">Add Tap</button>
+            </div>
+            <div class="extensions-list ui-resource-grid" id="skill-taps-list">
+              <div class="empty-state">Loading taps...</div>
             </div>
           </section>
         </div>

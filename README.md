@@ -101,6 +101,19 @@ For a deeper setup path, including service mode, remote access, provider guidanc
 
 The onboarding flow now uses a calmer "Humanist Cockpit" framing in both CLI and TUI modes, with shared readiness summaries, skin-aware presentation, saved follow-up notes, an explicit Quick Setup vs Advanced Setup split, and automatic handoff from onboarding into the matching local runtime.
 
+Remote / SSH host setup:
+
+```bash
+thinclaw onboard --profile remote
+thinclaw gateway access
+thinclaw service install
+thinclaw service start
+```
+
+This is the path for Raspberry Pi, Mac Mini, VPS, and other SSH-managed hosts.
+It ships in the normal `thinclaw` release binary; there is no separate remote
+artifact.
+
 ## Why ThinClaw
 
 ### 1. Security Is Part of the Architecture
@@ -179,15 +192,20 @@ You can run ThinClaw:
 
 ## Deployment Modes
 
-| Mode | Best For | Main Doc |
+| Situation | Best For | Start Here |
 |---|---|---|
-| Local standalone | personal machine, laptop, workstation | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| Long-running service | Mac Mini, Linux host, VPS | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| Remote gateway access | LAN, Tailscale, controlled remote use | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| macOS | local, Mac Mini, launchd service | [docs/deploy/macos.md](docs/deploy/macos.md) |
+| Windows | native install, Windows service, WSL guidance | [docs/deploy/windows.md](docs/deploy/windows.md) |
+| Linux | laptop, workstation, server, VPS | [docs/deploy/linux.md](docs/deploy/linux.md) |
+| Raspberry Pi OS Lite 64-bit | Pi 4/5 or ARM64 Pi server | [docs/deploy/raspberry-pi-os-lite.md](docs/deploy/raspberry-pi-os-lite.md) |
+| Docker | Compose or container deployment | [docs/deploy/docker.md](docs/deploy/docker.md) |
+| Remote access | gateway, Tailscale, webhook tunnels | [docs/deploy/remote-access.md](docs/deploy/remote-access.md) |
 | Reckless desktop autonomy | operator-approved host-level desktop automation | [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md) |
-| Scrappy embedding | desktop app workflow | [docs/README.md](docs/README.md) |
+| Scrappy embedding | local or remote ThinClaw runtime | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 
 Code-backed local default: the gateway listens on port `3000` unless you configure otherwise.
+
+For the full decision tree, use [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Build Profiles
 
@@ -197,11 +215,15 @@ The default build (`light`) is lean; opt into more with `--features`:
 | Profile | Command | What It Adds |
 |---|---|---|
 | **light** (default) | `cargo build` | PostgreSQL, libSQL, local gateway, HTML-to-Markdown, doc extraction, timezones |
-| **full** | `cargo build --features full` | + ACP, REPL/TUI, tunnel, Docker sandbox, browser, Nostr |
+| **full** | `cargo build --release --features full` | + ACP, REPL/TUI, tunnel, Docker sandbox, browser, Nostr |
 | **desktop** | `cargo build --features desktop` | libSQL, HTML-to-Markdown, doc extraction, REPL, timezones |
 | **minimal** | `cargo build --no-default-features --features libsql` | Single DB backend, nothing else |
 
 Additional opt-in flags not included in `full`: `voice`, `bedrock`, `bundled-wasm`.
+
+GitHub Releases are the normal user path. The repo's release workflow publishes
+the regular `thinclaw` binary with the `full` feature set for supported Linux,
+macOS, and Windows targets.
 
 Full details, custom combinations, and CI matrix: [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md)
 
@@ -251,7 +273,7 @@ Start here, then go deeper by topic:
 
 - [docs/README.md](docs/README.md): audience-first docs index
 - [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md): build profiles, feature flags, and `full` vs `--all-features`
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): standalone, service, remote, and gateway deployment
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): deployment decision tree and platform runbook index
 - [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md): reckless desktop autonomy profile, bootstrap, launcher, canaries, and rollback
 - [docs/IDENTITY_AND_PERSONALITY.md](docs/IDENTITY_AND_PERSONALITY.md): personality packs, identity stack, and `/personality`
 - [docs/MEMORY_AND_GROWTH.md](docs/MEMORY_AND_GROWTH.md): continuity, memory, compaction, and growth surfaces
