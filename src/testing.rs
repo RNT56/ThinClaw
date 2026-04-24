@@ -52,6 +52,64 @@ pub async fn test_db() -> (Arc<dyn Database>, tempfile::TempDir) {
     (Arc::new(backend) as Arc<dyn Database>, dir)
 }
 
+/// Create a PostgreSQL-backed test database using a unique schema.
+///
+/// This is available for the minimal `postgres` profile so unit tests that use
+/// the shared test harness still compile when libSQL is disabled. The helper
+/// requires `DATABASE_URL` only if the test is actually executed.
+#[cfg(all(not(feature = "libsql"), feature = "postgres"))]
+pub async fn test_db() -> (Arc<dyn Database>, tempfile::TempDir) {
+    use secrecy::SecretString;
+    use tokio_postgres::NoTls;
+    use uuid::Uuid;
+
+    use crate::config::{DatabaseBackend, DatabaseConfig};
+    use crate::db::postgres::PgBackend;
+
+    let base_url = std::env::var("DATABASE_URL")
+        .expect("DATABASE_URL is required to run PostgreSQL-backed tests");
+    let schema = format!("test_schema_{}", Uuid::new_v4().simple());
+    let pg_cfg: tokio_postgres::Config = base_url
+        .parse()
+        .expect("DATABASE_URL must be a valid PostgreSQL connection string");
+    let (client, connection) = pg_cfg
+        .connect(NoTls)
+        .await
+        .expect("failed to connect to PostgreSQL test database");
+    tokio::spawn(async move {
+        if let Err(err) = connection.await {
+            eprintln!("postgres test schema connection ended: {err}");
+        }
+    });
+    client
+        .batch_execute(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+        .await
+        .expect("failed to create PostgreSQL test schema");
+
+    let mut url = url::Url::parse(&base_url).expect("DATABASE_URL must be a valid URL");
+    url.query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={schema},public"));
+
+    let config = DatabaseConfig {
+        backend: DatabaseBackend::Postgres,
+        url: SecretString::from(url.to_string()),
+        pool_size: 2,
+        libsql_path: None,
+        libsql_url: None,
+        libsql_auth_token: None,
+    };
+    let backend = PgBackend::new(&config)
+        .await
+        .expect("failed to create PostgreSQL test backend");
+    backend
+        .run_migrations()
+        .await
+        .expect("failed to run PostgreSQL test migrations");
+
+    let guard = tempfile::tempdir().expect("failed to create temp dir");
+    (Arc::new(backend) as Arc<dyn Database>, guard)
+}
+
 /// What kind of error the stub should produce when failing.
 #[derive(Clone, Copy, Debug)]
 pub enum StubErrorKind {
