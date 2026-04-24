@@ -26,7 +26,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY build.rs build.rs
 COPY src/ src/
 COPY tests/ tests/
+COPY benches/ benches/
 COPY migrations/ migrations/
+COPY patches/ patches/
 COPY registry/ registry/
 COPY channels-src/ channels-src/
 COPY tools-src/ tools-src/
