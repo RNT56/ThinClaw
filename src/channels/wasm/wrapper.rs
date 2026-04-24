@@ -2314,7 +2314,7 @@ impl WasmChannel {
         }
 
         let serialized = serde_json::to_vec_pretty(state)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))?;
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         let tmp_path = path.with_extension("runtime.json.tmp");
         std::fs::write(&tmp_path, serialized)?;
         std::fs::rename(&tmp_path, &path)?;

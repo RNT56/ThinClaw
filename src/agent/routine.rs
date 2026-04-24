@@ -38,21 +38,16 @@ const EVENT_PATTERN_SIZE_LIMIT: usize = 256 * 1024;
 const EVENT_PATTERN_DFA_SIZE_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Catch-up policy for overdue scheduled routines after downtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RoutineCatchUpMode {
     /// Skip overdue backlog and move directly to the next future slot.
     Skip,
     /// Run at most once from the current state, then move to the next future slot.
+    #[default]
     RunOnceNow,
     /// Replay each missed slot (bounded by engine safeguards).
     Replay,
-}
-
-impl Default for RoutineCatchUpMode {
-    fn default() -> Self {
-        Self::RunOnceNow
-    }
 }
 
 /// Delivery/runtime policy for a routine.
@@ -1195,7 +1190,7 @@ pub fn content_hash(content: &str) -> u64 {
 enum ParsedSchedule {
     Cron {
         normalized: String,
-        parsed: cron::Schedule,
+        parsed: Box<cron::Schedule>,
     },
     Interval {
         seconds: u64,
@@ -1383,7 +1378,10 @@ fn parse_schedule_expr(expr: &str) -> Result<ParsedSchedule, RoutineError> {
 
     let normalized = normalize_cron_expr(trimmed);
     match cron::Schedule::from_str(&normalized) {
-        Ok(parsed) => Ok(ParsedSchedule::Cron { normalized, parsed }),
+        Ok(parsed) => Ok(ParsedSchedule::Cron {
+            normalized,
+            parsed: Box::new(parsed),
+        }),
         Err(err) => {
             if let Some(seconds) = parse_oversized_step_interval_seconds(&normalized) {
                 return Ok(ParsedSchedule::Interval {
@@ -1554,21 +1552,21 @@ pub fn heartbeat_schedule_hint(interval_secs: u64) -> String {
         return format!("*/{} * * * * * *", secs);
     }
 
-    if secs % 60 == 0 {
+    if secs.is_multiple_of(60) {
         let minutes = secs / 60;
         if minutes <= 59 {
             return format!("0 */{} * * * * *", minutes);
         }
     }
 
-    if secs % 3600 == 0 {
+    if secs.is_multiple_of(3600) {
         let hours = secs / 3600;
         if hours <= 23 {
             return format!("0 0 */{} * * * *", hours);
         }
     }
 
-    if secs % 86_400 == 0 {
+    if secs.is_multiple_of(86_400) {
         let days = secs / 86_400;
         if days <= 31 {
             return format!("0 0 0 */{} * * *", days);

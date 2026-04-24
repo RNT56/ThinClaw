@@ -164,11 +164,11 @@ impl SandboxJobLookup {
 enum ResolvedOwnedJob {
     Local {
         job_id: Uuid,
-        ctx: JobContext,
+        ctx: Box<JobContext>,
     },
     Sandbox {
         job_id: Uuid,
-        lookup: SandboxJobLookup,
+        lookup: Box<SandboxJobLookup>,
     },
 }
 
@@ -251,11 +251,14 @@ async fn resolve_owned_job_ref(
         if let Some(job_ctx) = direct_jobs.get(&id).cloned() {
             matches.push(ResolvedOwnedJob::Local {
                 job_id: id,
-                ctx: job_ctx,
+                ctx: Box::new(job_ctx),
             });
         }
         if let Some(lookup) = sandbox_jobs.get(&id).cloned() {
-            matches.push(ResolvedOwnedJob::Sandbox { job_id: id, lookup });
+            matches.push(ResolvedOwnedJob::Sandbox {
+                job_id: id,
+                lookup: Box::new(lookup),
+            });
         }
     } else {
         if input.len() < 4 {
@@ -273,7 +276,7 @@ async fn resolve_owned_job_ref(
             {
                 matches.push(ResolvedOwnedJob::Local {
                     job_id,
-                    ctx: job_ctx.clone(),
+                    ctx: Box::new(job_ctx),
                 });
             }
         }
@@ -283,7 +286,10 @@ async fn resolve_owned_job_ref(
                 .replace('-', "")
                 .starts_with(&input_lower)
             {
-                matches.push(ResolvedOwnedJob::Sandbox { job_id, lookup });
+                matches.push(ResolvedOwnedJob::Sandbox {
+                    job_id,
+                    lookup: Box::new(lookup),
+                });
             }
         }
     }

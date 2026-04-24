@@ -151,7 +151,7 @@ impl Validator for ReplHelper {
             return Ok(rustyline::validate::ValidationResult::Incomplete);
         }
         // Triple-backtick fencing: if odd number of ```, request more input.
-        if input.matches("```").count() % 2 != 0 {
+        if !input.matches("```").count().is_multiple_of(2) {
             return Ok(rustyline::validate::ValidationResult::Incomplete);
         }
         Ok(rustyline::validate::ValidationResult::Valid(None))

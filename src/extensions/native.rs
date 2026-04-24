@@ -62,6 +62,12 @@ impl fmt::Debug for NativePluginRuntime {
 }
 
 impl NativePluginRuntime {
+    /// # Safety
+    ///
+    /// Loading native plugin libraries executes process-local dynamic code from
+    /// the resolved plugin artifact. Callers must only invoke this after the
+    /// manifest has been trusted and the artifact path has passed allowlist
+    /// validation.
     pub unsafe fn load(
         manifest: &PluginManifest,
         contribution: &NativePluginContribution,
@@ -196,13 +202,13 @@ pub fn resolve_plugin_artifact_path(plugin_root: &Path, artifact_path: &str) -> 
     {
         bail!("plugin artifact paths may not contain '..'");
     }
-    Ok(plugin_root.join(path).canonicalize().with_context(|| {
+    plugin_root.join(path).canonicalize().with_context(|| {
         format!(
             "failed to resolve plugin artifact path {} under {}",
             artifact_path,
             plugin_root.display()
         )
-    })?)
+    })
 }
 
 pub fn ensure_native_path_allowed(path: &Path, settings: &ExtensionsSettings) -> Result<()> {

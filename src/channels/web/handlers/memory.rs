@@ -137,14 +137,14 @@ pub(crate) async fn memory_read_handler(
         "Workspace not available".to_string(),
     ))?;
 
-    if query.path == paths::SOUL {
-        if let Ok(content) = crate::identity::soul_store::read_home_soul() {
-            return Ok(Json(MemoryReadResponse {
-                path: query.path,
-                content,
-                updated_at: None,
-            }));
-        }
+    if query.path == paths::SOUL
+        && let Ok(content) = crate::identity::soul_store::read_home_soul()
+    {
+        return Ok(Json(MemoryReadResponse {
+            path: query.path,
+            content,
+            updated_at: None,
+        }));
     }
 
     let doc = workspace

@@ -343,12 +343,12 @@ impl BlueBubblesChannel {
                             .or(chat.get("identifier"))
                             .and_then(|v| v.as_str());
 
-                        if identifier == Some(target) {
-                            if let Some(g) = guid {
-                                let mut cache = self.guid_cache.write().await;
-                                cache.insert(target.to_string(), g.to_string());
-                                return Ok(Some(g.to_string()));
-                            }
+                        if identifier == Some(target)
+                            && let Some(g) = guid
+                        {
+                            let mut cache = self.guid_cache.write().await;
+                            cache.insert(target.to_string(), g.to_string());
+                            return Ok(Some(g.to_string()));
                         }
 
                         // Check participants
@@ -358,12 +358,12 @@ impl BlueBubblesChannel {
                             for part in participants {
                                 let addr =
                                     part.get("address").and_then(|a| a.as_str()).unwrap_or("");
-                                if addr.trim() == target {
-                                    if let Some(g) = guid {
-                                        let mut cache = self.guid_cache.write().await;
-                                        cache.insert(target.to_string(), g.to_string());
-                                        return Ok(Some(g.to_string()));
-                                    }
+                                if addr.trim() == target
+                                    && let Some(g) = guid
+                                {
+                                    let mut cache = self.guid_cache.write().await;
+                                    cache.insert(target.to_string(), g.to_string());
+                                    return Ok(Some(g.to_string()));
                                 }
                             }
                         }
@@ -400,18 +400,17 @@ impl BlueBubblesChannel {
         let url = self.webhook_url();
 
         // Check for existing registration
-        if let Ok(res) = self.api_get("/api/v1/webhook").await {
-            if let Some(webhooks) = res.get("data").and_then(|d| d.as_array()) {
-                for wh in webhooks {
-                    if wh.get("url").and_then(|u| u.as_str()) == Some(&url) {
-                        let id = wh.get("id").and_then(|i| i.as_i64());
-                        if let Some(id) = id {
-                            let mut wid = self.webhook_id.write().await;
-                            *wid = Some(id);
-                        }
-                        tracing::info!("BlueBubbles: reusing existing webhook registration");
-                        return Ok(());
+        if let Ok(res) = self.api_get("/api/v1/webhook").await
+            && let Some(webhooks) = res.get("data").and_then(|d| d.as_array())
+        {
+            for wh in webhooks {
+                if wh.get("url").and_then(|u| u.as_str()) == Some(&url) {
+                    if let Some(id) = wh.get("id").and_then(|i| i.as_i64()) {
+                        let mut wid = self.webhook_id.write().await;
+                        *wid = Some(id);
                     }
+                    tracing::info!("BlueBubbles: reusing existing webhook registration");
+                    return Ok(());
                 }
             }
         }
@@ -495,18 +494,17 @@ impl BlueBubblesChannel {
             });
 
             // Thread the reply if Private API is available
-            if let Some(original_guid) = reply_to {
-                if self.private_api.load(Ordering::Relaxed)
-                    && self.helper_connected.load(Ordering::Relaxed)
-                {
-                    let obj = payload.as_object_mut().unwrap();
-                    obj.insert("method".into(), serde_json::json!("private-api"));
-                    obj.insert(
-                        "selectedMessageGuid".into(),
-                        serde_json::json!(original_guid),
-                    );
-                    obj.insert("partIndex".into(), serde_json::json!(0));
-                }
+            if let Some(original_guid) = reply_to
+                && self.private_api.load(Ordering::Relaxed)
+                && self.helper_connected.load(Ordering::Relaxed)
+            {
+                let obj = payload.as_object_mut().unwrap();
+                obj.insert("method".into(), serde_json::json!("private-api"));
+                obj.insert(
+                    "selectedMessageGuid".into(),
+                    serde_json::json!(original_guid),
+                );
+                obj.insert("partIndex".into(), serde_json::json!(0));
             }
 
             self.api_post("/api/v1/message/text", &payload).await?;
@@ -569,10 +567,10 @@ impl BlueBubblesChannel {
         }
 
         // Send caption as a follow-up text message
-        if let Some(cap) = caption {
-            if !cap.is_empty() {
-                self.send_text(chat_guid, cap, None).await?;
-            }
+        if let Some(cap) = caption
+            && !cap.is_empty()
+        {
+            self.send_text(chat_guid, cap, None).await?;
         }
 
         Ok(())
@@ -777,33 +775,33 @@ impl Channel for BlueBubblesChannel {
         // The agent pipeline attaches `MediaContent` items to the outgoing
         // response via the `attachments` metadata key when tool calls
         // produce files (e.g. image generation, doc export).
-        if let Some(attachments) = msg.metadata.get("response_attachments") {
-            if let Some(arr) = attachments.as_array() {
-                let chat_id_for_att = msg
-                    .metadata
-                    .get("chat_guid")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| msg.metadata.get("chat_id").and_then(|v| v.as_str()))
-                    .unwrap_or(&msg.user_id);
-                if let Some(resolved_att) = self.resolve_chat_guid(chat_id_for_att).await? {
-                    for att in arr {
-                        let data_b64 = att.get("data").and_then(|d| d.as_str()).unwrap_or("");
-                        let fname = att
-                            .get("filename")
-                            .and_then(|f| f.as_str())
-                            .unwrap_or("attachment");
-                        let mime = att
-                            .get("mime_type")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("application/octet-stream");
-                        if let Ok(bytes) = base64_decode(data_b64) {
-                            let is_audio = mime.starts_with("audio/");
-                            if let Err(e) = self
-                                .send_attachment(&resolved_att, bytes, fname, mime, None, is_audio)
-                                .await
-                            {
-                                tracing::warn!(error = %e, "BlueBubbles: failed to send attachment");
-                            }
+        if let Some(attachments) = msg.metadata.get("response_attachments")
+            && let Some(arr) = attachments.as_array()
+        {
+            let chat_id_for_att = msg
+                .metadata
+                .get("chat_guid")
+                .and_then(|v| v.as_str())
+                .or_else(|| msg.metadata.get("chat_id").and_then(|v| v.as_str()))
+                .unwrap_or(&msg.user_id);
+            if let Some(resolved_att) = self.resolve_chat_guid(chat_id_for_att).await? {
+                for att in arr {
+                    let data_b64 = att.get("data").and_then(|d| d.as_str()).unwrap_or("");
+                    let fname = att
+                        .get("filename")
+                        .and_then(|f| f.as_str())
+                        .unwrap_or("attachment");
+                    let mime = att
+                        .get("mime_type")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("application/octet-stream");
+                    if let Ok(bytes) = base64_decode(data_b64) {
+                        let is_audio = mime.starts_with("audio/");
+                        if let Err(e) = self
+                            .send_attachment(&resolved_att, bytes, fname, mime, None, is_audio)
+                            .await
+                        {
+                            tracing::warn!(error = %e, "BlueBubbles: failed to send attachment");
                         }
                     }
                 }
@@ -967,13 +965,12 @@ async fn handle_webhook(
             let mut parsed = serde_json::Value::Null;
             for key in &["payload", "data", "message"] {
                 let prefix = format!("{key}=");
-                if let Some(rest) = body_str.strip_prefix(&prefix) {
-                    if let Ok(decoded) = urlencoding::decode(rest) {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&decoded) {
-                            parsed = v;
-                            break;
-                        }
-                    }
+                if let Some(rest) = body_str.strip_prefix(&prefix)
+                    && let Ok(decoded) = urlencoding::decode(rest)
+                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(&decoded)
+                {
+                    parsed = v;
+                    break;
                 }
             }
             if parsed.is_null() {
@@ -1012,10 +1009,10 @@ async fn handle_webhook(
         .unwrap_or(false);
     // Skip tapback reactions delivered as messages
     let assoc_type = record.get("associatedMessageType").and_then(|v| v.as_i64());
-    if let Some(code) = assoc_type {
-        if TAPBACK_CODES.contains(&code) {
-            return axum::http::StatusCode::OK;
-        }
+    if let Some(code) = assoc_type
+        && TAPBACK_CODES.contains(&code)
+    {
+        return axum::http::StatusCode::OK;
     }
 
     if is_from_me {
@@ -1180,10 +1177,10 @@ async fn handle_webhook(
         .with_attachments(media_attachments);
 
     // Send to channel
-    if let Some(ref tx) = state.tx {
-        if tx.send(incoming).await.is_err() {
-            tracing::warn!("BlueBubbles: incoming message channel dropped");
-        }
+    if let Some(ref tx) = state.tx
+        && tx.send(incoming).await.is_err()
+    {
+        tracing::warn!("BlueBubbles: incoming message channel dropped");
     }
 
     // Fire-and-forget read receipt
@@ -1286,18 +1283,17 @@ fn extract_record(payload: &serde_json::Value) -> Option<serde_json::Value> {
         if data.is_object() {
             return Some(data.clone());
         }
-        if let Some(arr) = data.as_array() {
-            if let Some(first) = arr.first() {
-                if first.is_object() {
-                    return Some(first.clone());
-                }
-            }
+        if let Some(arr) = data.as_array()
+            && let Some(first) = arr.first()
+            && first.is_object()
+        {
+            return Some(first.clone());
         }
     }
-    if let Some(msg) = payload.get("message") {
-        if msg.is_object() {
-            return Some(msg.clone());
-        }
+    if let Some(msg) = payload.get("message")
+        && msg.is_object()
+    {
+        return Some(msg.clone());
     }
     if payload.is_object() {
         return Some(payload.clone());
@@ -1308,12 +1304,12 @@ fn extract_record(payload: &serde_json::Value) -> Option<serde_json::Value> {
 /// Get the first non-empty string from a slice of optional JSON values.
 fn first_string(candidates: &[Option<&serde_json::Value>]) -> Option<String> {
     for candidate in candidates {
-        if let Some(val) = candidate {
-            if let Some(s) = val.as_str() {
-                let trimmed = s.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
+        if let Some(val) = candidate
+            && let Some(s) = val.as_str()
+        {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
             }
         }
     }

@@ -798,10 +798,10 @@ fn provider_cheap_model_for_slug(
 }
 
 fn suggested_cheap_model_for_slug(slug: &str, default_model: &str) -> Option<String> {
-    if let Some(endpoint) = crate::config::provider_catalog::endpoint_for(slug) {
-        if let Some(ref cheap) = endpoint.suggested_cheap_model {
-            return Some(cheap.clone());
-        }
+    if let Some(endpoint) = crate::config::provider_catalog::endpoint_for(slug)
+        && let Some(ref cheap) = endpoint.suggested_cheap_model
+    {
+        return Some(cheap.clone());
     }
     if !default_model.is_empty() {
         Some(default_model.to_string())

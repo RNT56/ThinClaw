@@ -182,7 +182,7 @@ fn check_linux_probe(
         crate::platform::LinuxProbeStatus::Fail => {
             let mut detail = probe.detail.clone();
             if let Some(guidance) = &probe.guidance {
-                detail.push_str(" ");
+                detail.push(' ');
                 detail.push_str(guidance);
             }
             CheckResult::Fail(detail)

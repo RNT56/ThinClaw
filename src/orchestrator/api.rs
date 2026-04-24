@@ -468,7 +468,7 @@ async fn job_event_handler(
                 .data
                 .get("success")
                 .and_then(|value| value.as_bool())
-                .or_else(|| match status.as_str() {
+                .or(match status.as_str() {
                     "completed" | "success" => Some(true),
                     "failed" | "error" => Some(false),
                     _ => None,

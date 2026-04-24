@@ -293,8 +293,8 @@ pub(crate) fn request_origin(headers: &HeaderMap) -> Option<String> {
         .get(axum::http::header::REFERER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| url::Url::parse(value).ok())
-        .and_then(|url| {
-            Some(format!(
+        .map(|url| {
+            format!(
                 "{}://{}",
                 url.scheme(),
                 url.host_str().map(str::to_string).unwrap_or_default()
@@ -302,7 +302,7 @@ pub(crate) fn request_origin(headers: &HeaderMap) -> Option<String> {
                         .port()
                         .map(|port| format!(":{port}"))
                         .unwrap_or_default()
-            ))
+            )
         })
 }
 

@@ -289,35 +289,35 @@ fn build_nostr_setup_status(
         invalid_private_key: false,
     };
 
-    if status.public_key_hex.is_none() || status.public_key_npub.is_none() {
-        if let Some(secret) = private_key.as_deref() {
-            #[cfg(feature = "nostr")]
-            match Keys::parse(secret) {
-                Ok(keys) => {
-                    let public_key_hex = keys.public_key().to_hex();
-                    let public_key_npub = keys
-                        .public_key()
-                        .to_bech32()
-                        .unwrap_or_else(|_| public_key_hex.clone());
-                    status.public_key_hex = Some(public_key_hex);
-                    status.public_key_npub = Some(public_key_npub);
-                }
-                Err(_) => {
-                    status.invalid_private_key = true;
-                    status.needs_private_key = true;
-                    if !status
-                        .missing_fields
-                        .iter()
-                        .any(|field| field == "private_key")
-                    {
-                        status.missing_fields.push("private_key".to_string());
-                    }
+    if (status.public_key_hex.is_none() || status.public_key_npub.is_none())
+        && let Some(secret) = private_key.as_deref()
+    {
+        #[cfg(feature = "nostr")]
+        match Keys::parse(secret) {
+            Ok(keys) => {
+                let public_key_hex = keys.public_key().to_hex();
+                let public_key_npub = keys
+                    .public_key()
+                    .to_bech32()
+                    .unwrap_or_else(|_| public_key_hex.clone());
+                status.public_key_hex = Some(public_key_hex);
+                status.public_key_npub = Some(public_key_npub);
+            }
+            Err(_) => {
+                status.invalid_private_key = true;
+                status.needs_private_key = true;
+                if !status
+                    .missing_fields
+                    .iter()
+                    .any(|field| field == "private_key")
+                {
+                    status.missing_fields.push("private_key".to_string());
                 }
             }
-            #[cfg(not(feature = "nostr"))]
-            {
-                let _ = secret;
-            }
+        }
+        #[cfg(not(feature = "nostr"))]
+        {
+            let _ = secret;
         }
     }
 

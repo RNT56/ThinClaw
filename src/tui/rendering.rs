@@ -119,7 +119,7 @@ impl TuiApp {
                 self.skin.accent_soft_style(),
             ),
             Span::styled(" │ ", self.skin.border_soft_style()),
-            Span::styled(format!("{status}"), self.skin.muted_style()),
+            Span::styled(status.to_string(), self.skin.muted_style()),
             Span::styled(" ", self.skin.muted_style()),
             Span::styled(&self.status_text, self.skin.muted_style()),
         ]));

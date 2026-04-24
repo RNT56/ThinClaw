@@ -555,12 +555,12 @@ impl<'a> WasmToolOAuthFlow<'a> {
         secret_name: &str,
     ) -> Result<Option<String>, WasmToolOAuthError> {
         for candidate in secret_lookup_names(secret_name) {
-            match self.secrets.get(&self.user_id, &candidate).await {
+            match self.secrets.get(self.user_id, &candidate).await {
                 Ok(_) => return Ok(Some(candidate)),
                 Err(SecretError::Expired) => {
                     if self
                         .secrets
-                        .exists(&self.user_id, &refresh_secret_name(&candidate))
+                        .exists(self.user_id, &refresh_secret_name(&candidate))
                         .await
                         .unwrap_or(false)
                     {
@@ -583,7 +583,7 @@ impl<'a> WasmToolOAuthFlow<'a> {
             match self
                 .secrets
                 .get_for_injection(
-                    &self.user_id,
+                    self.user_id,
                     &scopes_secret_name(&candidate),
                     crate::secrets::SecretAccessContext::new("wasm.oauth", "scope_metadata_read"),
                 )

@@ -853,7 +853,7 @@ async fn validate_normalized_skill_content(
     source: SkillSource,
 ) -> Result<(String, LoadedSkill), SkillRegistryError> {
     // Parse SKILL.md
-    let parsed = parse_skill_md(&normalized_content).map_err(|e: SkillParseError| match e {
+    let parsed = parse_skill_md(normalized_content).map_err(|e: SkillParseError| match e {
         SkillParseError::InvalidName { ref name } => SkillRegistryError::ParseError {
             name: name.clone(),
             reason: e.to_string(),

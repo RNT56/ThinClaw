@@ -591,6 +591,7 @@ impl PairingStore {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&path)?;
         file.lock_exclusive()?;
 
@@ -708,6 +709,7 @@ impl PairingStore {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&path)?;
 
         file.lock_exclusive()?;

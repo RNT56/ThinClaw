@@ -310,7 +310,10 @@ impl ShellTool {
         if let Some(ref sandbox) = self.sandbox
             && (sandbox.is_initialized() || sandbox.config().enabled)
         {
-            return DockerSandboxExecutionBackend::new(Arc::clone(sandbox), self.sandbox_policy);
+            return DockerSandboxExecutionBackend::from_sandbox(
+                Arc::clone(sandbox),
+                self.sandbox_policy,
+            );
         }
         Arc::clone(&self.local_backend)
     }

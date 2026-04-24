@@ -2185,13 +2185,10 @@ impl DesktopAutonomyManager {
         command.env("HOME", &manifest.shadow_home);
         command.env("USERPROFILE", &manifest.shadow_home);
         command.env("DESKTOP_AUTONOMY_ENABLED", "true");
-        command.env(
-            "DESKTOP_AUTONOMY_PROFILE",
-            self.config.profile.as_str().to_string(),
-        );
+        command.env("DESKTOP_AUTONOMY_PROFILE", self.config.profile.as_str());
         command.env(
             "DESKTOP_AUTONOMY_DEPLOYMENT_MODE",
-            self.config.deployment_mode.as_str().to_string(),
+            self.config.deployment_mode.as_str(),
         );
         if let Some(username) = self.config.target_username.as_deref() {
             command.env("DESKTOP_AUTONOMY_TARGET_USERNAME", username);

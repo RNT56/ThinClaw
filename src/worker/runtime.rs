@@ -618,23 +618,23 @@ Work independently to complete this job. Report when done."#,
         ctx.metadata = job
             .and_then(|job| job.metadata.clone())
             .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(metadata) = ctx.metadata.as_object_mut() {
-            if let Some(job) = job {
-                if let Some(allowed_tools) = job.allowed_tools.as_ref() {
-                    metadata.insert(
-                        "allowed_tools".to_string(),
-                        serde_json::json!(allowed_tools),
-                    );
-                }
-                if let Some(allowed_skills) = job.allowed_skills.as_ref() {
-                    metadata.insert(
-                        "allowed_skills".to_string(),
-                        serde_json::json!(allowed_skills),
-                    );
-                }
-                if let Some(tool_profile) = job.tool_profile.as_ref() {
-                    metadata.insert("tool_profile".to_string(), serde_json::json!(tool_profile));
-                }
+        if let Some(metadata) = ctx.metadata.as_object_mut()
+            && let Some(job) = job
+        {
+            if let Some(allowed_tools) = job.allowed_tools.as_ref() {
+                metadata.insert(
+                    "allowed_tools".to_string(),
+                    serde_json::json!(allowed_tools),
+                );
+            }
+            if let Some(allowed_skills) = job.allowed_skills.as_ref() {
+                metadata.insert(
+                    "allowed_skills".to_string(),
+                    serde_json::json!(allowed_skills),
+                );
+            }
+            if let Some(tool_profile) = job.tool_profile.as_ref() {
+                metadata.insert("tool_profile".to_string(), serde_json::json!(tool_profile));
             }
         }
         ctx

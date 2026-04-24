@@ -1389,13 +1389,12 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                 (job_user_id.as_deref(), job_actor_id.as_deref())
             {
                 let mut routine = None;
-                if let Some(routine_id) = self.deps.routine_id {
-                    if let Ok(Some(found)) = store.get_routine(routine_id).await
-                        && found.user_id == user_id
-                        && found.owner_actor_id() == actor_id
-                    {
-                        routine = Some(found);
-                    }
+                if let Some(routine_id) = self.deps.routine_id
+                    && let Ok(Some(found)) = store.get_routine(routine_id).await
+                    && found.user_id == user_id
+                    && found.owner_actor_id() == actor_id
+                {
+                    routine = Some(found);
                 }
                 if routine.is_none()
                     && let Ok(Some(found)) = store

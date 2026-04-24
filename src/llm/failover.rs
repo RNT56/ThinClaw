@@ -653,14 +653,14 @@ impl LlmProvider for FailoverProvider {
                 "Skipping streaming provider (in cooldown)"
             );
         }
-        if available.is_empty() {
-            if let Some(oldest) = (0..self.providers.len()).min_by_key(|&i| {
+        if available.is_empty()
+            && let Some(oldest) = (0..self.providers.len()).min_by_key(|&i| {
                 self.cooldowns[i]
                     .cooldown_activated_nanos
                     .load(Ordering::Relaxed)
-            }) {
-                available.push(oldest);
-            }
+            })
+        {
+            available.push(oldest);
         }
 
         let ordered = self.leases.order_candidates(&available);
@@ -737,14 +737,14 @@ impl LlmProvider for FailoverProvider {
                 "Skipping tool streaming provider (in cooldown)"
             );
         }
-        if available.is_empty() {
-            if let Some(oldest) = (0..self.providers.len()).min_by_key(|&i| {
+        if available.is_empty()
+            && let Some(oldest) = (0..self.providers.len()).min_by_key(|&i| {
                 self.cooldowns[i]
                     .cooldown_activated_nanos
                     .load(Ordering::Relaxed)
-            }) {
-                available.push(oldest);
-            }
+            })
+        {
+            available.push(oldest);
         }
 
         let ordered = self.leases.order_candidates(&available);

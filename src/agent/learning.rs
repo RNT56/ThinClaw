@@ -598,7 +598,7 @@ fn apply_provider_auth(
         "api-key" | "api_key" => request.header("api-key", token),
         "x-api-key" | "x_api_key" => request.header("X-API-Key", token),
         "x-chroma-token" | "x_chroma_token" => request.header("x-chroma-token", token),
-        "bearer" | _ => request.bearer_auth(token),
+        _ => request.bearer_auth(token),
     }
 }
 
@@ -1341,10 +1341,10 @@ fn payload_text(payload: &serde_json::Value) -> String {
         return value.to_string();
     }
     for key in ["content", "text", "summary", "memory", "user_message"] {
-        if let Some(value) = payload.get(key).and_then(|value| value.as_str()) {
-            if !value.trim().is_empty() {
-                return value.to_string();
-            }
+        if let Some(value) = payload.get(key).and_then(|value| value.as_str())
+            && !value.trim().is_empty()
+        {
+            return value.to_string();
         }
     }
     let user = payload
@@ -1410,12 +1410,8 @@ fn provider_score(value: &serde_json::Value) -> Option<f64> {
     }
     value
         .get("metadata")
-        .and_then(|metadata| provider_score(metadata))
-        .or_else(|| {
-            value
-                .get("payload")
-                .and_then(|payload| provider_score(payload))
-        })
+        .and_then(provider_score)
+        .or_else(|| value.get("payload").and_then(provider_score))
 }
 
 fn parse_matrix_hits(value: &serde_json::Value, provider: &str) -> Vec<ProviderMemoryHit> {
@@ -4897,7 +4893,6 @@ fn synthesize_generated_skill_markdown(
     activation_reason: Option<String>,
 ) -> Result<String, String> {
     let description = user_input
-        .trim()
         .split_whitespace()
         .take(18)
         .collect::<Vec<_>>()

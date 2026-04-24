@@ -452,7 +452,7 @@ impl AcpConnectionState {
             .iter()
             .filter_map(|id| inner.sessions.get(id))
             .filter(|session| !session.closed)
-            .filter(|session| cwd.map_or(true, |cwd| session.cwd == cwd))
+            .filter(|session| cwd.is_none_or(|cwd| session.cwd == cwd))
             .cloned()
             .collect()
     }
@@ -850,7 +850,7 @@ pub async fn client_execute_terminal(
     let exit_status = output_result
         .get("exitStatus")
         .filter(|value| !value.is_null())
-        .or_else(|| wait_exit_status.as_ref());
+        .or(wait_exit_status.as_ref());
     let exit_code = exit_status
         .and_then(|status| status.get("exitCode"))
         .and_then(Value::as_i64);
@@ -1875,7 +1875,7 @@ async fn handle_prompt(
         .append_transcript(&request.session_id, "user", prompt.clone())
         .await;
     if was_untitled && let Some(updated_session) = state.get_session(&request.session_id).await {
-        if let Err(error) = send_outbound(
+        let send_result = send_outbound(
             writer_tx,
             session_update(
                 &request.session_id,
@@ -1885,7 +1885,8 @@ async fn handle_prompt(
                     Some(json!({ "messageCount": updated_session.transcript.len() })),
                 ),
             ),
-        ) {
+        );
+        if let Err(error) = send_result {
             let _ = state.take_prompt_waiter(&request.session_id).await;
             return Err(json_rpc_error(-32000, error.to_string(), None));
         }

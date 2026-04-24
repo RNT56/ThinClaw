@@ -617,10 +617,9 @@ impl Thread {
 
             if let Some(next) = iter.peek()
                 && next.role == "assistant"
+                && let Some(response) = iter.next()
             {
-                if let Some(response) = iter.next() {
-                    turn.complete(&response.content);
-                }
+                turn.complete(&response.content);
             }
 
             if turn.hide_user_input_from_ui && turn.response.is_none() {

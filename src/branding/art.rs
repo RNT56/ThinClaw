@@ -169,8 +169,8 @@ pub fn wordmark_block() -> ArtBlock {
     for glyph in glyphs {
         let glyph_height = glyph.len();
         let glyph_width = glyph.first().map_or(0, |row| row.len());
-        for y in 0..glyph_height {
-            for (x, ch) in glyph[y].chars().enumerate() {
+        for (y, row) in glyph.iter().enumerate().take(glyph_height) {
+            for (x, ch) in row.chars().enumerate() {
                 if ch == ' ' {
                     continue;
                 }
@@ -291,14 +291,8 @@ pub fn onboarding_brand_block(skin: &CliSkin, max_width: usize) -> Option<ArtBlo
         Some(logo)
     } else if compact_logo.width() <= max_width {
         Some(compact_logo)
-    } else if let Some(hero) = hero_block(skin) {
-        if hero.width() <= max_width {
-            Some(hero)
-        } else {
-            None
-        }
     } else {
-        None
+        hero_block(skin).filter(|hero| hero.width() <= max_width)
     }
 }
 

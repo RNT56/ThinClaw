@@ -170,12 +170,18 @@ impl std::fmt::Display for ResearchSubagentError {
 #[derive(Debug)]
 enum ResearchSubagentInvocationError {
     Api(ApiError),
-    Run(ResearchSubagentError),
+    Run(Box<ResearchSubagentError>),
 }
 
 impl From<ApiError> for ResearchSubagentInvocationError {
     fn from(value: ApiError) -> Self {
         Self::Api(value)
+    }
+}
+
+impl From<ResearchSubagentError> for ResearchSubagentInvocationError {
+    fn from(value: ResearchSubagentError) -> Self {
+        Self::Run(Box::new(value))
     }
 }
 
@@ -1382,6 +1388,7 @@ async fn launch_next_trial_if_ready(
                 Ok(planner) => planner,
                 Err(ResearchSubagentInvocationError::Api(error)) => return Err(error),
                 Err(ResearchSubagentInvocationError::Run(error)) => {
+                    let error = *error;
                     campaign.status = ExperimentCampaignStatus::Paused;
                     campaign.queue_state = ExperimentCampaignQueueState::NotQueued;
                     campaign.pause_reason =
@@ -1413,7 +1420,7 @@ async fn launch_next_trial_if_ready(
                 "suggest_only",
                 "completed",
                 &planner.value.mutation_brief,
-                &[planner.run_artifact.clone()],
+                std::slice::from_ref(&planner.run_artifact),
             );
             campaign.updated_at = Utc::now();
             store
@@ -2328,6 +2335,7 @@ async fn create_experiment_trial_commit(
             return Err(CandidateGenerationError::new(error.to_string(), Vec::new()));
         }
         Err(ResearchSubagentInvocationError::Run(error)) => {
+            let error = *error;
             return Err(CandidateGenerationError::new(
                 error.message,
                 vec![error.run_artifact],
@@ -2344,6 +2352,7 @@ async fn create_experiment_trial_commit(
                 ));
             }
             Err(ResearchSubagentInvocationError::Run(error)) => {
+                let error = *error;
                 return Err(CandidateGenerationError::new(
                     error.message,
                     vec![planner.run_artifact.clone(), error.run_artifact],
@@ -2416,6 +2425,7 @@ async fn create_experiment_trial_commit(
             ));
         }
         Err(ResearchSubagentInvocationError::Run(error)) => {
+            let error = *error;
             return Err(CandidateGenerationError::new(
                 error.message,
                 vec![
@@ -4281,7 +4291,7 @@ async fn run_planner_subagent(
         research_channel_metadata(campaign, trial_id, "planner", &[]),
     )
     .await
-    .map_err(ResearchSubagentInvocationError::Run)
+    .map_err(ResearchSubagentInvocationError::from)
 }
 
 async fn run_mutator_subagent(
@@ -4332,7 +4342,7 @@ async fn run_mutator_subagent(
         research_channel_metadata(campaign, trial_id, "mutator", &planner.target_ids),
     )
     .await
-    .map_err(ResearchSubagentInvocationError::Run)
+    .map_err(ResearchSubagentInvocationError::from)
 }
 
 async fn run_reviewer_subagent(
@@ -4373,7 +4383,7 @@ async fn run_reviewer_subagent(
         research_channel_metadata(campaign, trial_id, "reviewer", &planner.target_ids),
     )
     .await
-    .map_err(ResearchSubagentInvocationError::Run)
+    .map_err(ResearchSubagentInvocationError::from)
 }
 
 async fn execute_local_trial(
@@ -4557,7 +4567,7 @@ fn agent_env_benchmark_config(
         .get("agent_env")
         .or_else(|| runner.backend_config.get("benchmark_config"))
         .unwrap_or(&runner.backend_config);
-    if !source.get("benchmark").is_some() {
+    if source.get("benchmark").is_none() {
         return Ok(None);
     }
     serde_json::from_value(source.clone())
@@ -4738,7 +4748,7 @@ fn experiment_execution_backend(
             {
                 sandbox_config.image = image.trim().to_string();
             }
-            DockerSandboxExecutionBackend::new(
+            DockerSandboxExecutionBackend::from_sandbox(
                 Arc::new(crate::sandbox::SandboxManager::new(sandbox_config)),
                 crate::sandbox::SandboxPolicy::WorkspaceWrite,
             )
@@ -5069,7 +5079,7 @@ fn derive_outcome_opportunities(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| {
                 experiment_target_kind_sort_key(left.kind)
-                    .cmp(&experiment_target_kind_sort_key(right.kind))
+                    .cmp(experiment_target_kind_sort_key(right.kind))
             })
             .then_with(|| left.pattern_key.cmp(&right.pattern_key))
     });
@@ -5077,7 +5087,7 @@ fn derive_outcome_opportunities(
     aggregates
         .into_iter()
         .take(limit.max(1))
-        .map(|aggregate| outcome_aggregate_to_opportunity(aggregate))
+        .map(outcome_aggregate_to_opportunity)
         .collect()
 }
 

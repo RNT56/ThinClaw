@@ -218,7 +218,7 @@ fn normalize_fact_line(line: &str) -> Option<String> {
         .or_else(|| trimmed.strip_prefix("* "))
         .or_else(|| trimmed.strip_prefix("• "))
         .unwrap_or(trimmed)
-        .trim_start_matches(|c: char| matches!(c, '-' | '*' | '•'))
+        .trim_start_matches(['-', '*', '•'])
         .trim();
     let trimmed = ordered_list_body(trimmed).unwrap_or(trimmed).trim();
 

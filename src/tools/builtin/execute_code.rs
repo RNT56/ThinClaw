@@ -1313,7 +1313,7 @@ def browser_tool(**kwargs):
 }
 
 fn javascript_tool_rpc_helper() -> String {
-    format!(
+    std::fmt::format(format_args!(
         r#"
 import crypto from "crypto";
 import fs from "fs";
@@ -1404,7 +1404,7 @@ export const session_search = (params = {{}}) => call_tool("session_search", par
 export const http_tool = (params = {{}}) => call_tool("http", params);
 export const browser_tool = (params = {{}}) => call_tool("browser", params);
 "#
-    )
+    ))
     .trim_start()
     .to_string()
 }
@@ -1982,7 +1982,8 @@ mod tests {
         .await
         .unwrap();
 
-        let backend = DockerSandboxExecutionBackend::new(sandbox, SandboxPolicy::WorkspaceWrite);
+        let backend =
+            DockerSandboxExecutionBackend::from_sandbox(sandbox, SandboxPolicy::WorkspaceWrite);
         let tool = ExecuteCodeTool::new()
             .with_working_dir(temp_dir.path().to_path_buf())
             .with_backend(backend);

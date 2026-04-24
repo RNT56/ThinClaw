@@ -49,21 +49,19 @@ impl HttpTool {
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
                 if attempt.previous().len() >= 10 {
                     attempt.error("too many redirects")
+                } else if validate_outbound_url(
+                    attempt.url().as_str(),
+                    &OutboundUrlGuardOptions {
+                        require_https: true,
+                        upgrade_http_to_https: false,
+                        allowlist: Vec::new(),
+                    },
+                )
+                .is_ok()
+                {
+                    attempt.follow()
                 } else {
-                    if validate_outbound_url(
-                        attempt.url().as_str(),
-                        &OutboundUrlGuardOptions {
-                            require_https: true,
-                            upgrade_http_to_https: false,
-                            allowlist: Vec::new(),
-                        },
-                    )
-                    .is_ok()
-                    {
-                        attempt.follow()
-                    } else {
-                        attempt.stop()
-                    }
+                    attempt.stop()
                 }
             }))
             .build()

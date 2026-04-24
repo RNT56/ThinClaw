@@ -348,7 +348,7 @@ impl NostrRuntime {
         plaintext: &str,
         reply_protocol: Option<NostrDmProtocol>,
     ) -> Result<String, ChannelError> {
-        let protocol = reply_protocol.or_else(|| Some(NostrDmProtocol::GiftWrap));
+        let protocol = reply_protocol.or(Some(NostrDmProtocol::GiftWrap));
         self.send_dm(recipient, plaintext, protocol).await
     }
 

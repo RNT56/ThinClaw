@@ -148,7 +148,7 @@ impl QuarantineManager {
                     .find_iter(&skill.content.raw_content)
                     .map(|matched| SecurityFinding {
                         kind: (*kind).to_string(),
-                        severity: severity.clone(),
+                        severity: *severity,
                         excerpt: matched.as_str().to_string(),
                     })
             })

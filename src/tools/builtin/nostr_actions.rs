@@ -459,7 +459,7 @@ async fn resolve_root_event(
         }) = tag.as_standardized()
         {
             if marker == &Some(Marker::Root) {
-                return Ok(runtime.fetch_event(*event_id).await.map_err(channel_err)?);
+                return runtime.fetch_event(*event_id).await.map_err(channel_err);
             }
             fallback.get_or_insert(*event_id);
         }

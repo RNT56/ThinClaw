@@ -1056,7 +1056,7 @@ impl AppBuilder {
                     match execute_code_registration_mode(mode, self.config.sandbox.enabled) {
                         RuntimeExecRegistrationMode::DockerSandbox => {
                             let backend =
-                                crate::tools::execution_backend::DockerSandboxExecutionBackend::new(
+                                crate::tools::execution_backend::DockerSandboxExecutionBackend::from_sandbox(
                                     Arc::clone(&sandbox_backend),
                                     crate::sandbox::SandboxPolicy::WorkspaceWrite,
                                 );
@@ -1093,7 +1093,7 @@ impl AppBuilder {
                         }
                         RuntimeExecRegistrationMode::DockerSandbox => {
                             let backend =
-                                crate::tools::execution_backend::DockerSandboxExecutionBackend::new(
+                                crate::tools::execution_backend::DockerSandboxExecutionBackend::from_sandbox(
                                     Arc::clone(&sandbox_backend),
                                     crate::sandbox::SandboxPolicy::WorkspaceWrite,
                                 );

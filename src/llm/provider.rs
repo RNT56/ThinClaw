@@ -432,12 +432,13 @@ pub struct ModelMetadata {
 }
 
 /// How a provider can service a streaming request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamSupport {
     /// Provider uses its native streaming endpoint/adapter.
     Native,
     /// Provider can only simulate streaming from a completed response.
+    #[default]
     Simulated,
     /// Provider cannot stream and should fail streaming requests.
     Unsupported,
@@ -453,19 +454,14 @@ impl StreamSupport {
     }
 }
 
-impl Default for StreamSupport {
-    fn default() -> Self {
-        Self::Simulated
-    }
-}
-
 /// Streaming behavior requested by a caller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamPolicy {
     /// Prefer native streaming but allow a simulated fallback if needed.
     PreferNative,
     /// Native or simulated streaming are both acceptable.
+    #[default]
     AllowSimulated,
     /// Fail unless the provider can produce native stream chunks.
     RequireNative,
@@ -474,12 +470,6 @@ pub enum StreamPolicy {
 impl StreamPolicy {
     pub fn allows_simulated(self) -> bool {
         matches!(self, Self::PreferNative | Self::AllowSimulated)
-    }
-}
-
-impl Default for StreamPolicy {
-    fn default() -> Self {
-        Self::AllowSimulated
     }
 }
 

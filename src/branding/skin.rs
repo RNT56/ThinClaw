@@ -343,11 +343,7 @@ impl CliSkin {
     /// Resolved spinner frames: custom from skin TOML, or preset defaults.
     pub fn resolved_spinner_frames(&self) -> Vec<&str> {
         if self.spinner_frames.is_empty() {
-            self.spinner_style
-                .default_frames()
-                .iter()
-                .copied()
-                .collect()
+            self.spinner_style.default_frames().to_vec()
         } else {
             self.spinner_frames.iter().map(String::as_str).collect()
         }

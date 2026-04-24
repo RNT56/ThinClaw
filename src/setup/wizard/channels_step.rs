@@ -1269,10 +1269,9 @@ impl SetupWizard {
                 optional_input("Webhook listen port", Some("8645")).map_err(SetupError::Io)?;
             if let Some(ref port) = webhook_port
                 && !port.is_empty()
+                && let Ok(p) = port.parse::<u16>()
             {
-                if let Ok(p) = port.parse::<u16>() {
-                    self.settings.channels.bluebubbles_webhook_port = Some(p);
-                }
+                self.settings.channels.bluebubbles_webhook_port = Some(p);
             }
 
             let allow_from = optional_input(

@@ -968,7 +968,10 @@ pub struct DockerSandboxExecutionBackend {
 }
 
 impl DockerSandboxExecutionBackend {
-    pub fn new(sandbox: Arc<SandboxManager>, policy: SandboxPolicy) -> Arc<dyn ExecutionBackend> {
+    pub fn from_sandbox(
+        sandbox: Arc<SandboxManager>,
+        policy: SandboxPolicy,
+    ) -> Arc<dyn ExecutionBackend> {
         Arc::new(Self {
             sandbox: Some(sandbox),
             policy: Some(policy),
@@ -1769,7 +1772,7 @@ mod tests {
             return;
         }
 
-        let backend = DockerSandboxExecutionBackend::new(
+        let backend = DockerSandboxExecutionBackend::from_sandbox(
             sandbox,
             crate::sandbox::SandboxPolicy::WorkspaceWrite,
         );

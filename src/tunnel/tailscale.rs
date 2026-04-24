@@ -43,7 +43,7 @@ impl Tunnel for TailscaleTunnel {
         } else {
             let output = tokio::time::timeout(
                 tokio::time::Duration::from_secs(10),
-                Command::new(&crate::tunnel::resolve_binary("tailscale"))
+                Command::new(crate::tunnel::resolve_binary("tailscale"))
                     .args(["status", "--json"])
                     .output(),
             )
@@ -101,20 +101,20 @@ impl Tunnel for TailscaleTunnel {
             .args([subcommand, "reset"])
             .output()
             .await;
-        if let Ok(ref out) = reset_output {
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                // version warnings are harmless — only log real failures
-                let real_errors: Vec<&str> = stderr
-                    .lines()
-                    .filter(|l| !l.contains("client version") && !l.contains("Warning:"))
-                    .collect();
-                if !real_errors.is_empty() {
-                    tracing::warn!(
-                        "tailscale {subcommand} reset returned non-zero: {}",
-                        real_errors.join("; ")
-                    );
-                }
+        if let Ok(ref out) = reset_output
+            && !out.status.success()
+        {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // version warnings are harmless — only log real failures
+            let real_errors: Vec<&str> = stderr
+                .lines()
+                .filter(|l| !l.contains("client version") && !l.contains("Warning:"))
+                .collect();
+            if !real_errors.is_empty() {
+                tracing::warn!(
+                    "tailscale {subcommand} reset returned non-zero: {}",
+                    real_errors.join("; ")
+                );
             }
         }
 
@@ -223,7 +223,7 @@ impl Tunnel for TailscaleTunnel {
 
     async fn stop(&self) -> Result<()> {
         let subcommand = if self.funnel { "funnel" } else { "serve" };
-        if let Err(e) = Command::new(&crate::tunnel::resolve_binary("tailscale"))
+        if let Err(e) = Command::new(crate::tunnel::resolve_binary("tailscale"))
             .args([subcommand, "reset"])
             .output()
             .await

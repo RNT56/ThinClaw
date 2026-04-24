@@ -30,10 +30,11 @@ const DEFAULT_DOT_FRAMES: &[&str] = &["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", 
 const DEFAULT_ARROW_FRAMES: &[&str] = &["←", "↖", "↑", "↗", "→", "↘", "↓", "↙"];
 
 /// Spinner preset style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SpinnerStyle {
     Kawaii,
     Dots,
+    #[default]
     Braille,
     Arrows,
 }
@@ -56,12 +57,6 @@ impl SpinnerStyle {
             Self::Braille => DEFAULT_BRAILLE_FRAMES,
             Self::Arrows => DEFAULT_ARROW_FRAMES,
         }
-    }
-}
-
-impl Default for SpinnerStyle {
-    fn default() -> Self {
-        Self::Braille
     }
 }
 

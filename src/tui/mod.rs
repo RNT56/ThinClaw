@@ -343,7 +343,7 @@ impl TuiApp {
                 _ = tokio::time::sleep(Duration::from_millis(50)) => {
                     // Advance animation tick
                     self.animation_tick += 1;
-                    if self.animation_tick % 6 == 0 {
+                    if self.animation_tick.is_multiple_of(6) {
                         self.spinner.tick();
                     }
 

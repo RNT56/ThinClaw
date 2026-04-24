@@ -368,41 +368,26 @@ pub struct SubagentSpawnRequest {
     pub wait: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentMemoryMode {
+    #[default]
     ProvidedContextOnly,
     GrantedToolsOnly,
 }
 
-impl Default for SubagentMemoryMode {
-    fn default() -> Self {
-        Self::ProvidedContextOnly
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentToolMode {
+    #[default]
     ExplicitOnly,
 }
 
-impl Default for SubagentToolMode {
-    fn default() -> Self {
-        Self::ExplicitOnly
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SubagentSkillMode {
+    #[default]
     ExplicitOnly,
-}
-
-impl Default for SubagentSkillMode {
-    fn default() -> Self {
-        Self::ExplicitOnly
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1186,13 +1171,12 @@ impl SubagentExecutor {
                         .and_then(|value| value.as_str())
                         .and_then(|value| Uuid::parse_str(value).ok());
                     let mut resolved_routine = None;
-                    if let Some(routine_id) = routine {
-                        if let Ok(Some(found)) = store.get_routine(routine_id).await
-                            && found.user_id == parent_user_id
-                            && found.owner_actor_id() == routine_actor
-                        {
-                            resolved_routine = Some(found);
-                        }
+                    if let Some(routine_id) = routine
+                        && let Ok(Some(found)) = store.get_routine(routine_id).await
+                        && found.user_id == parent_user_id
+                        && found.owner_actor_id() == routine_actor
+                    {
+                        resolved_routine = Some(found);
                     }
                     if resolved_routine.is_none()
                         && let Ok(Some(found)) = store

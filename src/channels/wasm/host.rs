@@ -577,10 +577,10 @@ impl ChannelWorkspaceStore {
         };
 
         // Compare with last-flushed snapshot to skip redundant writes
-        if let Ok(last) = self.last_flushed.lock() {
-            if *last == serialized {
-                return; // Content unchanged, skip disk I/O
-            }
+        if let Ok(last) = self.last_flushed.lock()
+            && *last == serialized
+        {
+            return; // Content unchanged, skip disk I/O
         }
 
         // Content changed — write to disk atomically
@@ -594,15 +594,15 @@ impl ChannelWorkspaceStore {
 
     /// Write serialized bytes to disk atomically (write-tmp + rename).
     fn write_to_disk(path: &std::path::Path, serialized: &[u8]) {
-        if let Some(parent) = path.parent() {
-            if let Err(err) = std::fs::create_dir_all(parent) {
-                tracing::warn!(
-                    path = %parent.display(),
-                    error = %err,
-                    "Failed to create directory for channel workspace persistence"
-                );
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(err) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %err,
+                "Failed to create directory for channel workspace persistence"
+            );
+            return;
         }
 
         let tmp_path = path.with_extension("tmp");

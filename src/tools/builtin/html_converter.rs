@@ -23,13 +23,12 @@ pub fn convert_html_to_markdown(html: &str, url: &str) -> Result<String, ToolErr
         .and_then(|r| r.parse())
         .and_then(|article| article.content);
 
-    if let Some(ref clean_html) = article_result {
+    if let Some(ref clean_html) = article_result
+        && let Ok(md) = convert(clean_html, None)
+        && !md.trim().is_empty()
+    {
         // Readability found an article — convert the clean extract to markdown.
-        if let Ok(md) = convert(clean_html, None) {
-            if !md.trim().is_empty() {
-                return Ok(md);
-            }
-        }
+        return Ok(md);
     }
 
     // Stage 2: readability couldn't extract an article (index pages, SPAs,

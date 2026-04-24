@@ -340,14 +340,14 @@ impl SetupWizard {
         print_info("It requires either an Anthropic API key or a Claude Code OAuth session.");
         crate::setup::prompts::print_blank_line();
 
-        if prompt_enable {
-            if !confirm("Enable Claude Code sandbox?", false).map_err(SetupError::Io)? {
-                self.settings.claude_code_enabled = false;
-                print_info(
-                    "Claude Code disabled. You can turn it on later with CLAUDE_CODE_ENABLED=true.",
-                );
-                return Ok(());
-            }
+        if prompt_enable
+            && !confirm("Enable Claude Code sandbox?", false).map_err(SetupError::Io)?
+        {
+            self.settings.claude_code_enabled = false;
+            print_info(
+                "Claude Code disabled. You can turn it on later with CLAUDE_CODE_ENABLED=true.",
+            );
+            return Ok(());
         }
 
         self.settings.claude_code_enabled = true;
@@ -616,14 +616,10 @@ impl SetupWizard {
         );
         crate::setup::prompts::print_blank_line();
 
-        if prompt_enable {
-            if !confirm("Enable Codex sandbox?", false).map_err(SetupError::Io)? {
-                self.settings.codex_code_enabled = false;
-                print_info(
-                    "Codex disabled. You can turn it on later with CODEX_CODE_ENABLED=true.",
-                );
-                return Ok(());
-            }
+        if prompt_enable && !confirm("Enable Codex sandbox?", false).map_err(SetupError::Io)? {
+            self.settings.codex_code_enabled = false;
+            print_info("Codex disabled. You can turn it on later with CODEX_CODE_ENABLED=true.");
+            return Ok(());
         }
 
         self.settings.codex_code_enabled = true;
