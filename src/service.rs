@@ -13,6 +13,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+#[cfg(target_os = "macos")]
 const SERVICE_LABEL: &str = "com.thinclaw.daemon";
 #[cfg(target_os = "linux")]
 const SYSTEMD_UNIT: &str = "thinclaw.service";
@@ -477,6 +478,7 @@ pub fn run_windows_service_dispatcher(home_override: Option<PathBuf>) -> Result<
     windows_impl::run_dispatcher()
 }
 
+#[cfg(target_os = "macos")]
 fn macos_plist_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not find home directory")?;
     Ok(home
@@ -495,6 +497,7 @@ fn linux_unit_path() -> Result<PathBuf> {
         .join(SYSTEMD_UNIT))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn thinclaw_logs_dir() -> Result<PathBuf> {
     Ok(crate::platform::state_paths().logs_dir)
 }
@@ -517,6 +520,7 @@ fn run_capture(command: &mut Command) -> Result<String> {
     Ok(text)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn xml_escape(raw: &str) -> String {
     raw.replace('&', "&amp;")
         .replace('<', "&lt;")
