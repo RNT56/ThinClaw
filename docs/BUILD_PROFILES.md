@@ -133,7 +133,7 @@ Pi OS Lite is a headless target, not a desktop-autonomy target.
 Use the release artifact for production:
 
 ```bash
-export THINCLAW_VERSION=v0.13.6  # replace with the latest release tag
+export THINCLAW_VERSION=v0.13.7  # replace with the latest release tag
 curl -L -o thinclaw-pi.tar.gz \
   "https://github.com/RNT56/ThinClaw/releases/download/${THINCLAW_VERSION}/thinclaw-aarch64-unknown-linux-gnu.tar.gz"
 tar -xzf thinclaw-pi.tar.gz

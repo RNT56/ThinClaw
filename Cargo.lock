@@ -7411,7 +7411,7 @@ dependencies = [
 
 [[package]]
 name = "thinclaw"
-version = "0.13.6"
+version = "0.13.7"
 dependencies = [
  "aes-gcm",
  "aho-corasick",

@@ -55,7 +55,7 @@ Native install is the preferred low-overhead path. Use the
 `aarch64-unknown-linux-gnu` release artifact.
 
 ```bash
-export THINCLAW_VERSION=v0.13.6  # replace with the latest release tag
+export THINCLAW_VERSION=v0.13.7  # replace with the latest release tag
 
 curl -L -o deploy-setup.sh \
   https://raw.githubusercontent.com/RNT56/ThinClaw/main/deploy/setup.sh
