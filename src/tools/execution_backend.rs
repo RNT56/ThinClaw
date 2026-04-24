@@ -1096,6 +1096,9 @@ impl ExecutionBackend for RemoteRunnerAdapterExecutionBackend {
 fn build_shell_command(command: &str, allow_network: bool) -> Command {
     let launcher = shell_launcher();
 
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = allow_network;
+
     #[cfg(target_os = "macos")]
     if !allow_network && Path::new("/usr/bin/sandbox-exec").is_file() {
         let mut sandboxed = Command::new("/usr/bin/sandbox-exec");
@@ -1128,6 +1131,9 @@ fn build_shell_command(command: &str, allow_network: bool) -> Command {
 }
 
 fn build_script_command(program: &str, args: &[String], allow_network: bool) -> Command {
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = allow_network;
+
     #[cfg(target_os = "macos")]
     if !allow_network && Path::new("/usr/bin/sandbox-exec").is_file() {
         let mut sandboxed = Command::new("/usr/bin/sandbox-exec");

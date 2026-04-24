@@ -1270,11 +1270,14 @@ fn signal_attachment_dir() -> Option<std::path::PathBuf> {
                 return Some(candidate);
             }
         }
-        return Some(home.join("AppData/Roaming/signal-cli/attachments"));
+        Some(home.join("AppData/Roaming/signal-cli/attachments"))
     }
 
-    // Fallback: try the Linux path anyway (it may be created later)
-    Some(linux_path)
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Fallback: try the Linux path anyway (it may be created later)
+        Some(linux_path)
+    }
 }
 
 /// Long-running SSE listener that reconnects with exponential backoff.

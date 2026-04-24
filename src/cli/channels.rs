@@ -400,8 +400,26 @@ fn channel_is_configured(config: &crate::config::Config, name: &str) -> bool {
         "telegram" => config.channels.telegram.is_some(),
         "slack" => config.channels.slack.is_some(),
         "discord" => config.channels.discord.is_some(),
-        "imessage" => config.channels.imessage.is_some(),
-        "apple_mail" => config.channels.apple_mail.is_some(),
+        "imessage" => {
+            #[cfg(target_os = "macos")]
+            {
+                config.channels.imessage.is_some()
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        }
+        "apple_mail" => {
+            #[cfg(target_os = "macos")]
+            {
+                config.channels.apple_mail.is_some()
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        }
         _ => false,
     }
 }

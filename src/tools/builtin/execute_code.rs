@@ -1040,7 +1040,6 @@ async fn serve_tool_rpc_windows(
     ctx: JobContext,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), ToolError> {
-    let mut listener = listener;
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,

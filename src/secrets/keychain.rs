@@ -517,7 +517,7 @@ mod platform {
     use std::slice;
     use std::sync::{Mutex, OnceLock};
 
-    use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, GetLastError, LocalFree};
+    use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, FILETIME, GetLastError, LocalFree};
     use windows_sys::Win32::Security::Credentials::{
         CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree,
         CredReadW, CredWriteW,
@@ -623,7 +623,10 @@ mod platform {
             Type: CRED_TYPE_GENERIC,
             TargetName: target.as_mut_ptr(),
             Comment: null_mut(),
-            LastWritten: Default::default(),
+            LastWritten: FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            },
             CredentialBlobSize: encrypted.len() as u32,
             CredentialBlob: encrypted.as_ptr() as *mut u8,
             Persist: CRED_PERSIST_LOCAL_MACHINE,

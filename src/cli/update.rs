@@ -517,34 +517,36 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
                     bytes.as_ref(),
                     &release.version,
                 )?;
-                return Ok(());
             }
 
-            // Backup current binary
-            let current = std::env::current_exe()?;
-            let backup = backup_binary_path();
-            std::fs::copy(&current, &backup)?;
-            println!("{}", branding.key_value("Backup", backup.display()));
-
-            // Replace binary
-            let temp_path = current.with_extension("new");
-            std::fs::write(&temp_path, &bytes)?;
-
-            #[cfg(unix)]
+            #[cfg(not(target_os = "windows"))]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = std::fs::Permissions::from_mode(0o755);
-                std::fs::set_permissions(&temp_path, perms)?;
-            }
+                // Backup current binary
+                let current = std::env::current_exe()?;
+                let backup = backup_binary_path();
+                std::fs::copy(&current, &backup)?;
+                println!("{}", branding.key_value("Backup", backup.display()));
 
-            std::fs::rename(&temp_path, &current)?;
-            println!(
-                "{}",
-                branding.good(format!(
-                    "Updated to v{}. Restart ThinClaw for changes to take effect.",
-                    release.version
-                ))
-            );
+                // Replace binary
+                let temp_path = current.with_extension("new");
+                std::fs::write(&temp_path, &bytes)?;
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(0o755);
+                    std::fs::set_permissions(&temp_path, perms)?;
+                }
+
+                std::fs::rename(&temp_path, &current)?;
+                println!(
+                    "{}",
+                    branding.good(format!(
+                        "Updated to v{}. Restart ThinClaw for changes to take effect.",
+                        release.version
+                    ))
+                );
+            }
         }
 
         UpdateCommand::Rollback => {
@@ -558,29 +560,31 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
                         "Windows rollback is installer-based. Reinstall the previous MSI/ZIP instead of swapping the running executable."
                     )
                 );
-                return Ok(());
             }
 
-            let backup = backup_binary_path();
-            if !backup.exists() {
-                println!(
-                    "{}",
-                    branding.warn(format!("No backup found at {}.", backup.display()))
-                );
-                println!(
-                    "{}",
-                    branding.muted("Rollback is only available after a successful update.")
-                );
-                return Ok(());
-            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let backup = backup_binary_path();
+                if !backup.exists() {
+                    println!(
+                        "{}",
+                        branding.warn(format!("No backup found at {}.", backup.display()))
+                    );
+                    println!(
+                        "{}",
+                        branding.muted("Rollback is only available after a successful update.")
+                    );
+                    return Ok(());
+                }
 
-            let current = std::env::current_exe()?;
-            std::fs::rename(&backup, &current)?;
-            println!("{}", branding.good("Rolled back to the previous version."));
-            println!(
-                "{}",
-                branding.muted("Restart ThinClaw for changes to take effect.")
-            );
+                let current = std::env::current_exe()?;
+                std::fs::rename(&backup, &current)?;
+                println!("{}", branding.good("Rolled back to the previous version."));
+                println!(
+                    "{}",
+                    branding.muted("Restart ThinClaw for changes to take effect.")
+                );
+            }
         }
     }
 

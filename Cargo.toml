@@ -181,7 +181,7 @@ pdf-extract = { version = "0.7", optional = true }
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 # Timezone handling
-chrono-tz = { version = "0.10", optional = true }
+chrono-tz = "0.10"
 iana-time-zone = "0.1"
 
 # PostgreSQL TLS (feature gated, pulled in by postgres feature)
@@ -250,7 +250,9 @@ tunnel = []
 docker-sandbox = []
 browser = ["dep:chromiumoxide"]
 nostr = ["dep:nostr-sdk"]
-timezones = ["dep:chrono-tz"]
+# Core scheduling/workspace APIs always use chrono-tz; keep this as a
+# compatibility feature for existing build profiles and docs.
+timezones = []
 # Everything — full-featured agent with all capabilities
 full = [
     "light",
