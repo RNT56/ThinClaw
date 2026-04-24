@@ -273,13 +273,11 @@ mod platform {
     pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
         if keychain_cache_enabled()
             && let Ok(cache) = get_cache().lock()
+            && let Some(password) = cache.get(MASTER_KEY_ACCOUNT)
         {
-            if let Some(password) = cache.get(MASTER_KEY_ACCOUNT) {
-                let hex_str = String::from_utf8(password.clone()).map_err(|_| {
-                    SecretError::KeychainError("Invalid UTF-8 in secret".to_string())
-                })?;
-                return hex_to_bytes(&hex_str);
-            }
+            let hex_str = String::from_utf8(password.clone())
+                .map_err(|_| SecretError::KeychainError("Invalid UTF-8 in secret".to_string()))?;
+            return hex_to_bytes(&hex_str);
         }
 
         let ss = SecretService::connect(EncryptionType::Dh)
@@ -363,10 +361,9 @@ mod platform {
     pub async fn has_master_key() -> bool {
         if keychain_cache_enabled()
             && let Ok(cache) = get_cache().lock()
+            && cache.contains_key(MASTER_KEY_ACCOUNT)
         {
-            if cache.contains_key(MASTER_KEY_ACCOUNT) {
-                return true;
-            }
+            return true;
         }
 
         let ss = match SecretService::connect(EncryptionType::Dh).await {
@@ -440,10 +437,9 @@ mod platform {
     pub async fn get_api_key(account: &str) -> Option<String> {
         if keychain_cache_enabled()
             && let Ok(cache) = get_cache().lock()
+            && let Some(password) = cache.get(account)
         {
-            if let Some(password) = cache.get(account) {
-                return String::from_utf8(password.clone()).ok();
-            }
+            return String::from_utf8(password.clone()).ok();
         }
 
         let ss = SecretService::connect(EncryptionType::Dh).await.ok()?;

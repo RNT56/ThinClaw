@@ -142,10 +142,11 @@ async fn capture_camera(
         .output()
         .await;
 
-    if let Ok(output) = fswebcam {
-        if output.status.success() && path.exists() {
-            return Ok("fswebcam".to_string());
-        }
+    if let Ok(output) = fswebcam
+        && output.status.success()
+        && path.exists()
+    {
+        return Ok("fswebcam".to_string());
     }
 
     // Fallback to ffmpeg
@@ -165,10 +166,11 @@ async fn capture_camera(
         .output()
         .await;
 
-    if let Ok(output) = ffmpeg {
-        if output.status.success() && path.exists() {
-            return Ok("ffmpeg".to_string());
-        }
+    if let Ok(output) = ffmpeg
+        && output.status.success()
+        && path.exists()
+    {
+        return Ok("ffmpeg".to_string());
     }
 
     Err(ToolError::ExecutionFailed(format!(

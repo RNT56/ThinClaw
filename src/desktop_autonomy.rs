@@ -3884,6 +3884,7 @@ fn create_symlink_dir(src: &Path, dst: &Path) -> Result<(), String> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn xml_escape(raw: &str) -> String {
     raw.replace('&', "&amp;")
         .replace('<', "&lt;")
