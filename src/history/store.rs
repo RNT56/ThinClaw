@@ -1702,9 +1702,15 @@ impl Store {
         conn.execute(
             r#"
             INSERT INTO settings (user_id, key, value, updated_at)
-            VALUES ('system', 'routine.event_cache_version', '1', NOW())
+            VALUES ('system', 'routine.event_cache_version', '1'::jsonb, NOW())
             ON CONFLICT (user_id, key) DO UPDATE
-            SET value = (COALESCE(NULLIF(settings.value, ''), '0')::BIGINT + 1)::TEXT,
+            SET value = to_jsonb(
+                    CASE
+                        WHEN (settings.value #>> '{}') ~ '^-?[0-9]+$'
+                            THEN (settings.value #>> '{}')::BIGINT
+                        ELSE 0
+                    END + 1
+                ),
                 updated_at = EXCLUDED.updated_at
             "#,
             &[],
@@ -1833,8 +1839,12 @@ impl Store {
             )
             .await?;
         Ok(row
-            .and_then(|row| row.try_get::<_, String>("value").ok())
-            .and_then(|value| value.parse::<i64>().ok())
+            .and_then(|row| row.try_get::<_, serde_json::Value>("value").ok())
+            .and_then(|value| {
+                value
+                    .as_i64()
+                    .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
+            })
             .unwrap_or(0))
     }
 
