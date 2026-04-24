@@ -894,11 +894,11 @@ mod tests {
             num_turns: Some(5),
         };
         let payloads = stream_event_to_payloads(&event);
-        // Should emit a message (the result text) + a result event
+        // Should emit a message (the result text) + a session result event
         assert_eq!(payloads.len(), 2);
         assert_eq!(payloads[0].event_type, "message");
         assert_eq!(payloads[0].data["content"], "The review is complete.");
-        assert_eq!(payloads[1].event_type, "result");
+        assert_eq!(payloads[1].event_type, "session_result");
         assert_eq!(payloads[1].data["status"], "completed");
     }
 

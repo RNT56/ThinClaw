@@ -33,8 +33,8 @@ use std::time::Duration;
 
 use bollard::Docker;
 use bollard::container::{
-    Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
-    StartContainerOptions, WaitContainerOptions,
+    Config, CreateContainerOptions, InspectContainerOptions, LogOutput, LogsOptions,
+    RemoveContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::HostConfig;
@@ -368,14 +368,19 @@ impl ContainerRunner {
         let exit_code = match wait_stream.next().await {
             Some(Ok(response)) => response.status_code,
             Some(Err(e)) => {
-                return Err(SandboxError::ExecutionFailed {
-                    reason: format!("wait failed: {}", e),
-                });
+                tracing::warn!(
+                    error = %e,
+                    container_id,
+                    "Docker wait stream failed; falling back to inspect polling"
+                );
+                self.poll_container_exit(container_id).await?
             }
             None => {
-                return Err(SandboxError::ExecutionFailed {
-                    reason: "container wait stream ended unexpectedly".to_string(),
-                });
+                tracing::warn!(
+                    container_id,
+                    "Docker wait stream ended unexpectedly; falling back to inspect polling"
+                );
+                self.poll_container_exit(container_id).await?
             }
         };
 
@@ -389,6 +394,28 @@ impl ContainerRunner {
             duration: Duration::ZERO, // Will be set by caller
             truncated,
         })
+    }
+
+    async fn poll_container_exit(&self, container_id: &str) -> Result<i64> {
+        loop {
+            let inspect = self
+                .docker
+                .inspect_container(container_id, None::<InspectContainerOptions>)
+                .await
+                .map_err(|e| SandboxError::ExecutionFailed {
+                    reason: format!("container inspect failed after wait error: {}", e),
+                })?;
+
+            if let Some(state) = inspect.state {
+                let running = state.running.unwrap_or(false);
+                let restarting = state.restarting.unwrap_or(false);
+                if !running && !restarting {
+                    return Ok(state.exit_code.unwrap_or(-1));
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Collect stdout and stderr from a container.

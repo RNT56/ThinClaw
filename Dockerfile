@@ -27,6 +27,8 @@ COPY build.rs build.rs
 COPY src/ src/
 COPY tests/ tests/
 COPY benches/ benches/
+COPY assets/ assets/
+COPY desktop-sidecars/ desktop-sidecars/
 COPY migrations/ migrations/
 COPY patches/ patches/
 COPY registry/ registry/

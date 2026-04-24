@@ -75,6 +75,30 @@ fn relaunch_current_process() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        return std::thread::Builder::new()
+            .name("thinclaw-main".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(run_async_main)?
+            .join()
+            .map_err(|_| anyhow::anyhow!("ThinClaw main thread panicked"))?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        run_async_main()
+    }
+}
+
+fn run_async_main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(Box::pin(async_main()))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeEntryMode {
     Default,
@@ -122,8 +146,7 @@ fn setup_config_for_startup_onboarding(runtime_entry_mode: RuntimeEntryMode) -> 
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let mut runtime_entry_mode = match cli.command {
         Some(Command::Tui) => RuntimeEntryMode::Tui,

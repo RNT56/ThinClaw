@@ -991,6 +991,31 @@ mod tests {
             )
             .await;
 
+        {
+            let mut containers = jm.containers.write().await;
+            containers.insert(
+                job_id,
+                crate::orchestrator::job_manager::ContainerHandle {
+                    job_id,
+                    container_id: "test-container".to_string(),
+                    state: crate::orchestrator::job_manager::ContainerState::Running,
+                    mode: crate::orchestrator::job_manager::JobMode::Worker,
+                    created_at: chrono::Utc::now(),
+                    spec: crate::sandbox_jobs::SandboxJobSpec::new(
+                        "test",
+                        "test",
+                        "default",
+                        "default",
+                        None,
+                        crate::orchestrator::job_manager::JobMode::Worker,
+                    ),
+                    last_worker_status: None,
+                    worker_iteration: 0,
+                    completion_result: None,
+                },
+            );
+        }
+
         let state = OrchestratorState {
             llm: Arc::new(StubLlm::default()),
             job_manager: Arc::new(jm),
