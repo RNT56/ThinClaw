@@ -371,7 +371,9 @@ impl DraftReplyState {
             message_id: None,
             channel_id: channel_id.into(),
             accumulated: String::new(),
-            last_edit_at: Instant::now() - DRAFT_DEBOUNCE, // allow immediate first edit
+            last_edit_at: Instant::now()
+                .checked_sub(DRAFT_DEBOUNCE)
+                .unwrap_or_else(Instant::now), // allow immediate first edit when representable
             posted: false,
             overflow: false,
         }

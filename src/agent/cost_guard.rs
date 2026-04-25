@@ -182,9 +182,13 @@ impl CostGuard {
         // Check hourly rate
         if let Some(limit) = self.config.max_actions_per_hour {
             let mut window = self.action_window.lock().await;
-            let cutoff = Instant::now() - std::time::Duration::from_secs(3600);
+            let now = Instant::now();
+            let hourly_window = std::time::Duration::from_secs(3600);
             // Drain expired entries
-            while window.front().is_some_and(|t| *t < cutoff) {
+            while window
+                .front()
+                .is_some_and(|t| now.saturating_duration_since(*t) >= hourly_window)
+            {
                 window.pop_front();
             }
             let count = window.len() as u64;
@@ -310,8 +314,12 @@ impl CostGuard {
     /// Number of actions in the current hourly window.
     pub async fn actions_this_hour(&self) -> u64 {
         let mut window = self.action_window.lock().await;
-        let cutoff = Instant::now() - std::time::Duration::from_secs(3600);
-        while window.front().is_some_and(|t| *t < cutoff) {
+        let now = Instant::now();
+        let hourly_window = std::time::Duration::from_secs(3600);
+        while window
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) >= hourly_window)
+        {
             window.pop_front();
         }
         window.len() as u64

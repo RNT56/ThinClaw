@@ -2350,8 +2350,11 @@ mod tests {
         channels.add(Box::new(channel)).await;
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        let (activity_tx, activity_rx) =
-            watch::channel(Instant::now() - SUBAGENT_HEARTBEAT_INTERVAL);
+        let (activity_tx, activity_rx) = watch::channel(
+            Instant::now()
+                .checked_sub(SUBAGENT_HEARTBEAT_INTERVAL)
+                .unwrap_or_else(Instant::now),
+        );
 
         let heartbeat = SubagentHeartbeat::spawn(
             Arc::clone(&channels),

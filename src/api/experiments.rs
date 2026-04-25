@@ -6627,6 +6627,7 @@ mod tests {
         let (store, _guard) = crate::testing::test_db().await;
         let repo = TempDir::new().expect("temp repo");
         git(repo.path(), &["init"]);
+        git(repo.path(), &["checkout", "-b", "main"]);
         git(repo.path(), &["config", "user.email", "tests@example.com"]);
         git(repo.path(), &["config", "user.name", "ThinClaw Tests"]);
         std::fs::write(repo.path().join("app.txt"), "baseline\n").expect("write repo file");
@@ -6866,6 +6867,7 @@ mod tests {
         let (store, _guard) = crate::testing::test_db().await;
         let repo = TempDir::new().expect("temp repo");
         git(repo.path(), &["init"]);
+        git(repo.path(), &["checkout", "-b", "main"]);
         git(repo.path(), &["config", "user.email", "tests@example.com"]);
         git(repo.path(), &["config", "user.name", "ThinClaw Tests"]);
         std::fs::write(repo.path().join("app.txt"), "baseline\n").expect("write repo file");
