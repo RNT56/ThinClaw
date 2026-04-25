@@ -35,6 +35,19 @@ The default `light` source profile includes the local gateway but excludes ACP,
 tunnel support, Docker sandbox, browser automation, and Nostr. For source build
 choices, use [BUILD_PROFILES.md](BUILD_PROFILES.md).
 
+Raspberry Pi OS Lite 64-bit uses the same headless runtime surface with Pi
+specific defaults. Prefer the published `aarch64-unknown-linux-gnu` release
+artifact for native installs, or the multi-arch Docker image for Compose:
+
+```bash
+thinclaw doctor --profile pi-os-lite-64
+cargo build --release --features full
+docker compose pull thinclaw
+```
+
+Keep `DESKTOP_AUTONOMY_ENABLED=false` on Pi OS Lite. The detailed native and
+Docker paths live in [deploy/raspberry-pi-os-lite.md](deploy/raspberry-pi-os-lite.md).
+
 ## Platform Capability Matrix
 
 | Capability | macOS | Windows | Linux | Raspberry Pi OS Lite |

@@ -114,6 +114,13 @@ This is the path for Raspberry Pi, Mac Mini, VPS, and other SSH-managed hosts.
 It ships in the normal `thinclaw` release binary; there is no separate remote
 artifact.
 
+For Raspberry Pi OS Lite native service installs from the release artifact, use
+the dedicated setup helper:
+
+```bash
+sudo bash deploy-setup.sh --mode native --binary ./thinclaw
+```
+
 ## Why ThinClaw
 
 ### 1. Security Is Part of the Architecture
