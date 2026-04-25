@@ -1,6 +1,5 @@
 ---
 source: tests/snapshots.rs
-assertion_line: 18
 expression: settings
 ---
 {
@@ -12,6 +11,13 @@ expression: settings
   "libsql_path": null,
   "libsql_url": null,
   "secrets_master_key_source": "none",
+  "secrets": {
+    "backend": "local_encrypted",
+    "master_key_source": "os_secure_store",
+    "allow_env_master_key": false,
+    "cache_ttl_secs": 0,
+    "strict_sensitive_routes": true
+  },
   "llm_backend": null,
   "ollama_base_url": null,
   "openai_compatible_base_url": null,
@@ -38,6 +44,7 @@ expression: settings
   },
   "channels": {
     "http_enabled": false,
+    "acp_enabled": false,
     "http_port": null,
     "http_host": null,
     "signal_enabled": false,
@@ -87,11 +94,26 @@ expression: settings
     "apple_mail_poll_interval": null,
     "apple_mail_unread_only": true,
     "apple_mail_mark_as_read": true,
+    "gateway_enabled": null,
+    "gateway_host": null,
     "gateway_port": null,
     "gateway_auth_token": null,
+    "cli_enabled": null,
     "wasm_channels": [],
     "wasm_channels_enabled": true,
     "wasm_channels_dir": null
+  },
+  "prompt": {
+    "session_freeze_enabled": true,
+    "project_context_max_tokens": 8000
+  },
+  "extensions": {
+    "user_tools_dir": "[home]/.thinclaw/user-tools",
+    "allow_native_plugins": false,
+    "require_plugin_signatures": true,
+    "trusted_manifest_keys": [],
+    "trusted_manifest_public_keys": {},
+    "native_plugin_allowlist_dirs": []
   },
   "notifications": {
     "preferred_channel": null,
@@ -182,6 +204,7 @@ expression: settings
     "memory_limit_mb": 2048,
     "cpu_shares": 1024,
     "image": "thinclaw-worker:latest",
+    "interactive_idle_timeout_secs": 1800,
     "auto_pull_image": true,
     "extra_allowed_domains": []
   },
@@ -226,7 +249,8 @@ expression: settings
     "moa_reference_models": [],
     "moa_aggregator_model": null,
     "moa_min_successful": 1,
-    "advisor_max_calls": 3,
+    "advisor_max_calls": 4,
+    "advisor_auto_escalation_mode": "risk_and_complex_final",
     "advisor_escalation_prompt": null
   },
   "learning": {
@@ -248,18 +272,31 @@ expression: settings
       "min_tool_calls": 2,
       "user_correction_threshold": 1
     },
+    "skill_synthesis": {
+      "enabled": true,
+      "min_tool_calls": 3,
+      "auto_apply": false
+    },
     "prompt_mutation": {
       "enabled": true
     },
     "providers": {
       "active": "none",
+      "active_provider": null,
+      "registry": {},
       "honcho": {
         "enabled": false,
-        "config": {}
+        "config": {},
+        "cadence": null,
+        "depth": null,
+        "user_modeling_enabled": false
       },
       "zep": {
         "enabled": false,
-        "config": {}
+        "config": {},
+        "cadence": null,
+        "depth": null,
+        "user_modeling_enabled": false
       }
     },
     "code_proposals": {
