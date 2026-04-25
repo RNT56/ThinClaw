@@ -18,6 +18,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 - Understanding research workspaces, experiments, and GPU clouds: go to [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md)
 - Understanding eval/SFT agent environments: go to [AGENT_ENV.md](AGENT_ENV.md)
 - Understanding the shared surface vocabulary: go to [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md)
+- Configuring CLI, TUI, and WebUI skins: go to [TERMINAL_SKINS.md](TERMINAL_SKINS.md)
 - Choosing or configuring providers: go to [LLM_PROVIDERS.md](LLM_PROVIDERS.md)
 - Understanding channels: go to [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md)
 - Understanding extensions and tools: go to [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md)
@@ -42,6 +43,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 - [ACP_INTEGRATION.md](ACP_INTEGRATION.md)
 - [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md)
 - [AGENT_ENV.md](AGENT_ENV.md)
+- [TERMINAL_SKINS.md](TERMINAL_SKINS.md)
 - Deployment note: `thinclaw` and `thinclaw run` are quiet by default; use `thinclaw --debug` or `thinclaw --debug run` for verbose startup logs
 - [LLM_PROVIDERS.md](LLM_PROVIDERS.md)
 - [EXTERNAL_DEPENDENCIES.md](EXTERNAL_DEPENDENCIES.md)
@@ -78,6 +80,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 | Research, experiments, and remote runners | [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md) |
 | AgentEnv eval and SFT framework | [AGENT_ENV.md](AGENT_ENV.md) |
 | Shared cross-surface command vocabulary | [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md) |
+| CLI, TUI, and WebUI skins | [TERMINAL_SKINS.md](TERMINAL_SKINS.md) |
 | Onboarding and setup behavior | [../src/setup/README.md](../src/setup/README.md) |
 | Deployment decision tree | [DEPLOYMENT.md](DEPLOYMENT.md) |
 | Platform-specific deploy runbooks | [deploy/](deploy/) |

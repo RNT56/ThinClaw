@@ -111,6 +111,39 @@ sudo systemctl restart thinclaw
 At minimum, replace `OPENROUTER_API_KEY=CHANGE_ME` or configure another LLM
 provider before expecting agent replies.
 
+## WebUI Access Over SSH
+
+Tailscale is optional for Pi WebUI access. If you can SSH to the Pi, use an SSH
+local port forward from your laptop. For an SSH-only posture, set the Pi gateway
+bind address to loopback:
+
+```env
+GATEWAY_HOST=127.0.0.1
+GATEWAY_PORT=3000
+```
+
+Then restart the service after editing `/var/lib/thinclaw/.thinclaw/.env`:
+
+```bash
+sudo systemctl restart thinclaw
+```
+
+Forward the gateway port from your laptop:
+
+```bash
+ssh -L 3000:127.0.0.1:3000 pi@<pi-host-or-ip>
+```
+
+Then open this on your laptop:
+
+```text
+http://127.0.0.1:3000/?token=<gateway-token>
+```
+
+See [SSH Tunnel Recommended](remote-access.md#ssh-tunnel-recommended) for the
+shared remote access guidance and the distinction between WebUI access and public
+webhook tunnels.
+
 ## Docker Install
 
 Docker is supported when you want container deployment or Docker-backed
@@ -169,7 +202,8 @@ tunnels, Docker sandbox, browser automation, and Nostr.
 
 ## Private Access With Tailscale
 
-For private access from Scrappy, prefer Tailscale:
+For private access from Scrappy or devices that should connect without opening an
+SSH tunnel, use Tailscale:
 
 ```bash
 sudo bash deploy/setup.sh --mode auto --token replace-with-a-long-random-token \
@@ -197,7 +231,9 @@ Then connect from a tailnet device with:
 http://<pi-tailscale-ip>:3000/?token=<gateway-token>
 ```
 
-For public webhook tunnels, use [remote-access.md](remote-access.md).
+For SSH-only WebUI access, use
+[SSH Tunnel Recommended](remote-access.md#ssh-tunnel-recommended). For public
+webhook tunnels, use [remote-access.md](remote-access.md).
 
 ## Pi Notes
 

@@ -46,6 +46,15 @@ thinclaw gateway access
 thinclaw gateway access --show-token
 ```
 
+## WebUI Access Without Tailscale
+
+You do not need Tailscale to use the WebUI from an SSH-managed host. If you can
+SSH to the machine, use a local SSH port forward and keep the gateway private on
+the remote host.
+
+Use this for Raspberry Pi OS Lite, VPS, Linux servers, and Mac Mini hosts where
+you manage the machine over SSH and only need browser access from your laptop.
+
 ## SSH Tunnel Recommended
 
 This is the safest default for VPS, Pi, and Mac Mini hosts managed over SSH.
@@ -66,6 +75,13 @@ Then open:
 ```text
 http://127.0.0.1:3000/?token=<gateway-token>
 ```
+
+The browser connects to `127.0.0.1:3000` on your laptop. SSH carries that traffic
+to `127.0.0.1:3000` on the remote host, so the ThinClaw gateway does not need to
+listen on the LAN, tailnet, or public internet.
+
+This path is for human/operator WebUI access. It does not provide a public HTTPS
+callback URL for external webhook providers.
 
 ## Private LAN Or Tailscale
 
@@ -156,6 +172,10 @@ Channels like Telegram, Slack, and Discord support two message delivery modes:
 Polling is reliable and zero-config. Webhook mode requires a tunnel because
 most home networks use NAT and external services cannot reach your machine
 directly.
+
+An SSH tunnel is enough for WebUI access from your browser, but it is not a
+webhook tunnel. Use polling for channels that support it, or configure a public
+HTTPS tunnel/reverse proxy for channels that require callbacks.
 
 ## Supported Tunnel Providers
 
