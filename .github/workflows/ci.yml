@@ -414,6 +414,7 @@ jobs:
   tests:
     name: Run Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       DATABASE_BACKEND: libsql
     steps:
@@ -431,7 +432,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Run tests with coverage
-        run: cargo llvm-cov --all-features --codecov --output-path codecov.json -- --nocapture
+        run: cargo llvm-cov --all-features --lib --codecov --output-path codecov.json -- --nocapture
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
