@@ -944,15 +944,8 @@ mod tests {
         }
     }
 
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_external_scanner_blocks_before_smart_approval() {
-        let _env_guard = lock_env();
-        unsafe {
-            std::env::set_var("SAFETY_SMART_APPROVAL_MODE", "smart");
-            std::env::set_var("SAFETY_SMART_APPROVAL_TEST_RESPONSE", "APPROVE");
-        }
-
         let dir = tempfile::tempdir().unwrap();
         let scanner_path = dir.path().join(if cfg!(windows) {
             "scanner.cmd"
@@ -981,8 +974,30 @@ mod tests {
             }
         }
 
-        let tool = ShellTool::new()
-            .with_external_scanner(ExternalScannerMode::FailClosed, Some(scanner_path));
+        let tool = ShellTool::new().with_safety_config(&SafetyConfig {
+            smart_approval_mode: "smart".to_string(),
+            external_scanner_mode: "fail_closed".to_string(),
+            external_scanner_path: Some(scanner_path),
+            ..SafetyConfig::default()
+        });
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        tool.store_smart_decision(
+            SmartApprovalMode::Smart,
+            "sudo echo approve",
+            &cwd,
+            ApprovalDecision::Approve,
+        );
+        let scanner_report = tool
+            .external_scanner
+            .as_ref()
+            .expect("scanner should be configured")
+            .scan("sudo echo approve")
+            .await;
+        assert_eq!(
+            scanner_report.verdict,
+            ExternalScanVerdict::Dangerous,
+            "test scanner should produce a dangerous verdict: {scanner_report:?}"
+        );
         let ctx = JobContext::default();
 
         let result = tool
@@ -993,11 +1008,6 @@ mod tests {
             matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("External scanner blocked")),
             "Expected external scanner block, got: {result:?}"
         );
-
-        unsafe {
-            std::env::remove_var("SAFETY_SMART_APPROVAL_TEST_RESPONSE");
-            std::env::remove_var("SAFETY_SMART_APPROVAL_MODE");
-        }
     }
 
     #[tokio::test]
