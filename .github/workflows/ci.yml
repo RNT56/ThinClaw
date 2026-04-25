@@ -439,10 +439,35 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Run tests with coverage
         run: cargo llvm-cov --all-features --lib --codecov --output-path codecov.json -- --nocapture
+      - name: Validate coverage report
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = Path("codecov.json")
+          if not report.is_file():
+              raise SystemExit("codecov.json was not created")
+          if report.stat().st_size == 0:
+              raise SystemExit("codecov.json is empty")
+          with report.open(encoding="utf-8") as fh:
+              data = json.load(fh)
+          if not isinstance(data, dict) or not data:
+              raise SystemExit("codecov.json is not a non-empty JSON object")
+          print(f"Validated {report} ({report.stat().st_size} bytes)")
+          PY
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-codecov-json
+          path: codecov.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Upload coverage to Codecov
+        continue-on-error: true
         uses: codecov/codecov-action@v6
         with:
           disable_search: true
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           files: codecov.json
           use_oidc: true
