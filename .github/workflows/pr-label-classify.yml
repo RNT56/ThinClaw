@@ -7,7 +7,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: read           # needed for search/issues API (contributor count)
+  issues: write          # needed for labels and search/issues API (contributor count)
 
 jobs:
   classify:
