@@ -227,6 +227,15 @@ async fn click_selector(page: &Page, selector: &str) {
     );
 }
 
+async fn run_app_action(page: &Page, expression: &str) {
+    let value = eval_value(page, expression).await;
+    assert!(
+        value.as_bool().unwrap_or(false),
+        "browser app action failed: {}",
+        expression
+    );
+}
+
 #[tokio::test]
 async fn browser_harness_loads_learning_and_outcome_backed_research_flow() {
     let Some(ctx) = contract_db_or_skip().await else {
@@ -291,12 +300,18 @@ async fn browser_harness_loads_learning_and_outcome_backed_research_flow() {
     .await;
     wait_for_expression(
         &page,
-        "(() => { const btn = document.getElementById('research-tab-button'); return !!btn && getComputedStyle(btn).display !== 'none'; })()",
+        "(() => typeof switchTab === 'function' && typeof switchResearchSubtab === 'function' && document.getElementById('tab-research')?.dataset.enabled === 'true')()",
         UI_TIMEOUT,
     )
     .await;
 
-    click_selector(&page, "[data-tab=\"learning\"]").await;
+    run_app_action(&page, "(() => { switchTab('learning'); return true; })()").await;
+    wait_for_expression(
+        &page,
+        "(() => document.getElementById('tab-learning')?.classList.contains('active'))()",
+        UI_TIMEOUT,
+    )
+    .await;
     wait_for_expression(
         &page,
         "(() => document.querySelectorAll('#learning-outcomes-tbody tr[data-outcome-id]').length)()",
@@ -327,7 +342,17 @@ async fn browser_harness_loads_learning_and_outcome_backed_research_flow() {
         "expected outcome detail to render evaluator provenance, got: {detail_text}"
     );
 
-    click_selector(&page, "#research-tab-button").await;
+    run_app_action(
+        &page,
+        "(() => { switchTab('research'); switchResearchSubtab('opportunities'); return true; })()",
+    )
+    .await;
+    wait_for_expression(
+        &page,
+        "(() => document.getElementById('tab-research')?.classList.contains('active') && document.querySelector('[data-research-pane=\"opportunities\"]')?.classList.contains('active'))()",
+        UI_TIMEOUT,
+    )
+    .await;
     wait_for_expression(
         &page,
         "(() => document.querySelectorAll('#research-opportunities-list [data-research-source=\"outcome_learning\"]').length)()",
