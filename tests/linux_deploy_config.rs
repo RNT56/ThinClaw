@@ -18,7 +18,8 @@ fn deploy_files_do_not_reintroduce_legacy_gateway_port() {
         let contents = repo_file(path);
         assert!(
             !contents.contains("18789"),
-            "{path} must not reintroduce the legacy gateway port"
+            "{} must not reintroduce the legacy gateway port",
+            path
         );
     }
 }
@@ -41,6 +42,16 @@ fn docker_compose_setup_and_docs_share_gateway_port() {
     assert!(setup.contains("THINCLAW_HOME=/var/lib/thinclaw/.thinclaw"));
     assert!(setup.contains("LIBSQL_PATH=/var/lib/thinclaw/.thinclaw/thinclaw.db"));
     assert!(setup.contains("http://localhost:$THINCLAW_PORT/api/health"));
+    assert!(setup.contains("ROLLBACK_DIR"));
+    assert!(setup.contains("backup_path"));
+    assert!(setup.contains("rollback_setup"));
+    assert!(setup.contains("wait_for_health"));
+    assert!(setup.contains("set_env_value .env GATEWAY_AUTH_TOKEN \"$TOKEN\""));
+    assert!(setup.contains("THINCLAW_FIREWALL_STRICT"));
+    assert!(
+        !setup.contains("ufw reset"),
+        "installer must not reset existing firewall rules"
+    );
     assert!(deployment_docs.contains("Code-backed default gateway port: `3000`"));
 }
 
@@ -64,7 +75,11 @@ fn deploy_env_documents_linux_runtime_overrides() {
         "THINCLAW_MICROPHONE_DEVICE=default",
         "THINCLAW_MICROPHONE_BACKEND=auto",
     ] {
-        assert!(env.contains(key), "deploy/env.example should mention {key}");
+        assert!(
+            env.contains(key),
+            "deploy/env.example should mention {}",
+            key
+        );
     }
 }
 
@@ -101,6 +116,10 @@ fn pi_os_lite_support_is_documented_and_guarded() {
     assert!(cargo_toml.contains("features = [\"full\"]"));
     assert!(ci.contains("ubuntu-24.04-arm"));
     assert!(ci.contains("linux/arm64"));
+    assert!(ci.contains("cargo build --release --features full --bin thinclaw"));
+    assert!(ci.contains("./target/release/thinclaw doctor --profile pi-os-lite-64"));
+    assert!(ci.contains("THINCLAW_LINUX_READINESS_OS_RELEASE"));
+    assert!(ci.contains("http://127.0.0.1:$port/api/health"));
     assert!(release.contains("linux/amd64,linux/arm64"));
     assert!(release.contains("ghcr.io/${GITHUB_REPOSITORY,,}"));
 }

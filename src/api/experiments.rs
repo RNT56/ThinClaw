@@ -6850,6 +6850,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_env_skill_bench_completion_writes_metrics_and_artifact() {
+        let dir = TempDir::new().expect("tempdir");
+        let run_root = dir.path().join("run");
+        let artifact_dir = dir.path().join("artifacts");
+        std::fs::create_dir_all(&run_root).expect("run root");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact root");
+        let log_path = dir.path().join("skill-bench.log");
+        let now = Utc::now();
+        let trial = ExperimentTrial {
+            id: Uuid::new_v4(),
+            campaign_id: Uuid::new_v4(),
+            sequence: 1,
+            candidate_commit: None,
+            parent_best_commit: None,
+            status: ExperimentTrialStatus::Running,
+            runner_backend: ExperimentRunnerBackend::LocalDocker,
+            exit_code: None,
+            metrics_json: serde_json::json!({}),
+            summary: None,
+            decision_reason: None,
+            artifact_manifest_json: serde_json::json!({}),
+            log_preview_path: None,
+            reviewer_decision: None,
+            runtime_ms: None,
+            attributed_cost_usd: None,
+            llm_cost_usd: None,
+            runner_cost_usd: None,
+            hypothesis: None,
+            mutation_summary: None,
+            provider_job_id: None,
+            provider_job_metadata: serde_json::json!({}),
+            started_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let completion = super::execute_agent_env_benchmark_trial(
+            super::AgentEnvBenchmarkConfig::SkillBench {
+                cases: vec![crate::agent::env::SkillBenchCase {
+                    name: "minimal-skill".to_string(),
+                    skill_content: "# Skill\n\nUse this skill carefully.".to_string(),
+                    required_substrings: vec!["carefully".to_string()],
+                }],
+            },
+            &run_root,
+            std::time::Instant::now(),
+            &log_path,
+            &artifact_dir,
+            &trial,
+        )
+        .await
+        .expect("agent env skill benchmark completion");
+
+        assert_eq!(completion.exit_code, Some(0));
+        assert_eq!(completion.metrics_json["score"], 1.0);
+        assert_eq!(
+            completion.artifact_manifest_json["stage"],
+            serde_json::json!("agent_env_benchmark")
+        );
+        let trajectory_path = Path::new(
+            completion.artifact_manifest_json["trajectory_json_path"]
+                .as_str()
+                .expect("trajectory path"),
+        );
+        assert!(trajectory_path.exists());
+        let trajectory_json =
+            std::fs::read_to_string(trajectory_path).expect("read trajectory json");
+        assert!(trajectory_json.contains("skill_bench"));
+        let log = std::fs::read_to_string(log_path).expect("read log");
+        assert!(log.contains("minimal-skill"));
+    }
+
+    #[tokio::test]
     async fn autonomous_campaign_runs_planner_mutator_reviewer_and_docker_trial_end_to_end() {
         let mut settings = crate::settings::Settings::default();
         settings.sandbox.enabled = true;

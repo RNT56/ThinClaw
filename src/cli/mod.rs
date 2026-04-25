@@ -115,7 +115,8 @@ pub struct Cli {
 pub enum LinuxReadinessCliProfile {
     Server,
     Remote,
-    DesktopGnome,
+    #[value(name = "desktop-linux", alias = "desktop-gnome", alias = "desktop")]
+    DesktopLinux,
     #[value(name = "pi-os-lite-64")]
     PiOsLite64,
     AllFeatures,
@@ -126,7 +127,7 @@ impl From<LinuxReadinessCliProfile> for crate::platform::LinuxReadinessProfile {
         match value {
             LinuxReadinessCliProfile::Server => Self::Server,
             LinuxReadinessCliProfile::Remote => Self::Remote,
-            LinuxReadinessCliProfile::DesktopGnome => Self::DesktopGnome,
+            LinuxReadinessCliProfile::DesktopLinux => Self::DesktopLinux,
             LinuxReadinessCliProfile::PiOsLite64 => Self::PiOsLite64,
             LinuxReadinessCliProfile::AllFeatures => Self::AllFeatures,
         }
@@ -399,7 +400,7 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Doctor {
-                profile: LinuxReadinessCliProfile::DesktopGnome
+                profile: LinuxReadinessCliProfile::DesktopLinux
             })
         ));
     }
@@ -468,6 +469,18 @@ mod tests {
             cli.command,
             Some(Command::Status {
                 profile: LinuxReadinessCliProfile::PiOsLite64
+            })
+        ));
+    }
+
+    #[test]
+    fn test_linux_desktop_readiness_alias_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "doctor", "--profile", "desktop-linux"])
+            .expect("parse linux desktop doctor profile alias");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Doctor {
+                profile: LinuxReadinessCliProfile::DesktopLinux
             })
         ));
     }

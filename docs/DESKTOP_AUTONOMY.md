@@ -59,7 +59,7 @@ Desktop autonomy uses one code path with two deployment shapes.
 | Mode | Intended Host Shape | Notes |
 |---|---|---|
 | `whole_machine_admin` | Main logged-in operator account on a desktop or Mac mini | Default mode |
-| `dedicated_user` | Separate GUI user session reserved for autonomy | Supported on macOS/Windows only in this release; Linux returns `unsupported_deployment_mode` |
+| `dedicated_user` | Separate GUI user session reserved for autonomy | Supported on macOS, Windows, and Linux when the host can create/manage the target user and the user has a real GUI login |
 
 ### `whole_machine_admin`
 
@@ -67,7 +67,7 @@ Use this when ThinClaw should act inside the current logged-in desktop session.
 
 - macOS uses a per-user `LaunchAgent`
 - Windows uses the scheduled-task/session bootstrap path
-- Linux uses the desktop-autostart/session path and currently supports GNOME on X11 only
+- Linux uses the cross-desktop autostart/session path and supports common X11 or Wayland desktop sessions when a supported input backend is installed
 
 ### `dedicated_user`
 
@@ -81,9 +81,12 @@ Use this when the autonomy runtime should live inside a separate desktop user.
 
 Desktop autonomy does not auto-login the dedicated user.
 
-Linux dedicated-user creation/session ownership is disabled for this release and
-reports `unsupported_deployment_mode`. Use `whole_machine_admin` from a logged-in
-GNOME on X11 session instead.
+On Linux, `dedicated_user` creates the target account with `useradd` when the
+bootstrap process is privileged, installs the same cross-desktop autostart
+launcher into that user's home directory, and waits for that user to log in to a
+real desktop session. ThinClaw does not configure display-manager auto-login.
+If Linux Secret Service is unavailable during account bootstrap, the generated
+one-time secret is returned in the bootstrap report instead of being stored.
 
 ## Platform Prerequisites
 
@@ -94,7 +97,7 @@ headless-server feature.
 |---|---|---|
 | macOS | Logged-in GUI session, Calendar, Numbers, Pages, TextEdit, privacy/accessibility permissions approved for the ThinClaw launcher/session, secure store access | `thinclaw doctor`, `autonomy_control bootstrap` |
 | Windows | Logged-in interactive session, Outlook, Excel, Word, Notepad or compatible local apps, PowerShell/COM access, service/session launcher access, secure store access | `thinclaw doctor`, `autonomy_control bootstrap` |
-| Linux | GNOME on X11, DBus session, AT-SPI accessibility bus, LibreOffice, Evolution, OCR/screenshot tools, Python GI/pyatspi modules | `thinclaw doctor --profile desktop-gnome` |
+| Linux | Logged-in X11 or Wayland desktop session such as GNOME, KDE/Plasma, XFCE, LXQt, MATE, Cinnamon, Unity, Budgie, Sway, or another compositor/window manager with the same backend support; DBus session; AT-SPI accessibility bus; LibreOffice; Evolution; OCR/screenshot tools; Python GI/pyatspi modules; xdotool, ydotool, or dotool input backend | `thinclaw doctor --profile desktop-linux` |
 
 Dedicated-user mode additionally requires:
 
@@ -107,19 +110,23 @@ Desktop autonomy should stay disabled on:
 
 - Raspberry Pi OS Lite
 - headless Linux servers
-- Linux Wayland-only sessions
 - accounts where the operator cannot approve accessibility/privacy prompts
 - machines where host-level app/UI/screen control is not intentionally granted
 
-Linux GNOME/X11 readiness:
+Linux desktop readiness:
 
 ```bash
-thinclaw doctor --profile desktop-gnome
+thinclaw doctor --profile desktop-linux
 sudo apt install python3 python3-gi python3-pyatspi libreoffice \
   libreoffice-script-provider-python evolution evolution-data-server-bin \
-  xdotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick \
+  xdotool ydotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick \
   at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam
 ```
+
+`desktop-gnome` remains accepted as a compatibility alias. Use `xdotool` for
+X11 sessions; use `ydotool` or `dotool` when a Wayland compositor blocks X11
+pointer/key injection. Menus and window discovery prefer AT-SPI on Wayland and
+fall back to `wmctrl` on X11.
 
 ## Tool Surfaces
 
@@ -221,7 +228,7 @@ Desktop autonomy is cross-platform in code, but not every platform is equally po
 |---|---|---|
 | macOS | Swift bridge + `LaunchAgent` | Most polished path today |
 | Windows | PowerShell/COM bridge + scheduled-session launcher | Supported, prerequisite-driven |
-| Linux | Python/UI automation bridge + desktop autostart/session launcher | Best-effort, prerequisite-heavy |
+| Linux | Python/UI automation bridge + cross-desktop autostart/session launcher | Best-effort, prerequisite-heavy; supports X11 and Wayland through backend probes |
 
 Bootstrap enforces platform prerequisites rather than pretending all hosts are equivalent.
 

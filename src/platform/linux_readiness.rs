@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 pub enum LinuxReadinessProfile {
     Server,
     Remote,
-    DesktopGnome,
+    DesktopLinux,
     PiOsLite64,
     AllFeatures,
 }
@@ -16,14 +16,14 @@ impl LinuxReadinessProfile {
         match self {
             Self::Server => "server",
             Self::Remote => "remote",
-            Self::DesktopGnome => "desktop-gnome",
+            Self::DesktopLinux => "desktop-linux",
             Self::PiOsLite64 => "pi-os-lite-64",
             Self::AllFeatures => "all-features",
         }
     }
 
     fn needs_desktop(self) -> bool {
-        matches!(self, Self::DesktopGnome | Self::AllFeatures)
+        matches!(self, Self::DesktopLinux | Self::AllFeatures)
     }
 
     fn needs_all_features(self) -> bool {
@@ -183,9 +183,18 @@ struct PiOsLiteHostFacts {
 impl PiOsLiteHostFacts {
     fn current() -> Self {
         Self {
-            arch: command_output_trimmed("uname", &["-m"]).unwrap_or_default(),
-            os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
-            rpi_issue: std::fs::read_to_string("/etc/rpi-issue").ok(),
+            arch: std::env::var("THINCLAW_LINUX_READINESS_ARCH")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| command_output_trimmed("uname", &["-m"]).unwrap_or_default()),
+            os_release: std::env::var("THINCLAW_LINUX_READINESS_OS_RELEASE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| std::fs::read_to_string("/etc/os-release").unwrap_or_default()),
+            rpi_issue: std::env::var("THINCLAW_LINUX_READINESS_RPI_ISSUE")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| std::fs::read_to_string("/etc/rpi-issue").ok()),
         }
     }
 }
@@ -711,7 +720,7 @@ fn probe_desktop_stack(profile: LinuxReadinessProfile) -> Vec<LinuxProbe> {
                 "pi_desktop_autonomy",
                 "Pi desktop autonomy",
                 "Desktop autonomy is not supported on Raspberry Pi OS Lite.",
-                "Disable DESKTOP_AUTONOMY_ENABLED on Pi OS Lite, or use `--profile desktop-gnome` on a supported GNOME/X11 Linux desktop host.",
+                "Disable DESKTOP_AUTONOMY_ENABLED on Pi OS Lite, or use `--profile desktop-linux` on a supported interactive Linux desktop host.",
             )];
         }
 
@@ -727,47 +736,40 @@ fn probe_desktop_stack(profile: LinuxReadinessProfile) -> Vec<LinuxProbe> {
     let mut probes = Vec::new();
     if !required {
         probes.push(LinuxProbe::skip(
-            "gnome_x11",
-            "GNOME/X11 desktop",
-            "Only required for the desktop-gnome profile.",
+            "linux_desktop_session",
+            "Linux desktop session",
+            "Only required for the desktop-linux profile.",
         ));
         probes.push(LinuxProbe::skip(
             "desktop_apps",
             "Desktop apps",
-            "Only required for the desktop-gnome profile.",
+            "Only required for the desktop-linux profile.",
         ));
         probes.push(LinuxProbe::skip(
             "at_spi",
             "AT-SPI accessibility",
-            "Only required for the desktop-gnome profile.",
+            "Only required for the desktop-linux profile.",
         ));
         return probes;
     }
 
     let session = current_linux_desktop_session_facts();
-    if linux_gnome_x11_ready(&session) {
+    if linux_desktop_session_ready(&session) {
         probes.push(LinuxProbe::pass(
-            "gnome_x11",
-            "GNOME/X11 desktop",
-            linux_gnome_x11_detail(&session),
+            "linux_desktop_session",
+            "Linux desktop session",
+            linux_desktop_session_detail(&session),
         ));
     } else {
         probes.push(LinuxProbe::fail(
-            "gnome_x11",
-            "GNOME/X11 desktop",
-            linux_gnome_x11_detail(&session),
-            "Log out and choose 'GNOME on Xorg' from the session gear; KDE and Wayland are intentionally unsupported for now.",
+            "linux_desktop_session",
+            "Linux desktop session",
+            linux_desktop_session_detail(&session),
+            "Run from a logged-in Linux desktop session with DISPLAY or WAYLAND_DISPLAY set.",
         ));
     }
 
-    let required_commands = [
-        "python3",
-        "libreoffice",
-        "evolution",
-        "gdbus",
-        "xdotool",
-        "wmctrl",
-    ];
+    let required_commands = ["python3", "libreoffice", "evolution", "gdbus"];
     let missing = required_commands
         .iter()
         .filter(|command| !crate::platform::executable_available(command))
@@ -808,6 +810,47 @@ fn probe_desktop_stack(profile: LinuxReadinessProfile) -> Vec<LinuxProbe> {
         ));
     }
 
+    let pointer_backend = ["xdotool", "ydotool", "dotool"]
+        .iter()
+        .find(|command| crate::platform::executable_available(command))
+        .copied();
+    if let Some(command) = pointer_backend {
+        probes.push(LinuxProbe::pass(
+            "desktop_input_backend",
+            "Desktop input backend",
+            format!("{command} is available for pointer/keyboard automation."),
+        ));
+    } else {
+        probes.push(LinuxProbe::fail(
+            "desktop_input_backend",
+            "Desktop input backend",
+            "No supported pointer input backend was found.",
+            "Install xdotool for X11, or ydotool/dotool for Wayland, KDE, and general Linux desktop automation.",
+        ));
+    }
+
+    let window_backend = if crate::platform::executable_available("wmctrl") {
+        Some("wmctrl")
+    } else if python_module_available("pyatspi") {
+        Some("pyatspi")
+    } else {
+        None
+    };
+    if let Some(backend) = window_backend {
+        probes.push(LinuxProbe::pass(
+            "desktop_window_backend",
+            "Desktop window backend",
+            format!("{backend} is available for window discovery."),
+        ));
+    } else {
+        probes.push(LinuxProbe::fail(
+            "desktop_window_backend",
+            "Desktop window backend",
+            "No supported window discovery backend was found.",
+            "Install wmctrl for X11 or python3-pyatspi for AT-SPI window/menu discovery.",
+        ));
+    }
+
     let at_spi_ok = std::env::var_os("AT_SPI_BUS_ADDRESS").is_some()
         || std::env::var_os("GTK_MODULES")
             .is_some_and(|value| value.to_string_lossy().contains("gail"));
@@ -822,7 +865,7 @@ fn probe_desktop_stack(profile: LinuxReadinessProfile) -> Vec<LinuxProbe> {
             "at_spi",
             "AT-SPI accessibility",
             "AT-SPI accessibility bus is not active.",
-            "Enable accessibility in GNOME and install at-spi2-core, then start a fresh GNOME/X11 session.",
+            "Enable desktop accessibility and install at-spi2-core, then start a fresh logged-in Linux desktop session.",
         ));
     }
     probes
@@ -1423,29 +1466,28 @@ fn current_linux_desktop_session_facts() -> LinuxDesktopSessionFacts {
     }
 }
 
-fn linux_gnome_x11_ready(facts: &LinuxDesktopSessionFacts) -> bool {
-    let session_is_x11 = facts
+fn linux_desktop_session_ready(facts: &LinuxDesktopSessionFacts) -> bool {
+    let session_supported = facts
         .session_type
         .as_deref()
-        .map(|value| value.eq_ignore_ascii_case("x11"))
-        .unwrap_or(false);
-    let desktop_is_gnome = facts
-        .current_desktop
-        .as_deref()
-        .unwrap_or_default()
-        .split(':')
-        .any(|value| value.eq_ignore_ascii_case("gnome"));
-
-    facts.display.is_some() && facts.wayland_display.is_none() && session_is_x11 && desktop_is_gnome
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "x11" | "wayland"))
+        .unwrap_or_else(|| facts.display.is_some() || facts.wayland_display.is_some());
+    (facts.display.is_some() || facts.wayland_display.is_some()) && session_supported
 }
 
-fn linux_gnome_x11_detail(facts: &LinuxDesktopSessionFacts) -> String {
-    if linux_gnome_x11_ready(facts) {
-        return "DISPLAY is set and XDG_CURRENT_DESKTOP reports GNOME on X11.".to_string();
+fn linux_desktop_session_detail(facts: &LinuxDesktopSessionFacts) -> String {
+    if linux_desktop_session_ready(facts) {
+        return format!(
+            "Desktop session is supported: DISPLAY={}, WAYLAND_DISPLAY={}, XDG_SESSION_TYPE={}, XDG_CURRENT_DESKTOP={}.",
+            facts.display.as_deref().unwrap_or("unset"),
+            facts.wayland_display.as_deref().unwrap_or("unset"),
+            facts.session_type.as_deref().unwrap_or("unset"),
+            facts.current_desktop.as_deref().unwrap_or("unset"),
+        );
     }
 
     format!(
-        "Linux desktop autonomy requires GNOME on X11 with DISPLAY set; detected DISPLAY={}, WAYLAND_DISPLAY={}, XDG_SESSION_TYPE={}, XDG_CURRENT_DESKTOP={}.",
+        "Linux desktop autonomy requires a logged-in Linux desktop session with DISPLAY or WAYLAND_DISPLAY set; detected DISPLAY={}, WAYLAND_DISPLAY={}, XDG_SESSION_TYPE={}, XDG_CURRENT_DESKTOP={}.",
         facts.display.as_deref().unwrap_or("unset"),
         facts.wayland_display.as_deref().unwrap_or("unset"),
         facts.session_type.as_deref().unwrap_or("unset"),
@@ -1563,7 +1605,7 @@ fn aws_credentials_present() -> bool {
 }
 
 fn ubuntu_debian_desktop_install_block() -> &'static str {
-    "Install the GNOME/X11 desktop prerequisites: sudo apt install python3 python3-gi python3-pyatspi libreoffice libreoffice-script-provider-python evolution evolution-data-server-bin xdotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam"
+    "Install the Linux desktop prerequisites: sudo apt install python3 python3-gi python3-pyatspi libreoffice libreoffice-script-provider-python evolution evolution-data-server-bin wmctrl tesseract-ocr gnome-screenshot scrot imagemagick at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam. Add xdotool for X11 or ydotool/dotool for Wayland/KDE/general desktop pointer automation."
 }
 
 #[cfg(test)]
@@ -1575,8 +1617,8 @@ mod tests {
         assert_eq!(LinuxReadinessProfile::Server.as_str(), "server");
         assert_eq!(LinuxReadinessProfile::Remote.as_str(), "remote");
         assert_eq!(
-            LinuxReadinessProfile::DesktopGnome.as_str(),
-            "desktop-gnome"
+            LinuxReadinessProfile::DesktopLinux.as_str(),
+            "desktop-linux"
         );
         assert_eq!(LinuxReadinessProfile::PiOsLite64.as_str(), "pi-os-lite-64");
         assert_eq!(LinuxReadinessProfile::AllFeatures.as_str(), "all-features");
@@ -1651,6 +1693,18 @@ ID=debian
         assert!(scrot.core_modes_available());
         assert!(scrot.window.contains(&"scrot"));
         assert!(scrot.interactive.contains(&"scrot"));
+    }
+
+    #[test]
+    fn desktop_session_detection_accepts_kde_wayland() {
+        let facts = LinuxDesktopSessionFacts {
+            display: None,
+            wayland_display: Some("wayland-0".to_string()),
+            session_type: Some("wayland".to_string()),
+            current_desktop: Some("KDE".to_string()),
+        };
+        assert!(linux_desktop_session_ready(&facts));
+        assert!(linux_desktop_session_detail(&facts).contains("Desktop session is supported"));
     }
 
     #[test]
@@ -1753,14 +1807,14 @@ ID=debian
     }
 
     #[test]
-    fn gnome_x11_detection_rejects_wayland_and_kde() {
+    fn desktop_session_detection_accepts_supported_desktops_and_rejects_headless() {
         let gnome_x11 = LinuxDesktopSessionFacts {
             display: Some(":0".to_string()),
             wayland_display: None,
             session_type: Some("x11".to_string()),
             current_desktop: Some("GNOME".to_string()),
         };
-        assert!(linux_gnome_x11_ready(&gnome_x11));
+        assert!(linux_desktop_session_ready(&gnome_x11));
 
         let wayland = LinuxDesktopSessionFacts {
             display: Some(":0".to_string()),
@@ -1768,7 +1822,7 @@ ID=debian
             session_type: Some("wayland".to_string()),
             current_desktop: Some("GNOME".to_string()),
         };
-        assert!(!linux_gnome_x11_ready(&wayland));
+        assert!(linux_desktop_session_ready(&wayland));
 
         let kde = LinuxDesktopSessionFacts {
             display: Some(":0".to_string()),
@@ -1776,7 +1830,15 @@ ID=debian
             session_type: Some("x11".to_string()),
             current_desktop: Some("KDE".to_string()),
         };
-        assert!(!linux_gnome_x11_ready(&kde));
+        assert!(linux_desktop_session_ready(&kde));
+
+        let headless = LinuxDesktopSessionFacts {
+            display: None,
+            wayland_display: None,
+            session_type: None,
+            current_desktop: Some("KDE".to_string()),
+        };
+        assert!(!linux_desktop_session_ready(&headless));
     }
 
     #[test]

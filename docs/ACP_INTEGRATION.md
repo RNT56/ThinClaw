@@ -53,9 +53,13 @@ ThinClaw advertises image/audio prompt support as disabled until the media pipel
 
 `session/resume` is retained as a compatibility handler, but it is not advertised as an ACP v1 core capability.
 
+## Acceptance Coverage
+
+CI runs `cargo check --features acp --bin thinclaw-acp`, ACP unit acceptance tests, and a subprocess stdio transcript smoke. The subprocess transcript currently covers parse errors, `initialize`, no-auth `authenticate`, invalid params, unsupported MCP transport rejection, `session/new`, `session/list`, `session/load`, method-not-found errors, stdout NDJSON cleanliness, and lifecycle method error shapes when the lightweight smoke harness is intentionally running without an agent runtime.
+
 ## Remaining Acceptance Gates
 
-- Full subprocess golden JSON-RPC transcripts for prompt, permissions, cancel, close, list, and load
+- Agent-backed subprocess golden transcripts for prompt streaming, permissions, cancel, and close
 - Schema validation against the published ACP schema, beyond the current typed serde conformance tests
 - Real Zed and VS Code ACP smoke tests
 - Native provider/cancel propagation deeper than the existing ThinClaw interrupt path

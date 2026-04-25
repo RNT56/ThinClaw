@@ -392,13 +392,14 @@ async fn linux_dedicated_user_live_desktop_smoke() {
         "live-dedicated-user-linux",
         |bootstrap| {
             assert!(
-                !bootstrap.passed,
-                "linux dedicated-user bootstrap must stay disabled for this release"
-            );
-            assert_eq!(
-                bootstrap.blocking_reason.as_deref(),
-                Some("unsupported_deployment_mode"),
-                "linux dedicated-user smoke should report the explicit unsupported-mode blocker"
+                bootstrap.passed
+                    || bootstrap.blocking_reason.as_deref() == Some("needs_target_user_login")
+                    || bootstrap.blocking_reason.as_deref()
+                        == Some("requires_privileged_bootstrap")
+                    || bootstrap.blocking_reason.as_deref() == Some("requires_supported_apps")
+                    || bootstrap.blocking_reason.as_deref()
+                        == Some("session_launcher_install_failed"),
+                "linux dedicated-user bootstrap should pass or report an actionable setup blocker"
             );
         },
     )

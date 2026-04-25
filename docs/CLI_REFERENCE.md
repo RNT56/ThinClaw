@@ -82,7 +82,7 @@ These flags can be appended to almost any command:
 - `thinclaw message`: Send a message to the agent directly from the CLI without starting the interactive prompt.
 - `thinclaw pairing`: DM pairing logic to approve inbound requests from unknown senders on supported channels.
 - `thinclaw logs`: Query, tail, and filter system logs.
-- `thinclaw doctor`: Probe external dependencies and validate the current configuration. On Linux, add `--profile server`, `--profile remote`, `--profile pi-os-lite-64`, `--profile desktop-gnome`, or `--profile all-features`.
+- `thinclaw doctor`: Probe external dependencies and validate the current configuration. On Linux, add `--profile server`, `--profile remote`, `--profile pi-os-lite-64`, `--profile desktop-linux`, `--profile desktop-gnome`, or `--profile all-features`.
 - `thinclaw status`: Show system health and diagnostics. On Linux, the same `--profile` values summarize runtime readiness.
 - `thinclaw service`: Manage the OS background service through launchd, systemd, or the Windows Service Control Manager.
   - `install`: Install ThinClaw as a system service.
@@ -138,7 +138,8 @@ Chromium fallback and host prerequisites, see [EXTERNAL_DEPENDENCIES.md](EXTERNA
 | `server` | Generic Linux server, workstation, or laptop readiness |
 | `remote` | Remote/headless gateway and service posture |
 | `pi-os-lite-64` | Raspberry Pi OS Lite 64-bit readiness |
-| `desktop-gnome` | Linux GNOME/X11 desktop-autonomy readiness |
+| `desktop-linux` | Linux desktop-autonomy readiness for supported X11 or Wayland desktop sessions |
+| `desktop-gnome` | Compatibility alias for `desktop-linux` |
 | `all-features` | Optional Linux feature and `--all-features` build readiness |
 
 These profiles are Linux-specific probes. On non-Linux hosts, `doctor` and

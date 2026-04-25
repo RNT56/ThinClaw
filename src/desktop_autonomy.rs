@@ -1738,11 +1738,28 @@ impl DesktopAutonomyManager {
             DesktopBridgeBackend::LinuxPython => {
                 let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
                 let current_desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-                let display_ok = std::env::var_os("DISPLAY").is_some()
-                    && !session_type.eq_ignore_ascii_case("wayland")
-                    && current_desktop
-                        .split(':')
-                        .any(|value| value.eq_ignore_ascii_case("gnome"));
+                let known_desktop = current_desktop.split([':', ';']).any(|value| {
+                    matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "gnome"
+                            | "kde"
+                            | "plasma"
+                            | "xfce"
+                            | "lxqt"
+                            | "mate"
+                            | "cinnamon"
+                            | "unity"
+                            | "budgie"
+                            | "sway"
+                    )
+                });
+                let has_display = std::env::var_os("DISPLAY").is_some()
+                    || std::env::var_os("WAYLAND_DISPLAY").is_some();
+                let session_supported = matches!(
+                    session_type.to_ascii_lowercase().as_str(),
+                    "x11" | "wayland" | ""
+                );
+                let display_ok = has_display && session_supported;
                 let display_evidence = self.attach_runtime_evidence(
                     "bootstrap_prerequisite",
                     serde_json::json!({
@@ -1750,6 +1767,7 @@ impl DesktopAutonomyManager {
                         "wayland_display": std::env::var("WAYLAND_DISPLAY").ok(),
                         "xdg_session_type": std::env::var("XDG_SESSION_TYPE").ok(),
                         "xdg_current_desktop": std::env::var("XDG_CURRENT_DESKTOP").ok(),
+                        "known_desktop": known_desktop,
                     }),
                 );
                 if display_ok {
@@ -1758,7 +1776,7 @@ impl DesktopAutonomyManager {
                     blocking_reason.get_or_insert_with(|| "unsupported_display_stack".to_string());
                     checks.push(failed_check(
                         "display_stack",
-                        "Linux reckless desktop currently requires a logged-in GNOME on X11 session with DISPLAY set. KDE and Wayland are unsupported for this release; choose 'GNOME on Xorg' at login."
+                        "Linux reckless desktop requires a logged-in desktop session with DISPLAY or WAYLAND_DISPLAY on X11 or Wayland."
                             .to_string(),
                         display_evidence,
                     ));
@@ -1785,8 +1803,6 @@ impl DesktopAutonomyManager {
                     ("libreoffice", "libreoffice"),
                     ("evolution", "evolution"),
                     ("gdbus", "gdbus"),
-                    ("xdotool", "xdotool"),
-                    ("wmctrl", "wmctrl"),
                 ];
                 for (name, command_name) in app_checks {
                     let evidence = self.attach_runtime_evidence(
@@ -1808,8 +1824,57 @@ impl DesktopAutonomyManager {
                         }
                     }
                 }
+                let input_backend = ["xdotool", "ydotool", "dotool"]
+                    .iter()
+                    .copied()
+                    .find(|command| command_on_path(command));
+                let input_evidence = self.attach_runtime_evidence(
+                    "bootstrap_prerequisite",
+                    serde_json::json!({
+                        "supported_commands": ["xdotool", "ydotool", "dotool"],
+                        "selected": input_backend,
+                        "wayland_note": "Wayland/KDE/general desktops need ydotool or dotool for pointer actions unless running X11 with xdotool.",
+                    }),
+                );
+                if input_backend.is_some() {
+                    checks.push(passed_check("input_backend", None, input_evidence));
+                } else {
+                    blocking_reason.get_or_insert_with(|| "requires_supported_apps".to_string());
+                    checks.push(failed_check(
+                        "input_backend",
+                        "Linux pointer automation requires xdotool on X11, or ydotool/dotool for Wayland/KDE/general desktops."
+                            .to_string(),
+                        input_evidence,
+                    ));
+                }
+                let window_backend = if command_on_path("wmctrl") {
+                    Some("wmctrl")
+                } else if python_module_on_path("pyatspi") {
+                    Some("pyatspi")
+                } else {
+                    None
+                };
+                let window_evidence = self.attach_runtime_evidence(
+                    "bootstrap_prerequisite",
+                    serde_json::json!({
+                        "supported_commands": ["wmctrl"],
+                        "supported_modules": ["pyatspi"],
+                        "selected": window_backend,
+                    }),
+                );
+                if window_backend.is_some() {
+                    checks.push(passed_check("window_backend", None, window_evidence));
+                } else {
+                    blocking_reason.get_or_insert_with(|| "requires_supported_apps".to_string());
+                    checks.push(failed_check(
+                        "window_backend",
+                        "Linux window discovery requires wmctrl on X11 or pyatspi accessibility on Wayland/general desktops."
+                            .to_string(),
+                        window_evidence,
+                    ));
+                }
                 notes.push(
-                    "Ubuntu/Debian desktop prerequisites: sudo apt install python3 python3-gi python3-pyatspi libreoffice libreoffice-script-provider-python evolution evolution-data-server-bin xdotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam"
+                    "Ubuntu/Debian desktop prerequisites: sudo apt install python3 python3-gi python3-pyatspi libreoffice libreoffice-script-provider-python evolution evolution-data-server-bin wmctrl tesseract-ocr gnome-screenshot scrot imagemagick at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam. Add xdotool for X11, or ydotool/dotool for Wayland/KDE/general desktop pointer automation."
                         .to_string(),
                 );
                 for (name, module) in [("pyatspi_module", "pyatspi"), ("pygobject_module", "gi")] {
@@ -1972,13 +2037,6 @@ impl DesktopAutonomyManager {
             });
         }
 
-        if matches!(self.bridge_backend(), DesktopBridgeBackend::LinuxPython) {
-            return Ok(DedicatedUserBootstrap {
-                blocking_reason: Some("unsupported_deployment_mode".to_string()),
-                ..Default::default()
-            });
-        }
-
         let username = self
             .config
             .target_username
@@ -2004,9 +2062,15 @@ impl DesktopAutonomyManager {
 
             let password = generate_dedicated_user_secret();
             self.create_dedicated_user(&username, &password).await?;
-            crate::platform::secure_store::store_api_key(&keychain_label, &password)
-                .await
-                .map_err(|e| format!("failed to store dedicated-user password in keychain: {e}"))?;
+            if let Err(error) =
+                crate::platform::secure_store::store_api_key(&keychain_label, &password).await
+            {
+                tracing::warn!(
+                    error = %error,
+                    "failed to store dedicated-user password in secure store; returning one-time login secret in bootstrap report"
+                );
+                bootstrap.keychain_label = None;
+            }
             bootstrap.created_user = true;
             bootstrap.one_time_login_secret = Some(password);
         }
@@ -2363,10 +2427,23 @@ impl DesktopAutonomyManager {
                 .await?;
                 Ok(())
             }
-            DesktopBridgeBackend::LinuxPython => Err(
-                "linux dedicated_user bootstrap is best-effort only and will not create users"
-                    .to_string(),
-            ),
+            DesktopBridgeBackend::LinuxPython => {
+                let user = shell_single_quote(username);
+                let secret = shell_single_quote(password);
+                run_cmd(
+                    Command::new("sh")
+                        .arg("-lc")
+                        .arg(format!(
+                            "useradd --create-home --shell /bin/bash {user} && \
+                             printf '%s:%s\\n' {user} {secret} | chpasswd && \
+                             for group in audio video input; do \
+                               if getent group \"$group\" >/dev/null 2>&1; then usermod -aG \"$group\" {user}; fi; \
+                             done"
+                        )),
+                )
+                .await?;
+                Ok(())
+            }
             DesktopBridgeBackend::Unsupported => {
                 Err("dedicated-user creation is unsupported on this platform".to_string())
             }
@@ -2408,12 +2485,28 @@ impl DesktopAutonomyManager {
             }
             DesktopBridgeBackend::LinuxPython => {
                 let expected_user = username.unwrap_or(session_subject);
-                let display_ready = std::env::var_os("DISPLAY").is_some();
                 let current_user = std::env::var("USER")
                     .ok()
                     .or_else(|| std::env::var("LOGNAME").ok())
                     .unwrap_or_default();
-                display_ready && current_user == expected_user
+                let current_session_ready = (std::env::var_os("DISPLAY").is_some()
+                    || std::env::var_os("WAYLAND_DISPLAY").is_some())
+                    && current_user == expected_user;
+                if current_session_ready {
+                    return true;
+                }
+                let quoted_user = shell_single_quote(expected_user);
+                run_cmd(
+                    Command::new("sh")
+                        .arg("-lc")
+                        .arg(format!(
+                            "command -v loginctl >/dev/null 2>&1 && \
+                             loginctl list-sessions --no-legend 2>/dev/null | \
+                             awk -v user={quoted_user} '$3 == user {{ found=1 }} END {{ exit found ? 0 : 1 }}'"
+                        )),
+                )
+                .await
+                .is_ok()
             }
             DesktopBridgeBackend::Unsupported => false,
         }
@@ -2705,14 +2798,99 @@ impl DesktopAutonomyManager {
             }
             let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
             let home = self.session_launcher_home()?;
+            let wrapper_path = home
+                .join(".local")
+                .join("bin")
+                .join("thinclaw-desktop-autonomy-session");
+            if let Some(parent) = wrapper_path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| format!("failed to create linux launcher bin dir: {e}"))?;
+            }
+            let mut env_lines = vec![
+                "export DESKTOP_AUTONOMY_ENABLED=true".to_string(),
+                format!(
+                    "export DESKTOP_AUTONOMY_PROFILE={}",
+                    shell_single_quote(self.config.profile.as_str())
+                ),
+                format!(
+                    "export DESKTOP_AUTONOMY_DEPLOYMENT_MODE={}",
+                    shell_single_quote(self.config.deployment_mode.as_str())
+                ),
+                format!(
+                    "export DESKTOP_AUTONOMY_MAX_CONCURRENT_JOBS={}",
+                    shell_single_quote(&self.config.desktop_max_concurrent_jobs.to_string())
+                ),
+                format!(
+                    "export DESKTOP_AUTONOMY_ACTION_TIMEOUT_SECS={}",
+                    shell_single_quote(&self.config.desktop_action_timeout_secs.to_string())
+                ),
+                format!(
+                    "export DESKTOP_AUTONOMY_CAPTURE_EVIDENCE={}",
+                    shell_single_quote(&self.config.capture_evidence.to_string())
+                ),
+                format!(
+                    "export DESKTOP_AUTONOMY_EMERGENCY_STOP_PATH={}",
+                    shell_single_quote(self.config.emergency_stop_path.to_string_lossy().as_ref())
+                ),
+                format!(
+                    "export DESKTOP_AUTONOMY_PAUSE_ON_BOOTSTRAP_FAILURE={}",
+                    shell_single_quote(&self.config.pause_on_bootstrap_failure.to_string())
+                ),
+                format!(
+                    "export DESKTOP_AUTONOMY_KILL_SWITCH_HOTKEY={}",
+                    shell_single_quote(&self.config.kill_switch_hotkey)
+                ),
+            ];
+            if let Some(username) = self.config.target_username.as_deref() {
+                env_lines.push(format!(
+                    "export DESKTOP_AUTONOMY_TARGET_USERNAME={}",
+                    shell_single_quote(username)
+                ));
+            }
+            let wrapper = format!(
+                "#!/bin/sh\nset -eu\nexport HOME={home}\n{env}\nexec {exe} run --no-onboard\n",
+                home = shell_single_quote(home.to_string_lossy().as_ref()),
+                env = env_lines.join("\n"),
+                exe = shell_single_quote(exe.to_string_lossy().as_ref()),
+            );
+            tokio::fs::write(&wrapper_path, wrapper)
+                .await
+                .map_err(|e| format!("failed to write linux session wrapper: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = tokio::fs::metadata(&wrapper_path)
+                    .await
+                    .map_err(|e| format!("failed to inspect linux session wrapper: {e}"))?
+                    .permissions();
+                perms.set_mode(0o755);
+                tokio::fs::set_permissions(&wrapper_path, perms)
+                    .await
+                    .map_err(|e| format!("failed to chmod linux session wrapper: {e}"))?;
+            }
             let desktop_entry = format!(
-                "[Desktop Entry]\nType=Application\nName=ThinClaw Desktop Autonomy\nComment=ThinClaw reckless desktop session launcher\nExec=\"{}\" run --no-onboard\nPath={}\nOnlyShowIn=GNOME;\nX-GNOME-Autostart-enabled=true\nTerminal=false\n",
-                exe.display(),
+                "[Desktop Entry]\nType=Application\nName=ThinClaw Desktop Autonomy\nComment=ThinClaw reckless desktop session launcher\nExec={}\nPath={}\nX-GNOME-Autostart-enabled=true\nX-KDE-autostart-after=panel\nTerminal=false\n",
+                wrapper_path.display(),
                 home.display(),
             );
             tokio::fs::write(&launcher_path, desktop_entry)
                 .await
                 .map_err(|e| format!("failed to write linux session launcher: {e}"))?;
+            if self.config.deployment_mode == crate::settings::DesktopDeploymentMode::DedicatedUser
+                && let Some(username) = self.config.target_username.as_deref()
+                && self.has_privileged_bootstrap().await
+            {
+                let user = shell_single_quote(username);
+                let launcher = shell_single_quote(launcher_path.to_string_lossy().as_ref());
+                let wrapper = shell_single_quote(wrapper_path.to_string_lossy().as_ref());
+                let _ = run_cmd(
+                    Command::new("sh")
+                        .arg("-lc")
+                        .arg(format!("chown {user}:{user} {launcher} {wrapper}")),
+                )
+                .await;
+            }
             Ok(launcher_path)
         }
     }
@@ -2730,11 +2908,11 @@ impl DesktopAutonomyManager {
                 .await
                 .map_err(|e| format!("failed to read linux session launcher: {e}"))?;
             if !raw.contains("[Desktop Entry]")
-                || !raw.contains("OnlyShowIn=GNOME;")
-                || !raw.contains("run --no-onboard")
+                || !raw.contains("Exec=")
+                || !raw.contains("thinclaw-desktop-autonomy-session")
             {
                 return Err(
-                    "linux session launcher does not contain the required GNOME autostart entry"
+                    "linux session launcher does not contain the required cross-desktop autostart entry"
                         .to_string(),
                 );
             }
@@ -2768,7 +2946,8 @@ impl DesktopAutonomyManager {
                     DesktopBridgeBackend::WindowsPowerShell => {
                         Ok(PathBuf::from(r"C:\Users").join(username))
                     }
-                    DesktopBridgeBackend::LinuxPython => Ok(PathBuf::from("/home").join(username)),
+                    DesktopBridgeBackend::LinuxPython => Ok(linux_user_home(username)
+                        .unwrap_or_else(|| PathBuf::from("/home").join(username))),
                     DesktopBridgeBackend::Unsupported => {
                         Err("failed to resolve target home for unsupported platform".to_string())
                     }
@@ -3691,6 +3870,17 @@ fn command_on_path(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn python_module_on_path(module: &str) -> bool {
+    std::process::Command::new("python3")
+        .arg("-c")
+        .arg(format!("import {module}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn permissions_report_passed(report: &serde_json::Value) -> bool {
     let object = report.as_object().cloned().unwrap_or_default();
     object.values().all(|value| {
@@ -3803,6 +3993,28 @@ fn generate_dedicated_user_secret() -> String {
             alphabet[idx] as char
         })
         .collect()
+}
+
+fn shell_single_quote(raw: &str) -> String {
+    format!("'{}'", raw.replace('\'', "'\"'\"'"))
+}
+
+fn linux_user_home(username: &str) -> Option<PathBuf> {
+    let output = std::process::Command::new("getent")
+        .arg("passwd")
+        .arg(username)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let home = raw.trim_end().split(':').nth(5)?;
+    if home.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(home))
+    }
 }
 
 fn copy_fixture_path(src: &Path, dst: &Path) -> Result<(), String> {
@@ -3924,6 +4136,12 @@ mod tests {
             "needs_target_user_login"
         );
         assert_eq!(dedicated_bootstrap_blocking_reason(true, true, true), "");
+    }
+
+    #[test]
+    fn shell_single_quote_handles_embedded_quotes() {
+        assert_eq!(shell_single_quote("plain"), "'plain'");
+        assert_eq!(shell_single_quote("a'b"), "'a'\"'\"'b'");
     }
 
     #[test]

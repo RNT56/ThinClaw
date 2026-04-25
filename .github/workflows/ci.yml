@@ -110,6 +110,26 @@ jobs:
       - name: Host runtime smoke
         run: cargo test --features full --bin thinclaw --test host_runtime_smoke -- --nocapture --test-threads=1
 
+  acp-acceptance:
+    name: ACP Acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: acp-acceptance
+      - name: Check ACP binary
+        run: cargo check --features acp --bin thinclaw-acp
+      - name: Run ACP unit acceptance tests
+        run: cargo test --features acp --lib acp -- --nocapture
+      - name: Run ACP stdio transcript smoke
+        run: cargo test --features acp --test acp_stdio_smoke -- --nocapture
+
   linux-arm64-host-smoke:
     name: Linux ARM64 Host Runtime Smoke
     runs-on: ubuntu-24.04-arm
@@ -125,6 +145,86 @@ jobs:
           key: linux-arm64-host-smoke
       - name: cargo check
         run: cargo check --features full
+      - name: Build ARM64 release artifact
+        run: cargo build --release --features full --bin thinclaw
+      - name: Pi OS Lite ARM64 artifact doctor
+        env:
+          THINCLAW_RUNTIME_PROFILE: pi-os-lite-64
+          THINCLAW_HEADLESS: "true"
+          THINCLAW_ALLOW_ENV_MASTER_KEY: "1"
+          SECRETS_MASTER_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+          ONBOARD_COMPLETED: "true"
+          GATEWAY_ENABLED: "true"
+          GATEWAY_AUTH_TOKEN: "thinclaw-ci-token"
+          GATEWAY_PORT: "3000"
+          CLI_ENABLED: "false"
+          DATABASE_BACKEND: "libsql"
+          BROWSER_DOCKER: "never"
+          DESKTOP_AUTONOMY_ENABLED: "false"
+          THINCLAW_LINUX_READINESS_OS_RELEASE: |
+            PRETTY_NAME="Raspberry Pi OS GNU/Linux 12 (bookworm)"
+            NAME="Raspberry Pi OS GNU/Linux"
+            ID=debian
+            VERSION_CODENAME=bookworm
+          THINCLAW_LINUX_READINESS_RPI_ISSUE: "Raspberry Pi reference 2026-04-25"
+        run: ./target/release/thinclaw doctor --profile pi-os-lite-64
+      - name: Pi OS Lite ARM64 artifact gateway health
+        env:
+          THINCLAW_RUNTIME_PROFILE: pi-os-lite-64
+          THINCLAW_HEADLESS: "true"
+          THINCLAW_ALLOW_ENV_MASTER_KEY: "1"
+          SECRETS_MASTER_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+          ONBOARD_COMPLETED: "true"
+          CLI_ENABLED: "false"
+          HTTP_HOST: "127.0.0.1"
+          HTTP_PORT: "0"
+          HTTP_WEBHOOK_SECRET: "thinclaw-ci-http"
+          GATEWAY_ENABLED: "true"
+          GATEWAY_HOST: "127.0.0.1"
+          GATEWAY_AUTH_TOKEN: "thinclaw-ci-token"
+          DATABASE_BACKEND: "libsql"
+          LLM_BACKEND: "ollama"
+          OLLAMA_BASE_URL: "http://127.0.0.1:11434"
+          SANDBOX_ENABLED: "false"
+          HEARTBEAT_ENABLED: "false"
+          ROUTINES_ENABLED: "false"
+          EXPERIMENTS_ENABLED: "false"
+          BUILDER_ENABLED: "false"
+          SKILLS_ENABLED: "false"
+          DESKTOP_AUTONOMY_ENABLED: "false"
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          port="$(python3 - <<'PY'
+          import socket
+          s = socket.socket()
+          s.bind(("127.0.0.1", 0))
+          print(s.getsockname()[1])
+          s.close()
+          PY
+          )"
+          export THINCLAW_HOME="$tmp/home"
+          export HOME="$tmp/home"
+          export USERPROFILE="$tmp/home"
+          export GATEWAY_PORT="$port"
+          mkdir -p "$THINCLAW_HOME"
+          ./target/release/thinclaw run --no-onboard >"$tmp/stdout.log" 2>"$tmp/stderr.log" &
+          pid="$!"
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+          for _ in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:$port/api/health" >/dev/null; then
+              exit 0
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              cat "$tmp/stdout.log"
+              cat "$tmp/stderr.log" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          cat "$tmp/stdout.log"
+          cat "$tmp/stderr.log" >&2
+          exit 1
       - name: Compile host runtime smoke
         run: cargo test --features full --bin thinclaw --test host_runtime_smoke --no-run
       - name: Host runtime smoke

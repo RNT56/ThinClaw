@@ -342,9 +342,10 @@ pullable before reporting the fallback as ready.
 
 Use `thinclaw doctor --profile server` for Ubuntu/Debian server or Docker hosts,
 `thinclaw doctor --profile pi-os-lite-64` for Raspberry Pi OS Lite 64-bit,
-`thinclaw doctor --profile desktop-gnome` for the supported GNOME/X11 desktop
-path, and `thinclaw doctor --profile all-features` before building or running
-with every optional feature enabled.
+`thinclaw doctor --profile desktop-linux` for the supported interactive Linux
+desktop path, and `thinclaw doctor --profile all-features` before building or
+running with every optional feature enabled. `desktop-gnome` remains accepted as
+a compatibility alias.
 
 Raspberry Pi OS Lite 64-bit supports the full headless runtime. Docker, Tailscale,
 camera, microphone, location, and browser automation are optional. Reckless
@@ -376,7 +377,7 @@ DESKTOP_AUTONOMY_ENABLED=false
 The `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and `THINCLAW_HEADLESS=true`
 markers are runtime guards: desktop autonomy tools are not registered under
 that profile, so Pi OS Lite remains a remote/headless setup rather than a
-GNOME/X11-style desktop automation host.
+desktop automation host.
 
 Optional Pi packages:
 
@@ -413,14 +414,17 @@ DESKTOP_AUTONOMY_ENABLED=false
 
 `SECRETS_MASTER_KEY` is ignored by default. Use the environment fallback only for headless hosts or containers where Linux Secret Service is not available, and prefer a service-manager secret mechanism over plain shell exports.
 
-Ubuntu/Debian packages for the supported GNOME/X11 desktop-autonomy path:
+Ubuntu/Debian packages for the supported interactive Linux desktop-autonomy path:
 
 ```bash
 sudo apt install python3 python3-gi python3-pyatspi libreoffice \
   libreoffice-script-provider-python evolution evolution-data-server-bin \
-  xdotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick \
+  xdotool ydotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick \
   at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam
 ```
+
+Use `xdotool` for X11 sessions. Use `ydotool` or `dotool` when the host runs a
+Wayland compositor that does not permit X11 input injection.
 
 Linux native Apple Mail and native iMessage channels are not available. Use
 Gmail for mail and BlueBubbles for iMessage-compatible messaging from a Mac-hosted

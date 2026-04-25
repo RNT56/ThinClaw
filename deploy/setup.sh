@@ -104,6 +104,84 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+ROLLBACK_DIR="$(mktemp -d /tmp/thinclaw-setup.XXXXXX)"
+SETUP_COMPLETE=false
+DOCKER_COMPOSE_TOUCHED=false
+THINCLAW_SERVICE_WAS_ACTIVE=false
+THINCLAW_USER_CREATED=false
+declare -a ROLLBACK_PATHS=()
+
+backup_path() {
+    local path="$1"
+    local item=""
+    for item in "${ROLLBACK_PATHS[@]}"; do
+        if [[ "$item" == "$path|"* ]]; then
+            return 0
+        fi
+    done
+
+    local label=""
+    label="$(printf '%s' "$path" | sed 's#[^A-Za-z0-9._-]#_#g')"
+    local backup="$ROLLBACK_DIR/$label"
+    if [[ -e "$path" || -L "$path" ]]; then
+        mkdir -p "$(dirname "$backup")"
+        cp -a "$path" "$backup"
+    else
+        backup=""
+    fi
+    ROLLBACK_PATHS+=("$path|$backup")
+}
+
+restore_backed_up_paths() {
+    local idx=""
+    for ((idx=${#ROLLBACK_PATHS[@]}-1; idx>=0; idx--)); do
+        local item="${ROLLBACK_PATHS[$idx]}"
+        local path="${item%%|*}"
+        local backup="${item#*|}"
+        if [[ -n "$backup" && ( -e "$backup" || -L "$backup" ) ]]; then
+            rm -rf "$path"
+            mkdir -p "$(dirname "$path")"
+            cp -a "$backup" "$path"
+        else
+            rm -rf "$path"
+        fi
+    done
+}
+
+rollback_setup() {
+    local status="$1"
+    if [[ "$SETUP_COMPLETE" == "true" || "$status" -eq 0 ]]; then
+        rm -rf "$ROLLBACK_DIR"
+        return 0
+    fi
+
+    echo ""
+    echo "ERROR: setup failed; rolling back ThinClaw-managed files and services." >&2
+    if [[ "$DOCKER_COMPOSE_TOUCHED" == "true" ]]; then
+        (cd "$DEPLOY_DIR" && docker compose down >/dev/null 2>&1) || true
+    fi
+    if [[ "$THINCLAW_USER_CREATED" == "true" ]]; then
+        userdel -r thinclaw >/dev/null 2>&1 || true
+    fi
+    restore_backed_up_paths
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if [[ "$THINCLAW_SERVICE_WAS_ACTIVE" == "true" ]]; then
+        systemctl restart thinclaw.service >/dev/null 2>&1 || true
+    else
+        systemctl stop thinclaw.service >/dev/null 2>&1 || true
+    fi
+    rm -rf "$ROLLBACK_DIR"
+    echo "Rollback complete. Package installations are not removed automatically." >&2
+}
+
+on_exit() {
+    local status="$?"
+    rollback_setup "$status"
+    exit "$status"
+}
+
+trap on_exit EXIT
+
 # Detect package manager
 if command -v apt-get &> /dev/null; then
     PKG_MANAGER="apt"
@@ -153,6 +231,32 @@ dotenv_quote() {
     printf '"%s"' "$value"
 }
 
+set_env_value() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    local quoted=""
+    quoted="$(dotenv_quote "$value")"
+    if grep -q "^${key}=" "$file"; then
+        sed -i "s|^${key}=.*|${key}=${quoted}|" "$file"
+    else
+        printf '%s=%s\n' "$key" "$quoted" >> "$file"
+    fi
+}
+
+wait_for_health() {
+    local attempts="${1:-60}"
+    local delay="${2:-1}"
+    local attempt=""
+    for ((attempt=1; attempt<=attempts; attempt++)); do
+        if curl -fsS "http://localhost:$THINCLAW_PORT/api/health" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep "$delay"
+    done
+    return 1
+}
+
 configure_firewall() {
     echo ""
     echo "==> Configuring UFW Firewall..."
@@ -167,9 +271,10 @@ configure_firewall() {
     fi
 
     if command -v ufw &> /dev/null; then
-        echo "y" | ufw reset 2>/dev/null || true
-        ufw default deny incoming
-        ufw default allow outgoing
+        if [[ "${THINCLAW_FIREWALL_STRICT:-false}" == "true" ]]; then
+            ufw default deny incoming
+            ufw default allow outgoing
+        fi
         ufw allow ssh comment "SSH access"
         ufw allow "$THINCLAW_PORT/tcp" comment "ThinClaw Gateway"
 
@@ -200,6 +305,7 @@ install_fail2ban() {
     fi
 
     if command -v fail2ban-client &> /dev/null; then
+        backup_path /etc/fail2ban/jail.local
         cat > /etc/fail2ban/jail.local <<'FAIL2BAN_CONF'
 [DEFAULT]
 bantime  = 3600
@@ -252,6 +358,7 @@ install_tailscale_if_requested() {
         fi
     else
         echo "    ERROR: Tailscale installation failed."
+        exit 1
     fi
 }
 
@@ -295,6 +402,7 @@ install_native_pi() {
         exit 1
     fi
 
+    backup_path /usr/local/bin/thinclaw
     if [[ "$(readlink -f "$source_binary" 2>/dev/null || echo "$source_binary")" != "/usr/local/bin/thinclaw" ]]; then
         install -m 0755 "$source_binary" /usr/local/bin/thinclaw
     else
@@ -303,6 +411,7 @@ install_native_pi() {
 
     if ! id thinclaw >/dev/null 2>&1; then
         useradd --system --create-home --home-dir /var/lib/thinclaw --shell /usr/sbin/nologin thinclaw
+        THINCLAW_USER_CREATED=true
     fi
 
     install -d -m 0750 -o thinclaw -g thinclaw /var/lib/thinclaw/.thinclaw
@@ -316,6 +425,7 @@ install_native_pi() {
     quoted_token="$(dotenv_quote "$TOKEN")"
     quoted_port="$(dotenv_quote "$THINCLAW_PORT")"
     quoted_master_key="$(dotenv_quote "$master_key")"
+    backup_path /var/lib/thinclaw/.thinclaw/.env
     cat > /var/lib/thinclaw/.thinclaw/.env <<ENV
 ONBOARD_COMPLETED=true
 THINCLAW_HOME=/var/lib/thinclaw/.thinclaw
@@ -349,6 +459,8 @@ ENV
     chown thinclaw:thinclaw /var/lib/thinclaw/.thinclaw/.env
     chmod 0600 /var/lib/thinclaw/.thinclaw/.env
 
+    backup_path /etc/systemd/system/thinclaw.service
+    systemctl is-active --quiet thinclaw.service && THINCLAW_SERVICE_WAS_ACTIVE=true || true
     cat > /etc/systemd/system/thinclaw.service <<'SYSTEMD_UNIT'
 [Unit]
 Description=ThinClaw AI Agent
@@ -380,6 +492,16 @@ SYSTEMD_UNIT
     install_tailscale_if_requested
 
     echo ""
+    echo "==> Verifying native ThinClaw health..."
+    if wait_for_health 90 1; then
+        echo "    Health endpoint responded on http://localhost:$THINCLAW_PORT/api/health"
+    else
+        echo "ERROR: Native ThinClaw service did not respond on http://localhost:$THINCLAW_PORT/api/health"
+        journalctl -u thinclaw -n 120 --no-pager || true
+        exit 1
+    fi
+
+    echo ""
     echo "============================================================"
     echo "  ThinClaw Native Pi OS Lite Setup Complete!"
     echo "============================================================"
@@ -394,6 +516,7 @@ SYSTEMD_UNIT
     echo "    2. Run: sudo systemctl restart thinclaw"
     echo "    3. Verify: curl http://localhost:$THINCLAW_PORT/api/health"
     echo "============================================================"
+    SETUP_COMPLETE=true
 }
 
 if [[ "$MODE" == "auto" ]]; then
@@ -484,12 +607,12 @@ if ! command -v ufw &> /dev/null; then
 fi
 
 if command -v ufw &> /dev/null; then
-    # Reset to clean state (non-interactive)
-    echo "y" | ufw reset 2>/dev/null || true
-
-    # Default policies: deny incoming, allow outgoing
-    ufw default deny incoming
-    ufw default allow outgoing
+    # Keep existing firewall rules intact. Operators can opt into strict
+    # defaults with THINCLAW_FIREWALL_STRICT=true.
+    if [[ "${THINCLAW_FIREWALL_STRICT:-false}" == "true" ]]; then
+        ufw default deny incoming
+        ufw default allow outgoing
+    fi
 
     # Allow SSH (critical — don't lock yourself out!)
     ufw allow ssh comment "SSH access"
@@ -530,6 +653,7 @@ fi
 
 if command -v fail2ban-client &> /dev/null; then
     # Create local config (overrides without touching defaults)
+    backup_path /etc/fail2ban/jail.local
     cat > /etc/fail2ban/jail.local <<'FAIL2BAN_CONF'
 [DEFAULT]
 # Ban for 1 hour after 5 failed attempts within 10 minutes
@@ -595,6 +719,7 @@ if [[ -n "$TAILSCALE_KEY" ]]; then
         fi
     else
         echo "    ERROR: Tailscale installation failed."
+        exit 1
     fi
 else
     echo ""
@@ -612,17 +737,20 @@ cd "$DEPLOY_DIR"
 
 # Backup existing config
 if [[ -f .env ]]; then
+    backup_path "$DEPLOY_DIR/.env"
     cp .env ".env.bak.$(date +%Y%m%d%H%M%S)"
     echo "    Backed up existing .env"
+else
+    backup_path "$DEPLOY_DIR/.env"
 fi
 
 # Create .env from template
 cp env.example .env
 
 # Inject the gateway auth token
-sed -i "s/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=${TOKEN}/" .env
-sed -i "s/^GATEWAY_PORT=.*/GATEWAY_PORT=${THINCLAW_PORT}/" .env
-sed -i "s|^THINCLAW_IMAGE=.*|THINCLAW_IMAGE=${THINCLAW_IMAGE}|" .env
+set_env_value .env GATEWAY_AUTH_TOKEN "$TOKEN"
+set_env_value .env GATEWAY_PORT "$THINCLAW_PORT"
+set_env_value .env THINCLAW_IMAGE "$THINCLAW_IMAGE"
 
 echo "    .env configured with gateway token."
 
@@ -633,6 +761,7 @@ echo "==> Starting ThinClaw Docker Compose stack..."
 docker compose down 2>/dev/null || true
 docker compose pull thinclaw 2>/dev/null || true
 docker compose up -d
+DOCKER_COMPOSE_TOUCHED=true
 
 echo "    Docker Compose stack started."
 
@@ -644,6 +773,8 @@ if [ "$ENABLE_SYSTEMD" = true ]; then
     echo ""
     echo "==> [6/6] Creating systemd service..."
 
+    backup_path /etc/systemd/system/thinclaw.service
+    systemctl is-active --quiet thinclaw.service && THINCLAW_SERVICE_WAS_ACTIVE=true || true
     cat > /etc/systemd/system/thinclaw.service <<SYSTEMD_UNIT
 [Unit]
 Description=ThinClaw AI Agent (Docker Compose)
@@ -700,11 +831,14 @@ sleep 5
 
 CONTAINER_STATUS=$(docker ps --filter "name=thinclaw-remote" --format "{{.Status}}" 2>/dev/null || echo "unknown")
 echo "  Container status: $CONTAINER_STATUS"
-if curl -fsS "http://localhost:$THINCLAW_PORT/api/health" >/dev/null 2>&1; then
+if wait_for_health 60 1; then
     echo "  Health endpoint:  http://localhost:$THINCLAW_PORT/api/health OK"
 else
-    echo "  WARNING: Health endpoint did not respond on http://localhost:$THINCLAW_PORT/api/health"
-    echo "           Check: docker compose ps && docker compose logs thinclaw"
+    echo "  ERROR: Health endpoint did not respond on http://localhost:$THINCLAW_PORT/api/health"
+    echo "         Check: docker compose ps && docker compose logs thinclaw"
+    docker compose ps || true
+    docker compose logs thinclaw || true
+    exit 1
 fi
 
 # Determine connection URL
@@ -737,4 +871,5 @@ if [ "$ENABLE_SYSTEMD" = true ]; then
     echo "    journalctl -u thinclaw -f"
     echo ""
 fi
+SETUP_COMPLETE=true
 echo "============================================================"

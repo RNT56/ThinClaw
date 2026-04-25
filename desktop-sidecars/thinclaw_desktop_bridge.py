@@ -50,6 +50,19 @@ def run(cmd, check=True, capture=True):
     return result
 
 
+def run_with_input(cmd, text, check=True):
+    result = subprocess.run(
+        cmd,
+        input=text,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if check and result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or f"command failed: {cmd}")
+    return result
+
+
 def command_exists(name):
     return shutil.which(name) is not None
 
@@ -103,6 +116,88 @@ def generic_ui_provider(state=None):
     return "gedit"
 
 
+def desktop_tokens():
+    raw = os.environ.get("XDG_CURRENT_DESKTOP") or ""
+    return [part.strip().lower() for part in raw.replace(";", ":").split(":") if part.strip()]
+
+
+def session_type():
+    return (os.environ.get("XDG_SESSION_TYPE") or "").strip().lower()
+
+
+def is_wayland_session():
+    return bool(os.environ.get("WAYLAND_DISPLAY")) or session_type() == "wayland"
+
+
+def input_backends():
+    backends = []
+    if os.environ.get("DISPLAY") and command_exists("xdotool"):
+        backends.append("xdotool")
+    if command_exists("ydotool"):
+        backends.append("ydotool")
+    if command_exists("dotool"):
+        backends.append("dotool")
+    if command_exists("wtype"):
+        backends.append("wtype")
+    return backends
+
+
+def pointer_backend():
+    backends = input_backends()
+    for candidate in ("xdotool", "ydotool", "dotool"):
+        if candidate in backends:
+            return candidate
+    return None
+
+
+def keyboard_backend(require_combo=False):
+    backends = input_backends()
+    for candidate in ("xdotool", "dotool", "ydotool", "wtype"):
+        if candidate == "wtype" and require_combo:
+            continue
+        if candidate in backends:
+            return candidate
+    return None
+
+
+def window_backends():
+    backends = []
+    if command_exists("wmctrl") and os.environ.get("DISPLAY"):
+        backends.append("wmctrl")
+    if pyatspi_available():
+        backends.append("atspi")
+    return backends
+
+
+def menu_backends():
+    return ["atspi"] if pyatspi_available() else []
+
+
+def linux_desktop_capabilities():
+    desktops = desktop_tokens()
+    known_desktop = any(
+        item in desktops
+        for item in ("gnome", "kde", "plasma", "xfce", "lxqt", "mate", "cinnamon", "unity", "budgie", "sway")
+    )
+    session_supported = session_type() in ("", "x11", "wayland")
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    return {
+        "session_type": session_type() or "unknown",
+        "xdg_current_desktop": os.environ.get("XDG_CURRENT_DESKTOP"),
+        "display": os.environ.get("DISPLAY"),
+        "wayland_display": os.environ.get("WAYLAND_DISPLAY"),
+        "desktops": desktops,
+        "known_desktop": known_desktop,
+        "supported_desktop": has_display and session_supported,
+        "input_backends": input_backends(),
+        "pointer_backend": pointer_backend(),
+        "keyboard_backend": keyboard_backend(),
+        "window_backends": window_backends(),
+        "menu_backends": menu_backends(),
+        "accessibility": pyatspi_available(),
+    }
+
+
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -140,7 +235,7 @@ def ocr_blocks(path):
 
 def window_listing():
     if not command_exists("wmctrl"):
-        return []
+        return atspi_window_listing()
     result = run(["wmctrl", "-lpGx"], check=False)
     windows = []
     for line in (result.stdout or "").splitlines():
@@ -165,14 +260,15 @@ def window_listing():
                 "name": app_name,
                 "title": title,
                 "target_ref": f"window:{window_id}",
+                "provider": "wmctrl",
             }
         )
-    return windows
+    return windows or atspi_window_listing()
 
 
 def focus_window(window_id=None, bundle_id=None):
     if not command_exists("wmctrl"):
-        raise RuntimeError("wmctrl is required for Linux app focus")
+        return {"focused": False, "provider": "none", "reason": "wmctrl is unavailable"}
     if window_id:
         run(["wmctrl", "-ia", window_id])
         return {"focused": True, "window_id": window_id}
@@ -182,17 +278,62 @@ def focus_window(window_id=None, bundle_id=None):
     raise RuntimeError("desktop_apps focus requires window_id or bundle_id")
 
 
+def find_atspi_node_by_ref(target_ref):
+    if not target_ref or not str(target_ref).startswith("atspi:") or not pyatspi_available():
+        return None
+    _, _, raw = str(target_ref).partition(":")
+    parts = [part for part in raw.split(":") if part]
+    try:
+        for node in iter_atspi(atspi_desktop()):
+            name = safe_name(node)
+            if parts and name and name.replace(":", "_") == parts[-1]:
+                return node
+    except Exception:
+        return None
+    return None
+
+
+def perform_accessible_default_action(node):
+    try:
+        action = node.queryAction()
+        if action.nActions > 0:
+            action.doAction(0)
+            return True
+    except Exception:
+        pass
+    try:
+        node.queryComponent().grabFocus()
+        return True
+    except Exception:
+        return False
+
+
+def focus_target(target):
+    if target.get("window_id"):
+        return focus_window(window_id=target["window_id"])
+    target_ref = target.get("target_ref")
+    node = find_atspi_node_by_ref(target_ref)
+    if node is not None and perform_accessible_default_action(node):
+        return {"focused": True, "target_ref": target_ref, "provider": "atspi"}
+    if target.get("bundle_id"):
+        return focus_window(bundle_id=target.get("bundle_id"))
+    return {"focused": False, "target_ref": target_ref, "provider": "none"}
+
+
 def pick_window(payload):
+    direct = direct_target_from_payload(payload)
+    if direct:
+        return direct
     target_ref = payload.get("target_ref")
     if isinstance(target_ref, str) and target_ref.startswith("window:"):
         window_id = target_ref.split(":", 1)[1]
         for window in window_listing():
-            if window["window_id"].lower() == window_id.lower():
+            if str(window.get("window_id", "")).lower() == window_id.lower():
                 return window
     window_id = payload.get("window_id")
     if window_id:
         for window in window_listing():
-            if window["window_id"].lower() == str(window_id).lower():
+            if str(window.get("window_id", "")).lower() == str(window_id).lower():
                 return window
     bundle_id = payload.get("bundle_id")
     if bundle_id:
@@ -215,6 +356,30 @@ def target_center(target):
     return x, y
 
 
+def direct_target_from_payload(payload):
+    if payload.get("x") is not None and payload.get("y") is not None:
+        x = int(payload.get("x"))
+        y = int(payload.get("y"))
+        return {
+            "bounds": {"x": x, "y": y, "width": 1, "height": 1},
+            "target_ref": f"point:{x},{y}",
+            "provider": "coordinates",
+        }
+    bounds = payload.get("bounds")
+    if isinstance(bounds, dict):
+        return {
+            "bounds": {
+                "x": int(bounds.get("x", 0)),
+                "y": int(bounds.get("y", 0)),
+                "width": int(bounds.get("width", 1)),
+                "height": int(bounds.get("height", 1)),
+            },
+            "target_ref": "bounds",
+            "provider": "coordinates",
+        }
+    return None
+
+
 def pyatspi_available():
     try:
         import pyatspi  # noqa: F401
@@ -224,31 +389,115 @@ def pyatspi_available():
         return False
 
 
-def build_atspi_tree():
+def atspi_desktop():
     import pyatspi
 
-    desktop = pyatspi.Registry.getDesktop(0)
+    return pyatspi.Registry.getDesktop(0)
+
+
+def safe_role_name(node):
+    try:
+        return str(node.getRoleName())
+    except Exception:
+        return ""
+
+
+def safe_name(node):
+    try:
+        return node.name or ""
+    except Exception:
+        return ""
+
+
+def safe_bounds(node):
+    try:
+        component = node.queryComponent()
+        extents = component.getExtents(0)
+        return {
+            "x": int(extents.x),
+            "y": int(extents.y),
+            "width": int(extents.width),
+            "height": int(extents.height),
+        }
+    except Exception:
+        return {}
+
+
+def safe_target_ref(prefix, *parts):
+    clean = ":".join(str(part).replace(":", "_") for part in parts if str(part))
+    return f"{prefix}:{clean}" if clean else prefix
+
+
+def iter_atspi(node, depth=0, max_depth=8, budget=None):
+    if budget is None:
+        budget = {"remaining": 1500}
+    if budget["remaining"] <= 0 or depth > max_depth:
+        return
+    budget["remaining"] -= 1
+    yield node
+    try:
+        children = list(node)
+    except Exception:
+        children = []
+    for child in children:
+        yield from iter_atspi(child, depth + 1, max_depth, budget)
+
+
+def build_atspi_tree():
+    desktop = atspi_desktop()
     children = []
     for app in desktop:
         child_nodes = []
         for window in app:
             child_nodes.append(
                 {
-                    "role": str(window.getRoleName()),
-                    "name": window.name or "",
-                    "target_ref": f"atspi:{app.name}:{window.name}",
+                    "role": safe_role_name(window),
+                    "name": safe_name(window),
+                    "target_ref": safe_target_ref("atspi", safe_name(app), safe_name(window)),
+                    "bounds": safe_bounds(window),
                     "children": [],
                 }
             )
         children.append(
             {
                 "role": "application",
-                "name": app.name or "",
-                "target_ref": f"app:{app.name}",
+                "name": safe_name(app),
+                "target_ref": safe_target_ref("app", safe_name(app)),
                 "children": child_nodes,
             }
         )
     return {"role": "desktop", "name": "desktop", "children": children}
+
+
+def atspi_window_listing():
+    if not pyatspi_available():
+        return []
+    windows = []
+    try:
+        desktop = atspi_desktop()
+        for app in desktop:
+            app_name = safe_name(app)
+            for window in app:
+                role = safe_role_name(window).lower()
+                if "window" not in role and "frame" not in role and "dialog" not in role:
+                    continue
+                name = safe_name(window)
+                windows.append(
+                    {
+                        "window_id": None,
+                        "desktop": "atspi",
+                        "pid": 0,
+                        "bounds": safe_bounds(window),
+                        "bundle_id": app_name,
+                        "name": app_name,
+                        "title": name,
+                        "target_ref": safe_target_ref("atspi", app_name, name),
+                        "provider": "atspi",
+                    }
+                )
+    except Exception:
+        return []
+    return windows
 
 
 def build_window_tree():
@@ -267,6 +516,100 @@ def build_window_tree():
             }
             for window in windows
         ],
+    }
+
+
+def menu_role(role):
+    return "menu" in str(role).lower()
+
+
+def collect_menu_item(node, depth=0):
+    item = {
+        "role": safe_role_name(node),
+        "name": safe_name(node),
+        "target_ref": safe_target_ref("atspi", safe_role_name(node), safe_name(node)),
+        "bounds": safe_bounds(node),
+        "children": [],
+    }
+    if depth >= 8:
+        return item
+    try:
+        for child in node:
+            if menu_role(safe_role_name(child)) or safe_name(child):
+                item["children"].append(collect_menu_item(child, depth + 1))
+    except Exception:
+        pass
+    return item
+
+
+def atspi_menu_listing(payload):
+    if not pyatspi_available():
+        return [
+            {
+                "available": False,
+                "provider": "atspi",
+                "reason": "pyatspi is unavailable; install python3-pyatspi and enable AT-SPI accessibility",
+            }
+        ]
+    requested = str(payload.get("bundle_id") or payload.get("app") or payload.get("name") or "").lower()
+    menus = []
+    try:
+        for app in atspi_desktop():
+            app_name = safe_name(app)
+            if requested and requested not in app_name.lower():
+                continue
+            app_entry = {"app": app_name, "provider": "atspi", "menus": []}
+            for node in iter_atspi(app):
+                role = safe_role_name(node).lower()
+                if role in {"menu bar", "menubar"} or "menu bar" in role:
+                    app_entry["menus"].append(collect_menu_item(node))
+            if app_entry["menus"]:
+                menus.append(app_entry)
+    except Exception as exc:
+        return [{"available": False, "provider": "atspi", "reason": str(exc)}]
+    return menus or [{"available": False, "provider": "atspi", "reason": "no accessible menus found"}]
+
+
+def find_menu_accessible(label, requested_app=None):
+    if not pyatspi_available():
+        return None
+    label_norm = str(label).strip().lower()
+    app_norm = str(requested_app or "").strip().lower()
+    if not label_norm:
+        return None
+    try:
+        for app in atspi_desktop():
+            if app_norm and app_norm not in safe_name(app).lower():
+                continue
+            for node in iter_atspi(app):
+                if not menu_role(safe_role_name(node)):
+                    continue
+                if safe_name(node).strip().lower() == label_norm:
+                    return node
+    except Exception:
+        return None
+    return None
+
+
+def select_menu_atspi(path, payload):
+    if not pyatspi_available() or not path:
+        return None
+    app = payload.get("bundle_id") or payload.get("app") or payload.get("name")
+    activated = []
+    for label in path:
+        node = find_menu_accessible(label, app)
+        if node is None:
+            return None
+        if not perform_accessible_default_action(node):
+            return None
+        activated.append(label)
+        time.sleep(0.15)
+    return {
+        "success": True,
+        "menu_path": path,
+        "provider": "atspi",
+        "introspection_used": True,
+        "activated": activated,
     }
 
 
@@ -330,7 +673,7 @@ def invoke_apps(payload):
     if action == "focus":
         target = pick_window(payload)
         if target:
-            return focus_window(window_id=target["window_id"])
+            return focus_target(target)
         bundle_id = payload.get("bundle_id")
         return focus_window(bundle_id=bundle_id)
     if action == "quit":
@@ -346,30 +689,68 @@ def invoke_apps(payload):
             windows = [w for w in windows if bundle_id.lower() in w["bundle_id"].lower()]
         return windows
     if action == "menus":
-        return []
+        return atspi_menu_listing(payload)
     raise RuntimeError(f"unsupported desktop_apps action {action}")
 
 
-def ensure_xdotool():
-    if not command_exists("xdotool"):
-        raise RuntimeError("xdotool is required for Linux desktop_ui actions")
-
-
 def xdotool_mouse(window, clicks=1, button="1"):
-    ensure_xdotool()
     x, y = target_center(window)
     run(["xdotool", "mousemove", str(x), str(y)], capture=False)
     run(["xdotool", "click", "--repeat", str(clicks), button], capture=False)
 
 
+def pointer_click(window, clicks=1, button="1"):
+    backend = pointer_backend()
+    if backend is None:
+        raise RuntimeError(
+            "Linux pointer actions require xdotool on X11, or ydotool/dotool for Wayland/KDE/general desktops"
+        )
+    x, y = target_center(window)
+    if backend == "xdotool":
+        xdotool_mouse(window, clicks=clicks, button=button)
+        return backend
+    if backend == "ydotool":
+        run(["ydotool", "mousemove", "--absolute", str(x), str(y)], capture=False)
+        code = {"1": "0xC0", "2": "0xC2", "3": "0xC1"}.get(str(button), "0xC0")
+        for _ in range(clicks):
+            run(["ydotool", "click", code], capture=False)
+        return backend
+    script = f"mouseto {x} {y}\n"
+    for _ in range(clicks):
+        script += "button left\n"
+    run_with_input(["dotool"], script)
+    return backend
+
+
 def send_text(text):
-    ensure_xdotool()
-    run(["xdotool", "type", "--delay", "1", text], capture=False)
+    backend = keyboard_backend()
+    if backend is None:
+        raise RuntimeError("Linux text input requires xdotool, dotool, ydotool, or wtype")
+    if backend == "xdotool":
+        run(["xdotool", "type", "--delay", "1", text], capture=False)
+    elif backend == "wtype":
+        run(["wtype", text], capture=False)
+    elif backend == "ydotool":
+        run(["ydotool", "type", text], capture=False)
+    else:
+        run_with_input(["dotool"], f"type {text}\n")
+    return backend
 
 
 def send_keys(keys):
-    ensure_xdotool()
-    run(["xdotool", "key", keys], capture=False)
+    backend = keyboard_backend(require_combo=("+" in str(keys)))
+    if backend is None:
+        raise RuntimeError("Linux key input requires xdotool, dotool, ydotool, or wtype")
+    keys = str(keys).replace("cmd", "super").replace("command", "super")
+    if backend == "xdotool":
+        run(["xdotool", "key", keys], capture=False)
+    elif backend == "wtype":
+        run(["wtype", "-k", keys], capture=False)
+    elif backend == "ydotool":
+        run(["ydotool", "key", keys], capture=False)
+    else:
+        run_with_input(["dotool"], f"key {keys}\n")
+    return backend
 
 
 def invoke_ui(payload):
@@ -385,68 +766,96 @@ def invoke_ui(payload):
         target = pick_window(payload)
         if not target:
             raise RuntimeError("desktop_ui click could not resolve a target")
-        focus_window(window_id=target["window_id"])
-        xdotool_mouse(target)
-        return {"success": True, "target_ref": target["target_ref"]}
+        focus_target(target)
+        provider = pointer_click(target)
+        return {"success": True, "target_ref": target["target_ref"], "provider": provider}
     if action == "double_click":
         target = pick_window(payload)
         if not target:
             raise RuntimeError("desktop_ui double_click could not resolve a target")
-        focus_window(window_id=target["window_id"])
-        xdotool_mouse(target, clicks=2)
-        return {"success": True, "target_ref": target["target_ref"]}
+        focus_target(target)
+        provider = pointer_click(target, clicks=2)
+        return {"success": True, "target_ref": target["target_ref"], "provider": provider}
     if action == "type_text":
         target = pick_window(payload)
         if target:
-            focus_window(window_id=target["window_id"])
-        send_text(str(payload.get("text", "")))
-        return {"success": True}
+            focus_target(target)
+        provider = send_text(str(payload.get("text", "")))
+        return {"success": True, "provider": provider}
     if action == "set_value":
         target = pick_window(payload)
         if target:
-            focus_window(window_id=target["window_id"])
+            focus_target(target)
         send_keys("ctrl+a")
         send_keys("BackSpace")
-        send_text(str(payload.get("value") or payload.get("text") or ""))
-        return {"success": True}
+        provider = send_text(str(payload.get("value") or payload.get("text") or ""))
+        return {"success": True, "provider": provider}
     if action == "keypress":
-        send_keys(str(payload.get("key", "")))
-        return {"success": True}
+        provider = send_keys(str(payload.get("key", "")))
+        return {"success": True, "provider": provider}
     if action == "chord":
         modifiers = payload.get("modifiers") or []
         key = payload.get("key") or ""
         combo = "+".join([*modifiers, key]).replace("cmd", "super").replace("command", "super")
-        send_keys(combo)
-        return {"success": True}
+        provider = send_keys(combo)
+        return {"success": True, "provider": provider}
     if action == "select_menu":
         path = payload.get("menu_path") or payload.get("path") or payload.get("value") or []
         if isinstance(path, str):
             path = [part.strip() for part in path.split(">") if part.strip()]
+        atspi_result = select_menu_atspi(path, payload)
+        if atspi_result is not None:
+            return atspi_result
         for label in path:
             send_text(str(label))
             send_keys("Return")
-        return {"success": True, "menu_path": path}
+        return {
+            "success": True,
+            "menu_path": path,
+            "provider": "keyboard_fallback",
+            "introspection_used": False,
+        }
     if action == "scroll":
-        ensure_xdotool()
+        backend = pointer_backend()
+        if backend is None:
+            raise RuntimeError("Linux scroll actions require xdotool, ydotool, or dotool")
         amount = int(payload.get("amount", 1))
         button = "4" if amount > 0 else "5"
-        for _ in range(abs(amount)):
-            run(["xdotool", "click", button], capture=False)
-        return {"success": True, "amount": amount}
+        if backend == "xdotool":
+            for _ in range(abs(amount)):
+                run(["xdotool", "click", button], capture=False)
+        elif backend == "ydotool":
+            code = "0xC3" if amount > 0 else "0xC4"
+            for _ in range(abs(amount)):
+                run(["ydotool", "click", code], capture=False)
+        else:
+            direction = "wheelup" if amount > 0 else "wheeldown"
+            run_with_input(["dotool"], "".join(f"{direction}\n" for _ in range(abs(amount))))
+        return {"success": True, "amount": amount, "provider": backend}
     if action == "drag":
         target = pick_window(payload)
         destination = payload.get("destination") or {}
-        ensure_xdotool()
+        backend = pointer_backend()
+        if backend is None:
+            raise RuntimeError("Linux drag actions require xdotool, ydotool, or dotool")
         if not target:
             raise RuntimeError("desktop_ui drag could not resolve a source target")
         start_x, start_y = target_center(target)
         end_x = int(destination.get("x", start_x))
         end_y = int(destination.get("y", start_y))
-        run(["xdotool", "mousemove", str(start_x), str(start_y)], capture=False)
-        run(["xdotool", "mousedown", "1"], capture=False)
-        run(["xdotool", "mousemove", "--sync", str(end_x), str(end_y)], capture=False)
-        run(["xdotool", "mouseup", "1"], capture=False)
-        return {"success": True}
+        if backend == "xdotool":
+            run(["xdotool", "mousemove", str(start_x), str(start_y)], capture=False)
+            run(["xdotool", "mousedown", "1"], capture=False)
+            run(["xdotool", "mousemove", "--sync", str(end_x), str(end_y)], capture=False)
+            run(["xdotool", "mouseup", "1"], capture=False)
+        elif backend == "ydotool":
+            run(["ydotool", "mousemove", "--absolute", str(start_x), str(start_y)], capture=False)
+            run(["ydotool", "click", "0x40"], capture=False)
+            run(["ydotool", "mousemove", "--absolute", str(end_x), str(end_y)], capture=False)
+            run(["ydotool", "click", "0x80"], capture=False)
+        else:
+            run_with_input(["dotool"], f"mouseto {start_x} {start_y}\nbuttondown left\nmouseto {end_x} {end_y}\nbuttonup left\n")
+        return {"success": True, "provider": backend}
     if action == "wait_for":
         timeout_ms = int(payload.get("timeout_ms", 250))
         deadline = time.time() + max(timeout_ms, 50) / 1000.0
@@ -461,12 +870,7 @@ def invoke_ui(payload):
             "error_code": "target_not_found",
             "error_message": "desktop_ui wait_for timed out before the requested target appeared",
         }
-    return {
-        "success": False,
-        "retryable": True,
-        "error_code": "not_implemented",
-        "error_message": f"ui action {action} is not implemented yet in the Linux sidecar",
-    }
+    raise RuntimeError(f"unsupported desktop_ui action {action}")
 
 
 def invoke_screen(payload):
@@ -963,6 +1367,7 @@ def main():
         "numbers": "libreoffice_calc",
         "pages": "libreoffice_writer",
         "generic_ui": generic_ui_provider(state),
+        "desktop_capabilities": linux_desktop_capabilities(),
     }
 
     if command == "health":
@@ -978,6 +1383,7 @@ def main():
                 "at_spi_bus_address": os.environ.get("AT_SPI_BUS_ADDRESS"),
                 "xdg_current_desktop": os.environ.get("XDG_CURRENT_DESKTOP"),
                 "xdg_session_type": os.environ.get("XDG_SESSION_TYPE"),
+                "desktop_capabilities": linux_desktop_capabilities(),
                 "timestamp": now_iso(),
             }
         )
@@ -992,6 +1398,9 @@ def main():
                 or command_exists("import"),
                 "calendar": "available" if command_exists("evolution") or command_exists("gdbus") else "missing",
                 "ocr": "available" if command_exists("tesseract") else "missing",
+                "input_backends": input_backends(),
+                "window_backends": window_backends(),
+                "menu_backends": menu_backends(),
                 "xdotool": "available" if command_exists("xdotool") else "missing",
                 "wmctrl": "available" if command_exists("wmctrl") else "missing",
                 "generic_ui": providers["generic_ui"],

@@ -3822,123 +3822,73 @@ mod tests {
 
     #[test]
     fn emitted_acp_messages_validate_against_schema_fixtures() {
-        let initialize_response_schema = json!({
-            "type": "object",
-            "required": ["jsonrpc", "id", "result"],
-            "properties": {
-                "jsonrpc": { "const": "2.0" },
-                "result": {
-                    "type": "object",
-                    "required": ["protocolVersion", "agentCapabilities", "agentInfo", "authMethods"],
-                    "properties": {
-                        "protocolVersion": { "const": 1 },
-                        "agentCapabilities": { "type": "object" },
-                        "agentInfo": {
-                            "type": "object",
-                            "required": ["name", "version"]
-                        },
-                        "authMethods": { "type": "array" }
-                    }
-                }
+        let fixtures: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/acp/v1_public_message_schemas.json"
+        ))
+        .expect("ACP v1 schema fixtures parse");
+        let schemas = fixtures["schemas"]
+            .as_object()
+            .expect("ACP v1 fixtures contain schemas");
+        let schema = |name: &str| {
+            let mut schema = schemas.get(name).expect("fixture schema exists").clone();
+            if let Some(object) = schema.as_object_mut() {
+                object.insert("$defs".to_string(), fixtures["$defs"].clone());
             }
-        });
-        let prompt_response_schema = json!({
-            "type": "object",
-            "required": ["stopReason"],
-            "properties": {
-                "stopReason": {
-                    "enum": [
-                        "end_turn",
-                        "max_tokens",
-                        "max_turn_requests",
-                        "refusal",
-                        "cancelled"
-                    ]
-                }
-            }
-        });
-        let session_update_schema = json!({
-            "type": "object",
-            "required": ["jsonrpc", "method", "params"],
-            "properties": {
-                "jsonrpc": { "const": "2.0" },
-                "method": { "const": "session/update" },
-                "params": {
-                    "type": "object",
-                    "required": ["sessionId", "update"],
-                    "properties": {
-                        "sessionId": { "type": "string", "minLength": 1 },
-                        "update": {
-                            "type": "object",
-                            "required": ["sessionUpdate"],
-                            "properties": {
-                                "sessionUpdate": {
-                                    "enum": [
-                                        "user_message_chunk",
-                                        "agent_message_chunk",
-                                        "agent_thought_chunk",
-                                        "tool_call",
-                                        "tool_call_update",
-                                        "current_mode_update",
-                                        "config_option_update",
-                                        "session_info_update",
-                                        "plan",
-                                        "usage_update"
-                                    ]
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        let permission_request_schema = json!({
-            "type": "object",
-            "required": ["jsonrpc", "id", "method", "params"],
-            "properties": {
-                "jsonrpc": { "const": "2.0" },
-                "method": { "const": "session/request_permission" },
-                "params": {
-                    "type": "object",
-                    "required": ["sessionId", "toolCall", "options"],
-                    "properties": {
-                        "sessionId": { "type": "string", "minLength": 1 },
-                        "toolCall": { "type": "object" },
-                        "options": {
-                            "type": "array",
-                            "minItems": 1,
-                            "items": {
-                                "type": "object",
-                                "required": ["optionId", "name", "kind"]
-                            }
-                        }
-                    }
-                }
-            }
-        });
+            schema
+        };
 
         assert_json_schema_valid(
-            &initialize_response_schema,
+            &schema("initializeResponse"),
+            &success_response(Some(json!(0)), wire::to_value(initialize_response(1))),
+        );
+        assert_json_schema_valid(
+            &schema("newSessionResponse"),
             &success_response(
-                Some(json!(0)),
+                Some(json!("new")),
                 json!({
-                    "protocolVersion": 1,
-                    "agentCapabilities": {},
-                    "agentInfo": { "name": "thinclaw", "version": env!("CARGO_PKG_VERSION") },
-                    "authMethods": []
+                    "sessionId": "sess_test",
+                    "modes": session_modes("ask"),
+                    "configOptions": session_config_options()
                 }),
             ),
         );
         assert_json_schema_valid(
-            &prompt_response_schema,
+            &schema("listSessionsResponse"),
+            &success_response(
+                Some(json!("list")),
+                json!({
+                    "sessions": [{
+                        "sessionId": "sess_test",
+                        "cwd": "/tmp",
+                        "title": "Test",
+                        "createdAt": "2026-04-25T00:00:00Z",
+                        "updatedAt": "2026-04-25T00:00:00Z"
+                    }],
+                    "nextCursor": null
+                }),
+            ),
+        );
+        assert_json_schema_valid(
+            &schema("loadSessionResponse"),
+            &success_response(
+                Some(json!("load")),
+                json!({
+                    "modes": session_modes("ask"),
+                    "configOptions": session_config_options(),
+                    "_meta": { "replayedMessages": 0 }
+                }),
+            ),
+        );
+        assert_json_schema_valid(
+            &schema("promptResponse"),
             &prompt_response(wire::StopReason::EndTurn),
         );
         assert_json_schema_valid(
-            &session_update_schema,
+            &schema("sessionUpdateNotification"),
             &session_update("sess_test", agent_message_chunk("hello")),
         );
         assert_json_schema_valid(
-            &permission_request_schema,
+            &schema("requestPermission"),
             &client_request(
                 json!("permission-1"),
                 "session/request_permission",

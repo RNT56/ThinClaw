@@ -193,11 +193,27 @@ fn thinclaw_acp_interactive_transcript_covers_list_load_and_error_shapes() {
         initialize["result"]["protocolVersion"],
         serde_json::json!(1)
     );
+    assert_eq!(initialize["result"]["authMethods"], serde_json::json!([]));
+
+    harness.write_line(r#"{"jsonrpc":"2.0","id":"auth","method":"authenticate","params":{}}"#);
+    let auth = harness.read_json();
+    assert_eq!(auth["id"], serde_json::json!("auth"));
+    assert_eq!(auth["result"], serde_json::json!({}));
 
     harness.write_line(r#"{"jsonrpc":"2.0","id":"bad-cwd","method":"session/new","params":{"cwd":"relative","mcpServers":[]}}"#);
     let bad_cwd = harness.read_json();
     assert_eq!(bad_cwd["id"], serde_json::json!("bad-cwd"));
     assert_eq!(bad_cwd["error"]["code"], serde_json::json!(-32602));
+
+    harness.write_line(r#"{"jsonrpc":"2.0","id":"bad-mcp","method":"session/new","params":{"cwd":"/tmp","mcpServers":[{"type":"http","url":"http://127.0.0.1:1234"}]}}"#);
+    let bad_mcp = harness.read_json();
+    assert_eq!(bad_mcp["id"], serde_json::json!("bad-mcp"));
+    assert_eq!(bad_mcp["error"]["code"], serde_json::json!(-32602));
+    assert!(
+        bad_mcp["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not advertised"))
+    );
 
     harness.write_line(r#"{"jsonrpc":"2.0","id":"new","method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#);
     let new_session = harness.read_json();
@@ -238,6 +254,30 @@ fn thinclaw_acp_interactive_transcript_covers_list_load_and_error_shapes() {
     assert_eq!(prompt["error"]["code"], serde_json::json!(-32601));
     assert!(
         prompt["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("agent runtime"))
+    );
+
+    harness.write_line(&format!(
+        r#"{{"jsonrpc":"2.0","id":"cancel","method":"session/cancel","params":{{"sessionId":"{session_id}"}}}}"#
+    ));
+    let cancel = harness.read_json();
+    assert_eq!(cancel["id"], serde_json::json!("cancel"));
+    assert_eq!(cancel["error"]["code"], serde_json::json!(-32601));
+    assert!(
+        cancel["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("agent runtime"))
+    );
+
+    harness.write_line(&format!(
+        r#"{{"jsonrpc":"2.0","id":"close","method":"session/close","params":{{"sessionId":"{session_id}"}}}}"#
+    ));
+    let close = harness.read_json();
+    assert_eq!(close["id"], serde_json::json!("close"));
+    assert_eq!(close["error"]["code"], serde_json::json!(-32601));
+    assert!(
+        close["error"]["message"]
             .as_str()
             .is_some_and(|message| message.contains("agent runtime"))
     );

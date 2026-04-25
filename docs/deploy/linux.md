@@ -58,7 +58,7 @@ Optional feature prerequisites:
 - `ffmpeg` for richer audio/video media handling
 - device permissions for camera and microphone tools
 - Tailscale, Cloudflare Tunnel, ngrok, or another tunnel for remote webhook URLs
-- GNOME on X11 plus the desktop packages listed in [../DESKTOP_AUTONOMY.md](../DESKTOP_AUTONOMY.md) for Linux desktop autonomy
+- a logged-in supported Linux desktop session plus the packages listed in [../DESKTOP_AUTONOMY.md](../DESKTOP_AUTONOMY.md) for Linux desktop autonomy
 - `libasound2-dev` when compiling with the optional `voice` feature
 
 Verify after install:

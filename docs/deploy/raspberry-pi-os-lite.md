@@ -6,7 +6,7 @@ Lite 64-bit Bookworm.
 Pi OS Lite is a first-class headless Linux target. It supports the gateway,
 libSQL, channels, routines, tunnels, and Docker sandbox/browser fallback when
 Docker is installed. It does not support reckless desktop autonomy because Lite
-has no supported GNOME/X11 desktop session.
+has no interactive Linux desktop session.
 
 ## What Works
 
@@ -23,7 +23,7 @@ Supported:
 Not supported:
 
 - reckless desktop autonomy
-- GNOME/X11 desktop action stack
+- Linux desktop action stack
 - native Apple Mail and native iMessage channels
 
 Use Gmail for mail and BlueBubbles for iMessage-compatible messaging through a
@@ -58,7 +58,7 @@ Optional feature prerequisites:
 Not supported on Pi OS Lite:
 
 - reckless desktop autonomy
-- GNOME/X11 desktop action stack
+- Linux desktop action stack
 - native Apple Mail and native iMessage channels
 
 ## Readiness

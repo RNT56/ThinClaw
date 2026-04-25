@@ -70,7 +70,7 @@ below repeat the prerequisites that matter for that host.
 | Remote WebUI over SSH | SSH access to the host, gateway enabled, auth token, local port forward | No public inbound port needed; not sufficient for public webhooks |
 | Remote LAN/Tailscale access | Gateway bound to reachable interface, auth token, private network or tailnet route | Firewall rules, Tailscale CLI, Tailscale Funnel/Serve depending on access mode |
 | Public webhook tunnel | Public HTTPS URL, provider token/binary for Tailscale Funnel, ngrok, Cloudflare Tunnel, or custom tunnel | DNS, TLS, proxy auth, rate limits, and firewall policy owned by the operator |
-| Desktop autonomy | Interactive GUI session, platform desktop apps, platform permissions/accessibility approvals, `desktop_autonomy.profile = "reckless_desktop"` | Dedicated-user mode on macOS/Windows; Linux GNOME/X11 packages; emergency stop path and bootstrap checks |
+| Desktop autonomy | Interactive GUI session, platform desktop apps, platform permissions/accessibility approvals, `desktop_autonomy.profile = "reckless_desktop"` | Dedicated-user mode on macOS/Windows/Linux; Linux desktop packages and input backend; emergency stop path and bootstrap checks |
 
 Core ThinClaw can start without optional external tools. Optional features simply
 stay unavailable until their dependencies are installed and configured. The
@@ -144,7 +144,7 @@ feature was not built or is unavailable on the current host.
 | Dependency probe | `thinclaw doctor` |
 | Linux server readiness | `thinclaw doctor --profile server` |
 | Remote/headless readiness | `thinclaw doctor --profile remote` |
-| Linux desktop readiness | `thinclaw doctor --profile desktop-gnome` |
+| Linux desktop readiness | `thinclaw doctor --profile desktop-linux` |
 | Pi OS Lite readiness | `thinclaw doctor --profile pi-os-lite-64` |
 | All optional Linux feature readiness | `thinclaw doctor --profile all-features` |
 | Manage config | `thinclaw config list`, `get`, `set` |
