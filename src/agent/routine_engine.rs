@@ -1668,7 +1668,32 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         return;
     }
 
-    // Complete the run record
+    let now = Utc::now();
+    let next_fire =
+        next_fire_for_routine(&routine, ctx.user_timezone.as_deref(), now).unwrap_or(None);
+
+    let new_failures = if status == RunStatus::Failed {
+        routine.consecutive_failures + 1
+    } else {
+        0
+    };
+
+    if let Err(e) = persist_routine_runtime_update(
+        &ctx.store,
+        routine.id,
+        now,
+        next_fire,
+        routine.run_count + 1,
+        new_failures,
+        &routine.state,
+    )
+    .await
+    {
+        tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
+    }
+
+    // Complete the run record after advancing the parent routine state so a
+    // visible terminal run also has consistent runtime metadata.
     if let Err(e) = ctx
         .store
         .complete_routine_run(run.id, status, summary.as_deref(), tokens)
@@ -1727,31 +1752,6 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             .session_end_extract(&routine_user_id, &run_artifact)
             .await;
     });
-
-    // Update routine runtime state
-    let now = Utc::now();
-    let next_fire =
-        next_fire_for_routine(&routine, ctx.user_timezone.as_deref(), now).unwrap_or(None);
-
-    let new_failures = if status == RunStatus::Failed {
-        routine.consecutive_failures + 1
-    } else {
-        0
-    };
-
-    if let Err(e) = persist_routine_runtime_update(
-        &ctx.store,
-        routine.id,
-        now,
-        next_fire,
-        routine.run_count + 1,
-        new_failures,
-        &routine.state,
-    )
-    .await
-    {
-        tracing::error!(routine = %routine.name, "Failed to update runtime state: {}", e);
-    }
 
     // Send notifications based on config
     send_notification(
