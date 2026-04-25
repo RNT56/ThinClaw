@@ -1666,7 +1666,7 @@ mod tests {
                 .result
                 .get("network_isolation")
                 .and_then(|v| v.as_str()),
-            Some("hard")
+            Some(host_local_network_isolation(false).as_str())
         );
         assert_eq!(
             result.result.get("result_format").and_then(|v| v.as_str()),

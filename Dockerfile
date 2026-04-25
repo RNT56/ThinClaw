@@ -53,7 +53,9 @@ COPY --from=builder /app/target/release/thinclaw /usr/local/bin/thinclaw
 COPY --from=builder /app/migrations /app/migrations
 
 # Non-root user
-RUN useradd -m -u 1000 -s /bin/bash thinclaw
+RUN useradd -m -u 1000 -s /bin/bash thinclaw \
+    && mkdir -p /data /workspace \
+    && chown -R thinclaw:thinclaw /data /workspace
 USER thinclaw
 
 EXPOSE 3000
