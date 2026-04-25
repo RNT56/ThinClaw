@@ -9,6 +9,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   # `dtolnay/rust-toolchain` already installs through rustup's `--profile minimal`
   # internally, so `profile: minimal` is redundant and not a supported action input.
@@ -432,5 +435,5 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
-          file: codecov.json
+          files: codecov.json
           fail_ci_if_error: false
