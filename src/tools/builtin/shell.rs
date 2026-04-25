@@ -956,13 +956,13 @@ mod tests {
         if cfg!(windows) {
             std::fs::write(
                 &scanner_path,
-                "@echo off\r\necho {\"verdict\":\"dangerous\",\"reason\":\"scripted deny\",\"diagnostics\":[]}\r\n",
+                "@echo off\r\nmore >NUL\r\necho {\"verdict\":\"dangerous\",\"reason\":\"scripted deny\",\"diagnostics\":[]}\r\n",
             )
             .unwrap();
         } else {
             std::fs::write(
                 &scanner_path,
-                "#!/bin/sh\necho '{\"verdict\":\"dangerous\",\"reason\":\"scripted deny\",\"diagnostics\":[]}'\n",
+                "#!/bin/sh\ncat >/dev/null\necho '{\"verdict\":\"dangerous\",\"reason\":\"scripted deny\",\"diagnostics\":[]}'\n",
             )
             .unwrap();
             #[cfg(unix)]
