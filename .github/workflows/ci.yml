@@ -420,7 +420,6 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
-      id-token: write
     env:
       DATABASE_BACKEND: libsql
     steps:
@@ -463,11 +462,23 @@ jobs:
           path: codecov.json
           if-no-files-found: error
           retention-days: 14
+      - name: Require Codecov token
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: |
+          if [ -z "$CODECOV_TOKEN" ]; then
+            echo "::error::CODECOV_TOKEN secret is required for Codecov uploads. Add the repository upload token in GitHub Actions secrets."
+            exit 1
+          fi
       - name: Upload coverage to Codecov
-        continue-on-error: true
+        if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: codecov/codecov-action@v6
         with:
           disable_search: true
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           files: codecov.json
-          use_oidc: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Skip Codecov upload for forked pull request
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: echo "Skipping Codecov upload for forked pull request; coverage artifact was uploaded."
