@@ -42,10 +42,9 @@ classify_size() {
   # Sum changed lines across non-doc files
   local total
   total=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
-    --paginate --jq '
-      [.[] | select(.filename | test("\\.(md|txt|rst|adoc)$") | not) | .changes]
-      | add // 0
-    ')
+    --paginate \
+    --jq '.[] | select(.filename | test("\\.(md|txt|rst|adoc)$") | not) | .changes' \
+    | awk '{sum += $1} END {print sum + 0}')
 
   local label
   if   (( total < 10 ));  then label="size: XS"

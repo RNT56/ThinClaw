@@ -18,6 +18,20 @@ use crate::error::DatabaseError;
 use crate::sandbox_jobs::SandboxJobSpec;
 
 #[cfg(feature = "postgres")]
+fn ensure_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod tests {
+    #[test]
+    fn rustls_provider_is_available_with_unified_features() {
+        super::ensure_rustls_crypto_provider();
+        let _ = rustls::ClientConfig::builder();
+    }
+}
+
+#[cfg(feature = "postgres")]
 fn job_failure_reason(ctx: &JobContext) -> Option<String> {
     if matches!(
         ctx.state,
@@ -409,6 +423,7 @@ impl Store {
             // Try TLS first ("prefer" semantics) — uses system CA roots.
             // Falls back to NoTls if TLS negotiation fails (e.g. local dev PG without certs).
             let tls_result = (|| -> Result<_, Box<dyn std::error::Error>> {
+                ensure_rustls_crypto_provider();
                 let certs = rustls_native_certs::load_native_certs();
                 let mut root_store = rustls::RootCertStore::empty();
                 for cert in certs.certs {
