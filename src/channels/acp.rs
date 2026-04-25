@@ -51,6 +51,8 @@ static ACP_CLIENT_BRIDGES: LazyLock<RwLock<HashMap<String, AcpClientBridge>>> =
 /// editor quirks can be handled in one place, but all emitted public shapes
 /// should round-trip through these types before they are considered supported.
 pub mod wire {
+    use std::collections::BTreeMap;
+
     use serde::{Deserialize, Serialize};
     use serde_json::Value;
 
@@ -106,14 +108,75 @@ pub mod wire {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(tag = "type", rename_all = "snake_case")]
+    #[serde(rename_all = "camelCase")]
+    pub struct EmbeddedResource {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub uri: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub mime_type: Option<String>,
+        #[serde(flatten)]
+        pub extra: BTreeMap<String, Value>,
+    }
+
+    impl EmbeddedResource {
+        pub fn text(uri: impl Into<String>, text: impl Into<String>) -> Self {
+            Self {
+                uri: Some(uri.into()),
+                text: Some(text.into()),
+                mime_type: Some("text/plain".to_string()),
+                extra: BTreeMap::new(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(
+        tag = "type",
+        rename_all = "snake_case",
+        rename_all_fields = "camelCase"
+    )]
     pub enum ContentBlock {
-        Text { text: String },
+        Text {
+            text: String,
+        },
+        Resource {
+            resource: EmbeddedResource,
+        },
+        #[serde(rename = "resource_link", alias = "resourceLink")]
+        ResourceLink {
+            uri: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            title: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            mime_type: Option<String>,
+            #[serde(flatten)]
+            extra: BTreeMap<String, Value>,
+        },
     }
 
     impl ContentBlock {
         pub fn text(text: impl Into<String>) -> Self {
             Self::Text { text: text.into() }
+        }
+
+        pub fn embedded_text_resource(uri: impl Into<String>, text: impl Into<String>) -> Self {
+            Self::Resource {
+                resource: EmbeddedResource::text(uri, text),
+            }
+        }
+
+        pub fn resource_link(uri: impl Into<String>) -> Self {
+            Self::ResourceLink {
+                uri: uri.into(),
+                name: None,
+                title: None,
+                mime_type: None,
+                extra: BTreeMap::new(),
+            }
         }
     }
 
@@ -287,6 +350,8 @@ pub mod compat {
     pub const INITIALIZE_REQUEST: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true},"clientInfo":{"name":"compat-client","version":"1.0.0"}}}"#;
     pub const SESSION_NEW_REQUEST: &str = r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#;
     pub const TEXT_PROMPT_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"00000000-0000-0000-0000-000000000000","prompt":[{"type":"text","text":"hello"}]}}"#;
+    pub const EMBEDDED_RESOURCE_PROMPT_REQUEST: &str = r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"00000000-0000-0000-0000-000000000000","prompt":[{"type":"resource","resource":{"uri":"file:///tmp/main.rs","text":"fn main() {}","mimeType":"text/plain"}}]}}"#;
+    pub const RESOURCE_LINK_PROMPT_REQUEST: &str = r#"{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"00000000-0000-0000-0000-000000000000","prompt":[{"type":"resource_link","uri":"file:///tmp/lib.rs","mimeType":"text/x-rust"}]}}"#;
 }
 
 #[derive(Clone)]
@@ -1004,7 +1069,19 @@ impl Channel for AcpChannel {
 
 pub async fn run_stdio(
     agent: Arc<Agent>,
-    mut outbound_rx: AcpOutboundRx,
+    outbound_rx: AcpOutboundRx,
+    state: AcpSharedState,
+) -> anyhow::Result<()> {
+    run_stdio_inner(Some(agent), Some(outbound_rx), state).await
+}
+
+pub async fn run_stdio_without_agent(state: AcpSharedState) -> anyhow::Result<()> {
+    run_stdio_inner(None, None, state).await
+}
+
+async fn run_stdio_inner(
+    agent: Option<Arc<Agent>>,
+    outbound_rx: Option<AcpOutboundRx>,
     state: AcpSharedState,
 ) -> anyhow::Result<()> {
     let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<Value>();
@@ -1026,13 +1103,15 @@ pub async fn run_stdio(
         }
     });
 
-    let bridge_tx = writer_tx.clone();
-    let bridge = tokio::spawn(async move {
-        while let Some(message) = outbound_rx.recv().await {
-            if bridge_tx.send(message).is_err() {
-                break;
+    let bridge = outbound_rx.map(|mut outbound_rx| {
+        let bridge_tx = writer_tx.clone();
+        tokio::spawn(async move {
+            while let Some(message) = outbound_rx.recv().await {
+                if bridge_tx.send(message).is_err() {
+                    break;
+                }
             }
-        }
+        })
     });
 
     let stdin = BufReader::new(tokio::io::stdin());
@@ -1066,7 +1145,9 @@ pub async fn run_stdio(
         }
 
         if request.method.is_none() {
-            handle_client_response(agent.clone(), &writer_tx, &state, request).await;
+            if let Some(agent) = agent.as_ref() {
+                handle_client_response(Arc::clone(agent), &writer_tx, &state, request).await;
+            }
             continue;
         }
 
@@ -1075,8 +1156,11 @@ pub async fn run_stdio(
         }
     }
 
+    ACP_CLIENT_BRIDGES.write().await.clear();
     drop(writer_tx);
-    bridge.abort();
+    if let Some(bridge) = bridge {
+        bridge.abort();
+    }
     let _ = writer.await;
     Ok(())
 }
@@ -1277,7 +1361,7 @@ struct SessionSetConfigOptionRequest {
 }
 
 async fn handle_json_rpc(
-    agent: Arc<Agent>,
+    agent: Option<Arc<Agent>>,
     writer_tx: &OutboundTx,
     state: &AcpSharedState,
     request: JsonRpcMessage,
@@ -1289,18 +1373,29 @@ async fn handle_json_rpc(
         "initialize" => handle_initialize(state, &request.params).await,
         "authenticate" => Ok(json!({})),
         "session/new" => {
-            handle_new_session(Some(agent), Some(writer_tx), state, &request.params).await
+            handle_new_session(agent.clone(), Some(writer_tx), state, &request.params).await
         }
-        "session/list" => handle_list_sessions(Some(agent), state, &request.params).await,
-        "session/load" => handle_load_session(Some(agent), writer_tx, state, &request.params).await,
+        "session/list" => handle_list_sessions(agent.clone(), state, &request.params).await,
+        "session/load" => {
+            handle_load_session(agent.clone(), writer_tx, state, &request.params).await
+        }
         "session/resume" => {
-            handle_resume_session(Some(agent), Some(writer_tx), state, &request.params).await
+            handle_resume_session(agent.clone(), Some(writer_tx), state, &request.params).await
         }
-        "session/close" => handle_close_session(agent, state, &request.params).await,
-        "session/cancel" => handle_cancel_session(agent, state, &request.params).await,
+        "session/close" => match agent.clone() {
+            Some(agent) => handle_close_session(agent, state, &request.params).await,
+            None => Err(agent_runtime_required_error("session/close")),
+        },
+        "session/cancel" => match agent.clone() {
+            Some(agent) => handle_cancel_session(agent, state, &request.params).await,
+            None => Err(agent_runtime_required_error("session/cancel")),
+        },
         "session/set_mode" => handle_set_mode(writer_tx, state, &request.params).await,
         "session/set_config_option" => handle_set_config_option(state, &request.params).await,
-        "session/prompt" => handle_prompt(agent, writer_tx, state, &request.params).await,
+        "session/prompt" => match agent.clone() {
+            Some(agent) => handle_prompt(agent, writer_tx, state, &request.params).await,
+            None => Err(agent_runtime_required_error("session/prompt")),
+        },
         _ => Err(json_rpc_error(
             -32601,
             format!("Method not found: {method}"),
@@ -1316,6 +1411,14 @@ async fn handle_json_rpc(
         Ok(result) => success_response(request.id, result),
         Err(error) => error_response(request.id, error.code, error.message, error.data),
     })
+}
+
+fn agent_runtime_required_error(method: &str) -> JsonRpcError {
+    json_rpc_error(
+        -32601,
+        format!("Method not available without an agent runtime: {method}"),
+        None,
+    )
 }
 
 async fn handle_client_response(
@@ -2440,54 +2543,61 @@ fn content_block_to_text_result(block: &Value) -> Result<Option<String>, JsonRpc
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    match kind {
-        "text" => Ok(block
-            .get("text")
-            .and_then(Value::as_str)
-            .map(str::to_string)),
-        "resource" => {
-            let resource = block.get("resource").ok_or_else(|| {
-                json_rpc_error(-32602, "resource content block missing resource", None)
-            })?;
-            if let Some(text) = resource.get("text").and_then(Value::as_str) {
-                Ok(Some(format_resource_text(resource, text)))
-            } else {
-                Ok(resource
-                    .get("uri")
-                    .and_then(Value::as_str)
-                    .map(|uri| format!("Context resource: {uri}")))
-            }
-        }
-        "resource_link" | "resourceLink" => {
-            let uri = block
-                .get("uri")
-                .or_else(|| {
-                    block
-                        .get("resource")
-                        .and_then(|resource| resource.get("uri"))
-                })
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    json_rpc_error(-32602, "resource_link content block missing uri", None)
-                })?;
-            Ok(Some(format!("Context resource: {uri}")))
-        }
-        "image" | "audio" => Err(json_rpc_error(
+    if kind == "image" || kind == "audio" {
+        return Err(json_rpc_error(
             -32602,
             format!("ACP prompt content type '{kind}' is not advertised by this ThinClaw build"),
             None,
-        )),
-        "" => Ok(None),
-        other => Err(json_rpc_error(
-            -32602,
-            format!("Unsupported ACP prompt content type: {other}"),
-            None,
-        )),
+        ));
+    }
+    if kind.is_empty() {
+        return Ok(None);
+    }
+
+    let content: wire::ContentBlock =
+        serde_json::from_value(block.clone()).map_err(|error| match kind {
+            "resource" => json_rpc_error(
+                -32602,
+                format!("Invalid ACP resource content block: {error}"),
+                None,
+            ),
+            "resource_link" | "resourceLink" => json_rpc_error(
+                -32602,
+                format!("Invalid ACP resource_link content block: {error}"),
+                None,
+            ),
+            "text" => json_rpc_error(
+                -32602,
+                format!("Invalid ACP text content block: {error}"),
+                None,
+            ),
+            other => json_rpc_error(
+                -32602,
+                format!("Unsupported ACP prompt content type: {other}"),
+                None,
+            ),
+        })?;
+
+    match content {
+        wire::ContentBlock::Text { text } => Ok(Some(text)),
+        wire::ContentBlock::Resource { resource } => Ok(resource
+            .text
+            .as_deref()
+            .map(|text| format_resource_text(&resource, text))
+            .or_else(|| {
+                resource
+                    .uri
+                    .as_deref()
+                    .map(|uri| format!("Context resource: {uri}"))
+            })),
+        wire::ContentBlock::ResourceLink { uri, .. } => {
+            Ok(Some(format!("Context resource: {uri}")))
+        }
     }
 }
 
-fn format_resource_text(resource: &Value, text: &str) -> String {
-    if let Some(uri) = resource.get("uri").and_then(Value::as_str) {
+fn format_resource_text(resource: &wire::EmbeddedResource, text: &str) -> String {
+    if let Some(uri) = resource.uri.as_deref() {
         format!("Context resource: {uri}\n\n{text}")
     } else {
         text.to_string()
@@ -2956,6 +3066,19 @@ fn title_from_prompt(prompt: &str) -> String {
 mod tests {
     use super::*;
 
+    fn assert_json_schema_valid(schema: &Value, instance: &Value) {
+        let compiled = jsonschema::JSONSchema::compile(schema).expect("schema fixture compiles");
+        if let Err(errors) = compiled.validate(instance) {
+            panic!(
+                "ACP message did not match schema fixture: {}",
+                errors
+                    .map(|error| error.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+    }
+
     #[test]
     fn prompt_to_text_extracts_text_and_resources() {
         let prompt = json!([
@@ -2968,6 +3091,38 @@ mod tests {
         assert!(text.contains("file:///tmp/a.rs"));
         assert!(text.contains("fn main()"));
         assert!(text.contains("file:///tmp/b.rs"));
+    }
+
+    #[test]
+    fn acp_content_blocks_round_trip_resource_shapes() {
+        let resource =
+            wire::ContentBlock::embedded_text_resource("file:///tmp/a.rs", "fn main() {}");
+        let resource_json = serde_json::to_value(resource).expect("resource content json");
+        assert_eq!(resource_json["type"], json!("resource"));
+        assert_eq!(resource_json["resource"]["uri"], json!("file:///tmp/a.rs"));
+        assert_eq!(resource_json["resource"]["text"], json!("fn main() {}"));
+        assert_eq!(resource_json["resource"]["mimeType"], json!("text/plain"));
+
+        let link = wire::ContentBlock::resource_link("file:///tmp/b.rs");
+        let link_json = serde_json::to_value(link).expect("resource link json");
+        assert_eq!(link_json["type"], json!("resource_link"));
+        assert_eq!(link_json["uri"], json!("file:///tmp/b.rs"));
+
+        let legacy_link: wire::ContentBlock =
+            serde_json::from_value(json!({ "type": "resourceLink", "uri": "file:///tmp/c.rs" }))
+                .expect("legacy resourceLink input");
+        assert!(matches!(
+            legacy_link,
+            wire::ContentBlock::ResourceLink { .. }
+        ));
+    }
+
+    #[test]
+    fn prompt_to_text_rejects_invalid_typed_content_blocks() {
+        let err = prompt_to_text_result(&json!([{ "type": "resource_link" }]))
+            .expect_err("resource links must include a uri");
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("resource_link"));
     }
 
     #[test]
@@ -3622,11 +3777,28 @@ mod tests {
             compat::INITIALIZE_REQUEST,
             compat::SESSION_NEW_REQUEST,
             compat::TEXT_PROMPT_REQUEST,
+            compat::EMBEDDED_RESOURCE_PROMPT_REQUEST,
+            compat::RESOURCE_LINK_PROMPT_REQUEST,
         ] {
             let message: JsonRpcMessage =
                 serde_json::from_str(raw).expect("compat fixture should parse");
             assert_eq!(message.jsonrpc.as_deref(), Some("2.0"));
             assert!(message.method.is_some());
+        }
+    }
+
+    #[test]
+    fn compat_prompt_transcripts_use_typed_content_blocks() {
+        for raw in [
+            compat::TEXT_PROMPT_REQUEST,
+            compat::EMBEDDED_RESOURCE_PROMPT_REQUEST,
+            compat::RESOURCE_LINK_PROMPT_REQUEST,
+        ] {
+            let message: JsonRpcMessage =
+                serde_json::from_str(raw).expect("compat fixture should parse");
+            let prompt = message.params.get("prompt").expect("prompt blocks");
+            let text = prompt_to_text_result(prompt).expect("typed prompt content");
+            assert!(!text.is_empty());
         }
     }
 
@@ -3646,6 +3818,137 @@ mod tests {
             params.update,
             wire::SessionUpdate::AgentMessageChunk { .. }
         ));
+    }
+
+    #[test]
+    fn emitted_acp_messages_validate_against_schema_fixtures() {
+        let initialize_response_schema = json!({
+            "type": "object",
+            "required": ["jsonrpc", "id", "result"],
+            "properties": {
+                "jsonrpc": { "const": "2.0" },
+                "result": {
+                    "type": "object",
+                    "required": ["protocolVersion", "agentCapabilities", "agentInfo", "authMethods"],
+                    "properties": {
+                        "protocolVersion": { "const": 1 },
+                        "agentCapabilities": { "type": "object" },
+                        "agentInfo": {
+                            "type": "object",
+                            "required": ["name", "version"]
+                        },
+                        "authMethods": { "type": "array" }
+                    }
+                }
+            }
+        });
+        let prompt_response_schema = json!({
+            "type": "object",
+            "required": ["stopReason"],
+            "properties": {
+                "stopReason": {
+                    "enum": [
+                        "end_turn",
+                        "max_tokens",
+                        "max_turn_requests",
+                        "refusal",
+                        "cancelled"
+                    ]
+                }
+            }
+        });
+        let session_update_schema = json!({
+            "type": "object",
+            "required": ["jsonrpc", "method", "params"],
+            "properties": {
+                "jsonrpc": { "const": "2.0" },
+                "method": { "const": "session/update" },
+                "params": {
+                    "type": "object",
+                    "required": ["sessionId", "update"],
+                    "properties": {
+                        "sessionId": { "type": "string", "minLength": 1 },
+                        "update": {
+                            "type": "object",
+                            "required": ["sessionUpdate"],
+                            "properties": {
+                                "sessionUpdate": {
+                                    "enum": [
+                                        "user_message_chunk",
+                                        "agent_message_chunk",
+                                        "agent_thought_chunk",
+                                        "tool_call",
+                                        "tool_call_update",
+                                        "current_mode_update",
+                                        "config_option_update",
+                                        "session_info_update",
+                                        "plan",
+                                        "usage_update"
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let permission_request_schema = json!({
+            "type": "object",
+            "required": ["jsonrpc", "id", "method", "params"],
+            "properties": {
+                "jsonrpc": { "const": "2.0" },
+                "method": { "const": "session/request_permission" },
+                "params": {
+                    "type": "object",
+                    "required": ["sessionId", "toolCall", "options"],
+                    "properties": {
+                        "sessionId": { "type": "string", "minLength": 1 },
+                        "toolCall": { "type": "object" },
+                        "options": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "required": ["optionId", "name", "kind"]
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        assert_json_schema_valid(
+            &initialize_response_schema,
+            &success_response(
+                Some(json!(0)),
+                json!({
+                    "protocolVersion": 1,
+                    "agentCapabilities": {},
+                    "agentInfo": { "name": "thinclaw", "version": env!("CARGO_PKG_VERSION") },
+                    "authMethods": []
+                }),
+            ),
+        );
+        assert_json_schema_valid(
+            &prompt_response_schema,
+            &prompt_response(wire::StopReason::EndTurn),
+        );
+        assert_json_schema_valid(
+            &session_update_schema,
+            &session_update("sess_test", agent_message_chunk("hello")),
+        );
+        assert_json_schema_valid(
+            &permission_request_schema,
+            &client_request(
+                json!("permission-1"),
+                "session/request_permission",
+                json!({
+                    "sessionId": "sess_test",
+                    "toolCall": { "toolCallId": "tool_1", "title": "shell", "kind": "execute" },
+                    "options": permission_options()
+                }),
+            ),
+        );
     }
 
     #[test]

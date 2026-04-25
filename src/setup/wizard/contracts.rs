@@ -59,6 +59,8 @@ pub enum OnboardingProfile {
     ChannelFirst,
     #[value(name = "remote", alias = "remote-server")]
     RemoteServer,
+    #[value(name = "pi-os-lite-64", alias = "raspberry-pi-os-lite", alias = "pi")]
+    PiOsLite64,
     #[value(name = "custom", alias = "custom-advanced")]
     CustomAdvanced,
 }
@@ -71,6 +73,7 @@ impl OnboardingProfile {
             Self::BuilderAndCoding => "Builder & Coding",
             Self::ChannelFirst => "Channel-First",
             Self::RemoteServer => "Remote / SSH Host",
+            Self::PiOsLite64 => "Pi OS Lite 64-bit",
             Self::CustomAdvanced => "Custom / Advanced",
         }
     }
@@ -92,9 +95,24 @@ impl OnboardingProfile {
             Self::RemoteServer => {
                 "Run ThinClaw as a safe headless/service runtime on a Raspberry Pi, Mac Mini, VPS, or SSH-managed host with WebUI access through a tunnel by default."
             }
+            Self::PiOsLite64 => {
+                "Run ThinClaw on Raspberry Pi OS Lite as a headless remote service with WebUI access, Docker Chromium fallback, and desktop autonomy explicitly blocked."
+            }
             Self::CustomAdvanced => {
                 "Start from a neutral baseline with minimal profile assumptions so you can choose the stack, routing, and trust boundaries step by step."
             }
+        }
+    }
+
+    pub fn is_headless_remote(self) -> bool {
+        matches!(self, Self::RemoteServer | Self::PiOsLite64)
+    }
+
+    pub fn runtime_profile_env_value(self) -> Option<&'static str> {
+        match self {
+            Self::PiOsLite64 => Some("pi-os-lite-64"),
+            Self::RemoteServer => Some("remote"),
+            _ => None,
         }
     }
 }

@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 use crate::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamSupport,
-    ToolCompletionRequest, ToolCompletionResponse,
+    TokenCaptureSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Configuration for the response cache.
@@ -293,6 +293,17 @@ impl LlmProvider for CachedProvider {
 
     fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
         self.inner.stream_support_for_model(requested_model)
+    }
+
+    fn token_capture_support(&self) -> TokenCaptureSupport {
+        self.inner.token_capture_support()
+    }
+
+    fn token_capture_support_for_model(
+        &self,
+        requested_model: Option<&str>,
+    ) -> TokenCaptureSupport {
+        self.inner.token_capture_support_for_model(requested_model)
     }
 }
 

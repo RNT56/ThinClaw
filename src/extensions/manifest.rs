@@ -215,6 +215,71 @@ pub fn validate_plugin_manifest(
         }
     }
 
+    for tool in &manifest.contributions.tools {
+        if tool.id.trim().is_empty() {
+            errors.push("tool contribution id is required".to_string());
+        }
+        if tool.name.trim().is_empty() {
+            errors.push(format!("tool contribution '{}' name is required", tool.id));
+        }
+        if let Some(artifact_id) = tool.wasm_artifact.as_deref() {
+            validate_artifact_reference(
+                manifest,
+                artifact_id,
+                PluginArtifactKind::Wasm,
+                "tool",
+                &tool.id,
+                &mut errors,
+            );
+        }
+    }
+
+    for channel in &manifest.contributions.channels {
+        if channel.id.trim().is_empty() {
+            errors.push("channel contribution id is required".to_string());
+        }
+        if channel.name.trim().is_empty() {
+            errors.push(format!(
+                "channel contribution '{}' name is required",
+                channel.id
+            ));
+        }
+        if let Some(artifact_id) = channel.wasm_artifact.as_deref() {
+            validate_artifact_reference(
+                manifest,
+                artifact_id,
+                PluginArtifactKind::Wasm,
+                "channel",
+                &channel.id,
+                &mut errors,
+            );
+        }
+    }
+
+    for provider in &manifest.contributions.memory_providers {
+        if provider.id.trim().is_empty() {
+            errors.push("memory provider contribution id is required".to_string());
+        }
+        if provider.provider_type.trim().is_empty() {
+            errors.push(format!(
+                "memory provider contribution '{}' provider_type is required",
+                provider.id
+            ));
+        }
+    }
+
+    for provider in &manifest.contributions.context_providers {
+        if provider.id.trim().is_empty() {
+            errors.push("context provider contribution id is required".to_string());
+        }
+        if provider.provider_type.trim().is_empty() {
+            errors.push(format!(
+                "context provider contribution '{}' provider_type is required",
+                provider.id
+            ));
+        }
+    }
+
     for native in &manifest.contributions.native_plugins {
         if native.abi != NativePluginAbi::CAbiJsonV1 {
             errors.push(format!(
@@ -234,6 +299,14 @@ pub fn validate_plugin_manifest(
                 native.id
             ));
         }
+        validate_artifact_reference(
+            manifest,
+            &native.artifact,
+            PluginArtifactKind::NativeDylib,
+            "native plugin",
+            &native.id,
+            &mut errors,
+        );
     }
 
     if manifest.contributions.tools.is_empty()
@@ -249,6 +322,30 @@ pub fn validate_plugin_manifest(
         valid: errors.is_empty(),
         errors,
         warnings,
+    }
+}
+
+fn validate_artifact_reference(
+    manifest: &PluginManifest,
+    artifact_id: &str,
+    expected_kind: PluginArtifactKind,
+    contribution_kind: &str,
+    contribution_id: &str,
+    errors: &mut Vec<String>,
+) {
+    match manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.id == artifact_id)
+    {
+        Some(artifact) if artifact.kind == expected_kind => {}
+        Some(artifact) => errors.push(format!(
+            "{contribution_kind} contribution '{contribution_id}' references artifact '{artifact_id}' with kind {:?}; expected {:?}",
+            artifact.kind, expected_kind
+        )),
+        None => errors.push(format!(
+            "{contribution_kind} contribution '{contribution_id}' references missing artifact '{artifact_id}'"
+        )),
     }
 }
 
@@ -368,6 +465,12 @@ mod tests {
             name: "Example Channel".to_string(),
             wasm_artifact: Some("channel-wasm".to_string()),
         });
+        manifest.artifacts.push(PluginArtifact {
+            id: "channel-wasm".to_string(),
+            kind: PluginArtifactKind::Wasm,
+            path: "channel.wasm".to_string(),
+            sha256: Some("22".repeat(32)),
+        });
         manifest
             .contributions
             .memory_providers
@@ -390,6 +493,77 @@ mod tests {
         let json = serde_json::to_string(&manifest).expect("serialize");
         let reparsed: PluginManifest = serde_json::from_str(&json).expect("parse");
         assert_eq!(reparsed.contributions.tools.len(), 1);
+    }
+
+    #[test]
+    fn manifest_validation_rejects_bad_contribution_artifacts() {
+        let mut manifest = sample_manifest();
+        manifest.contributions.tools[0].wasm_artifact = Some("missing-wasm".to_string());
+        let validation = validate_plugin_manifest(&manifest, &signed_settings());
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("missing artifact 'missing-wasm'"))
+        );
+
+        let mut manifest = sample_manifest();
+        manifest.contributions.channels.push(ChannelContribution {
+            id: "example.channel".to_string(),
+            name: "Example Channel".to_string(),
+            wasm_artifact: Some("native-lib".to_string()),
+        });
+        manifest.artifacts.push(PluginArtifact {
+            id: "native-lib".to_string(),
+            kind: PluginArtifactKind::NativeDylib,
+            path: "libexample.dylib".to_string(),
+            sha256: Some("11".repeat(32)),
+        });
+        let validation = validate_plugin_manifest(&manifest, &signed_settings());
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("expected Wasm"))
+        );
+    }
+
+    #[test]
+    fn manifest_validation_requires_provider_contribution_ids() {
+        let mut manifest = sample_manifest();
+        manifest
+            .contributions
+            .memory_providers
+            .push(MemoryProviderContribution {
+                id: "".to_string(),
+                provider_type: "".to_string(),
+                config_schema: serde_json::json!({ "type": "object" }),
+            });
+        manifest
+            .contributions
+            .context_providers
+            .push(ContextProviderContribution {
+                id: "".to_string(),
+                provider_type: "".to_string(),
+                config_schema: serde_json::json!({ "type": "object" }),
+            });
+
+        let validation = validate_plugin_manifest(&manifest, &signed_settings());
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("memory provider contribution id is required"))
+        );
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.contains("context provider contribution id is required"))
+        );
     }
 
     #[test]

@@ -120,7 +120,7 @@ cargo build --all-features
 Linux notes:
 
 - The default `light` profile includes the local gateway and does not need any extra system packages beyond the normal Rust build toolchain.
-- `full` needs Docker for Docker sandbox jobs and Docker Chromium fallback, plus a local Chrome/Chromium/Brave/Edge browser if you set `BROWSER_DOCKER=never`.
+- `full` needs Docker for Docker sandbox jobs and Docker Chromium fallback. The default `CHROMIUM_IMAGE=chromedp/headless-shell:latest` is multi-arch; use a local Chrome/Chromium/Brave/Edge browser if you set `BROWSER_DOCKER=never`.
 - Raspberry Pi OS Lite 64-bit should use the `aarch64-unknown-linux-gnu` release artifact or `cargo build --release --features full` for native installs.
 - `--features light,voice` or `--all-features` requires `libasound2-dev`.
 - `--features bedrock` or `--all-features` requires AWS credentials (`AWS_PROFILE` or AWS access keys).
@@ -157,9 +157,13 @@ It omits ACP, tunnels, Docker sandbox, browser automation, and Nostr.
 Before deploying or enabling new runtime capabilities:
 
 ```bash
+thinclaw onboard --profile pi-os-lite-64
 thinclaw doctor --profile pi-os-lite-64
 thinclaw status --profile pi-os-lite-64
 ```
+
+That onboarding profile writes `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and
+`THINCLAW_HEADLESS=true`, which keep Pi OS Lite on the remote/headless path.
 
 ## Profile Composition
 

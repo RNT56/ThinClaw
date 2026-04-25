@@ -37,7 +37,8 @@ impl SetupWizard {
             super::OnboardingProfile::BuilderAndCoding => 2,
             super::OnboardingProfile::Balanced
             | super::OnboardingProfile::ChannelFirst
-            | super::OnboardingProfile::RemoteServer => 1,
+            | super::OnboardingProfile::RemoteServer
+            | super::OnboardingProfile::PiOsLite64 => 1,
             super::OnboardingProfile::CustomAdvanced => 0,
         };
         let bundle_options = [

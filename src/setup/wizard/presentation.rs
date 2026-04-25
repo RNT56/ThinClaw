@@ -56,7 +56,7 @@ impl SetupWizard {
 
         if matches!(
             self.selected_profile,
-            super::OnboardingProfile::RemoteServer
+            super::OnboardingProfile::RemoteServer | super::OnboardingProfile::PiOsLite64
         ) {
             self.step_remote_web_ui_access()?;
             crate::setup::prompts::print_blank_line();

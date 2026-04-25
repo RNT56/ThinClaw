@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use crate::agent::{Agent, AgentRunArtifact, AgentRunArtifactLogger, AgentRunStatus};
 use crate::channels::IncomingMessage;
+use crate::llm::TokenCaptureSupport;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvState {
@@ -198,7 +199,7 @@ impl AgentEnv for AgentLoopEnv {
             reward,
             done: self.terminal,
             at: Utc::now(),
-            token_capture: None,
+            token_capture: Some(agent_token_capture(&self.agent)),
             metadata: serde_json::json!({}),
         };
         self.steps.push(step);
@@ -364,7 +365,7 @@ impl AgentEnv for TerminalBenchEnv {
             reward,
             done,
             at: Utc::now(),
-            token_capture: None,
+            token_capture: Some(unsupported_token_capture()),
             metadata: metadata.clone(),
         });
 
@@ -514,7 +515,7 @@ impl AgentEnv for SkillBenchEnv {
             reward,
             done,
             at: Utc::now(),
-            token_capture: None,
+            token_capture: Some(unsupported_token_capture()),
             metadata: metadata.clone(),
         });
 
@@ -725,6 +726,35 @@ fn heuristic_reward(response: Option<&str>) -> f64 {
     }
 }
 
+fn unsupported_token_capture() -> TokenTrajectoryCapture {
+    token_capture_from_support(TokenCaptureSupport::UNSUPPORTED, None, None)
+}
+
+fn token_capture_from_support(
+    support: TokenCaptureSupport,
+    provider: Option<String>,
+    model: Option<String>,
+) -> TokenTrajectoryCapture {
+    TokenTrajectoryCapture {
+        exact_tokens_supported: support.exact_tokens_supported,
+        logprobs_supported: support.logprobs_supported,
+        token_ids: Vec::new(),
+        tokens: Vec::new(),
+        logprobs: Vec::new(),
+        provider,
+        model,
+    }
+}
+
+fn agent_token_capture(agent: &Agent) -> TokenTrajectoryCapture {
+    let provider = agent.llm_provider_name();
+    token_capture_from_support(
+        agent.llm_token_capture_support(),
+        Some(provider.clone()),
+        Some(provider),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,6 +797,25 @@ mod tests {
         assert!((first_logprob - -0.1).abs() < 0.000_001);
     }
 
+    #[test]
+    fn token_capture_from_support_preserves_provider_capability_flags() {
+        let capture = token_capture_from_support(
+            TokenCaptureSupport {
+                exact_tokens_supported: true,
+                logprobs_supported: false,
+            },
+            Some("openai-compatible".to_string()),
+            Some("gpt-test".to_string()),
+        );
+
+        assert!(capture.exact_tokens_supported);
+        assert!(!capture.logprobs_supported);
+        assert_eq!(capture.provider.as_deref(), Some("openai-compatible"));
+        assert_eq!(capture.model.as_deref(), Some("gpt-test"));
+        assert!(capture.token_ids.is_empty());
+        assert!(capture.logprobs.is_empty());
+    }
+
     #[tokio::test]
     async fn terminal_bench_env_runs_command_cases() {
         let mut env = TerminalBenchEnv::new(vec![TerminalBenchCase {
@@ -797,6 +846,14 @@ mod tests {
             trajectory.metadata["benchmark"],
             serde_json::json!("terminal_bench")
         );
+        let capture = trajectory.steps[0]
+            .token_capture
+            .as_ref()
+            .expect("token capture capability marker");
+        assert!(!capture.exact_tokens_supported);
+        assert!(!capture.logprobs_supported);
+        assert!(capture.token_ids.is_empty());
+        assert!(capture.logprobs.is_empty());
     }
 
     #[tokio::test]
@@ -817,5 +874,11 @@ mod tests {
         assert_eq!(result.reward, 1.0);
         let trajectory = env.export_trajectory().await;
         assert_eq!(trajectory.env_name, "skill_bench");
+        let capture = trajectory.steps[0]
+            .token_capture
+            .as_ref()
+            .expect("token capture capability marker");
+        assert!(!capture.exact_tokens_supported);
+        assert!(!capture.logprobs_supported);
     }
 }

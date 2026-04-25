@@ -51,11 +51,15 @@ fn deploy_env_documents_linux_runtime_overrides() {
         "BUILD_FEATURES=full",
         "THINCLAW_IMAGE=ghcr.io/rnt56/thinclaw:latest",
         "BROWSER_DOCKER=auto",
+        "CHROMIUM_IMAGE=chromedp/headless-shell:latest",
+        "THINCLAW_RUNTIME_PROFILE=pi-os-lite-64",
+        "THINCLAW_HEADLESS=true",
         "SCREEN_CAPTURE_ENABLED=false",
         "CAMERA_CAPTURE_ENABLED=false",
         "TALK_MODE_ENABLED=false",
         "LOCATION_ENABLED=false",
         "LOCATION_ALLOW_IP_FALLBACK=false",
+        "DESKTOP_AUTONOMY_ENABLED=false",
         "THINCLAW_CAMERA_DEVICE=/dev/video0",
         "THINCLAW_MICROPHONE_DEVICE=default",
         "THINCLAW_MICROPHONE_BACKEND=auto",
@@ -80,6 +84,10 @@ fn pi_os_lite_support_is_documented_and_guarded() {
     assert!(setup.contains("is_pi_os_lite_64"));
     assert!(setup.contains("MODE=\"auto\""));
     assert!(setup.contains("THINCLAW_ALLOW_ENV_MASTER_KEY=1"));
+    assert!(setup.contains("THINCLAW_RUNTIME_PROFILE=pi-os-lite-64"));
+    assert!(setup.contains("THINCLAW_HEADLESS=true"));
+    assert!(setup.contains("dotenv_quote"));
+    assert!(setup.contains("CHROMIUM_IMAGE=chromedp/headless-shell:latest"));
     assert!(readme.contains("deploy-setup.sh --mode native --binary ./thinclaw"));
     assert!(deployment_docs.contains("thinclaw doctor --profile pi-os-lite-64"));
     assert!(deployment_docs.contains("aarch64-unknown-linux-gnu"));

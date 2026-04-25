@@ -14,6 +14,22 @@ service/headless runtime, generates `GATEWAY_AUTH_TOKEN` when missing, and
 prints access instructions. It ships inside the normal `thinclaw` binary from
 GitHub Releases; there is no separate remote binary.
 
+## Prerequisites By Access Pattern
+
+| Access Pattern | Required | Not Required |
+|---|---|---|
+| Local-only gateway | ThinClaw running on the same machine, default loopback bind | Tailscale, public DNS, public tunnel |
+| SSH-tunneled WebUI | SSH access to the host, gateway bound to `127.0.0.1`, `GATEWAY_AUTH_TOKEN` | Public inbound port, public HTTPS URL |
+| Private LAN access | Gateway bound to a LAN interface or `0.0.0.0`, `GATEWAY_AUTH_TOKEN`, firewall allowing selected clients | Public tunnel |
+| Tailscale private access | Tailscale installed and authenticated on host/client, gateway reachable on tailnet, `GATEWAY_AUTH_TOKEN` | Tailscale Funnel, public exposure |
+| Public webhook tunnel | Public HTTPS tunnel URL, tunnel provider binary/token, webhook-capable channel config | SSH tunnel alone |
+| Reverse proxy public access | Reverse proxy, TLS certificate, DNS, firewall/rate-limit policy, `GATEWAY_AUTH_TOKEN` | Managed tunnel provider |
+
+Remote access always needs a deliberate exposure choice. If you only need a
+browser on your laptop to reach a server, use SSH tunneling first. If an external
+service needs to call back into ThinClaw, use polling where supported or a public
+HTTPS tunnel/reverse proxy.
+
 ## Gateway Basics
 
 Local default:

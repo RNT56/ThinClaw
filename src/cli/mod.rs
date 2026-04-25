@@ -439,6 +439,19 @@ mod tests {
     }
 
     #[test]
+    fn test_onboard_pi_os_lite_profile_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "onboard", "--profile", "pi-os-lite-64"])
+            .expect("parse Pi OS Lite onboarding profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Onboard {
+                profile: Some(OnboardingProfile::PiOsLite64),
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn test_pi_os_lite_readiness_profile_parses() {
         let cli = Cli::try_parse_from(["thinclaw", "doctor", "--profile", "pi-os-lite-64"])
             .expect("parse pi doctor profile");

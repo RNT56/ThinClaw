@@ -6,6 +6,47 @@ where Docker is your preferred service boundary.
 Docker is optional. It is only required for container deployment, Docker-backed
 sandbox execution, or Docker Chromium browser fallback.
 
+## Prerequisites
+
+Required for Compose:
+
+- Docker Engine on Linux/Pi, or Docker Desktop on macOS/Windows
+- Docker Compose V2 (`docker compose version`)
+- a repo checkout or the `deploy/` assets
+- network access to pull `ghcr.io/rnt56/thinclaw:latest`, unless you build locally
+- a long random `GATEWAY_AUTH_TOKEN`
+- `curl` for health checks
+- `openssl` for the token-generation examples, or another secure random-token generator
+- `sed` for the shell snippets shown below
+
+Verify before starting:
+
+```bash
+docker version
+docker compose version
+docker pull ghcr.io/rnt56/thinclaw:latest
+```
+
+Windows notes:
+
+- Docker Desktop must be installed and running before Compose commands work.
+- WSL 2 integration is recommended for Linux-container workflows.
+- Run commands from PowerShell or a WSL shell consistently; do not mix runtime homes.
+
+Linux server notes:
+
+- The setup script can install Docker on `apt`, `dnf`, or `yum` hosts.
+- If you manage Docker manually, make sure the daemon is running and the operator
+  account can run Docker commands.
+- Expose port `3000` only on a trusted network, behind a reverse proxy, or behind
+  Tailscale unless you intentionally publish it.
+
+Optional:
+
+- PostgreSQL profile if you want a separately managed database instead of libSQL.
+- systemd wrapper if you want Compose managed by the host service manager.
+- Docker Chromium fallback for browser automation on headless hosts.
+
 ## Compose Quick Start
 
 From a repo checkout:

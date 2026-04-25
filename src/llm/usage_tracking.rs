@@ -15,7 +15,8 @@ use crate::llm::cost_tracker::{CostEntry, CostTracker};
 use crate::llm::costs;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamChunk,
-    StreamChunkStream, StreamSupport, ToolCompletionRequest, ToolCompletionResponse,
+    StreamChunkStream, StreamSupport, TokenCaptureSupport, ToolCompletionRequest,
+    ToolCompletionResponse,
 };
 
 pub const USAGE_TRACKING_OWNER_KEY: &str = "thinclaw.usage_tracking.owner";
@@ -768,6 +769,17 @@ impl LlmProvider for UsageTrackingProvider {
 
     fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
         self.inner.stream_support_for_model(requested_model)
+    }
+
+    fn token_capture_support(&self) -> TokenCaptureSupport {
+        self.inner.token_capture_support()
+    }
+
+    fn token_capture_support_for_model(
+        &self,
+        requested_model: Option<&str>,
+    ) -> TokenCaptureSupport {
+        self.inner.token_capture_support_for_model(requested_model)
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {

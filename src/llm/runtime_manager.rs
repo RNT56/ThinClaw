@@ -14,7 +14,7 @@ use crate::db::Database;
 use crate::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamChunkStream,
-    StreamSupport, ToolCompletionRequest, ToolCompletionResponse,
+    StreamSupport, TokenCaptureSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 use crate::llm::provider_factory::{
     build_provider_chain, create_llm_provider, create_provider_for_catalog_entry_with_settings,
@@ -822,6 +822,30 @@ impl LlmProvider for RuntimeLlmProvider {
 
     fn supports_streaming_for_model(&self, requested_model: Option<&str>) -> bool {
         self.stream_support_for_model(requested_model).is_native()
+    }
+
+    fn token_capture_support(&self) -> TokenCaptureSupport {
+        self.current_provider().token_capture_support()
+    }
+
+    fn token_capture_support_for_model(
+        &self,
+        requested_model: Option<&str>,
+    ) -> TokenCaptureSupport {
+        let snapshot = self.manager.snapshot();
+        self.provider_for_request(requested_model, None, None)
+            .map(|route| {
+                route
+                    .provider
+                    .token_capture_support_for_model(requested_model)
+            })
+            .unwrap_or_else(|_| match self.role {
+                RuntimeProviderRole::Primary => snapshot.llm.token_capture_support(),
+                RuntimeProviderRole::Cheap => snapshot
+                    .cheap_llm
+                    .unwrap_or(snapshot.llm)
+                    .token_capture_support(),
+            })
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {

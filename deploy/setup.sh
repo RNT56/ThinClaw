@@ -142,6 +142,17 @@ generate_hex_32() {
     fi
 }
 
+dotenv_quote() {
+    local value="$1"
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+        echo "ERROR: dotenv values must not contain newlines" >&2
+        exit 1
+    fi
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "$value"
+}
+
 configure_firewall() {
     echo ""
     echo "==> Configuring UFW Firewall..."
@@ -299,17 +310,25 @@ install_native_pi() {
 
     local master_key=""
     master_key="$(generate_hex_32)"
+    local quoted_token=""
+    local quoted_port=""
+    local quoted_master_key=""
+    quoted_token="$(dotenv_quote "$TOKEN")"
+    quoted_port="$(dotenv_quote "$THINCLAW_PORT")"
+    quoted_master_key="$(dotenv_quote "$master_key")"
     cat > /var/lib/thinclaw/.thinclaw/.env <<ENV
 ONBOARD_COMPLETED=true
 THINCLAW_HOME=/var/lib/thinclaw/.thinclaw
+THINCLAW_RUNTIME_PROFILE=pi-os-lite-64
+THINCLAW_HEADLESS=true
 DATABASE_BACKEND=libsql
 LIBSQL_PATH=/var/lib/thinclaw/.thinclaw/thinclaw.db
 GATEWAY_ENABLED=true
 GATEWAY_HOST=0.0.0.0
-GATEWAY_PORT=${THINCLAW_PORT}
-GATEWAY_AUTH_TOKEN=${TOKEN}
+GATEWAY_PORT=${quoted_port}
+GATEWAY_AUTH_TOKEN=${quoted_token}
 THINCLAW_ALLOW_ENV_MASTER_KEY=1
-SECRETS_MASTER_KEY=${master_key}
+SECRETS_MASTER_KEY=${quoted_master_key}
 LLM_BACKEND=openai_compatible
 LLM_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_API_KEY=CHANGE_ME
@@ -319,6 +338,7 @@ HEARTBEAT_ENABLED=false
 SANDBOX_ENABLED=false
 ROUTINES_ENABLED=true
 BROWSER_DOCKER=auto
+CHROMIUM_IMAGE=chromedp/headless-shell:latest
 SCREEN_CAPTURE_ENABLED=false
 CAMERA_CAPTURE_ENABLED=false
 TALK_MODE_ENABLED=false

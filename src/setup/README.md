@@ -108,8 +108,8 @@ the Quick/Advanced selector first.
 ### `--profile <profile>`
 
 Preselects the onboarding profile and skips the Profile prompt. Valid values:
-`balanced`, `local-private`, `builder-coding`, `channel-first`, `remote`, and
-`custom`.
+`balanced`, `local-private`, `builder-coding`, `channel-first`, `remote`,
+`pi-os-lite-64`, and `custom`.
 
 Use `thinclaw onboard --profile remote` for Raspberry Pi, Mac Mini, VPS, or
 SSH-managed hosts. This profile configures a service-safe runtime:
@@ -121,6 +121,11 @@ SSH-managed hosts. This profile configures a service-safe runtime:
 - generated `GATEWAY_AUTH_TOKEN` when missing
 - local libSQL database unless the operator chooses another backend
 - env-backed secrets fallback writes `THINCLAW_ALLOW_ENV_MASTER_KEY=1` when selected
+
+Use `thinclaw onboard --profile pi-os-lite-64` on Raspberry Pi OS Lite 64-bit.
+It applies the same service-safe runtime defaults and additionally writes
+`THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` plus `THINCLAW_HEADLESS=true` so
+desktop autonomy tools are not registered at runtime.
 
 The remote Web UI step offers SSH tunnel, private LAN/Tailscale, and reverse
 proxy/public access modes. The default is SSH tunnel.
@@ -137,13 +142,14 @@ It does not uninstall the ThinClaw binary or remove launchd, systemd, or Windows
 
 ### Profile Lanes
 
-The Profile step currently offers six onboarding lanes:
+The Profile step currently offers seven onboarding lanes:
 
 - `Balanced` for the standard first-run path
 - `Local & Private` for a local-first, lower-dependency setup
 - `Builder & Coding` for stronger planning, routing, and tool-heavy work
 - `Channel-First` for messaging reachability and notification routing
 - `Remote / SSH Host` for headless/service hosts reached over SSH, LAN, or tailnet
+- `Pi OS Lite 64-bit` for a Raspberry Pi headless remote service with desktop autonomy blocked
 - `Custom / Advanced` for a neutral baseline with minimal profile-driven defaults
 
 `Custom / Advanced` does not add a different step plan. It runs the same wizard,

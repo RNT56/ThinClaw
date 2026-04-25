@@ -13,6 +13,37 @@ polished host for local use, service mode, and desktop autonomy.
 | Host-level desktop automation | Enable the reckless desktop autonomy profile after local setup |
 | Remote Scrappy access | Bind the gateway to a private address or Tailscale |
 
+## Prerequisites
+
+Required for release install:
+
+- macOS on Apple Silicon or Intel
+- Terminal or another shell
+- `curl` with TLS access to GitHub Releases
+- a writable install location in `PATH`
+
+Required for source builds:
+
+- Xcode Command Line Tools: `xcode-select --install`
+- Rust 1.92+ through `rustup`
+- Git
+- `wasm32-wasip2` when building bundled WASM extensions
+
+Optional feature prerequisites:
+
+- Chrome, Brave, or Edge for local browser automation
+- Docker Desktop for Docker sandbox jobs or Docker Chromium fallback
+- Tailscale, Cloudflare Tunnel, ngrok, or another tunnel when remote webhooks need a public HTTPS URL
+- `ffmpeg` for richer audio/video media handling
+- Calendar, Numbers, Pages, TextEdit, and one-time macOS privacy/accessibility permissions for desktop autonomy
+
+Verify after install:
+
+```bash
+thinclaw status
+thinclaw doctor
+```
+
 ## Fast Local Install
 
 ```bash

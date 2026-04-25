@@ -561,11 +561,32 @@ fn probe_browser(
     }
 
     if docker_mode.allows_docker() && docker_status == crate::sandbox::DockerStatus::Available {
-        return LinuxProbe::pass(
-            "browser",
-            "Browser",
-            "No local browser required because Docker Chromium fallback is available.",
-        );
+        match docker_chromium_image_readiness_detail() {
+            Ok(detail) => {
+                return LinuxProbe::pass(
+                    "browser",
+                    "Browser",
+                    format!("No local browser required. {detail}"),
+                );
+            }
+            Err(detail) if required => {
+                return LinuxProbe::fail(
+                    "browser",
+                    "Browser",
+                    detail,
+                    "Install chromium/google-chrome/brave/edge locally, or set CHROMIUM_IMAGE to a reachable CDP-capable multi-arch Chromium image.",
+                );
+            }
+            Err(detail) => {
+                return LinuxProbe::skip(
+                    "browser",
+                    "Browser",
+                    format!(
+                        "Browser automation is optional for this profile. Docker fallback is not ready: {detail}"
+                    ),
+                );
+            }
+        }
     }
 
     if required {
@@ -582,6 +603,18 @@ fn probe_browser(
             "Browser automation is optional for this profile.",
         )
     }
+}
+
+#[cfg(feature = "browser")]
+fn docker_chromium_image_readiness_detail() -> Result<String, String> {
+    crate::sandbox::docker_chromium::DockerChromiumConfig::from_env()
+        .image_readiness_detail()
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "browser"))]
+fn docker_chromium_image_readiness_detail() -> Result<String, String> {
+    Err("current build does not include the browser feature".to_string())
 }
 
 fn probe_screen_capture(profile: LinuxReadinessProfile) -> LinuxProbe {

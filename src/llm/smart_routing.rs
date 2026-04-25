@@ -16,7 +16,7 @@ use rust_decimal::Decimal;
 use crate::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role, StreamSupport,
-    ToolCompletionRequest, ToolCompletionResponse,
+    TokenCaptureSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Classification of a request's complexity, determining which model handles it.
@@ -393,6 +393,18 @@ impl LlmProvider for SmartRoutingProvider {
 
     fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
         self.primary.stream_support_for_model(requested_model)
+    }
+
+    fn token_capture_support(&self) -> TokenCaptureSupport {
+        self.primary.token_capture_support()
+    }
+
+    fn token_capture_support_for_model(
+        &self,
+        requested_model: Option<&str>,
+    ) -> TokenCaptureSupport {
+        self.primary
+            .token_capture_support_for_model(requested_model)
     }
 }
 

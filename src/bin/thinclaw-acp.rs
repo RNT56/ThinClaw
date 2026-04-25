@@ -43,6 +43,11 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    if std::env::var_os("THINCLAW_ACP_STDIO_SMOKE").is_some() {
+        let (acp_channel, _) = acp::channel_pair();
+        return acp::run_stdio_without_agent(acp_channel.shared_state()).await;
+    }
+
     let _ = dotenvy::dotenv();
     thinclaw::bootstrap::load_thinclaw_env();
 

@@ -13,6 +13,38 @@ Linux-like environment, but the primary Windows user path is native Windows.
 | Docker-backed browser or sandbox fallback | Docker Desktop |
 | Linux-style development | WSL 2, then follow the Linux docs inside WSL |
 
+## Prerequisites
+
+Required for native install:
+
+- Windows 10/11 or Windows Server with PowerShell
+- MSI or portable ZIP from GitHub Releases
+- an install location available in `PATH`
+- Windows OS secure store available for normal local secret storage
+
+Required for service mode:
+
+- onboarding completed under the Windows account that will run ThinClaw
+- Windows Service Control Manager access
+- gateway and provider settings persisted before service start, not just set in a transient shell
+- `GATEWAY_AUTH_TOKEN` whenever exposing the gateway beyond loopback
+
+Optional feature prerequisites:
+
+- Docker Desktop, installed and running, for Docker sandbox jobs or Docker Chromium fallback
+- WSL 2 integration for Linux-container workflows in Docker Desktop
+- Chrome, Edge, or Brave for local browser automation
+- `ffmpeg` for camera/microphone capture and media processing
+- Microsoft Outlook, Excel, Word, Notepad, an interactive session, and required Windows automation permissions for desktop autonomy
+- Tailscale, Cloudflare Tunnel, ngrok, or another tunnel for remote webhook URLs
+
+Verify after install:
+
+```powershell
+thinclaw status
+thinclaw doctor
+```
+
 ## Native Windows Install
 
 Install the latest MSI or portable ZIP from GitHub Releases:

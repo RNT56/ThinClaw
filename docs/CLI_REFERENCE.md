@@ -21,7 +21,8 @@ These flags can be appended to almost any command:
 - `thinclaw tui`: Launches the agent inside the full-screen terminal UI.
 - `thinclaw onboard`: Launches the interactive onboarding wizard to configure the agent, set up the database, and link your first provider.
   - `--ui tui`: Forces the onboarding to run in full-screen mode.
-  - `--profile remote`: Preselects the Remote / SSH Host lane for Raspberry Pi, Mac Mini, VPS, and other SSH-managed hosts.
+  - `--profile remote`: Preselects the Remote / SSH Host lane for Mac Mini, VPS, and other SSH-managed hosts.
+  - `--profile pi-os-lite-64`: Preselects the Raspberry Pi OS Lite headless remote lane. It writes runtime headless markers and keeps desktop autonomy off.
   - Other profile values: `balanced`, `local-private`, `builder-coding`, `channel-first`, and `custom`.
 - `thinclaw reset`: Completely wipes ThinClaw's local database and state so you can start fresh.
 - `thinclaw update`: Checks for updates and performs a self-update.
@@ -87,3 +88,58 @@ These flags can be appended to almost any command:
   - `install`: Install ThinClaw as a system service.
   - `start`: Start the background service.
   - `stop`: Stop the background service.
+  - `status`: Show service-manager status.
+  - `uninstall`: Remove the installed service.
+- `thinclaw completion --shell <SHELL>`: Generate shell completion scripts.
+
+## Browser Automation
+
+- `thinclaw browser check`: Check whether a supported browser binary is available.
+- `thinclaw browser open <URL>`: Open a URL and extract page content.
+  - `--format text|html|json`: Select output format.
+  - `--wait <SECONDS>`: Wait before capture for JavaScript-heavy pages.
+  - `--screenshot <PATH>`: Save a PNG screenshot.
+- `thinclaw browser screenshot <URL>`: Capture a screenshot.
+  - `--output <PATH>` or `-o <PATH>`: Output path.
+  - `--width <PX>` / `--height <PX>`: Viewport size.
+- `thinclaw browser links <URL>`: Extract links from a page.
+  - `--external-only`: Show only external links.
+
+Browser automation uses local Chrome-family browsers when available. For Docker
+Chromium fallback and host prerequisites, see [EXTERNAL_DEPENDENCIES.md](EXTERNAL_DEPENDENCIES.md).
+
+## Registry
+
+- `thinclaw registry list`: List installable extensions.
+  - `--kind tool|channel`: Filter by extension kind.
+  - `--tag <TAG>`: Filter by tag.
+  - `--verbose`: Show detailed registry entries.
+- `thinclaw registry search <QUERY>`: Search by name, description, or keywords.
+- `thinclaw registry info <NAME>`: Show details for an extension or bundle.
+- `thinclaw registry install <NAME>`: Install an extension or bundle.
+  - `--force`: Overwrite an existing install.
+  - `--build`: Build from source instead of using a prebuilt artifact.
+- `thinclaw registry install-defaults`: Install the recommended default bundle.
+- `thinclaw registry remove <NAME>`: Remove an installed registry extension.
+
+## Trajectory Archive
+
+- `thinclaw trajectory stats`: Show archive statistics.
+- `thinclaw trajectory export`: Export archived records.
+  - `--format jsonl|json|sft|dpo`: Select export format.
+  - `--output <PATH>` or `-o <PATH>`: Write to a file instead of stdout.
+
+## Readiness Profiles
+
+`thinclaw doctor` and `thinclaw status` accept the same Linux readiness profiles:
+
+| Profile | Use |
+|---|---|
+| `server` | Generic Linux server, workstation, or laptop readiness |
+| `remote` | Remote/headless gateway and service posture |
+| `pi-os-lite-64` | Raspberry Pi OS Lite 64-bit readiness |
+| `desktop-gnome` | Linux GNOME/X11 desktop-autonomy readiness |
+| `all-features` | Optional Linux feature and `--all-features` build readiness |
+
+These profiles are Linux-specific probes. On non-Linux hosts, `doctor` and
+`status` still report general runtime health where available.

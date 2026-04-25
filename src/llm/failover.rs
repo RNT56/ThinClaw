@@ -20,7 +20,7 @@ use rust_decimal::Decimal;
 use crate::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamSupport,
-    ToolCompletionRequest, ToolCompletionResponse,
+    TokenCaptureSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 use crate::llm::retry::is_retryable;
@@ -269,6 +269,17 @@ fn aggregate_stream_support(supports: impl IntoIterator<Item = StreamSupport>) -
     } else {
         StreamSupport::Unsupported
     }
+}
+
+fn aggregate_token_capture_support(
+    supports: impl IntoIterator<Item = TokenCaptureSupport>,
+) -> TokenCaptureSupport {
+    let mut aggregate = TokenCaptureSupport::UNSUPPORTED;
+    for support in supports {
+        aggregate.exact_tokens_supported |= support.exact_tokens_supported;
+        aggregate.logprobs_supported |= support.logprobs_supported;
+    }
+    aggregate
 }
 
 fn can_failover_stream_start(err: &LlmError) -> bool {
@@ -826,6 +837,25 @@ impl LlmProvider for FailoverProvider {
             self.providers
                 .iter()
                 .map(|provider| provider.stream_support_for_model(requested_model)),
+        )
+    }
+
+    fn token_capture_support(&self) -> TokenCaptureSupport {
+        aggregate_token_capture_support(
+            self.providers
+                .iter()
+                .map(|provider| provider.token_capture_support()),
+        )
+    }
+
+    fn token_capture_support_for_model(
+        &self,
+        requested_model: Option<&str>,
+    ) -> TokenCaptureSupport {
+        aggregate_token_capture_support(
+            self.providers
+                .iter()
+                .map(|provider| provider.token_capture_support_for_model(requested_model)),
         )
     }
 

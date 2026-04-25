@@ -454,6 +454,23 @@ impl StreamSupport {
     }
 }
 
+/// Whether a provider can report exact token IDs and token logprobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenCaptureSupport {
+    #[serde(default)]
+    pub exact_tokens_supported: bool,
+    #[serde(default)]
+    pub logprobs_supported: bool,
+}
+
+impl TokenCaptureSupport {
+    pub const UNSUPPORTED: Self = Self {
+        exact_tokens_supported: false,
+        logprobs_supported: false,
+    };
+}
+
 /// Streaming behavior requested by a caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -622,6 +639,23 @@ pub trait LlmProvider: Send + Sync {
         self.stream_support_for_model(_requested_model).is_native()
     }
 
+    /// Whether this provider can return exact token/logprob trajectory data.
+    ///
+    /// Providers must only return `true` for data exposed by the upstream API.
+    /// Synthetic stream chunks, word splitting, and local approximations must keep
+    /// these flags false.
+    fn token_capture_support(&self) -> TokenCaptureSupport {
+        TokenCaptureSupport::UNSUPPORTED
+    }
+
+    /// Whether this provider can return exact token/logprob data for a request model.
+    fn token_capture_support_for_model(
+        &self,
+        _requested_model: Option<&str>,
+    ) -> TokenCaptureSupport {
+        self.token_capture_support()
+    }
+
     /// List available models from the provider.
     /// Default implementation returns empty list.
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -757,11 +791,20 @@ mod tests {
 
     struct StreamPolicyTestProvider {
         support: StreamSupport,
+        token_support: TokenCaptureSupport,
     }
 
     impl StreamPolicyTestProvider {
         fn new(support: StreamSupport) -> Self {
-            Self { support }
+            Self {
+                support,
+                token_support: TokenCaptureSupport::UNSUPPORTED,
+            }
+        }
+
+        fn with_token_capture_support(mut self, token_support: TokenCaptureSupport) -> Self {
+            self.token_support = token_support;
+            self
         }
     }
 
@@ -809,6 +852,31 @@ mod tests {
         fn stream_support(&self) -> StreamSupport {
             self.support
         }
+
+        fn token_capture_support(&self) -> TokenCaptureSupport {
+            self.token_support
+        }
+    }
+
+    #[test]
+    fn token_capture_support_defaults_to_unsupported_and_can_be_declared() {
+        let default_provider = StreamPolicyTestProvider::new(StreamSupport::Native);
+        assert_eq!(
+            default_provider.token_capture_support(),
+            TokenCaptureSupport::UNSUPPORTED
+        );
+
+        let exact_provider = StreamPolicyTestProvider::new(StreamSupport::Native)
+            .with_token_capture_support(TokenCaptureSupport {
+                exact_tokens_supported: true,
+                logprobs_supported: true,
+            });
+        assert!(
+            exact_provider
+                .token_capture_support()
+                .exact_tokens_supported
+        );
+        assert!(exact_provider.token_capture_support().logprobs_supported);
     }
 
     #[test]

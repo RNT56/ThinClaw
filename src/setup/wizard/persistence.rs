@@ -97,6 +97,12 @@ impl SetupWizard {
         if self.settings.onboard_completed {
             env_vars.push(("ONBOARD_COMPLETED", "true".to_string()));
         }
+        if let Some(profile) = self.selected_profile.runtime_profile_env_value() {
+            env_vars.push(("THINCLAW_RUNTIME_PROFILE", profile.to_string()));
+            if self.selected_profile.is_headless_remote() {
+                env_vars.push(("THINCLAW_HEADLESS", "true".to_string()));
+            }
+        }
 
         // Signal channel env vars (chicken-and-egg: config resolves before DB).
         if let Some(ref url) = self.settings.channels.signal_http_url {

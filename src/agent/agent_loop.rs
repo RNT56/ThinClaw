@@ -30,7 +30,7 @@ use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::LlmProvider;
+use crate::llm::{LlmProvider, TokenCaptureSupport};
 use crate::safety::SafetyLayer;
 use crate::sandbox_jobs::SandboxChildRegistry;
 use crate::skills::SkillRegistry;
@@ -254,6 +254,16 @@ impl Agent {
 
     pub(super) fn llm(&self) -> &Arc<dyn LlmProvider> {
         &self.deps.llm
+    }
+
+    /// Report exact token/logprob capture support for the active LLM provider.
+    pub fn llm_token_capture_support(&self) -> TokenCaptureSupport {
+        self.deps.llm.token_capture_support()
+    }
+
+    /// Stable provider/model label for trajectory metadata.
+    pub fn llm_provider_name(&self) -> String {
+        self.deps.llm.model_name().to_string()
     }
 
     pub(super) fn safety(&self) -> &Arc<SafetyLayer> {

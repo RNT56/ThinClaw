@@ -14,6 +14,60 @@ and development boxes. For Raspberry Pi OS Lite, use
 | Raspberry Pi OS Lite 64-bit | [raspberry-pi-os-lite.md](raspberry-pi-os-lite.md) |
 | Remote Scrappy access | [remote-access.md](remote-access.md) |
 
+## Prerequisites
+
+Required for release install:
+
+- Linux on a supported release target
+- shell access as the operator user
+- `curl` with TLS access to GitHub Releases
+- a writable install location in `PATH`
+
+Required for source builds:
+
+- C/C++ build tools
+- `pkg-config`
+- `curl`, Git, and CA certificates
+- Rust 1.92+ through `rustup`
+- `wasm32-wasip2` if you are building WASM extensions or bundled channel/tool artifacts
+
+Debian/Ubuntu baseline:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential curl git pkg-config ca-certificates
+```
+
+Fedora baseline:
+
+```bash
+sudo dnf install -y gcc gcc-c++ make curl git pkg-config ca-certificates
+```
+
+Required for `systemd --user` service mode:
+
+- a normal user login session with `pam_systemd`
+- `systemctl --user` reachable for the operator account
+- onboarding completed under the same account
+- persisted gateway/provider settings before service start
+
+Optional feature prerequisites:
+
+- Docker Engine and Compose V2 for Docker sandbox jobs, Docker Chromium fallback, or Compose deployment
+- Chrome, Chromium, Brave, or Edge for local browser automation
+- `ffmpeg` for richer audio/video media handling
+- device permissions for camera and microphone tools
+- Tailscale, Cloudflare Tunnel, ngrok, or another tunnel for remote webhook URLs
+- GNOME on X11 plus the desktop packages listed in [../DESKTOP_AUTONOMY.md](../DESKTOP_AUTONOMY.md) for Linux desktop autonomy
+- `libasound2-dev` when compiling with the optional `voice` feature
+
+Verify after install:
+
+```bash
+thinclaw doctor --profile server
+thinclaw status --profile server
+```
+
 ## Fast Local Install
 
 ```bash
@@ -60,6 +114,7 @@ sudo apt-get update
 sudo apt-get install -y build-essential curl git pkg-config ca-certificates
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
+rustup target add wasm32-wasip2
 
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
@@ -73,6 +128,7 @@ Fedora:
 sudo dnf install -y gcc gcc-c++ make curl git pkg-config ca-certificates
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
+rustup target add wasm32-wasip2
 
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw

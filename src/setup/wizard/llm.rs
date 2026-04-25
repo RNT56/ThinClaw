@@ -1904,7 +1904,8 @@ impl SetupWizard {
             }
             super::OnboardingProfile::Balanced
             | super::OnboardingProfile::ChannelFirst
-            | super::OnboardingProfile::RemoteServer => {
+            | super::OnboardingProfile::RemoteServer
+            | super::OnboardingProfile::PiOsLite64 => {
                 Some(crate::settings::RoutingMode::CheapSplit)
             }
             super::OnboardingProfile::CustomAdvanced => None,

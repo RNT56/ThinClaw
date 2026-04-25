@@ -57,6 +57,29 @@ fn execute_code_registration_mode(
     }
 }
 
+fn desktop_autonomy_headless_blocker() -> Option<&'static str> {
+    let runtime_profile = std::env::var("THINCLAW_RUNTIME_PROFILE").unwrap_or_default();
+    desktop_autonomy_headless_blocker_for(
+        runtime_profile.trim(),
+        crate::platform::env_flag_enabled("THINCLAW_HEADLESS"),
+    )
+}
+
+fn desktop_autonomy_headless_blocker_for(
+    runtime_profile: &str,
+    headless_enabled: bool,
+) -> Option<&'static str> {
+    let normalized_profile = runtime_profile
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    match normalized_profile.as_str() {
+        "pi" | "pi-os-lite" | "pi-os-lite-64" | "raspberry-pi-os-lite" => Some("pi-os-lite-64"),
+        _ if headless_enabled => Some("headless"),
+        _ => None,
+    }
+}
+
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
 pub struct AppComponents {
@@ -962,15 +985,26 @@ impl AppBuilder {
         }
 
         // Register host device tools only after explicit user opt-in.
+        let desktop_autonomy_blocker = desktop_autonomy_headless_blocker();
         let screen_capture_enabled = crate::platform::env_flag_enabled("SCREEN_CAPTURE_ENABLED");
         let reckless_desktop_capture = self.config.desktop_autonomy.is_reckless_enabled()
-            && self.config.desktop_autonomy.capture_evidence;
+            && self.config.desktop_autonomy.capture_evidence
+            && desktop_autonomy_blocker.is_none();
         if self.config.agent.allow_local_tools
+            && desktop_autonomy_blocker.is_none()
             && (screen_capture_enabled || reckless_desktop_capture)
         {
             use crate::tools::builtin::ScreenCaptureTool;
             tools.register_sync(Arc::new(ScreenCaptureTool::new()));
             tracing::info!("Registered screen capture tool (enabled via user toggle)");
+        } else if self.config.agent.allow_local_tools
+            && screen_capture_enabled
+            && desktop_autonomy_blocker.is_some()
+        {
+            tracing::warn!(
+                runtime_profile = desktop_autonomy_blocker.unwrap_or("unknown"),
+                "Screen capture requested but blocked by headless runtime profile"
+            );
         }
         if self.config.agent.allow_local_tools
             && crate::platform::env_flag_enabled("CAMERA_CAPTURE_ENABLED")
@@ -993,7 +1027,9 @@ impl AppBuilder {
             tracing::info!("Registered location tool (enabled via user toggle)");
         }
 
-        let _desktop_autonomy_manager = if self.config.desktop_autonomy.is_reckless_enabled() {
+        let _desktop_autonomy_manager = if self.config.desktop_autonomy.is_reckless_enabled()
+            && desktop_autonomy_blocker.is_none()
+        {
             let manager = Arc::new(crate::desktop_autonomy::DesktopAutonomyManager::new(
                 self.config.desktop_autonomy.clone(),
                 Some(self.config.database.clone()),
@@ -1007,6 +1043,12 @@ impl AppBuilder {
             );
             Some(manager)
         } else {
+            if self.config.desktop_autonomy.is_reckless_enabled() {
+                tracing::warn!(
+                    runtime_profile = desktop_autonomy_blocker.unwrap_or("unknown"),
+                    "Desktop autonomy requested but blocked by headless runtime profile"
+                );
+            }
             crate::desktop_autonomy::install_global_manager(None);
             None
         };
@@ -1712,5 +1754,22 @@ mod tests {
             execute_code_registration_mode("unrestricted", false),
             RuntimeExecRegistrationMode::LocalHost
         );
+    }
+
+    #[test]
+    fn pi_os_lite_runtime_blocks_desktop_autonomy_registration() {
+        assert_eq!(
+            desktop_autonomy_headless_blocker_for("pi-os-lite-64", false),
+            Some("pi-os-lite-64")
+        );
+        assert_eq!(
+            desktop_autonomy_headless_blocker_for("raspberry-pi-os-lite", false),
+            Some("pi-os-lite-64")
+        );
+        assert_eq!(
+            desktop_autonomy_headless_blocker_for("remote", true),
+            Some("headless")
+        );
+        assert_eq!(desktop_autonomy_headless_blocker_for("remote", false), None);
     }
 }

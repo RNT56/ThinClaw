@@ -29,6 +29,38 @@ Not supported:
 Use Gmail for mail and BlueBubbles for iMessage-compatible messaging through a
 Mac-hosted BlueBubbles server.
 
+## Prerequisites
+
+Required host shape:
+
+- Raspberry Pi 4/5 or another ARM64 Pi-class host
+- Raspberry Pi OS Lite 64-bit Bookworm
+- SSH or local shell access
+- `sudo`
+- `systemd`
+- `curl`, `tar`, and CA certificates
+- `openssl` for the token-generation examples, or another secure random-token generator
+- port `3000` reachable only through the access method you choose
+
+Recommended:
+
+- 4 GB RAM or more for `full` plus Docker
+- additional swap before large on-device source builds
+- release artifact or GHCR image for production installs instead of on-device builds
+
+Optional feature prerequisites:
+
+- Docker Engine and Compose V2 for container deployment, Docker sandbox jobs, or Docker Chromium fallback
+- Tailscale for private access without an SSH tunnel
+- public HTTPS tunnel only when webhook providers require callbacks
+- explicitly configured local browser or Docker Chromium fallback for browser automation
+
+Not supported on Pi OS Lite:
+
+- reckless desktop autonomy
+- GNOME/X11 desktop action stack
+- native Apple Mail and native iMessage channels
+
 ## Readiness
 
 Check readiness with:
@@ -44,9 +76,9 @@ channel.
 For an interactive first-run setup on the Pi instead of the root installer path:
 
 ```bash
-thinclaw onboard --profile remote
+thinclaw onboard --profile pi-os-lite-64
 thinclaw gateway access
-thinclaw doctor --profile remote
+thinclaw doctor --profile pi-os-lite-64
 ```
 
 ## Native Release Install
@@ -186,6 +218,7 @@ sudo apt-get update
 sudo apt-get install -y build-essential curl git pkg-config ca-certificates
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 . "$HOME/.cargo/env"
+rustup target add wasm32-wasip2
 
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
@@ -241,7 +274,9 @@ webhook tunnels, use [remote-access.md](remote-access.md).
 - Keep the default `GATEWAY_PORT=3000` unless you intentionally change it.
 - 4 GB RAM or more is recommended for `full` plus Docker.
 - Increase swap before large on-device source builds.
-- Browser automation on Lite needs Docker Chromium fallback or an explicitly configured local browser.
+- Browser automation on Lite needs Docker Chromium fallback (`CHROMIUM_IMAGE=chromedp/headless-shell:latest` by default) or an explicitly configured local browser.
+- Use `thinclaw onboard --profile pi-os-lite-64` for interactive setup on-device.
+- Native installs write `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and `THINCLAW_HEADLESS=true`; with those markers, reckless desktop autonomy tools are blocked at runtime even if misconfigured.
 - Keep `DESKTOP_AUTONOMY_ENABLED=false` on Pi OS Lite.
 
 For the full command surface after deployment, use

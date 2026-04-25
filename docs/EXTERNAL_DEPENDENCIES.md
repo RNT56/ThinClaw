@@ -316,7 +316,7 @@ should use `BROWSER_EXECUTABLE`.
 
 ### Docker Chromium (headless)
 
-**What it does:** When no local browser is found (or on headless servers), ThinClaw automatically starts a Docker container with Chromium + Xvfb for browser automation.
+**What it does:** When no local browser is found (or on headless servers), ThinClaw automatically starts a Docker container with headless Chromium for browser automation.
 
 **Prerequisites:** Docker Desktop on Windows, or Docker on macOS/Linux (see [Docker section](#docker))
 
@@ -327,9 +327,14 @@ should use `BROWSER_EXECUTABLE`.
 # always: force Docker Chromium even if a local binary exists
 # never: disable Docker Chromium fallback
 BROWSER_DOCKER=auto
+CHROMIUM_IMAGE=chromedp/headless-shell:latest
 ```
 
-The `BrowserTool` handles the container lifecycle automatically (start, health-check, stop).
+The default image is public and multi-arch (`linux/amd64` and `linux/arm64`).
+Set `CHROMIUM_IMAGE` only if you operate an internal CDP-capable Chromium image.
+The `BrowserTool` handles the container lifecycle automatically (pull, start,
+health-check, stop), and `thinclaw doctor` verifies that the image is local or
+pullable before reporting the fallback as ready.
 
 ---
 
@@ -358,6 +363,8 @@ Pi OS Lite native service defaults:
 
 ```env
 THINCLAW_HOME=/var/lib/thinclaw/.thinclaw
+THINCLAW_RUNTIME_PROFILE=pi-os-lite-64
+THINCLAW_HEADLESS=true
 DATABASE_BACKEND=libsql
 LIBSQL_PATH=/var/lib/thinclaw/.thinclaw/thinclaw.db
 GATEWAY_HOST=0.0.0.0
@@ -365,6 +372,11 @@ GATEWAY_PORT=3000
 THINCLAW_ALLOW_ENV_MASTER_KEY=1
 DESKTOP_AUTONOMY_ENABLED=false
 ```
+
+The `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and `THINCLAW_HEADLESS=true`
+markers are runtime guards: desktop autonomy tools are not registered under
+that profile, so Pi OS Lite remains a remote/headless setup rather than a
+GNOME/X11-style desktop automation host.
 
 Optional Pi packages:
 
@@ -385,6 +397,7 @@ Important Linux env vars:
 ```env
 BROWSER_EXECUTABLE=/usr/bin/google-chrome-stable
 BROWSER_DOCKER=auto
+CHROMIUM_IMAGE=chromedp/headless-shell:latest
 SCREEN_CAPTURE_ENABLED=false
 CAMERA_CAPTURE_ENABLED=false
 TALK_MODE_ENABLED=false
@@ -751,15 +764,16 @@ Caddy **automatically** provisions and renews TLS certificates from Let's Encryp
 
 These are only needed if you **compile ThinClaw from source**:
 
-| Dependency | Purpose | Install (macOS) | Install (Linux) |
-|-----------|---------|-----------------|-----------------|
-| Xcode CLI Tools | C compiler, linker | `xcode-select --install` | N/A |
-| build-essential | C compiler + pkg-config | N/A | `sudo apt install build-essential pkg-config` |
-| Rust 1.92+ | Rust compiler | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | Same |
-| wasm32-wasip2 target | WASM compilation | `rustup target add wasm32-wasip2` | Same |
-| wasm-tools | WASM component model | `cargo install wasm-tools --locked` | Same |
-| cargo-component | Build WASM extensions | `cargo install cargo-component --locked` | Same |
-| Git | Clone the repo | Pre-installed | `apt install git` |
+| Dependency | Purpose | macOS | Linux | Windows / WSL |
+|-----------|---------|-------|-------|---------------|
+| Xcode CLI Tools | C compiler, linker | `xcode-select --install` | N/A | N/A |
+| C/C++ build tools | Native dependency compilation | Xcode CLI Tools | `sudo apt install build-essential pkg-config` or distro equivalent | Use WSL and Linux packages for the supported Linux-style source path |
+| Rust 1.92+ | Rust compiler | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | Same | Install inside WSL for Linux-style builds |
+| wasm32-wasip2 target | WASM compilation | `rustup target add wasm32-wasip2` | Same | Same inside WSL |
+| wasm-tools | WASM component model | `cargo install wasm-tools --locked` | Same | Same inside WSL |
+| cargo-component | Build WASM extensions | `cargo install cargo-component --locked` | Same | Same inside WSL |
+| Git | Clone the repo | Pre-installed or Xcode CLI Tools | `sudo apt install git` or distro equivalent | Git for Windows or Git inside WSL |
+| CA certificates and curl | Fetch installers/dependencies | Built in on most hosts | `sudo apt install ca-certificates curl` or distro equivalent | Built in PowerShell for release installs; install inside WSL for source builds |
 
 **One-click setup scripts** (install all build dependencies automatically):
 
@@ -777,6 +791,10 @@ These are only needed if you **compile ThinClaw from source**:
 Linux note: the core ThinClaw build now uses Rustls and does not require OpenSSL
 development headers. If you enable the optional `voice` feature, also install
 `libasound2-dev` so `cpal` can link against ALSA.
+
+Windows native source builds are not the primary documented path. Prefer the MSI
+or portable ZIP for native Windows, or use WSL 2 and follow the Linux source
+build instructions when you need a development build on a Windows machine.
 
 ---
 

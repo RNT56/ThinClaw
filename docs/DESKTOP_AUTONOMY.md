@@ -85,6 +85,32 @@ Linux dedicated-user creation/session ownership is disabled for this release and
 reports `unsupported_deployment_mode`. Use `whole_machine_admin` from a logged-in
 GNOME on X11 session instead.
 
+## Platform Prerequisites
+
+Desktop autonomy requires a real interactive desktop session. It is not a
+headless-server feature.
+
+| Platform | Required Before Bootstrap | Verify With |
+|---|---|---|
+| macOS | Logged-in GUI session, Calendar, Numbers, Pages, TextEdit, privacy/accessibility permissions approved for the ThinClaw launcher/session, secure store access | `thinclaw doctor`, `autonomy_control bootstrap` |
+| Windows | Logged-in interactive session, Outlook, Excel, Word, Notepad or compatible local apps, PowerShell/COM access, service/session launcher access, secure store access | `thinclaw doctor`, `autonomy_control bootstrap` |
+| Linux | GNOME on X11, DBus session, AT-SPI accessibility bus, LibreOffice, Evolution, OCR/screenshot tools, Python GI/pyatspi modules | `thinclaw doctor --profile desktop-gnome` |
+
+Dedicated-user mode additionally requires:
+
+- `desktop_autonomy.target_username`
+- a real GUI login for that user
+- one-time permission approval inside that user's session
+- platform secure-store access for generated secrets
+
+Desktop autonomy should stay disabled on:
+
+- Raspberry Pi OS Lite
+- headless Linux servers
+- Linux Wayland-only sessions
+- accounts where the operator cannot approve accessibility/privacy prompts
+- machines where host-level app/UI/screen control is not intentionally granted
+
 Linux GNOME/X11 readiness:
 
 ```bash

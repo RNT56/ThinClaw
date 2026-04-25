@@ -17,16 +17,6 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/self--hosted-operator--owned-2ea44f?style=flat-square" alt="Self-hosted and operator-owned" />
-  &nbsp;
-  <img src="https://img.shields.io/badge/runtime-Rust-b7410e?style=flat-square" alt="Rust runtime" />
-  &nbsp;
-  <img src="https://img.shields.io/badge/extensions-WASM%20%2B%20MCP-8250df?style=flat-square" alt="WASM and MCP extensions" />
-  &nbsp;
-  <img src="https://img.shields.io/badge/surfaces-CLI%20%2F%20TUI%20%2F%20WebUI-1f883d?style=flat-square" alt="CLI, TUI, and WebUI" />
-</p>
-
-<p align="center">
   <a href="#quick-start"><img src="https://img.shields.io/badge/Quick_Start-2ea44f?style=flat-square" alt="Quick Start" /></a>&nbsp;
   <a href="#why-thinclaw"><img src="https://img.shields.io/badge/Why_ThinClaw-8250df?style=flat-square" alt="Why ThinClaw" /></a>&nbsp;
   <a href="#core-capabilities"><img src="https://img.shields.io/badge/Capabilities-0969da?style=flat-square" alt="Capabilities" /></a>&nbsp;

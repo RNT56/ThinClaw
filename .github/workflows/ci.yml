@@ -129,6 +129,12 @@ jobs:
         run: cargo test --features full --bin thinclaw --test host_runtime_smoke --no-run
       - name: Host runtime smoke
         run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+      - name: Pi OS Lite headless runtime smoke
+        env:
+          THINCLAW_RUNTIME_PROFILE: pi-os-lite-64
+          THINCLAW_HEADLESS: "true"
+          DESKTOP_AUTONOMY_ENABLED: "false"
+        run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
 
   macos-host-regression:
     name: macOS Host Regression

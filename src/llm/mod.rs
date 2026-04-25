@@ -49,9 +49,9 @@ pub use failover::{
 pub use prompt_stack::{PromptLayer, PromptStack};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
-    Role, StreamChunk, StreamChunkStream, StreamPolicy, StreamSupport, ThinkingConfig, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
-    sanitize_tool_messages,
+    Role, StreamChunk, StreamChunkStream, StreamPolicy, StreamSupport, ThinkingConfig,
+    TokenCaptureSupport, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
+    ToolResult, sanitize_tool_messages,
 };
 pub use provider_factory::{build_provider_chain, create_llm_provider};
 pub use reasoning::{

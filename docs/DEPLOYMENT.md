@@ -45,8 +45,36 @@ cargo build --release --features full
 docker compose pull thinclaw
 ```
 
-Keep `DESKTOP_AUTONOMY_ENABLED=false` on Pi OS Lite. The detailed native and
+Use `thinclaw onboard --profile pi-os-lite-64` for interactive Pi setup. Keep
+`DESKTOP_AUTONOMY_ENABLED=false` on Pi OS Lite; the native installer also writes
+`THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and `THINCLAW_HEADLESS=true`, which
+block desktop autonomy tool registration at runtime. The detailed native and
 Docker paths live in [deploy/raspberry-pi-os-lite.md](deploy/raspberry-pi-os-lite.md).
+
+## Deployment Prerequisites Matrix
+
+Use this as the high-level checklist before choosing a runbook. Platform pages
+below repeat the prerequisites that matter for that host.
+
+| Deployment Shape | Required Before You Start | Optional / Feature-Specific |
+|---|---|---|
+| Release install on macOS or Linux | `curl`, TLS access to GitHub Releases, normal user shell, writable install target in `PATH` | Chrome/Brave/Edge for local browser automation; Docker for sandbox jobs or Docker Chromium fallback; Tailscale/tunnel provider for remote access |
+| Release install on Windows | MSI or portable ZIP from GitHub Releases, PowerShell, writable install location in `PATH` | Docker Desktop for sandbox jobs or Docker Chromium fallback; Chrome/Edge/Brave for local browser automation; `ffmpeg` for media capture/processing |
+| Source build on macOS | Xcode Command Line Tools, Rust 1.92+, `wasm32-wasip2` target, Git | `wasm-tools`/`cargo-component` for building WASM extensions; Docker for sandbox jobs; optional feature dependencies from [EXTERNAL_DEPENDENCIES.md](EXTERNAL_DEPENDENCIES.md) |
+| Source build on Linux | C/C++ build tools, `pkg-config`, `curl`, Git, Rust 1.92+ | `wasm32-wasip2` for WASM extension builds; `libasound2-dev` when enabling `voice`; Docker, browser, and desktop packages as needed |
+| Native service on macOS | Completed onboarding, launchd-capable logged-in user, secrets available to that user | Remote profile for SSH-managed Mac Mini hosts; Tailscale/private network for remote WebUI |
+| Native service on Windows | Completed onboarding under the service account, Windows Service Control Manager access, secrets available to that account | Persist gateway/env settings before service mode; Docker Desktop and browser/media dependencies as needed |
+| Linux `systemd --user` service | Completed onboarding, user systemd session with `pam_systemd`, `systemctl --user` reachable | Linger/session management if the service must survive logout; system-level service pattern from the Pi runbook when needed |
+| Pi OS Lite native system service | Raspberry Pi OS Lite 64-bit Bookworm, ARM64 release binary or local build, `sudo`, `systemd`, `curl`, `tar`, token generation via `openssl` or `/dev/urandom` | Docker for sandbox/browser fallback; Tailscale for private network access; more swap for on-device source builds |
+| Docker Compose deployment | Docker Engine/Desktop running, Compose V2, repo checkout or deploy assets, network access to GHCR or build context, `GATEWAY_AUTH_TOKEN` | PostgreSQL Compose profile; systemd wrapper; Docker Chromium fallback; firewall/Tailscale exposure |
+| Remote WebUI over SSH | SSH access to the host, gateway enabled, auth token, local port forward | No public inbound port needed; not sufficient for public webhooks |
+| Remote LAN/Tailscale access | Gateway bound to reachable interface, auth token, private network or tailnet route | Firewall rules, Tailscale CLI, Tailscale Funnel/Serve depending on access mode |
+| Public webhook tunnel | Public HTTPS URL, provider token/binary for Tailscale Funnel, ngrok, Cloudflare Tunnel, or custom tunnel | DNS, TLS, proxy auth, rate limits, and firewall policy owned by the operator |
+| Desktop autonomy | Interactive GUI session, platform desktop apps, platform permissions/accessibility approvals, `desktop_autonomy.profile = "reckless_desktop"` | Dedicated-user mode on macOS/Windows; Linux GNOME/X11 packages; emergency stop path and bootstrap checks |
+
+Core ThinClaw can start without optional external tools. Optional features simply
+stay unavailable until their dependencies are installed and configured. The
+complete optional dependency catalog is [EXTERNAL_DEPENDENCIES.md](EXTERNAL_DEPENDENCIES.md).
 
 ## Platform Capability Matrix
 
@@ -115,8 +143,10 @@ feature was not built or is unavailable on the current host.
 | Health check | `thinclaw status` |
 | Dependency probe | `thinclaw doctor` |
 | Linux server readiness | `thinclaw doctor --profile server` |
+| Remote/headless readiness | `thinclaw doctor --profile remote` |
 | Linux desktop readiness | `thinclaw doctor --profile desktop-gnome` |
 | Pi OS Lite readiness | `thinclaw doctor --profile pi-os-lite-64` |
+| All optional Linux feature readiness | `thinclaw doctor --profile all-features` |
 | Manage config | `thinclaw config list`, `get`, `set` |
 | Manage secrets | `thinclaw secrets status`, `list`, `set`, `delete` |
 | Inspect providers/models | `thinclaw models` |

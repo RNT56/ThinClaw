@@ -204,7 +204,7 @@ impl SetupWizard {
                         "Recommended: libSQL unless you already need shared PostgreSQL infrastructure.",
                     );
                 }
-                super::OnboardingProfile::RemoteServer => {
+                super::OnboardingProfile::RemoteServer | super::OnboardingProfile::PiOsLite64 => {
                     print_success(
                         "Recommended: libSQL local file. Remote/headless hosts should avoid requiring a separate database before the service starts.",
                     );

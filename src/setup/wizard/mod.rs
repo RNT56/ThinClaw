@@ -213,7 +213,7 @@ impl SetupWizard {
     }
 
     pub(super) fn primary_runtime_command(&self) -> &'static str {
-        if matches!(self.selected_profile, OnboardingProfile::RemoteServer) {
+        if self.selected_profile.is_headless_remote() {
             return "thinclaw run --no-onboard";
         }
         match self.runtime_ui_mode() {
@@ -223,11 +223,14 @@ impl SetupWizard {
     }
 
     pub(super) fn runtime_handoff_summary(&self) -> String {
-        if matches!(self.selected_profile, OnboardingProfile::RemoteServer) {
+        if self.selected_profile.is_headless_remote() {
             return if self.should_continue_to_runtime() {
-                "ThinClaw will now continue into `thinclaw run --no-onboard` with the service-safe remote runtime settings from this run.".to_string()
+                format!(
+                    "ThinClaw will now continue into `thinclaw run --no-onboard` with the service-safe {} runtime settings from this run.",
+                    self.selected_profile.title()
+                )
             } else {
-                "Settings are saved. Start the remote runtime with `thinclaw run --no-onboard` or install/start the OS service.".to_string()
+                "Settings are saved. Start the headless runtime with `thinclaw run --no-onboard` or install/start the OS service.".to_string()
             };
         }
         if self.should_continue_to_runtime() {
@@ -242,16 +245,27 @@ impl SetupWizard {
     }
 
     pub(super) fn what_next_commands(&self) -> Vec<String> {
-        if matches!(self.selected_profile, OnboardingProfile::RemoteServer) {
-            return vec![
+        if self.selected_profile.is_headless_remote() {
+            let mut commands = vec![
                 "Service-safe runtime: thinclaw run --no-onboard".to_string(),
                 "Install OS service: thinclaw service install".to_string(),
                 "Start OS service: thinclaw service start".to_string(),
                 "Show WebUI access: thinclaw gateway access".to_string(),
                 "Show full token URL: thinclaw gateway access --show-token".to_string(),
-                "Remote diagnostics: thinclaw doctor --profile remote".to_string(),
-                "Reopen remote onboarding: thinclaw onboard --profile remote".to_string(),
             ];
+            if self.selected_profile == OnboardingProfile::PiOsLite64 {
+                commands
+                    .push("Pi diagnostics: thinclaw doctor --profile pi-os-lite-64".to_string());
+                commands.push(
+                    "Reopen Pi onboarding: thinclaw onboard --profile pi-os-lite-64".to_string(),
+                );
+            } else {
+                commands.push("Remote diagnostics: thinclaw doctor --profile remote".to_string());
+                commands.push(
+                    "Reopen remote onboarding: thinclaw onboard --profile remote".to_string(),
+                );
+            }
+            return commands;
         }
         let mut commands = vec![
             format!("Primary runtime: {}", self.primary_runtime_command()),
@@ -1302,6 +1316,7 @@ impl SetupWizard {
             "Builder & Coding    - bias for tools, coding, and stronger routing",
             "Channel-First       - prioritize reachability and notification setup",
             "Remote / SSH Host   - safe service runtime with WebUI access via SSH tunnel",
+            "Pi OS Lite 64-bit   - Raspberry Pi headless remote service, no desktop actions",
             "Custom / Advanced   - start neutral and tune each major choice directly",
         ];
         print_info("Choose the lane that best matches the system you want to leave setup with.");
@@ -1311,7 +1326,8 @@ impl SetupWizard {
             2 => OnboardingProfile::BuilderAndCoding,
             3 => OnboardingProfile::ChannelFirst,
             4 => OnboardingProfile::RemoteServer,
-            5 => OnboardingProfile::CustomAdvanced,
+            5 => OnboardingProfile::PiOsLite64,
+            6 => OnboardingProfile::CustomAdvanced,
             _ => OnboardingProfile::Balanced,
         };
 
@@ -1380,40 +1396,45 @@ impl SetupWizard {
                 }
                 self.settings.routines_enabled = true;
             }
-            OnboardingProfile::RemoteServer => {
-                self.settings.skills_enabled = true;
-                self.settings.observability_backend = "none".to_string();
-                self.settings.providers.smart_routing_enabled = true;
-                if self.settings.providers.routing_mode == crate::settings::RoutingMode::PrimaryOnly
-                {
-                    self.settings.providers.routing_mode = crate::settings::RoutingMode::CheapSplit;
-                }
-                self.settings.routines_enabled = true;
-                self.settings.heartbeat.enabled = false;
-                self.settings.channels.cli_enabled = Some(false);
-                self.settings.channels.gateway_enabled = Some(true);
-                let gateway_host = self.remote_gateway_host_or_loopback().to_string();
-                self.settings.channels.gateway_host = Some(gateway_host);
-                self.settings.channels.gateway_port =
-                    Some(self.settings.channels.gateway_port.unwrap_or(3000));
-                self.ensure_gateway_auth_token();
-                if self.settings.database_backend.is_none() {
-                    self.settings.database_backend = Some("libsql".to_string());
-                }
-                if self.settings.libsql_path.is_none() {
-                    self.settings.libsql_path = Some(
-                        crate::config::default_libsql_path()
-                            .to_string_lossy()
-                            .into_owned(),
-                    );
-                }
-                if self.settings.secrets_master_key_source == crate::settings::KeySource::Env {
-                    self.settings.secrets.allow_env_master_key = true;
-                    self.settings.secrets.master_key_source =
-                        crate::settings::SecretsMasterKeySource::Env;
-                }
-            }
+            OnboardingProfile::RemoteServer => self.apply_headless_remote_profile_defaults(false),
+            OnboardingProfile::PiOsLite64 => self.apply_headless_remote_profile_defaults(true),
             OnboardingProfile::CustomAdvanced => {}
+        }
+    }
+
+    fn apply_headless_remote_profile_defaults(&mut self, pi_os_lite: bool) {
+        self.settings.skills_enabled = true;
+        self.settings.observability_backend = "none".to_string();
+        self.settings.providers.smart_routing_enabled = true;
+        if self.settings.providers.routing_mode == crate::settings::RoutingMode::PrimaryOnly {
+            self.settings.providers.routing_mode = crate::settings::RoutingMode::CheapSplit;
+        }
+        self.settings.routines_enabled = true;
+        self.settings.heartbeat.enabled = false;
+        self.settings.channels.cli_enabled = Some(false);
+        self.settings.channels.gateway_enabled = Some(true);
+        let gateway_host = self.remote_gateway_host_or_loopback().to_string();
+        self.settings.channels.gateway_host = Some(gateway_host);
+        self.settings.channels.gateway_port =
+            Some(self.settings.channels.gateway_port.unwrap_or(3000));
+        self.ensure_gateway_auth_token();
+        if self.settings.database_backend.is_none() {
+            self.settings.database_backend = Some("libsql".to_string());
+        }
+        if self.settings.libsql_path.is_none() {
+            self.settings.libsql_path = Some(
+                crate::config::default_libsql_path()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        if self.settings.secrets_master_key_source == crate::settings::KeySource::Env {
+            self.settings.secrets.allow_env_master_key = true;
+            self.settings.secrets.master_key_source = crate::settings::SecretsMasterKeySource::Env;
+        }
+        if pi_os_lite {
+            self.settings.desktop_autonomy.enabled = false;
+            self.settings.desktop_autonomy.profile = crate::settings::DesktopAutonomyProfile::Off;
         }
     }
 
@@ -2430,6 +2451,31 @@ mod tests {
     }
 
     #[test]
+    fn test_pi_os_lite_profile_applies_headless_remote_defaults() {
+        let mut wizard = SetupWizard::new();
+        wizard.selected_profile = OnboardingProfile::PiOsLite64;
+        wizard.settings.desktop_autonomy.enabled = true;
+        wizard.settings.desktop_autonomy.profile =
+            crate::settings::DesktopAutonomyProfile::RecklessDesktop;
+
+        wizard.apply_profile_defaults();
+
+        assert_eq!(wizard.settings.channels.cli_enabled, Some(false));
+        assert_eq!(wizard.settings.channels.gateway_enabled, Some(true));
+        assert_eq!(
+            wizard.settings.channels.gateway_host.as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(wizard.settings.channels.gateway_port, Some(3000));
+        assert_eq!(wizard.settings.database_backend.as_deref(), Some("libsql"));
+        assert!(!wizard.settings.desktop_autonomy.enabled);
+        assert_eq!(
+            wizard.settings.desktop_autonomy.profile,
+            crate::settings::DesktopAutonomyProfile::Off
+        );
+    }
+
+    #[test]
     fn test_cli_supplied_remote_profile_is_preselected() {
         let wizard = SetupWizard::with_config(SetupConfig {
             profile: Some(OnboardingProfile::RemoteServer),
@@ -2456,6 +2502,25 @@ mod tests {
         assert!(content.contains("GATEWAY_HOST=\"127.0.0.1\""));
         assert!(content.contains("GATEWAY_PORT=\"3000\""));
         assert!(content.contains("GATEWAY_AUTH_TOKEN=\""));
+        assert!(content.contains("CLI_ENABLED=\"false\""));
+    }
+
+    #[test]
+    fn test_pi_os_lite_bootstrap_env_writes_headless_runtime_markers() {
+        let temp = tempdir().expect("temp thinclaw home");
+        let _guard = EnvGuard::set("THINCLAW_HOME", temp.path().to_string_lossy().into_owned());
+        let mut wizard = SetupWizard::new();
+        wizard.selected_profile = OnboardingProfile::PiOsLite64;
+        wizard.apply_profile_defaults();
+        wizard.settings.onboard_completed = true;
+
+        wizard.write_bootstrap_env().expect("write bootstrap env");
+
+        let env_path = temp.path().join(".env");
+        let content = std::fs::read_to_string(env_path).expect("read bootstrap env");
+        assert!(content.contains("THINCLAW_RUNTIME_PROFILE=\"pi-os-lite-64\""));
+        assert!(content.contains("THINCLAW_HEADLESS=\"true\""));
+        assert!(content.contains("GATEWAY_ENABLED=\"true\""));
         assert!(content.contains("CLI_ENABLED=\"false\""));
     }
 
