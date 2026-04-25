@@ -26,6 +26,8 @@
 //! ```
 
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -63,6 +65,21 @@ pub struct ContainerRunner {
     docker: Docker,
     image: String,
     proxy_port: u16,
+}
+
+fn container_user_for_workspace(working_dir: &Path) -> String {
+    #[cfg(unix)]
+    {
+        if let Ok(metadata) = std::fs::metadata(working_dir) {
+            let uid = metadata.uid();
+            let gid = metadata.gid();
+            if uid != 0 {
+                return format!("{uid}:{gid}");
+            }
+        }
+    }
+
+    "1000:1000".to_string()
 }
 
 impl ContainerRunner {
@@ -321,6 +338,8 @@ impl ContainerRunner {
             ..Default::default()
         };
 
+        let user = container_user_for_workspace(working_dir);
+
         let config = Config {
             image: Some(self.image.clone()),
             cmd: Some(vec![
@@ -331,7 +350,9 @@ impl ContainerRunner {
             working_dir: Some("/workspace".to_string()),
             env: Some(env_vec),
             host_config: Some(host_config),
-            user: Some("1000:1000".to_string()), // Non-root user
+            // Match the bind-mounted workspace owner on Unix so Linux CI and
+            // rootless Docker workspaces remain writable without using root.
+            user: Some(user),
             ..Default::default()
         };
 

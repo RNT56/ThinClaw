@@ -122,6 +122,7 @@ async fn wait_for_gateway_ready(child: &mut Child, port: u16) -> Result<(), Stri
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let health_url = format!("http://127.0.0.1:{port}/api/health");
     let status_url = format!("http://127.0.0.1:{port}/api/gateway/status?token={AUTH_TOKEN}");
+    let mut last_error: String;
 
     loop {
         if let Some(status) = child
@@ -134,35 +135,53 @@ async fn wait_for_gateway_ready(child: &mut Child, port: u16) -> Result<(), Stri
             ));
         }
 
-        if let Ok(response) = client.get(&health_url).send().await
-            && response.status().is_success()
-        {
-            let health: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|e| format!("failed to decode health response: {e}"))?;
-            if health.get("status") == Some(&serde_json::Value::String("healthy".to_string())) {
-                let status = client
-                    .get(&status_url)
-                    .send()
-                    .await
-                    .map_err(|e| format!("gateway status endpoint failed: {e}"))?;
-                if !status.status().is_success() {
-                    return Err(format!(
-                        "gateway status endpoint returned {}",
-                        status.status()
-                    ));
+        match client.get(&health_url).send().await {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<serde_json::Value>().await {
+                    Ok(health)
+                        if health.get("status")
+                            == Some(&serde_json::Value::String("healthy".to_string())) =>
+                    {
+                        match client.get(&status_url).send().await {
+                            Ok(status) if status.status().is_success() => {
+                                match status.json::<serde_json::Value>().await {
+                                    Ok(status_json) if status_json.get("uptime_secs").is_some() => {
+                                        return Ok(());
+                                    }
+                                    Ok(status_json) => {
+                                        last_error = format!(
+                                            "gateway status response missing uptime_secs: {status_json}"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        last_error = format!(
+                                            "failed to decode gateway status response: {e}"
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(status) => {
+                                last_error =
+                                    format!("gateway status endpoint returned {}", status.status());
+                            }
+                            Err(e) => {
+                                last_error = format!("gateway status endpoint failed: {e}");
+                            }
+                        }
+                    }
+                    Ok(health) => {
+                        last_error = format!("gateway health response not ready: {health}");
+                    }
+                    Err(e) => {
+                        last_error = format!("failed to decode health response: {e}");
+                    }
                 }
-                let status_json: serde_json::Value = status
-                    .json()
-                    .await
-                    .map_err(|e| format!("failed to decode gateway status response: {e}"))?;
-                if status_json.get("uptime_secs").is_some() {
-                    return Ok(());
-                }
-                return Err(format!(
-                    "gateway status response missing uptime_secs: {status_json}"
-                ));
+            }
+            Ok(response) => {
+                last_error = format!("gateway health endpoint returned {}", response.status());
+            }
+            Err(e) => {
+                last_error = format!("gateway health endpoint failed: {e}");
             }
         }
 
@@ -171,8 +190,8 @@ async fn wait_for_gateway_ready(child: &mut Child, port: u16) -> Result<(), Stri
             let _ = child.wait();
             let output = read_child_output(child);
             return Err(format!(
-                "gateway did not become ready within {:?}.\n{output}",
-                STARTUP_TIMEOUT
+                "gateway did not become ready within {:?}. Last observed error: {}.\n{output}",
+                STARTUP_TIMEOUT, last_error
             ));
         }
 
