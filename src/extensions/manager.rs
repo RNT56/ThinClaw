@@ -1251,7 +1251,8 @@ impl ExtensionManager {
         match fallback_decision(&primary_result, &entry.fallback_source) {
             FallbackDecision::Return => primary_result,
             FallbackDecision::TryFallback => {
-                let primary_err = primary_result.unwrap_err();
+                let primary_err =
+                    primary_result.expect_err("TryFallback requires primary install to fail");
                 let fallback = entry
                     .fallback_source
                     .as_ref()

@@ -11,11 +11,13 @@ use crate::agent::cost_guard::CostGuard;
 use crate::db::Database;
 use crate::error::LlmError;
 use crate::experiments::ExperimentModelUsageRecord;
-use crate::llm::cost_tracker::{CostEntry, CostTracker};
+use crate::llm::cost_tracker::{
+    CostEntry, CostSource, CostTracker, TokenCaptureCostSummary, TokenCountSource,
+};
 use crate::llm::costs;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamChunk,
-    StreamChunkStream, StreamSupport, TokenCaptureSupport, ToolCompletionRequest,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ProviderTokenCapture,
+    StreamChunk, StreamChunkStream, StreamSupport, TokenCaptureSupport, ToolCompletionRequest,
     ToolCompletionResponse,
 };
 
@@ -107,12 +109,28 @@ async fn record_usage(
     cost_usd: Option<f64>,
     input_tokens: u32,
     output_tokens: u32,
+    token_capture: Option<&ProviderTokenCapture>,
     latency_ms: Option<u64>,
     success: bool,
 ) {
     let model = resolve_model(fallback_model, provider_model);
-    let cost_usd =
-        cost_usd.unwrap_or_else(|| fallback_cost_usd(&model, input_tokens, output_tokens));
+    let cost_source = if !success {
+        CostSource::None
+    } else if cost_usd.is_some() {
+        CostSource::ProviderCost
+    } else {
+        CostSource::LocalPricingFallback
+    };
+    let cost_usd = if success {
+        cost_usd.unwrap_or_else(|| fallback_cost_usd(&model, input_tokens, output_tokens))
+    } else {
+        0.0
+    };
+    let token_count_source = if success {
+        TokenCountSource::ProviderUsage
+    } else {
+        TokenCountSource::None
+    };
     let (provider, model_name, route_key, logical_role) =
         usage_identity(metadata, &model, provider_model);
     let request_id = Some(uuid::Uuid::new_v4().to_string());
@@ -125,6 +143,9 @@ async fn record_usage(
         output_tokens,
         cost_usd,
         request_id,
+        token_count_source,
+        cost_source,
+        token_capture: token_capture.map(TokenCaptureCostSummary::from_capture),
     };
     tracker.lock().await.record(entry);
     if let Some(guard) = guard {
@@ -185,6 +206,7 @@ impl StreamUsageMode {
         cost_usd: Option<f64>,
         input_tokens: u32,
         output_tokens: u32,
+        token_capture: Option<&ProviderTokenCapture>,
         latency_ms: Option<u64>,
         success: bool,
     ) {
@@ -206,6 +228,7 @@ impl StreamUsageMode {
                     cost_usd,
                     input_tokens,
                     output_tokens,
+                    token_capture,
                     latency_ms,
                     success,
                 )
@@ -250,6 +273,7 @@ impl StreamUsageRecorder {
         cost_usd: Option<f64>,
         input_tokens: u32,
         output_tokens: u32,
+        token_capture: Option<&ProviderTokenCapture>,
         success: bool,
     ) {
         if self.recorded.swap(true, Ordering::AcqRel) {
@@ -261,6 +285,7 @@ impl StreamUsageRecorder {
                 cost_usd,
                 input_tokens,
                 output_tokens,
+                token_capture,
                 Some(self.started.elapsed().as_millis() as u64),
                 success,
             )
@@ -279,7 +304,7 @@ impl Drop for StreamUsageRecorder {
             return;
         };
         handle.spawn(async move {
-            mode.record(None, None, 0, 0, latency_ms, false).await;
+            mode.record(None, None, 0, 0, None, latency_ms, false).await;
         });
     }
 }
@@ -398,6 +423,7 @@ impl UsageTrackingProvider {
         cost_usd: Option<f64>,
         input_tokens: u32,
         output_tokens: u32,
+        token_capture: Option<&ProviderTokenCapture>,
         latency_ms: Option<u64>,
         success: bool,
     ) {
@@ -427,6 +453,7 @@ impl UsageTrackingProvider {
             cost_usd,
             input_tokens,
             output_tokens,
+            token_capture,
             latency_ms,
             success,
         )
@@ -456,6 +483,7 @@ impl LlmProvider for UsageTrackingProvider {
                     response.cost_usd,
                     response.input_tokens,
                     response.output_tokens,
+                    response.token_capture.as_ref(),
                     Some(started.elapsed().as_millis() as u64),
                     true,
                 )
@@ -469,6 +497,7 @@ impl LlmProvider for UsageTrackingProvider {
                     None,
                     0,
                     0,
+                    None,
                     Some(started.elapsed().as_millis() as u64),
                     false,
                 )
@@ -493,6 +522,7 @@ impl LlmProvider for UsageTrackingProvider {
                     response.cost_usd,
                     response.input_tokens,
                     response.output_tokens,
+                    response.token_capture.as_ref(),
                     Some(started.elapsed().as_millis() as u64),
                     true,
                 )
@@ -506,6 +536,7 @@ impl LlmProvider for UsageTrackingProvider {
                     None,
                     0,
                     0,
+                    None,
                     Some(started.elapsed().as_millis() as u64),
                     false,
                 )
@@ -530,6 +561,7 @@ impl LlmProvider for UsageTrackingProvider {
                     None,
                     0,
                     0,
+                    None,
                     Some(started.elapsed().as_millis() as u64),
                     false,
                 )
@@ -558,12 +590,14 @@ impl LlmProvider for UsageTrackingProvider {
                                 input_tokens,
                                 output_tokens,
                                 finish_reason,
+                                token_capture,
                             }) => {
                                 recorder.record(
                                     provider_model.clone(),
                                     cost_usd,
                                     input_tokens,
                                     output_tokens,
+                                    token_capture.as_ref(),
                                     true,
                                 ).await;
                                 yield Ok(StreamChunk::Done {
@@ -572,10 +606,11 @@ impl LlmProvider for UsageTrackingProvider {
                                     input_tokens,
                                     output_tokens,
                                     finish_reason,
+                                    token_capture,
                                 });
                             }
                             Err(error) => {
-                                recorder.record(None, None, 0, 0, false).await;
+                                recorder.record(None, None, 0, 0, None, false).await;
                                 yield Err(error);
                                 break;
                             }
@@ -607,12 +642,14 @@ impl LlmProvider for UsageTrackingProvider {
                         input_tokens,
                         output_tokens,
                         finish_reason,
+                        token_capture,
                     }) => {
                         recorder.record(
                             provider_model.clone(),
                             cost_usd,
                             input_tokens,
                             output_tokens,
+                            token_capture.as_ref(),
                             true,
                         )
                         .await;
@@ -622,10 +659,11 @@ impl LlmProvider for UsageTrackingProvider {
                             input_tokens,
                             output_tokens,
                             finish_reason,
+                            token_capture,
                         });
                     }
                     Err(error) => {
-                        recorder.record(None, None, 0, 0, false).await;
+                        recorder.record(None, None, 0, 0, None, false).await;
                         yield Err(error);
                         break;
                     }
@@ -651,6 +689,7 @@ impl LlmProvider for UsageTrackingProvider {
                     None,
                     0,
                     0,
+                    None,
                     Some(started.elapsed().as_millis() as u64),
                     false,
                 )
@@ -677,12 +716,14 @@ impl LlmProvider for UsageTrackingProvider {
                                 input_tokens,
                                 output_tokens,
                                 finish_reason,
+                                token_capture,
                             }) => {
                                 recorder.record(
                                     provider_model.clone(),
                                     cost_usd,
                                     input_tokens,
                                     output_tokens,
+                                    token_capture.as_ref(),
                                     true,
                                 ).await;
                                 yield Ok(StreamChunk::Done {
@@ -691,10 +732,11 @@ impl LlmProvider for UsageTrackingProvider {
                                     input_tokens,
                                     output_tokens,
                                     finish_reason,
+                                    token_capture,
                                 });
                             }
                             Err(error) => {
-                                recorder.record(None, None, 0, 0, false).await;
+                                recorder.record(None, None, 0, 0, None, false).await;
                                 yield Err(error);
                                 break;
                             }
@@ -726,12 +768,14 @@ impl LlmProvider for UsageTrackingProvider {
                         input_tokens,
                         output_tokens,
                         finish_reason,
+                        token_capture,
                     }) => {
                         recorder.record(
                             provider_model.clone(),
                             cost_usd,
                             input_tokens,
                             output_tokens,
+                            token_capture.as_ref(),
                             true,
                         )
                         .await;
@@ -741,10 +785,11 @@ impl LlmProvider for UsageTrackingProvider {
                             input_tokens,
                             output_tokens,
                             finish_reason,
+                            token_capture,
                         });
                     }
                     Err(error) => {
-                        recorder.record(None, None, 0, 0, false).await;
+                        recorder.record(None, None, 0, 0, None, false).await;
                         yield Err(error);
                         break;
                     }
@@ -836,6 +881,10 @@ mod tests {
         assert_eq!(summary.total_requests, 1);
         assert_eq!(summary.model_details.len(), 1);
         assert_eq!(summary.model_details[0].model, "openai/gpt-5.4-mini");
+        assert_eq!(summary.token_count_sources["provider_usage"], 1);
+        assert_eq!(summary.cost_sources["local_pricing_fallback"], 1);
+        assert_eq!(summary.model_details[0].provider_usage_requests, 1);
+        assert_eq!(summary.model_details[0].local_pricing_fallback_requests, 1);
         assert_eq!(guard.actions_this_hour().await, 1);
     }
 

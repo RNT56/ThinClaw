@@ -390,7 +390,7 @@ async fn add_server(
 
     let mut config = if is_stdio {
         // Stdio transport: command is required, url is ignored
-        let cmd = command.unwrap();
+        let cmd = command.expect("guarded by is_stdio = command.is_some()");
         let cmd_args = args.unwrap_or_default();
         let mut cfg = McpServerConfig::new_stdio(&name, &cmd, cmd_args);
 

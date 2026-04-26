@@ -932,11 +932,15 @@ fn split_message(text: &str) -> Vec<String> {
 
 /// Redact phone numbers and email addresses from log output.
 fn redact(text: &str) -> String {
-    // Phone: 7-15 digits, optional leading +
-    let phone_re = regex::Regex::new(r"\+?\d{7,15}")
-        .unwrap_or_else(|_| regex::Regex::new(r"NEVER_MATCH").unwrap());
-    let email_re = regex::Regex::new(r"[\w.+-]+@[\w-]+\.[\w.]+")
-        .unwrap_or_else(|_| regex::Regex::new(r"NEVER_MATCH").unwrap());
+    use std::sync::OnceLock;
+    static PHONE_RE: OnceLock<regex::Regex> = OnceLock::new();
+    static EMAIL_RE: OnceLock<regex::Regex> = OnceLock::new();
+
+    let phone_re = PHONE_RE
+        .get_or_init(|| regex::Regex::new(r"\+?\d{7,15}").expect("static phone regex is valid"));
+    let email_re = EMAIL_RE.get_or_init(|| {
+        regex::Regex::new(r"[\w.+-]+@[\w-]+\.[\w.]+").expect("static email regex is valid")
+    });
     let s = phone_re.replace_all(text, "[REDACTED]");
     email_re.replace_all(&s, "[REDACTED]").to_string()
 }

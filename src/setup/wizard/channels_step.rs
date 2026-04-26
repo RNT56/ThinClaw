@@ -820,10 +820,8 @@ impl SetupWizard {
             .unwrap_or_default();
 
         if !bundled_installed.is_empty() {
-            print_success(&format!(
-                "Installed bundled channels: {}",
-                bundled_result.as_ref().unwrap().join(", ")
-            ));
+            let names: Vec<&str> = bundled_installed.iter().map(|s| s.as_str()).collect();
+            print_success(&format!("Installed bundled channels: {}", names.join(", ")));
             any_installed = true;
         }
 

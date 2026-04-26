@@ -287,6 +287,7 @@ fn wrap_breaker_stream(
                     input_tokens,
                     output_tokens,
                     finish_reason,
+                    token_capture,
                 }) => {
                     finished = true;
                     record_success_state(&state, &config, &provider).await;
@@ -296,6 +297,7 @@ fn wrap_breaker_stream(
                         input_tokens,
                         output_tokens,
                         finish_reason,
+                        token_capture,
                     });
                 }
                 Err(error) => {
@@ -504,6 +506,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: crate::llm::FinishReason::Stop,
+                token_capture: None,
             })
         }
 
@@ -520,6 +523,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: crate::llm::FinishReason::Stop,
+                token_capture: None,
             })
         }
 

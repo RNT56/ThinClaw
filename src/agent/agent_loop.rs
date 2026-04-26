@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::agent::AgentRunDriver;
@@ -30,7 +31,7 @@ use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::{LlmProvider, TokenCaptureSupport};
+use crate::llm::{LlmProvider, ProviderTokenCapture, TokenCaptureSupport};
 use crate::safety::SafetyLayer;
 use crate::sandbox_jobs::SandboxChildRegistry;
 use crate::skills::SkillRegistry;
@@ -156,6 +157,11 @@ pub struct Agent {
     pub(super) agent_router: Arc<AgentRouter>,
     /// Sub-agent executor for parallel agentic loops.
     pub(super) subagent_executor: Option<Arc<SubagentExecutor>>,
+    /// Latest provider-native token/logprob capture by thread. This is kept out
+    /// of the persisted transcript because capture vectors can be large and are
+    /// primarily trajectory artifact data.
+    pub(super) latest_token_captures:
+        Arc<Mutex<std::collections::HashMap<Uuid, ProviderTokenCapture>>>,
 }
 
 impl Agent {
@@ -225,6 +231,7 @@ impl Agent {
             routine_config,
             agent_router,
             subagent_executor,
+            latest_token_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -264,6 +271,36 @@ impl Agent {
     /// Stable provider/model label for trajectory metadata.
     pub fn llm_provider_name(&self) -> String {
         self.deps.llm.model_name().to_string()
+    }
+
+    pub(super) async fn record_thread_token_capture(
+        &self,
+        thread_id: Uuid,
+        token_capture: Option<ProviderTokenCapture>,
+    ) {
+        let mut captures = self.latest_token_captures.lock().await;
+        if let Some(token_capture) = token_capture {
+            captures.insert(thread_id, token_capture);
+        } else {
+            captures.remove(&thread_id);
+        }
+    }
+
+    pub async fn latest_token_capture_for_message(
+        &self,
+        message: &IncomingMessage,
+    ) -> Option<ProviderTokenCapture> {
+        let identity = message.resolved_identity();
+        let (session, thread_id) = self
+            .session_manager
+            .resolve_thread_for_identity(&identity, &message.channel, message.thread_id.as_deref())
+            .await;
+        drop(session);
+        self.latest_token_captures
+            .lock()
+            .await
+            .get(&thread_id)
+            .cloned()
     }
 
     pub(super) fn safety(&self) -> &Arc<SafetyLayer> {
@@ -593,9 +630,9 @@ impl Agent {
         // is a safety net that catches leaked contexts: panicked cleanup tasks,
         // orphaned Completed/Stuck jobs, etc. Runs every 5 min.
         let job_context_pruning_handle = self.context_manager.spawn_pruner(
-            std::time::Duration::from_secs(300),        // check every 5 min
-            chrono::Duration::try_minutes(10).unwrap(), // prune terminal/completed jobs > 10 min old
-            chrono::Duration::try_minutes(30).unwrap(), // prune stuck jobs > 30 min old
+            std::time::Duration::from_secs(300), // check every 5 min
+            chrono::Duration::try_minutes(10).expect("10 minutes is a valid chrono::Duration"), // prune terminal/completed jobs > 10 min old
+            chrono::Duration::try_minutes(30).expect("30 minutes is a valid chrono::Duration"), // prune stuck jobs > 30 min old
         );
 
         // ── Memory hygiene background task ─────────────────────────────

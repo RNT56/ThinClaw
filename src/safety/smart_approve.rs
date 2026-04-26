@@ -179,6 +179,7 @@ impl LlmProvider for MockResponseProvider {
             input_tokens: 1,
             output_tokens: 1,
             finish_reason: crate::llm::FinishReason::Stop,
+            token_capture: None,
         })
     }
 

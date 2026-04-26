@@ -39,7 +39,7 @@ pub fn compose_seeded_soul(requested_pack: &str) -> Result<String, String> {
     let mut base = parse_canonical_soul(include_str!("../../assets/soul/base.md"))?;
     let pack = parse_pack_expression(pack_asset_markdown(seed_pack))?;
 
-    for key in ["Vibe", "Default Behaviors"] {
+    for key in ["Core Truths", "Boundaries", "Vibe", "Default Behaviors"] {
         if let Some(value) = pack.sections.get(key) {
             base.sections.insert(key.to_string(), value.clone());
         }
@@ -60,6 +60,7 @@ pub fn canonical_pack_name(requested_pack: &str) -> &'static str {
         "research_assistant" => "research_assistant",
         "mentor" => "mentor",
         "minimal" => "minimal",
+        "flow_state" => "flow_state",
         _ => "balanced",
     }
 }
@@ -73,6 +74,7 @@ pub fn pack_asset_markdown(pack: &str) -> &'static str {
         }
         "mentor" => include_str!("../../assets/personality_packs/mentor.md"),
         "minimal" => include_str!("../../assets/personality_packs/minimal.md"),
+        "flow_state" => include_str!("../../assets/personality_packs/flow_state.md"),
         _ => include_str!("../../assets/personality_packs/balanced.md"),
     }
 }
@@ -372,6 +374,35 @@ mod tests {
         assert!(soul.contains("- **Schema:** v2"));
         assert!(soul.contains("- **Seed Pack:** mentor"));
         assert!(soul.contains("## Core Truths"));
+    }
+
+    #[test]
+    fn seeded_soul_flow_state_includes_all_sections() {
+        let soul = compose_seeded_soul("flow_state").expect("seeded soul");
+        assert!(soul.contains("- **Seed Pack:** flow_state"));
+        assert!(soul.contains("## Core Truths"));
+        assert!(soul.contains("## Boundaries"));
+        assert!(soul.contains("## Vibe"));
+        assert!(soul.contains("## Default Behaviors"));
+        // Flow state overrides Core Truths with its own content
+        assert!(soul.contains("electric calm"));
+        // Flow state overrides Boundaries with its own content
+        assert!(soul.contains("entrusted context"));
+        // Flow state overrides Vibe
+        assert!(soul.contains("composed intensity"));
+        // Flow state overrides Default Behaviors
+        assert!(soul.contains("bring receipts"));
+    }
+
+    #[test]
+    fn seeded_soul_balanced_unchanged_by_extended_merge() {
+        // Existing packs only provide Vibe + Default Behaviors, so the
+        // extended merge list should not change their output.
+        let soul = compose_seeded_soul("balanced").expect("seeded soul");
+        // Balanced uses the base template's Core Truths (not overridden)
+        assert!(soul.contains("Be genuinely helpful"));
+        // Balanced uses the base template's Boundaries (not overridden)
+        assert!(soul.contains("Private things stay private"));
     }
 
     #[test]

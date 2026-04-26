@@ -206,15 +206,37 @@ def capture_screen(payload):
     path = payload.get("path") or str(
         Path(tempfile.gettempdir()) / f"thinclaw-screen-{int(time.time() * 1000)}.png"
     )
+    attempts = []
+    desktops = set(desktop_tokens())
+    spectacle_command = ["spectacle", "-b", "-n", "-o", path]
+    if is_wayland_session() and command_exists("weston-screenshooter"):
+        attempts.append(["weston-screenshooter", path])
+    if (
+        is_wayland_session()
+        and desktops.intersection({"kde", "plasma"})
+        and command_exists("spectacle")
+    ):
+        attempts.append(spectacle_command)
+    if is_wayland_session() and command_exists("grim"):
+        attempts.append(["grim", path])
+    if command_exists("spectacle") and spectacle_command not in attempts:
+        attempts.append(spectacle_command)
     if command_exists("gnome-screenshot"):
-        run(["gnome-screenshot", "-f", path])
-    elif command_exists("scrot"):
-        run(["scrot", path])
-    elif command_exists("import"):
-        run(["import", "-window", "root", path])
-    else:
-        raise RuntimeError("no supported Linux screenshot command found")
-    return {"path": path}
+        attempts.append(["gnome-screenshot", "-f", path])
+    if command_exists("scrot"):
+        attempts.append(["scrot", path])
+    if command_exists("import"):
+        attempts.append(["import", "-window", "root", path])
+
+    errors = []
+    for command in attempts:
+        result = run(command, check=False)
+        if result.returncode == 0 and Path(path).exists() and Path(path).stat().st_size > 0:
+            return {"path": path, "backend": command[0]}
+        error_text = (result.stderr or result.stdout or "").strip()
+        errors.append(f"{command[0]} exited {result.returncode}: {error_text}")
+    detail = "; ".join(errors) if errors else "no supported Linux screenshot command found"
+    raise RuntimeError(f"Linux screenshot failed: {detail}")
 
 
 def ocr_blocks(path):
@@ -1395,7 +1417,10 @@ def main():
                 "accessibility": bool(os.environ.get("AT_SPI_BUS_ADDRESS") or pyatspi_available()),
                 "screen_recording": command_exists("gnome-screenshot")
                 or command_exists("scrot")
-                or command_exists("import"),
+                or command_exists("import")
+                or command_exists("weston-screenshooter")
+                or command_exists("grim")
+                or command_exists("spectacle"),
                 "calendar": "available" if command_exists("evolution") or command_exists("gdbus") else "missing",
                 "ocr": "available" if command_exists("tesseract") else "missing",
                 "input_backends": input_backends(),

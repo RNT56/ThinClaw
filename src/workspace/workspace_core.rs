@@ -11,7 +11,7 @@ use chrono::NaiveDate;
 use deadpool_postgres::Pool;
 use uuid::Uuid;
 
-use super::WorkspaceStorage;
+use super::WorkspaceBackend;
 use super::chunker::{ChunkConfig, chunk};
 use super::document::{MemoryDocument, WorkspaceEntry, paths};
 use super::embeddings::EmbeddingProvider;
@@ -464,7 +464,7 @@ pub struct Workspace {
     /// Optional agent ID for multi-agent isolation.
     agent_id: Option<Uuid>,
     /// Database storage backend.
-    storage: WorkspaceStorage,
+    storage: WorkspaceBackend,
     /// Embedding provider for semantic search.
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
 }
@@ -473,10 +473,16 @@ impl Workspace {
     /// Create a new workspace backed by a PostgreSQL connection pool.
     #[cfg(feature = "postgres")]
     pub fn new(user_id: impl Into<String>, pool: Pool) -> Self {
+        let store: WorkspaceBackend = Arc::new(Repository::new(pool));
+        Self::new_with_store(user_id, store)
+    }
+
+    /// Create a new workspace backed by any workspace store implementation.
+    pub fn new_with_store(user_id: impl Into<String>, store: WorkspaceBackend) -> Self {
         Self {
             user_id: user_id.into(),
             agent_id: None,
-            storage: WorkspaceStorage::Repo(Repository::new(pool)),
+            storage: store,
             embeddings: None,
         }
     }
@@ -485,12 +491,7 @@ impl Workspace {
     ///
     /// Use this for libSQL or any other backend that implements the Database trait.
     pub fn new_with_db(user_id: impl Into<String>, db: Arc<dyn crate::db::Database>) -> Self {
-        Self {
-            user_id: user_id.into(),
-            agent_id: None,
-            storage: WorkspaceStorage::Db(db),
-            embeddings: None,
-        }
+        Self::new_with_store(user_id, db)
     }
 
     /// Create a workspace with a specific agent ID.

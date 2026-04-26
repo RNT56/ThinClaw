@@ -5,14 +5,28 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Duration;
 
+use async_trait::async_trait;
 use clap::Parser;
+use rust_decimal::Decimal;
 use thinclaw::agent::{Agent, AgentDeps, SessionManager};
 use thinclaw::app::{AppBuilder, AppBuilderFlags};
 use thinclaw::channels::ChannelManager;
 use thinclaw::channels::acp;
 use thinclaw::channels::web::log_layer::{LogBroadcaster, init_tracing};
-use thinclaw::config::{Config, LlmBackend};
+use thinclaw::config::{AgentConfig, Config, LlmBackend, SafetyConfig, SkillsConfig};
+use thinclaw::context::{ContextManager, JobContext};
+use thinclaw::error::LlmError;
+use thinclaw::hooks::HookRegistry;
+use thinclaw::llm::{
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
+    Role, StreamSupport, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+};
+use thinclaw::safety::SafetyLayer;
+use thinclaw::tools::{
+    ApprovalRequirement, Tool, ToolError, ToolOutput, ToolProfile, ToolRegistry,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "thinclaw-acp")]
@@ -46,6 +60,10 @@ async fn main() -> anyhow::Result<()> {
     if std::env::var_os("THINCLAW_ACP_STDIO_SMOKE").is_some() {
         let (acp_channel, _) = acp::channel_pair();
         return acp::run_stdio_without_agent(acp_channel.shared_state()).await;
+    }
+
+    if std::env::var_os("THINCLAW_ACP_AGENT_STDIO_SMOKE").is_some() {
+        return run_agent_stdio_smoke().await;
     }
 
     let _ = dotenvy::dotenv();
@@ -172,6 +190,248 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("ThinClaw ACP restart was requested; exiting for supervisor restart.");
     }
     Ok(())
+}
+
+async fn run_agent_stdio_smoke() -> anyhow::Result<()> {
+    let channels = Arc::new(ChannelManager::new());
+    let (acp_channel, acp_outbound_rx) = acp::channel_pair();
+    let acp_state = acp_channel.shared_state();
+    channels.add(Box::new(acp_channel)).await;
+
+    let tools = Arc::new(ToolRegistry::new());
+    tools.register_builtin(Arc::new(SmokeApprovalTool)).await;
+
+    let llm: Arc<dyn LlmProvider> = Arc::new(SmokeLlm);
+    let restart_requested = Arc::new(AtomicBool::new(false));
+    let deps = AgentDeps {
+        store: None,
+        llm: Arc::clone(&llm),
+        cheap_llm: Some(llm),
+        safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+            redact_pii_in_prompts: false,
+            smart_approval_mode: "off".to_string(),
+            external_scanner_mode: "off".to_string(),
+            external_scanner_path: None,
+        })),
+        tools,
+        workspace: None,
+        extension_manager: None,
+        skill_registry: None,
+        skill_catalog: None,
+        skills_config: SkillsConfig::default(),
+        hooks: Arc::new(HookRegistry::new()),
+        cost_guard: Arc::new(thinclaw::agent::cost_guard::CostGuard::new(
+            thinclaw::agent::cost_guard::CostGuardConfig::default(),
+        )),
+        sse_sender: None,
+        agent_router: None,
+        agent_registry: None,
+        canvas_store: None,
+        subagent_executor: None,
+        cost_tracker: None,
+        response_cache: None,
+        llm_runtime: None,
+        routing_policy: None,
+        model_override: None,
+        restart_requested: Arc::clone(&restart_requested),
+        sandbox_children: None,
+    };
+
+    let agent = Arc::new(Agent::new(
+        AgentConfig {
+            name: "acp-smoke-agent".to_string(),
+            max_parallel_jobs: 1,
+            job_timeout: Duration::from_secs(60),
+            stuck_threshold: Duration::from_secs(60),
+            repair_check_interval: Duration::from_secs(30),
+            max_repair_attempts: 1,
+            use_planning: false,
+            session_idle_timeout: Duration::from_secs(300),
+            allow_local_tools: false,
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: None,
+            max_tool_iterations: 4,
+            max_context_messages: 200,
+            thinking_enabled: false,
+            thinking_budget_tokens: 128,
+            auto_approve_tools: false,
+            subagent_transparency_level: "balanced".to_string(),
+            main_tool_profile: ToolProfile::Acp,
+            worker_tool_profile: ToolProfile::Restricted,
+            subagent_tool_profile: ToolProfile::ExplicitOnly,
+            model_thinking_overrides: std::collections::HashMap::new(),
+            workspace_mode: "unrestricted".to_string(),
+            workspace_root: None,
+            notify_channel: None,
+            model_guidance_enabled: false,
+            cli_skin: "cockpit".to_string(),
+            personality_pack: "balanced".to_string(),
+            persona_seed: "default".to_string(),
+            checkpoints_enabled: false,
+            max_checkpoints: 0,
+            browser_backend: "chromium".to_string(),
+            cloud_browser_provider: None,
+        },
+        deps,
+        channels,
+        None,
+        None,
+        None,
+        Some(Arc::new(ContextManager::new(1))),
+        Some(Arc::new(SessionManager::new())),
+    ));
+
+    acp::run_stdio(agent, acp_outbound_rx, acp_state).await
+}
+
+struct SmokeLlm;
+
+impl SmokeLlm {
+    fn last_user_text(messages: &[ChatMessage]) -> String {
+        messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, Role::User))
+            .map(|message| message.content.clone())
+            .unwrap_or_default()
+    }
+
+    fn saw_tool_result(messages: &[ChatMessage]) -> bool {
+        messages
+            .iter()
+            .any(|message| matches!(message.role, Role::Tool))
+    }
+
+    async fn maybe_wait_for_slow_prompt(messages: &[ChatMessage]) {
+        if Self::last_user_text(messages).contains("slow") {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for SmokeLlm {
+    fn model_name(&self) -> &str {
+        "acp-smoke-llm"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Self::maybe_wait_for_slow_prompt(&request.messages).await;
+        Ok(CompletionResponse {
+            content: "smoke streamed alpha beta gamma".to_string(),
+            provider_model: Some(self.model_name().to_string()),
+            cost_usd: Some(0.0),
+            thinking_content: None,
+            input_tokens: 3,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+            token_capture: None,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Self::maybe_wait_for_slow_prompt(&request.messages).await;
+        if Self::saw_tool_result(&request.messages) {
+            return Ok(ToolCompletionResponse {
+                content: Some("approval tool result observed".to_string()),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: Some(0.0),
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                input_tokens: 6,
+                output_tokens: 4,
+                finish_reason: FinishReason::Stop,
+                token_capture: None,
+            });
+        }
+
+        let wants_approval = Self::last_user_text(&request.messages).contains("approval");
+        Ok(ToolCompletionResponse {
+            content: if wants_approval {
+                None
+            } else {
+                Some("smoke streamed alpha beta gamma".to_string())
+            },
+            provider_model: Some(self.model_name().to_string()),
+            cost_usd: Some(0.0),
+            tool_calls: if wants_approval {
+                vec![ToolCall {
+                    id: "smoke_call_write_file".to_string(),
+                    name: "write_file".to_string(),
+                    arguments: serde_json::json!({ "message": "approval requested" }),
+                }]
+            } else {
+                Vec::new()
+            },
+            thinking_content: None,
+            input_tokens: 5,
+            output_tokens: 5,
+            finish_reason: if wants_approval {
+                FinishReason::ToolUse
+            } else {
+                FinishReason::Stop
+            },
+            token_capture: None,
+        })
+    }
+
+    fn stream_support(&self) -> StreamSupport {
+        StreamSupport::Native
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        Ok(ModelMetadata {
+            id: self.model_name().to_string(),
+            context_length: Some(4096),
+        })
+    }
+}
+
+struct SmokeApprovalTool;
+
+#[async_trait]
+impl Tool for SmokeApprovalTool {
+    fn name(&self) -> &str {
+        "write_file"
+    }
+
+    fn description(&self) -> &str {
+        "Deterministic ACP smoke tool that always requires approval."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "additionalProperties": false
+        })
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::text(
+            "approval tool output",
+            Duration::from_millis(1),
+        ))
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Always
+    }
 }
 
 fn apply_model_override(config: &mut Config, model: String) {

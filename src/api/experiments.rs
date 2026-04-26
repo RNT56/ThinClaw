@@ -1247,7 +1247,7 @@ async fn reconcile_active_campaign(
                 campaign.status = ExperimentCampaignStatus::AwaitingPromotion;
                 campaign.pause_reason = Some(format!(
                     "Reached max_trials={limit}. Promote the best commit when ready.",
-                    limit = max_trials.unwrap()
+                    limit = max_trials.unwrap_or(0)
                 ));
                 campaign.updated_at = Utc::now();
                 store
@@ -6315,6 +6315,7 @@ mod tests {
                 input_tokens: 32,
                 output_tokens: 24,
                 finish_reason,
+                token_capture: None,
             })
         }
 
@@ -6333,6 +6334,7 @@ mod tests {
                 input_tokens: 32,
                 output_tokens: 24,
                 finish_reason,
+                token_capture: None,
             })
         }
     }

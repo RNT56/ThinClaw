@@ -173,7 +173,7 @@ impl Tool for CreateAgentTool {
                     "workspace_seeded": true,
                     "duration_ms": start.elapsed().as_millis(),
                 }))
-                .unwrap(),
+                .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string()),
                 start.elapsed(),
             )),
             Err(e) => Ok(ToolOutput::text(
@@ -252,7 +252,7 @@ impl Tool for ListAgentsTool {
                 "total": agents.len(),
                 "default_agent": default_agent,
             }))
-            .unwrap(),
+            .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string()),
             start.elapsed(),
         ))
     }
@@ -424,7 +424,7 @@ impl Tool for UpdateAgentTool {
                     "allowed_skills": record.allowed_skills,
                     "tool_profile": record.tool_profile.map(|profile| profile.as_str().to_string()),
                 }))
-                .unwrap(),
+                .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string()),
                 start.elapsed(),
             )),
             Err(e) => Ok(ToolOutput::text(
@@ -502,7 +502,7 @@ impl Tool for RemoveAgentTool {
                     "status": "removed",
                     "agent_id": agent_id,
                 }))
-                .unwrap(),
+                .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string()),
                 start.elapsed(),
             )),
             Ok(false) => Ok(ToolOutput::text(
@@ -663,7 +663,7 @@ impl Tool for MessageAgentTool {
                 "timeout_secs": timeout_secs,
                 "duration_ms": start.elapsed().as_millis() as u64,
             }))
-            .unwrap(),
+            .unwrap_or_else(|_| r#"{"error": "serialization failed"}"#.to_string()),
             start.elapsed(),
         ))
     }

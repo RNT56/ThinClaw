@@ -46,6 +46,12 @@ fn docker_compose_setup_and_docs_share_gateway_port() {
     assert!(setup.contains("backup_path"));
     assert!(setup.contains("rollback_setup"));
     assert!(setup.contains("wait_for_health"));
+    assert!(setup.contains("THINCLAW_ROLLBACK_PACKAGES"));
+    assert!(setup.contains("PACKAGES_INSTALLED_BY_SETUP"));
+    assert!(setup.contains("rollback_installed_packages"));
+    assert!(setup.contains("restore_service_state docker"));
+    assert!(setup.contains("restore_ufw_state"));
+    assert!(setup.contains("rollback_tailscale_state"));
     assert!(setup.contains("set_env_value .env GATEWAY_AUTH_TOKEN \"$TOKEN\""));
     assert!(setup.contains("THINCLAW_FIREWALL_STRICT"));
     assert!(
@@ -116,10 +122,35 @@ fn pi_os_lite_support_is_documented_and_guarded() {
     assert!(cargo_toml.contains("features = [\"full\"]"));
     assert!(ci.contains("ubuntu-24.04-arm"));
     assert!(ci.contains("linux/arm64"));
+    assert!(ci.contains("workflow_dispatch"));
+    assert!(ci.contains("Verify ARM64 runner"));
     assert!(ci.contains("cargo build --release --features full --bin thinclaw"));
     assert!(ci.contains("./target/release/thinclaw doctor --profile pi-os-lite-64"));
     assert!(ci.contains("THINCLAW_LINUX_READINESS_OS_RELEASE"));
     assert!(ci.contains("http://127.0.0.1:$port/api/health"));
+    assert!(ci.contains("linux-desktop-autonomy-smoke"));
+    assert!(ci.contains("gnome-x11"));
+    assert!(ci.contains("plasma-kwin-wayland"));
+    assert!(ci.contains("openbox-x11"));
+    assert!(ci.contains("kwin-wayland"));
+    assert!(ci.contains("plasma-workspace"));
+    assert!(ci.contains("spectacle"));
+    assert!(ci.contains("scripts/ci/linux_desktop_sidecar_smoke.sh"));
     assert!(release.contains("linux/amd64,linux/arm64"));
     assert!(release.contains("ghcr.io/${GITHUB_REPOSITORY,,}"));
+}
+
+#[test]
+fn linux_desktop_sidecar_smoke_covers_expected_sessions() {
+    let smoke = repo_file("scripts/ci/linux_desktop_sidecar_smoke.sh");
+    assert!(smoke.contains("gnome-x11"));
+    assert!(smoke.contains("kde-wayland"));
+    assert!(smoke.contains("plasma-kwin-wayland"));
+    assert!(smoke.contains("kwin_wayland"));
+    assert!(smoke.contains("plasmashell"));
+    assert!(smoke.contains("openbox-x11"));
+    assert!(smoke.contains("sidecar health"));
+    assert!(smoke.contains("sidecar ui"));
+    assert!(smoke.contains("sidecar screen"));
+    assert!(smoke.contains("assert_health"));
 }

@@ -1796,6 +1796,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: crate::llm::FinishReason::Stop,
+                token_capture: None,
             })
         }
         async fn complete_with_tools(
@@ -1811,6 +1812,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: crate::llm::FinishReason::Stop,
+                token_capture: None,
             })
         }
     }

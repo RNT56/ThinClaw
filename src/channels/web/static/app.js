@@ -8795,17 +8795,41 @@ function summarizeCostModels(models) {
   var totalOutput = 0;
   var totalCost = 0;
   var totalRequests = 0;
+  var capturedOutput = 0;
+  var capturedTokenIds = 0;
+  var capturedLogprobs = 0;
+  var tokenCaptureRequests = 0;
+  var providerUsageRequests = 0;
+  var unknownTokenCountRequests = 0;
+  var providerCostRequests = 0;
+  var localPricingFallbackRequests = 0;
   for (var i = 0; i < models.length; i++) {
     totalInput += models[i].input_tokens || 0;
     totalOutput += models[i].output_tokens || 0;
     totalCost += models[i].cost_usd || 0;
     totalRequests += models[i].requests || 0;
+    capturedOutput += models[i].captured_output_tokens || 0;
+    capturedTokenIds += models[i].captured_token_ids || 0;
+    capturedLogprobs += models[i].captured_logprobs || 0;
+    tokenCaptureRequests += models[i].token_capture_requests || 0;
+    providerUsageRequests += models[i].provider_usage_requests || 0;
+    unknownTokenCountRequests += models[i].unknown_token_count_requests || 0;
+    providerCostRequests += models[i].provider_cost_requests || 0;
+    localPricingFallbackRequests += models[i].local_pricing_fallback_requests || 0;
   }
   return {
     totalInput: totalInput,
     totalOutput: totalOutput,
     totalCost: totalCost,
     totalRequests: totalRequests,
+    capturedOutput: capturedOutput,
+    capturedTokenIds: capturedTokenIds,
+    capturedLogprobs: capturedLogprobs,
+    tokenCaptureRequests: tokenCaptureRequests,
+    providerUsageRequests: providerUsageRequests,
+    unknownTokenCountRequests: unknownTokenCountRequests,
+    providerCostRequests: providerCostRequests,
+    localPricingFallbackRequests: localPricingFallbackRequests,
   };
 }
 
@@ -8818,6 +8842,14 @@ function getCostRangeSnapshot(data, range) {
     totalOutput: totals.totalOutput,
     totalCost: totals.totalCost,
     totalRequests: totals.totalRequests,
+    capturedOutput: totals.capturedOutput,
+    capturedTokenIds: totals.capturedTokenIds,
+    capturedLogprobs: totals.capturedLogprobs,
+    tokenCaptureRequests: totals.tokenCaptureRequests,
+    providerUsageRequests: totals.providerUsageRequests,
+    unknownTokenCountRequests: totals.unknownTokenCountRequests,
+    providerCostRequests: totals.providerCostRequests,
+    localPricingFallbackRequests: totals.localPricingFallbackRequests,
   };
 }
 
@@ -8897,6 +8929,10 @@ function renderCostSummary(data) {
   var totalOut = rangeSnapshot.totalOutput;
   var totalReq = rangeSnapshot.totalRequests;
   var rangeLabel = getCostRangeLabel(costRange);
+  var providerUsageReq = rangeSnapshot.providerUsageRequests || 0;
+  var providerCostReq = rangeSnapshot.providerCostRequests || 0;
+  var fallbackCostReq = rangeSnapshot.localPricingFallbackRequests || 0;
+  var capturedOutput = rangeSnapshot.capturedOutput || 0;
 
   // Spend card with optional budget progress
   var spendHtml = '<div class="ui-panel ui-panel--feature ui-panel--compact ui-panel--interactive cost-card accent">'
@@ -8920,6 +8956,7 @@ function renderCostSummary(data) {
     + '<div class="cost-card-label">Total Tokens</div>'
     + '<div class="cost-card-value">' + formatTokenCount(totalIn + totalOut) + '</div>'
     + '<div class="cost-card-sub">' + formatTokenCount(totalIn) + ' input · ' + formatTokenCount(totalOut) + ' output</div>'
+    + '<div class="cost-card-sub">' + providerUsageReq + ' provider-usage requests' + (capturedOutput ? ' · ' + formatTokenCount(capturedOutput) + ' captured output' : '') + '</div>'
     + '</div>';
 
   // Active models
@@ -8939,6 +8976,7 @@ function renderCostSummary(data) {
     + '<div class="cost-card-label">Actions / Hour</div>'
     + '<div class="cost-card-value">' + actionsHr + '</div>'
     + '<div class="cost-card-sub">' + actionsSubText + '</div>'
+    + '<div class="cost-card-sub">' + providerCostReq + ' provider-cost · ' + fallbackCostReq + ' priced locally</div>'
     + '</div>';
 
   var capacityHtml = '';
@@ -9026,6 +9064,7 @@ function renderCostChart(data) {
     var inp = m.input_tokens || 0;
     var out = m.output_tokens || 0;
     var total = inp + out;
+    var captured = m.captured_output_tokens || 0;
     var pct = (total / maxTokens) * 100;
     var color = MODEL_COLORS[i % MODEL_COLORS.length];
     var colorDark = color + '99';
@@ -9038,7 +9077,7 @@ function renderCostChart(data) {
       + '<div class="chart-bar-output" style="width:' + (total > 0 ? (out/total*100).toFixed(1) : 0) + '%;background:' + colorDark + '"></div>'
       + '</div>'
       + '</div>'
-      + '<div class="chart-bar-value">' + formatTokenCount(total) + ' · ' + formatCost(String(m.cost_usd)) + '</div>'
+      + '<div class="chart-bar-value">' + formatTokenCount(total) + ' · ' + formatCost(String(m.cost_usd)) + (captured ? ' · cap ' + formatTokenCount(captured) : '') + '</div>'
       + '</div>';
   }
 
@@ -9078,12 +9117,13 @@ function renderCostTable(data) {
   if (table) table.style.display = '';
   if (empty) empty.style.display = 'none';
 
-  var totalInput = 0, totalOutput = 0, totalCost = 0, totalReq = 0;
+  var totalInput = 0, totalOutput = 0, totalCost = 0, totalReq = 0, totalCaptured = 0;
   for (var i = 0; i < models.length; i++) {
     totalInput += models[i].input_tokens || 0;
     totalOutput += models[i].output_tokens || 0;
     totalCost += models[i].cost_usd || 0;
     totalReq += models[i].requests || 0;
+    totalCaptured += models[i].captured_output_tokens || 0;
   }
 
   var html = '';
@@ -9093,11 +9133,15 @@ function renderCostTable(data) {
     var out = m.output_tokens || 0;
     var cost = m.cost_usd || 0;
     var req = m.requests || 0;
+    var captured = m.captured_output_tokens || 0;
     var share = totalCost > 0 ? (cost / totalCost * 100) : 0;
     var color = MODEL_COLORS[i % MODEL_COLORS.length];
+    var provenance = (m.provider_usage_requests || 0) + ' usage src';
+    if (m.local_pricing_fallback_requests) provenance += ' · ' + m.local_pricing_fallback_requests + ' priced locally';
+    if (captured) provenance += ' · ' + formatTokenCount(captured) + ' captured';
 
     html += '<tr>'
-      + '<td><span class="cost-model-dot" style="background:' + color + '"></span><span class="cost-model-name" title="' + escapeHtml(m.model) + '">' + escapeHtml(displayCostModelLabel(m.model, shortLabelCounts)) + '</span></td>'
+      + '<td><span class="cost-model-dot" style="background:' + color + '"></span><span class="cost-model-name" title="' + escapeHtml(m.model) + '">' + escapeHtml(displayCostModelLabel(m.model, shortLabelCounts)) + '</span><div class="cost-card-sub">' + escapeHtml(provenance) + '</div></td>'
       + '<td>' + formatTokenCount(inp) + '</td>'
       + '<td>' + formatTokenCount(out) + '</td>'
       + '<td>' + formatTokenCount(inp + out) + '</td>'
@@ -9115,7 +9159,7 @@ function renderCostTable(data) {
       + '<td>' + formatTokenCount(totalInput + totalOutput) + '</td>'
       + '<td>' + formatCost(String(totalCost)) + '</td>'
       + '<td>' + totalReq + '</td>'
-      + '<td>100%</td>'
+      + '<td>100%' + (totalCaptured ? '<div class="cost-card-sub">' + formatTokenCount(totalCaptured) + ' captured output</div>' : '') + '</td>'
       + '</tr>';
   }
 }

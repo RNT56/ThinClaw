@@ -45,6 +45,14 @@ const ACP_TERMINAL_OUTPUT_LIMIT: u64 = 64 * 1024;
 static ACP_CLIENT_BRIDGES: LazyLock<RwLock<HashMap<String, AcpClientBridge>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
+fn prompt_approval_timeout() -> Duration {
+    std::env::var("THINCLAW_ACP_PROMPT_APPROVAL_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(ACP_PROMPT_APPROVAL_TIMEOUT)
+}
+
 /// Public ACP v1 wire structs used by the stdio adapter and conformance tests.
 ///
 /// The adapter still accepts raw `serde_json::Value` at the JSON-RPC boundary so
@@ -372,6 +380,13 @@ struct PromptCompletion {
 }
 
 #[derive(Debug, Clone)]
+struct ActivePromptTask {
+    abort_handle: tokio::task::AbortHandle,
+    response_id: Option<Value>,
+    writer_tx: OutboundTx,
+}
+
+#[derive(Debug, Clone)]
 pub struct AcpTerminalExecution {
     pub terminal_id: String,
     pub output: String,
@@ -672,6 +687,38 @@ impl AcpConnectionState {
         }
     }
 
+    async fn register_prompt_task(&self, session_id: &str, task: ActivePromptTask) {
+        self.inner
+            .write()
+            .await
+            .active_prompt_tasks
+            .insert(session_id.to_string(), task);
+    }
+
+    async fn take_prompt_task(&self, session_id: &str) -> Option<ActivePromptTask> {
+        self.inner
+            .write()
+            .await
+            .active_prompt_tasks
+            .remove(session_id)
+    }
+
+    async fn cancel_prompt_task(&self, session_id: &str) -> bool {
+        if let Some(task) = self.take_prompt_task(session_id).await {
+            task.abort_handle.abort();
+            let _ = send_outbound(
+                &task.writer_tx,
+                success_response(
+                    task.response_id,
+                    prompt_response(wire::StopReason::Cancelled),
+                ),
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     #[cfg(test)]
     async fn client_capabilities(&self) -> AcpClientCapabilities {
         self.inner.read().await.client_capabilities.clone()
@@ -689,6 +736,7 @@ struct AcpRuntimeState {
     pending_permissions: HashMap<String, PendingPermission>,
     pending_client_requests: HashMap<String, oneshot::Sender<AcpClientResponse>>,
     prompt_waiters: HashMap<String, oneshot::Sender<PromptCompletion>>,
+    active_prompt_tasks: HashMap<String, ActivePromptTask>,
 }
 
 async fn register_client_bridge(session_id: &str, writer_tx: &OutboundTx, state: &AcpSharedState) {
@@ -1369,6 +1417,51 @@ async fn handle_json_rpc(
     let method = request.method.as_deref().unwrap_or_default();
     let is_notification = request.id.is_none();
 
+    if method == "session/prompt"
+        && !is_notification
+        && let Some(agent) = agent.clone()
+    {
+        let id = request.id.clone();
+        let params = request.params.clone();
+        let prompt_writer_tx = writer_tx.clone();
+        let active_writer_tx = prompt_writer_tx.clone();
+        let state = Arc::clone(state);
+        let session_id = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let task_state = Arc::clone(&state);
+        let task_session_id = session_id.clone();
+        let handle = tokio::spawn(async move {
+            let result = handle_prompt(agent, &prompt_writer_tx, &state, &params).await;
+            let should_send_response = match task_session_id.as_deref() {
+                Some(session_id) => state.take_prompt_task(session_id).await.is_some(),
+                None => true,
+            };
+            if !should_send_response {
+                return;
+            }
+            let response = match result {
+                Ok(result) => success_response(id, result),
+                Err(error) => error_response(id, error.code, error.message, error.data),
+            };
+            let _ = send_outbound(&prompt_writer_tx, response);
+        });
+        if let Some(session_id) = session_id {
+            task_state
+                .register_prompt_task(
+                    &session_id,
+                    ActivePromptTask {
+                        abort_handle: handle.abort_handle(),
+                        response_id: request.id.clone(),
+                        writer_tx: active_writer_tx.clone(),
+                    },
+                )
+                .await;
+        }
+        return None;
+    }
+
     let result = match method {
         "initialize" => handle_initialize(state, &request.params).await,
         "authenticate" => Ok(json!({})),
@@ -1392,10 +1485,7 @@ async fn handle_json_rpc(
         },
         "session/set_mode" => handle_set_mode(writer_tx, state, &request.params).await,
         "session/set_config_option" => handle_set_config_option(state, &request.params).await,
-        "session/prompt" => match agent.clone() {
-            Some(agent) => handle_prompt(agent, writer_tx, state, &request.params).await,
-            None => Err(agent_runtime_required_error("session/prompt")),
-        },
+        "session/prompt" => Err(agent_runtime_required_error("session/prompt")),
         _ => Err(json_rpc_error(
             -32601,
             format!("Method not found: {method}"),
@@ -1833,6 +1923,7 @@ async fn handle_close_session(
         json_rpc_error(-32602, format!("Invalid session/close params: {err}"), None)
     })?;
     state.mark_cancelled(&request.session_id).await;
+    state.cancel_prompt_task(&request.session_id).await;
     state
         .complete_prompt(&request.session_id, wire::StopReason::Cancelled)
         .await;
@@ -1859,6 +1950,7 @@ async fn handle_cancel_session(
         )
     })?;
     state.mark_cancelled(&request.session_id).await;
+    state.cancel_prompt_task(&request.session_id).await;
     state
         .complete_prompt(&request.session_id, wire::StopReason::Cancelled)
         .await;
@@ -2044,11 +2136,14 @@ async fn handle_prompt(
     }
 
     if state.has_pending_permission(&request.session_id).await {
-        match tokio::time::timeout(ACP_PROMPT_APPROVAL_TIMEOUT, prompt_rx).await {
+        match tokio::time::timeout(prompt_approval_timeout(), prompt_rx).await {
             Ok(Ok(completion)) => {
                 return Ok(prompt_response(completion.stop_reason));
             }
             Ok(Err(_)) => {
+                if state.was_cancelled(&request.session_id).await {
+                    return Ok(prompt_response(wire::StopReason::Cancelled));
+                }
                 return Ok(prompt_response(wire::StopReason::EndTurn));
             }
             Err(_) => {
@@ -2057,6 +2152,11 @@ async fn handle_prompt(
                 return Ok(prompt_response(wire::StopReason::Cancelled));
             }
         }
+    }
+
+    if state.was_cancelled(&request.session_id).await {
+        let _ = state.take_prompt_waiter(&request.session_id).await;
+        return Ok(prompt_response(wire::StopReason::Cancelled));
     }
 
     let _ = state.take_prompt_waiter(&request.session_id).await;

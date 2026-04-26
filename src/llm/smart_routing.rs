@@ -539,6 +539,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: crate::llm::FinishReason::Stop,
+            token_capture: None,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&response));
 
@@ -552,6 +553,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 1,
             finish_reason: crate::llm::FinishReason::Stop,
+            token_capture: None,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&short));
     }
@@ -566,6 +568,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 0,
             finish_reason: crate::llm::FinishReason::Stop,
+            token_capture: None,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&response));
     }
@@ -583,6 +586,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 1,
             finish_reason: crate::llm::FinishReason::Stop,
+            token_capture: None,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&response));
 
@@ -595,6 +599,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: crate::llm::FinishReason::Stop,
+            token_capture: None,
         };
         assert!(!SmartRoutingProvider::response_is_uncertain(&longer));
     }
@@ -610,6 +615,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 20,
             finish_reason: crate::llm::FinishReason::Stop,
+            token_capture: None,
         };
         assert!(!SmartRoutingProvider::response_is_uncertain(&response));
     }

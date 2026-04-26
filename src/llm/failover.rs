@@ -902,6 +902,7 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
+                    token_capture: None,
                 }))),
                 tool_complete_result: Mutex::new(Some(Ok(ToolCompletionResponse {
                     content: Some(content.to_string()),
@@ -912,6 +913,7 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
+                    token_capture: None,
                 }))),
             }
         }
@@ -1322,6 +1324,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
 
@@ -1350,6 +1353,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
 

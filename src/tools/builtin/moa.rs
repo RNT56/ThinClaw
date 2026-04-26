@@ -444,6 +444,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
 
@@ -460,6 +461,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
 

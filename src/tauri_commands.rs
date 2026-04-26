@@ -903,7 +903,7 @@ mod tests {
     use super::*;
     // RoutineRun tests removed — routine_audit_list now queries the DB (integration test needed)
     use crate::extensions::lifecycle_hooks::{LifecycleEvent, LifecycleHook};
-    use crate::llm::cost_tracker::{BudgetConfig, CostEntry};
+    use crate::llm::cost_tracker::{BudgetConfig, CostEntry, CostSource, TokenCountSource};
     use crate::llm::response_cache_ext::CacheConfig;
     use crate::llm::routing_policy::RoutingRule;
 
@@ -919,6 +919,9 @@ mod tests {
             input_tokens: 100,
             output_tokens: 50,
             request_id: None,
+            token_count_source: TokenCountSource::ProviderUsage,
+            cost_source: CostSource::ProviderCost,
+            token_capture: None,
         });
         let summary = cost_summary(&tracker).unwrap();
         assert!((summary.total_cost_usd - 0.05).abs() < 0.001);
@@ -937,6 +940,9 @@ mod tests {
             input_tokens: 200,
             output_tokens: 100,
             request_id: None,
+            token_count_source: TokenCountSource::ProviderUsage,
+            cost_source: CostSource::ProviderCost,
+            token_capture: None,
         });
         let csv = cost_export_csv(&tracker).unwrap();
         assert!(csv.contains("claude"));

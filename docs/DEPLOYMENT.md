@@ -30,6 +30,10 @@ For identity and surface behavior, use
 - Source builds default to the `light` feature set
 - If you need the full production/runtime surface from source, build with `--features full`
 - Desktop autonomy is a separate privileged operator mode
+- `deploy/setup.sh` rolls back ThinClaw-managed files, services, Docker Compose
+  startup, UFW config, Tailscale session changes, and packages it newly
+  installed when setup fails. Set `THINCLAW_ROLLBACK_PACKAGES=false` only if
+  you want failed installs to leave newly installed OS packages behind.
 
 The default `light` source profile includes the local gateway but excludes ACP,
 tunnel support, Docker sandbox, browser automation, and Nostr. For source build

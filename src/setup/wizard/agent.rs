@@ -33,7 +33,7 @@ impl SetupWizard {
                     .settings
                     .channels
                     .telegram_owner_id
-                    .unwrap()
+                    .expect("guarded by is_some() in match arm")
                     .to_string();
                 self.settings.notifications.preferred_channel = Some("telegram".to_string());
                 self.settings.notifications.recipient = Some(owner_id.clone());
@@ -44,7 +44,12 @@ impl SetupWizard {
             "signal"
                 if is_verified("signal") && self.settings.channels.signal_account.is_some() =>
             {
-                let account = self.settings.channels.signal_account.clone().unwrap();
+                let account = self
+                    .settings
+                    .channels
+                    .signal_account
+                    .clone()
+                    .expect("guarded by is_some() in match arm");
                 self.settings.notifications.preferred_channel = Some("signal".to_string());
                 self.settings.notifications.recipient = Some(account.clone());
                 self.settings.heartbeat.enabled = true;
@@ -104,6 +109,7 @@ impl SetupWizard {
             "research_assistant — Methodical, evidence-driven, and careful",
             "mentor        — Patient, explanatory, and encouraging",
             "minimal       — Lean, unobtrusive, and flexible",
+            "flow_state    — Electric calm, decisive, receipts-driven",
         ];
         let option_refs: Vec<&str> = options.to_vec();
         let choice = select_one("Personality pack", &option_refs).map_err(SetupError::Io)?;
@@ -114,6 +120,7 @@ impl SetupWizard {
             3 => "research_assistant",
             4 => "mentor",
             5 => "minimal",
+            6 => "flow_state",
             _ => "balanced",
         };
         self.settings.agent.personality_pack = chosen.to_string();

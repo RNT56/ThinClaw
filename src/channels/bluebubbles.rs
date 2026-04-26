@@ -498,7 +498,9 @@ impl BlueBubblesChannel {
                 && self.private_api.load(Ordering::Relaxed)
                 && self.helper_connected.load(Ordering::Relaxed)
             {
-                let obj = payload.as_object_mut().unwrap();
+                let obj = payload
+                    .as_object_mut()
+                    .expect("payload was created as a JSON object literal");
                 obj.insert("method".into(), serde_json::json!("private-api"));
                 obj.insert(
                     "selectedMessageGuid".into(),
@@ -1360,8 +1362,11 @@ fn redact_pii(text: &str) -> String {
     static PHONE_RE: OnceLock<regex::Regex> = OnceLock::new();
     static EMAIL_RE: OnceLock<regex::Regex> = OnceLock::new();
 
-    let phone = PHONE_RE.get_or_init(|| regex::Regex::new(r"\+?\d{7,15}").unwrap());
-    let email = EMAIL_RE.get_or_init(|| regex::Regex::new(r"[\w.+-]+@[\w-]+\.[\w.]+").unwrap());
+    let phone = PHONE_RE
+        .get_or_init(|| regex::Regex::new(r"\+?\d{7,15}").expect("static phone regex is valid"));
+    let email = EMAIL_RE.get_or_init(|| {
+        regex::Regex::new(r"[\w.+-]+@[\w-]+\.[\w.]+").expect("static email regex is valid")
+    });
     let s = phone.replace_all(text, "[REDACTED]");
     email.replace_all(&s, "[REDACTED]").to_string()
 }

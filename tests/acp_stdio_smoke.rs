@@ -12,24 +12,40 @@ struct AcpStdioHarness {
     stdout_rx: mpsc::Receiver<String>,
     stdout_thread: Option<thread::JoinHandle<()>>,
     stderr: Option<ChildStderr>,
+    _temp_home: tempfile::TempDir,
 }
 
 impl AcpStdioHarness {
     fn spawn() -> Self {
+        Self::spawn_with_agent_runtime(false, &[])
+    }
+
+    fn spawn_agent(extra_env: &[(&str, &str)]) -> Self {
+        Self::spawn_with_agent_runtime(true, extra_env)
+    }
+
+    fn spawn_with_agent_runtime(agent_runtime: bool, extra_env: &[(&str, &str)]) -> Self {
         let temp_home = tempfile::tempdir().expect("temp THINCLAW_HOME");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_thinclaw-acp"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_thinclaw-acp"));
+        command
             .arg("--no-db")
             .arg("--workspace")
             .arg(temp_home.path())
             .env("THINCLAW_HOME", temp_home.path())
-            .env("THINCLAW_ACP_STDIO_SMOKE", "1")
             .env("LLM_BACKEND", "openai_compatible")
             .env("LLM_BASE_URL", "http://127.0.0.1:9/v1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn thinclaw-acp");
+            .stderr(Stdio::piped());
+        if agent_runtime {
+            command.env("THINCLAW_ACP_AGENT_STDIO_SMOKE", "1");
+        } else {
+            command.env("THINCLAW_ACP_STDIO_SMOKE", "1");
+        }
+        for (name, value) in extra_env {
+            command.env(name, value);
+        }
+        let mut child = command.spawn().expect("spawn thinclaw-acp");
         let stdout = child.stdout.take().expect("stdout");
         let (stdout_tx, stdout_rx) = mpsc::channel();
         let stdout_thread = thread::spawn(move || {
@@ -47,6 +63,7 @@ impl AcpStdioHarness {
             child,
             stdout_rx,
             stdout_thread: Some(stdout_thread),
+            _temp_home: temp_home,
         }
     }
 
@@ -69,6 +86,51 @@ impl AcpStdioHarness {
         let value: serde_json::Value = serde_json::from_str(&line).expect("stdout line is JSON");
         assert_eq!(value["jsonrpc"], serde_json::json!("2.0"));
         value
+    }
+
+    fn read_until_response(
+        &self,
+        id: serde_json::Value,
+    ) -> (Vec<serde_json::Value>, serde_json::Value) {
+        let mut seen = Vec::new();
+        loop {
+            let value = self.read_json();
+            if value.get("id") == Some(&id) {
+                return (seen, value);
+            }
+            seen.push(value);
+        }
+    }
+
+    fn read_until_two_responses(
+        &self,
+        first_id: serde_json::Value,
+        second_id: serde_json::Value,
+    ) -> (serde_json::Value, serde_json::Value) {
+        let mut first = None;
+        let mut second = None;
+        loop {
+            let value = self.read_json();
+            if value.get("id") == Some(&first_id) {
+                first = Some(value);
+            } else if value.get("id") == Some(&second_id) {
+                second = Some(value);
+            }
+            if let (Some(first), Some(second)) = (first.clone(), second.clone()) {
+                return (first, second);
+            }
+        }
+    }
+
+    fn read_until_method(&self, method: &str) -> (Vec<serde_json::Value>, serde_json::Value) {
+        let mut seen = Vec::new();
+        loop {
+            let value = self.read_json();
+            if value["method"] == serde_json::json!(method) {
+                return (seen, value);
+            }
+            seen.push(value);
+        }
     }
 
     fn finish(mut self) -> std::process::ExitStatus {
@@ -94,6 +156,28 @@ impl AcpStdioHarness {
         }
         status
     }
+}
+
+fn initialize_agent_session(harness: &mut AcpStdioHarness) -> String {
+    harness.write_line(r#"{"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"agent-stdio-smoke","version":"0"}}}"#);
+    let init = harness.read_json();
+    assert_eq!(init["id"], serde_json::json!("init"));
+    assert_eq!(init["result"]["protocolVersion"], serde_json::json!(1));
+
+    harness.write_line(r#"{"jsonrpc":"2.0","id":"new","method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#);
+    let new_session = harness.read_json();
+    assert_eq!(new_session["id"], serde_json::json!("new"));
+    new_session["result"]["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_string()
+}
+
+fn has_update_kind(values: &[serde_json::Value], kind: &str) -> bool {
+    values.iter().any(|value| {
+        value["method"] == serde_json::json!("session/update")
+            && value["params"]["update"]["sessionUpdate"] == serde_json::json!(kind)
+    })
 }
 
 fn run_acp_stdio(input: &str) -> std::process::Output {
@@ -285,6 +369,160 @@ fn thinclaw_acp_interactive_transcript_covers_list_load_and_error_shapes() {
     harness.write_line(r#"{"jsonrpc":"2.0","id":"unknown","method":"not/a-method","params":{}}"#);
     let unknown = harness.read_json();
     assert_eq!(unknown["error"]["code"], serde_json::json!(-32601));
+
+    let status = harness.finish();
+    assert!(status.success(), "thinclaw-acp exited with {status}");
+}
+
+#[test]
+fn thinclaw_acp_agent_prompt_streams_updates_from_real_runtime() {
+    let mut harness = AcpStdioHarness::spawn_agent(&[]);
+    let session_id = initialize_agent_session(&mut harness);
+
+    harness.write_line(&format!(
+        r#"{{"jsonrpc":"2.0","id":"prompt-stream","method":"session/prompt","params":{{"sessionId":"{session_id}","prompt":[{{"type":"text","text":"stream please"}}]}}}}"#
+    ));
+    let (updates, prompt) = harness.read_until_response(serde_json::json!("prompt-stream"));
+    assert_eq!(
+        prompt["result"]["stopReason"],
+        serde_json::json!("end_turn")
+    );
+    assert!(
+        has_update_kind(&updates, "agent_message_chunk"),
+        "expected streamed agent message chunk, got {updates:#?}"
+    );
+    assert!(
+        has_update_kind(&updates, "usage_update"),
+        "expected usage update, got {updates:#?}"
+    );
+
+    let status = harness.finish();
+    assert!(status.success(), "thinclaw-acp exited with {status}");
+}
+
+#[test]
+fn thinclaw_acp_agent_permission_approve_reject_cancel_and_timeout_are_transcripts() {
+    let mut harness =
+        AcpStdioHarness::spawn_agent(&[("THINCLAW_ACP_PROMPT_APPROVAL_TIMEOUT_MS", "150")]);
+    let session_id = initialize_agent_session(&mut harness);
+
+    harness.write_line(&format!(
+        r#"{{"jsonrpc":"2.0","id":"approve-prompt","method":"session/prompt","params":{{"sessionId":"{session_id}","prompt":[{{"type":"text","text":"approval please"}}]}}}}"#
+    ));
+    let (before_permission, permission) = harness.read_until_method("session/request_permission");
+    assert!(
+        has_update_kind(&before_permission, "tool_call"),
+        "expected tool_call before permission request, got {before_permission:#?}"
+    );
+    let permission_id = permission["id"].clone();
+    harness.write_line(
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": permission_id,
+            "result": { "outcome": "selected", "optionId": "allow-once" }
+        })
+        .to_string(),
+    );
+    let (approve_updates, approve_prompt) =
+        harness.read_until_response(serde_json::json!("approve-prompt"));
+    assert_eq!(
+        approve_prompt["result"]["stopReason"],
+        serde_json::json!("end_turn")
+    );
+    assert!(
+        has_update_kind(&approve_updates, "tool_call")
+            || has_update_kind(&approve_updates, "tool_call_update"),
+        "expected tool lifecycle update after approval, got {approve_updates:#?}"
+    );
+
+    harness.write_line(&format!(
+        r#"{{"jsonrpc":"2.0","id":"reject-prompt","method":"session/prompt","params":{{"sessionId":"{session_id}","prompt":[{{"type":"text","text":"approval reject path"}}]}}}}"#
+    ));
+    let (_, permission) = harness.read_until_method("session/request_permission");
+    harness.write_line(
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": permission["id"].clone(),
+            "result": { "outcome": "selected", "optionId": "reject-once" }
+        })
+        .to_string(),
+    );
+    let (_, reject_prompt) = harness.read_until_response(serde_json::json!("reject-prompt"));
+    assert_eq!(
+        reject_prompt["result"]["stopReason"],
+        serde_json::json!("end_turn")
+    );
+
+    harness.write_line(&format!(
+        r#"{{"jsonrpc":"2.0","id":"cancel-permission-prompt","method":"session/prompt","params":{{"sessionId":"{session_id}","prompt":[{{"type":"text","text":"approval cancel path"}}]}}}}"#
+    ));
+    let (_, permission) = harness.read_until_method("session/request_permission");
+    harness.write_line(
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": permission["id"].clone(),
+            "result": { "outcome": "cancelled" }
+        })
+        .to_string(),
+    );
+    let (_, cancel_permission_prompt) =
+        harness.read_until_response(serde_json::json!("cancel-permission-prompt"));
+    assert_eq!(
+        cancel_permission_prompt["result"]["stopReason"],
+        serde_json::json!("cancelled")
+    );
+
+    harness.write_line(&format!(
+        r#"{{"jsonrpc":"2.0","id":"timeout-prompt","method":"session/prompt","params":{{"sessionId":"{session_id}","prompt":[{{"type":"text","text":"approval timeout path"}}]}}}}"#
+    ));
+    let (_, permission) = harness.read_until_method("session/request_permission");
+    assert!(permission["id"].is_number() || permission["id"].is_string());
+    let (_, timeout_prompt) = harness.read_until_response(serde_json::json!("timeout-prompt"));
+    assert_eq!(
+        timeout_prompt["result"]["stopReason"],
+        serde_json::json!("cancelled")
+    );
+
+    let status = harness.finish();
+    assert!(status.success(), "thinclaw-acp exited with {status}");
+}
+
+#[test]
+fn thinclaw_acp_agent_cancel_and_close_abort_real_prompt_turns() {
+    let mut harness = AcpStdioHarness::spawn_agent(&[]);
+    let session_id = initialize_agent_session(&mut harness);
+
+    harness.write_line(&format!(
+        r#"{{"jsonrpc":"2.0","id":"slow-cancel-prompt","method":"session/prompt","params":{{"sessionId":"{session_id}","prompt":[{{"type":"text","text":"slow cancel"}}]}}}}"#
+    ));
+    harness.write_line(&format!(
+        r#"{{"jsonrpc":"2.0","id":"cancel","method":"session/cancel","params":{{"sessionId":"{session_id}"}}}}"#
+    ));
+    let (cancelled_prompt, cancel_response) = harness.read_until_two_responses(
+        serde_json::json!("slow-cancel-prompt"),
+        serde_json::json!("cancel"),
+    );
+    assert_eq!(cancel_response["result"], serde_json::json!({}));
+    assert_eq!(
+        cancelled_prompt["result"]["stopReason"],
+        serde_json::json!("cancelled")
+    );
+
+    harness.write_line(&format!(
+        r#"{{"jsonrpc":"2.0","id":"slow-close-prompt","method":"session/prompt","params":{{"sessionId":"{session_id}","prompt":[{{"type":"text","text":"slow close"}}]}}}}"#
+    ));
+    harness.write_line(&format!(
+        r#"{{"jsonrpc":"2.0","id":"close","method":"session/close","params":{{"sessionId":"{session_id}"}}}}"#
+    ));
+    let (closed_prompt, close_response) = harness.read_until_two_responses(
+        serde_json::json!("slow-close-prompt"),
+        serde_json::json!("close"),
+    );
+    assert_eq!(close_response["result"], serde_json::json!({}));
+    assert_eq!(
+        closed_prompt["result"]["stopReason"],
+        serde_json::json!("cancelled")
+    );
 
     let status = harness.finish();
     assert!(status.success(), "thinclaw-acp exited with {status}");

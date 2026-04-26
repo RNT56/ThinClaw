@@ -170,11 +170,9 @@ impl AgentRegistry {
     ) -> Result<bool, AgentRegistryError> {
         // Check if agent exists
         let agent = self.router.get_agent(agent_id).await;
-        if agent.is_none() {
+        let Some(agent) = agent else {
             return Err(AgentRegistryError::NotFound(agent_id.to_string()));
-        }
-
-        let agent = agent.unwrap();
+        };
 
         // Protect default agent unless force
         if agent.is_default && !force {

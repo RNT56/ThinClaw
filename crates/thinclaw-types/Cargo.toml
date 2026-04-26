@@ -1,0 +1,23 @@
+[package]
+name = "thinclaw-types"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
+base64 = "0.22.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+deadpool-postgres = { version = "0.14", optional = true }
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"], optional = true }
+libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication"] }
+
+[features]
+default = []
+postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
+libsql = ["dep:libsql"]

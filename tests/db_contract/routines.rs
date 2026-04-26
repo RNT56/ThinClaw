@@ -77,6 +77,7 @@ impl LlmProvider for TestLlm {
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             }),
             TestLlmMode::Fail(reason) => Err(LlmError::RequestFailed {
                 provider: self.model_name().to_string(),
@@ -99,6 +100,7 @@ impl LlmProvider for TestLlm {
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             }),
             TestLlmMode::Fail(reason) => Err(LlmError::RequestFailed {
                 provider: self.model_name().to_string(),

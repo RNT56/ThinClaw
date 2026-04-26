@@ -109,7 +109,18 @@ SETUP_COMPLETE=false
 DOCKER_COMPOSE_TOUCHED=false
 THINCLAW_SERVICE_WAS_ACTIVE=false
 THINCLAW_USER_CREATED=false
+PACKAGE_ROLLBACK="${THINCLAW_ROLLBACK_PACKAGES:-true}"
+DOCKER_WAS_INSTALLED=false
+DOCKER_WAS_ACTIVE=false
+DOCKER_WAS_ENABLED=false
+FAIL2BAN_WAS_ACTIVE=false
+FAIL2BAN_WAS_ENABLED=false
+UFW_WAS_ACTIVE=false
+TAILSCALE_WAS_INSTALLED=false
+TAILSCALE_WAS_RUNNING=false
+TAILSCALE_TOUCHED=false
 declare -a ROLLBACK_PATHS=()
+declare -a PACKAGES_INSTALLED_BY_SETUP=()
 
 backup_path() {
     local path="$1"
@@ -160,18 +171,23 @@ rollback_setup() {
     if [[ "$DOCKER_COMPOSE_TOUCHED" == "true" ]]; then
         (cd "$DEPLOY_DIR" && docker compose down >/dev/null 2>&1) || true
     fi
+    rollback_tailscale_state
     if [[ "$THINCLAW_USER_CREATED" == "true" ]]; then
         userdel -r thinclaw >/dev/null 2>&1 || true
     fi
+    rollback_installed_packages
     restore_backed_up_paths
     systemctl daemon-reload >/dev/null 2>&1 || true
+    restore_ufw_state
+    restore_service_state docker "$DOCKER_WAS_ACTIVE" "$DOCKER_WAS_ENABLED" "$DOCKER_WAS_INSTALLED"
+    restore_service_state fail2ban "$FAIL2BAN_WAS_ACTIVE" "$FAIL2BAN_WAS_ENABLED" "true"
     if [[ "$THINCLAW_SERVICE_WAS_ACTIVE" == "true" ]]; then
         systemctl restart thinclaw.service >/dev/null 2>&1 || true
     else
         systemctl stop thinclaw.service >/dev/null 2>&1 || true
     fi
     rm -rf "$ROLLBACK_DIR"
-    echo "Rollback complete. Package installations are not removed automatically." >&2
+    echo "Rollback complete." >&2
 }
 
 on_exit() {
@@ -257,16 +273,165 @@ wait_for_health() {
     return 1
 }
 
+service_active() {
+    systemctl is-active --quiet "$1" >/dev/null 2>&1 && echo true || echo false
+}
+
+service_enabled() {
+    systemctl is-enabled --quiet "$1" >/dev/null 2>&1 && echo true || echo false
+}
+
+ufw_active() {
+    command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active' && echo true || echo false
+}
+
+tailscale_running() {
+    command -v tailscale >/dev/null 2>&1 && tailscale status --json 2>/dev/null | grep -q '"BackendState"[[:space:]]*:[[:space:]]*"Running"' && echo true || echo false
+}
+
+capture_initial_host_state() {
+    command -v docker >/dev/null 2>&1 && DOCKER_WAS_INSTALLED=true || DOCKER_WAS_INSTALLED=false
+    DOCKER_WAS_ACTIVE="$(service_active docker)"
+    DOCKER_WAS_ENABLED="$(service_enabled docker)"
+    FAIL2BAN_WAS_ACTIVE="$(service_active fail2ban)"
+    FAIL2BAN_WAS_ENABLED="$(service_enabled fail2ban)"
+    UFW_WAS_ACTIVE="$(ufw_active)"
+    command -v tailscale >/dev/null 2>&1 && TAILSCALE_WAS_INSTALLED=true || TAILSCALE_WAS_INSTALLED=false
+    TAILSCALE_WAS_RUNNING="$(tailscale_running)"
+}
+
+package_installed() {
+    local package="$1"
+    case "$PKG_MANAGER" in
+        apt)
+            dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -q '^ii'
+            ;;
+        yum|dnf)
+            rpm -q "$package" >/dev/null 2>&1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+record_package_installed() {
+    local package="$1"
+    local item=""
+    for item in "${PACKAGES_INSTALLED_BY_SETUP[@]}"; do
+        if [[ "$item" == "$package" ]]; then
+            return 0
+        fi
+    done
+    PACKAGES_INSTALLED_BY_SETUP+=("$package")
+}
+
+install_packages() {
+    local package=""
+    local -a newly_requested=()
+    for package in "$@"; do
+        if ! package_installed "$package"; then
+            newly_requested+=("$package")
+        fi
+    done
+
+    case "$PKG_MANAGER" in
+        apt)
+            apt-get install -y -qq "$@"
+            ;;
+        yum|dnf)
+            "$PKG_MANAGER" install -y "$@"
+            ;;
+        *)
+            echo "ERROR: unsupported package manager $PKG_MANAGER" >&2
+            exit 1
+            ;;
+    esac
+
+    for package in "${newly_requested[@]}"; do
+        if package_installed "$package"; then
+            record_package_installed "$package"
+        fi
+    done
+}
+
+rollback_installed_packages() {
+    if [[ "${#PACKAGES_INSTALLED_BY_SETUP[@]}" -eq 0 ]]; then
+        return 0
+    fi
+    if [[ "$PACKAGE_ROLLBACK" != "true" ]]; then
+        echo "Package rollback disabled; leaving installed packages: ${PACKAGES_INSTALLED_BY_SETUP[*]}" >&2
+        return 0
+    fi
+
+    echo "Removing packages installed by failed setup: ${PACKAGES_INSTALLED_BY_SETUP[*]}" >&2
+    case "$PKG_MANAGER" in
+        apt)
+            apt-get purge -y -qq "${PACKAGES_INSTALLED_BY_SETUP[@]}" >/dev/null 2>&1 || true
+            apt-get autoremove -y -qq >/dev/null 2>&1 || true
+            ;;
+        yum|dnf)
+            "$PKG_MANAGER" remove -y "${PACKAGES_INSTALLED_BY_SETUP[@]}" >/dev/null 2>&1 || true
+            ;;
+    esac
+}
+
+restore_service_state() {
+    local service="$1"
+    local was_active="$2"
+    local was_enabled="$3"
+    local existed_before="$4"
+    if [[ "$existed_before" != "true" ]] && ! systemctl status "$service" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [[ "$was_enabled" == "true" ]]; then
+        systemctl enable "$service" >/dev/null 2>&1 || true
+    else
+        systemctl disable "$service" >/dev/null 2>&1 || true
+    fi
+
+    if [[ "$was_active" == "true" ]]; then
+        systemctl restart "$service" >/dev/null 2>&1 || systemctl start "$service" >/dev/null 2>&1 || true
+    else
+        systemctl stop "$service" >/dev/null 2>&1 || true
+    fi
+}
+
+restore_ufw_state() {
+    if ! command -v ufw >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ "$UFW_WAS_ACTIVE" == "true" ]]; then
+        echo "y" | ufw enable >/dev/null 2>&1 || true
+    else
+        ufw disable >/dev/null 2>&1 || true
+    fi
+}
+
+rollback_tailscale_state() {
+    if [[ "$TAILSCALE_TOUCHED" != "true" ]] || ! command -v tailscale >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ "$TAILSCALE_WAS_RUNNING" != "true" ]]; then
+        tailscale down >/dev/null 2>&1 || true
+    else
+        echo "Tailscale was already running before setup; leaving it up after rollback." >&2
+    fi
+}
+
 configure_firewall() {
     echo ""
     echo "==> Configuring UFW Firewall..."
 
+    backup_path /etc/ufw
+
     if ! command -v ufw &> /dev/null; then
         if [ "$PKG_MANAGER" = "apt" ]; then
-            apt-get install -y -qq ufw
+            install_packages ufw
         elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
-            $PKG_MANAGER install -y epel-release 2>/dev/null || true
-            $PKG_MANAGER install -y ufw 2>/dev/null || true
+            install_packages epel-release 2>/dev/null || true
+            install_packages ufw 2>/dev/null || true
         fi
     fi
 
@@ -297,10 +462,10 @@ install_fail2ban() {
 
     if ! command -v fail2ban-client &> /dev/null; then
         if [ "$PKG_MANAGER" = "apt" ]; then
-            apt-get install -y -qq fail2ban
+            install_packages fail2ban
         elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
-            $PKG_MANAGER install -y epel-release 2>/dev/null || true
-            $PKG_MANAGER install -y fail2ban
+            install_packages epel-release 2>/dev/null || true
+            install_packages fail2ban
         fi
     fi
 
@@ -342,10 +507,17 @@ install_tailscale_if_requested() {
     echo ""
     echo "==> Installing Tailscale VPN..."
     if ! command -v tailscale &> /dev/null; then
+        backup_path /etc/apt/sources.list.d/tailscale.list
+        backup_path /usr/share/keyrings/tailscale-archive-keyring.gpg
+        backup_path /etc/yum.repos.d/tailscale.repo
         curl -fsSL https://tailscale.com/install.sh | sh
+        if [[ "$TAILSCALE_WAS_INSTALLED" != "true" ]] && package_installed tailscale; then
+            record_package_installed tailscale
+        fi
     fi
 
     if command -v tailscale &> /dev/null; then
+        TAILSCALE_TOUCHED=true
         tailscale up --authkey="$TAILSCALE_KEY" --accept-routes --accept-dns=false
         TS_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
         echo "    Tailscale installed and connected."
@@ -393,7 +565,7 @@ install_native_pi() {
 
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y -qq
-    apt-get install -y -qq ca-certificates curl openssl
+    install_packages ca-certificates curl openssl
 
     local source_binary=""
     if ! source_binary="$(resolve_native_binary)"; then
@@ -519,6 +691,8 @@ SYSTEMD_UNIT
     SETUP_COMPLETE=true
 }
 
+capture_initial_host_state
+
 if [[ "$MODE" == "auto" ]]; then
     if is_pi_os_lite_64; then
         MODE="native"
@@ -544,9 +718,11 @@ if ! command -v docker &> /dev/null; then
     if [ "$PKG_MANAGER" = "apt" ]; then
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -y -qq
-        apt-get install -y -qq ca-certificates curl gnupg lsb-release
+        install_packages ca-certificates curl gnupg lsb-release
 
         # Add Docker's official GPG key
+        backup_path /etc/apt/keyrings/docker.asc
+        backup_path /etc/apt/sources.list.d/docker.list
         install -m 0755 -d /etc/apt/keyrings
         if [ -f /etc/apt/keyrings/docker.asc ]; then
             rm /etc/apt/keyrings/docker.asc
@@ -563,13 +739,14 @@ if ! command -v docker &> /dev/null; then
           tee /etc/apt/sources.list.d/docker.list > /dev/null
 
         apt-get update -y -qq
-        apt-get install -y -qq docker-ce docker-ce-cli containerd.io \
+        install_packages docker-ce docker-ce-cli containerd.io \
             docker-buildx-plugin docker-compose-plugin
 
     elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
-        $PKG_MANAGER install -y yum-utils
+        install_packages yum-utils
+        backup_path /etc/yum.repos.d/docker-ce.repo
         yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-        $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io \
+        install_packages docker-ce docker-ce-cli containerd.io \
             docker-buildx-plugin docker-compose-plugin
     fi
 
@@ -596,13 +773,15 @@ fi
 echo ""
 echo "==> [2/6] Configuring UFW Firewall..."
 
+backup_path /etc/ufw
+
 if ! command -v ufw &> /dev/null; then
     if [ "$PKG_MANAGER" = "apt" ]; then
-        apt-get install -y -qq ufw
+        install_packages ufw
     elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
         # UFW isn't native on RHEL — install EPEL first
-        $PKG_MANAGER install -y epel-release 2>/dev/null || true
-        $PKG_MANAGER install -y ufw 2>/dev/null || true
+        install_packages epel-release 2>/dev/null || true
+        install_packages ufw 2>/dev/null || true
     fi
 fi
 
@@ -644,10 +823,10 @@ echo "==> [3/6] Installing Fail2ban..."
 
 if ! command -v fail2ban-client &> /dev/null; then
     if [ "$PKG_MANAGER" = "apt" ]; then
-        apt-get install -y -qq fail2ban
+        install_packages fail2ban
     elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
-        $PKG_MANAGER install -y epel-release 2>/dev/null || true
-        $PKG_MANAGER install -y fail2ban
+        install_packages epel-release 2>/dev/null || true
+        install_packages fail2ban
     fi
 fi
 
@@ -692,11 +871,18 @@ if [[ -n "$TAILSCALE_KEY" ]]; then
 
     if ! command -v tailscale &> /dev/null; then
         # Official Tailscale install script
+        backup_path /etc/apt/sources.list.d/tailscale.list
+        backup_path /usr/share/keyrings/tailscale-archive-keyring.gpg
+        backup_path /etc/yum.repos.d/tailscale.repo
         curl -fsSL https://tailscale.com/install.sh | sh
+        if [[ "$TAILSCALE_WAS_INSTALLED" != "true" ]] && package_installed tailscale; then
+            record_package_installed tailscale
+        fi
     fi
 
     if command -v tailscale &> /dev/null; then
         # Authenticate and connect
+        TAILSCALE_TOUCHED=true
         tailscale up --authkey="$TAILSCALE_KEY" --accept-routes --accept-dns=false
 
         # Get Tailscale IP

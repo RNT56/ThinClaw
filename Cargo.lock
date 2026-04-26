@@ -7489,6 +7489,14 @@ dependencies = [
  "tempfile",
  "termimad",
  "textwrap",
+ "thinclaw-channels-core",
+ "thinclaw-db",
+ "thinclaw-identity",
+ "thinclaw-llm-core",
+ "thinclaw-safety",
+ "thinclaw-tools-core",
+ "thinclaw-types",
+ "thinclaw-workspace",
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
@@ -7513,6 +7521,118 @@ dependencies = [
  "windows-sys 0.52.0",
  "zbus",
  "zip",
+]
+
+[[package]]
+name = "thinclaw-channels-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "serde_json",
+ "thinclaw-identity",
+ "thinclaw-types",
+ "uuid",
+]
+
+[[package]]
+name = "thinclaw-db"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "thinclaw-types",
+ "thinclaw-workspace",
+ "uuid",
+]
+
+[[package]]
+name = "thinclaw-identity"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thinclaw-safety",
+ "uuid",
+]
+
+[[package]]
+name = "thinclaw-llm-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thinclaw-types",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "thinclaw-safety"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "chrono",
+ "dirs",
+ "hex",
+ "jsonschema",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thinclaw-types",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "unicode-normalization",
+ "url",
+]
+
+[[package]]
+name = "thinclaw-tools-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest 0.12.28",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thinclaw-types",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "thinclaw-types"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "deadpool-postgres",
+ "libsql",
+ "reqwest 0.12.28",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio-postgres",
+ "uuid",
+]
+
+[[package]]
+name = "thinclaw-workspace"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

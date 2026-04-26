@@ -7,13 +7,16 @@ use serde_json::json;
 
 use crate::error::LlmError;
 
-use crate::llm::cost_tracker::{CostEntry, CostTracker};
+use crate::llm::cost_tracker::{
+    CostEntry, CostSource, CostTracker, TokenCaptureCostSummary, TokenCountSource,
+};
 use crate::llm::model_guidance;
 use crate::llm::prompt_stack::PromptStack;
 use crate::llm::streaming::merge_streamed_tool_calls;
 use crate::llm::usage_tracking::mark_reasoning_request;
 use crate::llm::{
-    ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
+    ChatMessage, CompletionRequest, LlmProvider, ProviderTokenCapture, ToolCall,
+    ToolCompletionRequest, ToolDefinition,
 };
 use crate::safety::{SafetyLayer, sanitize_context_content};
 
@@ -235,6 +238,8 @@ pub struct RespondOutput {
     pub finish_reason: crate::llm::FinishReason,
     /// Extended thinking / chain-of-thought content from the LLM, if available.
     pub thinking_content: Option<String>,
+    /// Provider-native exact token/logprob data, when returned by the upstream.
+    pub token_capture: Option<ProviderTokenCapture>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -765,6 +770,7 @@ impl Reasoning {
             &usage,
             response.provider_model.as_deref(),
             response.cost_usd,
+            response.token_capture.as_ref(),
         )
         .await;
 
@@ -806,6 +812,7 @@ impl Reasoning {
         usage: &TokenUsage,
         provider_model: Option<&str>,
         cost_usd: Option<f64>,
+        token_capture: Option<&ProviderTokenCapture>,
     ) {
         let Some(ref tracker) = self.cost_tracker else {
             return;
@@ -820,6 +827,11 @@ impl Reasoning {
             let total = input * input_rate + output * output_rate;
             use rust_decimal::prelude::ToPrimitive;
             total.to_f64().unwrap_or(0.0)
+        };
+        let cost_source = if cost_usd.is_some() {
+            CostSource::ProviderCost
+        } else {
+            CostSource::LocalPricingFallback
         };
         let cost_usd = cost_usd.unwrap_or(fallback_cost_usd);
         let agent_id = self
@@ -842,6 +854,9 @@ impl Reasoning {
             output_tokens: usage.output_tokens,
             cost_usd,
             request_id: None,
+            token_count_source: TokenCountSource::ProviderUsage,
+            cost_source,
+            token_capture: token_capture.map(TokenCaptureCostSummary::from_capture),
         };
         tracker.lock().await.record(entry);
     }
@@ -929,6 +944,7 @@ impl Reasoning {
             &usage,
             response.provider_model.as_deref(),
             response.cost_usd,
+            response.token_capture.as_ref(),
         )
         .await;
 
@@ -980,6 +996,7 @@ impl Reasoning {
             &usage,
             response.provider_model.as_deref(),
             response.cost_usd,
+            response.token_capture.as_ref(),
         )
         .await;
 
@@ -1039,6 +1056,7 @@ impl Reasoning {
             &usage,
             response.provider_model.as_deref(),
             response.cost_usd,
+            response.token_capture.as_ref(),
         )
         .await;
 
@@ -1111,6 +1129,7 @@ Respond in JSON format:
             &usage,
             response.provider_model.as_deref(),
             response.cost_usd,
+            response.token_capture.as_ref(),
         )
         .await;
 
@@ -1207,6 +1226,7 @@ Respond in JSON format:
                 &usage,
                 response.provider_model.as_deref(),
                 response.cost_usd,
+                response.token_capture.as_ref(),
             )
             .await;
 
@@ -1221,6 +1241,7 @@ Respond in JSON format:
                     routed_model_name: response.provider_model.clone(),
                     finish_reason: response.finish_reason,
                     thinking_content: thinking,
+                    token_capture: response.token_capture.clone(),
                 });
             }
 
@@ -1247,6 +1268,7 @@ Respond in JSON format:
                     routed_model_name: response.provider_model.clone(),
                     finish_reason: response.finish_reason,
                     thinking_content: thinking,
+                    token_capture: response.token_capture.clone(),
                 });
             }
 
@@ -1271,6 +1293,7 @@ Respond in JSON format:
                 routed_model_name: response.provider_model.clone(),
                 finish_reason: response.finish_reason,
                 thinking_content: thinking,
+                token_capture: response.token_capture,
             })
         } else {
             // No tools, use simple completion
@@ -1293,6 +1316,7 @@ Respond in JSON format:
                 &usage,
                 response.provider_model.as_deref(),
                 response.cost_usd,
+                response.token_capture.as_ref(),
             )
             .await;
 
@@ -1312,6 +1336,7 @@ Respond in JSON format:
                 routed_model_name: response.provider_model.clone(),
                 finish_reason: response.finish_reason,
                 thinking_content: response.thinking_content,
+                token_capture: response.token_capture,
             })
         }
     }
@@ -1398,6 +1423,7 @@ Respond in JSON format:
         let mut final_usage = TokenUsage::default();
         let mut final_finish_reason = crate::llm::FinishReason::Stop;
         let mut final_provider_model: Option<String> = None;
+        let mut final_token_capture: Option<ProviderTokenCapture> = None;
 
         // Accumulator for tool call deltas (index -> partial ToolCall)
         let mut partial_tool_calls: std::collections::HashMap<u32, (String, String, String)> =
@@ -1442,6 +1468,7 @@ Respond in JSON format:
                     input_tokens,
                     output_tokens,
                     finish_reason: fr,
+                    token_capture,
                 } => {
                     final_usage = TokenUsage {
                         input_tokens,
@@ -1450,8 +1477,14 @@ Respond in JSON format:
                     final_finish_reason = fr;
 
                     // Record cost when stream completes (feeds Cost Dashboard).
-                    self.record_cost(&final_usage, provider_model.as_deref(), cost_usd)
-                        .await;
+                    self.record_cost(
+                        &final_usage,
+                        provider_model.as_deref(),
+                        cost_usd,
+                        token_capture.as_ref(),
+                    )
+                    .await;
+                    final_token_capture = token_capture;
                     final_provider_model = provider_model;
                 }
             }
@@ -1477,6 +1510,7 @@ Respond in JSON format:
                 routed_model_name: final_provider_model,
                 finish_reason: final_finish_reason,
                 thinking_content,
+                token_capture: final_token_capture,
             });
         }
 
@@ -1500,6 +1534,7 @@ Respond in JSON format:
                     routed_model_name: final_provider_model,
                     finish_reason: final_finish_reason,
                     thinking_content,
+                    token_capture: final_token_capture,
                 });
             }
         }
@@ -1520,6 +1555,7 @@ Respond in JSON format:
             routed_model_name: final_provider_model,
             finish_reason: final_finish_reason,
             thinking_content,
+            token_capture: final_token_capture,
         })
     }
 
@@ -1930,6 +1966,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
 
@@ -1946,6 +1983,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
 
@@ -1977,6 +2015,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
 
@@ -1993,6 +2032,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
     }
@@ -2019,6 +2059,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: self.response,
+                token_capture: None,
             })
         }
 
@@ -2035,6 +2076,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: self.response,
+                token_capture: None,
             })
         }
     }
@@ -2062,6 +2104,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
 
@@ -2083,6 +2126,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 finish_reason: FinishReason::ToolUse,
+                token_capture: None,
             })
         }
     }

@@ -74,6 +74,7 @@ impl LlmProvider for MockLlmProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            token_capture: None,
         })
     }
 
@@ -102,6 +103,7 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 15,
                 output_tokens: 8,
                 finish_reason: FinishReason::ToolUse,
+                token_capture: None,
             })
         } else {
             Ok(ToolCompletionResponse {
@@ -113,6 +115,7 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 10,
                 output_tokens: 4,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
     }
@@ -154,6 +157,7 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            token_capture: None,
         })
     }
 
@@ -170,6 +174,7 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            token_capture: None,
         })
     }
 
@@ -795,6 +800,7 @@ impl LlmProvider for ThinkingMockProvider {
             input_tokens: 20,
             output_tokens: 10,
             finish_reason: FinishReason::Stop,
+            token_capture: None,
         })
     }
 
@@ -811,6 +817,7 @@ impl LlmProvider for ThinkingMockProvider {
             input_tokens: 15,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            token_capture: None,
         })
     }
 }

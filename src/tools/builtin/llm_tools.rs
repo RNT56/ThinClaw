@@ -286,7 +286,9 @@ impl Tool for LlmSelectTool {
             )));
         }
 
-        let (provider_slug, model_name) = model_spec.split_once('/').unwrap();
+        let (provider_slug, model_name) = model_spec
+            .split_once('/')
+            .expect("validated by contains('/') check above");
 
         // Validate against provider catalog
         let endpoint = crate::config::provider_catalog::endpoint_for(provider_slug);

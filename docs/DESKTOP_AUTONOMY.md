@@ -119,14 +119,17 @@ Linux desktop readiness:
 thinclaw doctor --profile desktop-linux
 sudo apt install python3 python3-gi python3-pyatspi libreoffice \
   libreoffice-script-provider-python evolution evolution-data-server-bin \
-  xdotool ydotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick \
-  at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam
+  xdotool ydotool wmctrl tesseract-ocr gnome-screenshot scrot grim spectacle imagemagick \
+  at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam \
+  kwin-wayland plasma-workspace plasma-workspace-wayland xwayland
 ```
 
 `desktop-gnome` remains accepted as a compatibility alias. Use `xdotool` for
 X11 sessions; use `ydotool` or `dotool` when a Wayland compositor blocks X11
 pointer/key injection. Menus and window discovery prefer AT-SPI on Wayland and
-fall back to `wmctrl` on X11.
+fall back to `wmctrl` on X11. Screen capture tries compositor-native Wayland
+paths such as KDE `spectacle`, `grim`, and `weston-screenshooter` before
+X11-style capture tools.
 
 ## Tool Surfaces
 
@@ -317,6 +320,15 @@ ThinClaw ships ignored live desktop smoke coverage in:
 - [../tests/desktop_autonomy_live_smoke.rs](../tests/desktop_autonomy_live_smoke.rs)
 
 These tests are intentionally out of normal CI and are meant for a sacrificial machine with permissions already granted.
+
+Normal CI also runs a lighter Linux sidecar smoke matrix through
+[../scripts/ci/linux_desktop_sidecar_smoke.sh](../scripts/ci/linux_desktop_sidecar_smoke.sh).
+That matrix starts headless `gnome-x11`, a real `plasma-kwin-wayland` session
+using `kwin_wayland --virtual` plus `plasmashell`, and `openbox-x11` sessions.
+It verifies sidecar health/capabilities and exercises app/window, snapshot,
+input, and screen-capture paths. It is not a replacement for the
+sacrificial-machine smoke below, but it prevents regressions in the Linux
+backend wiring, Plasma/KWin launch assumptions, and CI runner assumptions.
 
 They cover:
 

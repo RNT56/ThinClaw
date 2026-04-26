@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::agent::{Agent, AgentRunArtifact, AgentRunArtifactLogger, AgentRunStatus};
 use crate::channels::IncomingMessage;
-use crate::llm::TokenCaptureSupport;
+use crate::llm::{ProviderTokenCapture, TokenCaptureSupport};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvState {
@@ -187,6 +187,12 @@ impl AgentEnv for AgentLoopEnv {
                 "episode_id": self.episode_id,
             }));
         let response = self.agent.handle_message_external(&message).await?;
+        let token_capture = self
+            .agent
+            .latest_token_capture_for_message(&message)
+            .await
+            .map(token_capture_from_provider_capture)
+            .unwrap_or_else(|| agent_token_capture(&self.agent));
         let reward = heuristic_reward(response.as_deref());
         self.terminal = self.steps.len() + 1 >= self.max_steps;
         if let Some(ref text) = response {
@@ -199,7 +205,7 @@ impl AgentEnv for AgentLoopEnv {
             reward,
             done: self.terminal,
             at: Utc::now(),
-            token_capture: Some(agent_token_capture(&self.agent)),
+            token_capture: Some(token_capture),
             metadata: serde_json::json!({}),
         };
         self.steps.push(step);
@@ -746,6 +752,18 @@ fn token_capture_from_support(
     }
 }
 
+fn token_capture_from_provider_capture(capture: ProviderTokenCapture) -> TokenTrajectoryCapture {
+    TokenTrajectoryCapture {
+        exact_tokens_supported: capture.exact_tokens_supported,
+        logprobs_supported: capture.logprobs_supported,
+        token_ids: capture.token_ids,
+        tokens: capture.tokens,
+        logprobs: capture.logprobs,
+        provider: capture.provider,
+        model: capture.model,
+    }
+}
+
 fn agent_token_capture(agent: &Agent) -> TokenTrajectoryCapture {
     let provider = agent.llm_provider_name();
     token_capture_from_support(
@@ -814,6 +832,27 @@ mod tests {
         assert_eq!(capture.model.as_deref(), Some("gpt-test"));
         assert!(capture.token_ids.is_empty());
         assert!(capture.logprobs.is_empty());
+    }
+
+    #[test]
+    fn token_capture_from_provider_preserves_real_provider_arrays() {
+        let capture = token_capture_from_provider_capture(ProviderTokenCapture {
+            exact_tokens_supported: true,
+            logprobs_supported: true,
+            token_ids: vec![11, 12],
+            tokens: vec!["real".to_string(), " data".to_string()],
+            logprobs: vec![-0.7, -0.8],
+            provider: Some("openai".to_string()),
+            model: Some("gpt-test".to_string()),
+        });
+
+        assert!(capture.exact_tokens_supported);
+        assert!(capture.logprobs_supported);
+        assert_eq!(capture.token_ids, vec![11, 12]);
+        assert_eq!(capture.tokens, vec!["real", " data"]);
+        assert_eq!(capture.logprobs, vec![-0.7, -0.8]);
+        assert_eq!(capture.provider.as_deref(), Some("openai"));
+        assert_eq!(capture.model.as_deref(), Some("gpt-test"));
     }
 
     #[tokio::test]

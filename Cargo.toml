@@ -1,5 +1,5 @@
 [workspace]
-members = ["."]
+members = [".", "crates/*"]
 exclude = [
     "channels-src/discord",
     "channels-src/telegram",
@@ -40,6 +40,15 @@ eula = false
 dist = true
 
 [dependencies]
+thinclaw-types = { path = "crates/thinclaw-types", default-features = false }
+thinclaw-db = { path = "crates/thinclaw-db" }
+thinclaw-channels-core = { path = "crates/thinclaw-channels-core" }
+thinclaw-identity = { path = "crates/thinclaw-identity" }
+thinclaw-llm-core = { path = "crates/thinclaw-llm-core" }
+thinclaw-safety = { path = "crates/thinclaw-safety" }
+thinclaw-tools-core = { path = "crates/thinclaw-tools-core" }
+thinclaw-workspace = { path = "crates/thinclaw-workspace" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -265,6 +274,7 @@ full = [
     "nostr",
 ]
 postgres = [
+    "thinclaw-types/postgres",
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
     "dep:tokio-postgres-rustls",
@@ -275,7 +285,7 @@ postgres = [
     "dep:pgvector",
     "rust_decimal/db-tokio-postgres",
 ]
-libsql = ["dep:libsql"]
+libsql = ["thinclaw-types/libsql", "dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 # Document text extraction — PDF (pdf-extract), DOCX/PPTX/XLSX (zip crate)
@@ -357,6 +367,11 @@ aarch64-apple-darwin = "macos-14"
 too_many_arguments    = "allow"  # Builder/config functions legitimately need many params
 should_implement_trait = "allow"  # from_str() helpers aren't always FromStr
 module_name_repetitions = "allow"  # e.g. WorkspaceStorage in workspace module
+
+# Panic prevention — unwrap() in production code is a crash waiting to happen.
+# Use expect("reason") for invariants, or propagate errors with ? / unwrap_or.
+# Test code can opt out: #[allow(clippy::unwrap_used)]
+unwrap_used = "warn"
 
 # Documentation nits — allow (don't block PRs on doc formatting):
 doc_overindented_list_items = "allow"

@@ -490,7 +490,11 @@ impl RoutineStore for LibSqlBackend {
         let conn = self.connect().await?;
         let now = Utc::now();
         let now_str = fmt_ts(&now);
-        let cutoff = fmt_ts(&(now - chrono::Duration::try_minutes(10).unwrap()));
+        let cutoff = fmt_ts(
+            &(now
+                - chrono::Duration::try_minutes(10)
+                    .expect("10 minutes is a valid chrono::Duration")),
+        );
         let count = conn
             .execute(
                 r#"

@@ -1,5 +1,6 @@
 name: CI
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches:
@@ -143,6 +144,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-arm64-host-smoke
+      - name: Verify ARM64 runner
+        run: |
+          set -euo pipefail
+          uname -a
+          test "$(uname -m)" = "aarch64"
       - name: cargo check
         run: cargo check --features full
       - name: Build ARM64 release artifact
@@ -235,6 +241,48 @@ jobs:
           THINCLAW_HEADLESS: "true"
           DESKTOP_AUTONOMY_ENABLED: "false"
         run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+
+  linux-desktop-autonomy-smoke:
+    name: "Linux Desktop Autonomy Smoke (${{ matrix.session }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        session:
+          - gnome-x11
+          - plasma-kwin-wayland
+          - openbox-x11
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install desktop smoke dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            at-spi2-core \
+            dbus-x11 \
+            grim \
+            kwin-wayland \
+            openbox \
+            plasma-workspace \
+            plasma-workspace-wayland \
+            python3 \
+            python3-gi \
+            python3-pyatspi \
+            scrot \
+            spectacle \
+            wmctrl \
+            wtype \
+            x11-utils \
+            xdotool \
+            xterm \
+            xwayland \
+            xvfb
+          command -v kwin_wayland
+          command -v plasmashell
+      - name: Run desktop sidecar live smoke
+        run: dbus-run-session -- bash scripts/ci/linux_desktop_sidecar_smoke.sh "${{ matrix.session }}"
 
   macos-host-regression:
     name: macOS Host Regression

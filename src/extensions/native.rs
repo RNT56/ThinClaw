@@ -247,6 +247,8 @@ fn verify_sha256(path: &Path, expected_hex: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -350,5 +352,77 @@ mod tests {
             unsafe { NativePluginRuntime::load(&manifest, contribution, dir.path(), &settings) }
                 .expect_err("hash mismatch should reject before libloading");
         assert!(err.to_string().contains("hash mismatch"));
+    }
+
+    #[test]
+    fn native_c_abi_json_v1_invokes_successfully_when_allowlisted() {
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("native_echo.c");
+        let library_name = format!(
+            "{}native_echo.{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_EXTENSION
+        );
+        let library = dir.path().join(&library_name);
+        fs::write(
+            &source,
+            r#"
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+int thinclaw_native_plugin_invoke_v1(
+    const uint8_t* request,
+    size_t request_len,
+    uint8_t* response,
+    size_t response_cap,
+    size_t* response_len
+) {
+    (void)request;
+    (void)request_len;
+    const char* payload = "{\"ok\":true,\"payload\":{\"echo\":\"native-ok\"}}";
+    size_t len = strlen(payload);
+    if (response_cap < len) {
+        *response_len = len;
+        return 2;
+    }
+    memcpy(response, payload, len);
+    *response_len = len;
+    return 0;
+}
+"#,
+        )
+        .expect("write C fixture");
+
+        let mut command = Command::new("cc");
+        #[cfg(target_os = "macos")]
+        command.arg("-dynamiclib");
+        #[cfg(not(target_os = "macos"))]
+        command.args(["-shared", "-fPIC"]);
+        let status = command.arg(&source).arg("-o").arg(&library).status();
+        let Ok(status) = status else {
+            eprintln!("skipping native C ABI smoke: cc is unavailable");
+            return;
+        };
+        if !status.success() {
+            eprintln!("skipping native C ABI smoke: cc failed with {status}");
+            return;
+        }
+
+        let manifest = native_manifest(&library_name, None);
+        let contribution = manifest.contributions.native_plugins.first().unwrap();
+        let settings = ExtensionsSettings {
+            allow_native_plugins: true,
+            require_plugin_signatures: false,
+            native_plugin_allowlist_dirs: vec![dir.path().display().to_string()],
+            ..ExtensionsSettings::default()
+        };
+        let runtime =
+            unsafe { NativePluginRuntime::load(&manifest, contribution, dir.path(), &settings) }
+                .expect("load native smoke dylib");
+        let payload = runtime
+            .invoke_json("echo", serde_json::json!({ "message": "hello" }))
+            .expect("invoke native smoke dylib");
+        assert_eq!(payload, serde_json::json!({ "echo": "native-ok" }));
     }
 }

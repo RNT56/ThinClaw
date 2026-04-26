@@ -33,6 +33,7 @@ Built-in packs:
 - `research_assistant`
 - `mentor`
 - `minimal`
+- `flow_state`
 
 The pack chosen during onboarding seeds the first canonical `THINCLAW_HOME/SOUL.md` and is stored in `agent.personality_pack`. Later pack changes do not silently rewrite an already-authored soul.
 

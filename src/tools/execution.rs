@@ -388,9 +388,12 @@ fn wasm_tool_invoke_context(job_ctx: &JobContext, tool_name: &str) -> Result<Job
         serde_json::Value::Object(map) => map,
         _ => serde_json::Map::new(),
     };
+    metadata
+        .entry("allowed_tools".to_string())
+        .or_insert_with(|| serde_json::json!([tool_name.to_string()]));
     metadata.insert(
-        "allowed_tools".to_string(),
-        serde_json::json!([tool_name.to_string()]),
+        "wasm_tool_invoke_target".to_string(),
+        serde_json::json!(tool_name),
     );
     metadata.insert(
         WASM_TOOL_INVOKE_DEPTH_KEY.to_string(),
@@ -698,6 +701,36 @@ mod tests {
         }
     }
 
+    struct SlowTool;
+
+    #[async_trait::async_trait]
+    impl Tool for SlowTool {
+        fn name(&self) -> &str {
+            "slow_tool"
+        }
+
+        fn description(&self) -> &str {
+            "slow test tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(ToolOutput::text("too slow", Duration::from_millis(100)))
+        }
+
+        fn execution_timeout(&self) -> Duration {
+            Duration::from_millis(10)
+        }
+    }
+
     fn host_invoker(registry: Arc<ToolRegistry>) -> HostMediatedToolInvoker {
         HostMediatedToolInvoker::new(
             registry,
@@ -798,5 +831,52 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("recursion depth exceeded"));
+    }
+
+    #[tokio::test]
+    async fn host_invoker_applies_policy_allowlist_to_wasm_invocations() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry
+            .register_builtin(Arc::new(TestTool {
+                name: "allowed_tool",
+                schema: serde_json::json!({ "type": "object" }),
+                approval: ApprovalRequirement::Never,
+                output: serde_json::json!({"ok": true}),
+            }))
+            .await;
+        registry
+            .register_builtin(Arc::new(TestTool {
+                name: "blocked_tool",
+                schema: serde_json::json!({ "type": "object" }),
+                approval: ApprovalRequirement::Never,
+                output: serde_json::json!({"should_not_run": true}),
+            }))
+            .await;
+        let mut ctx = JobContext::default();
+        ctx.metadata = serde_json::json!({ "allowed_tools": ["allowed_tool"] });
+
+        let err = host_invoker(registry)
+            .invoke_json(&ctx, "blocked_tool", "{}")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("not permitted"));
+    }
+
+    #[tokio::test]
+    async fn host_invoker_enforces_target_tool_timeout() {
+        let registry = Arc::new(ToolRegistry::new());
+        registry.register_builtin(Arc::new(SlowTool)).await;
+
+        let err = host_invoker(registry)
+            .invoke_json(&JobContext::default(), "slow_tool", "{}")
+            .await
+            .unwrap_err();
+
+        let error_text = err.to_string();
+        assert!(
+            error_text.to_lowercase().contains("timed out"),
+            "{error_text}"
+        );
     }
 }

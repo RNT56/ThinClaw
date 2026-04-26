@@ -1,3 +1,6 @@
+// Build scripts are compile-time only — panics abort the build with clear errors.
+#![allow(clippy::unwrap_used)]
+
 //! Build script: compile WASM extensions and embed registry catalog.
 //!
 //! Do not commit compiled WASM binaries — they are a supply chain risk.

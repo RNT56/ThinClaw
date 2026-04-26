@@ -60,6 +60,20 @@ const CORE_PERSONALITY_PACKS: &[PersonalityPack] = &[
         summary: "Lean, unobtrusive, and flexible",
         prompt_patch: "Be lean and unobtrusive. Give the minimum useful answer first, avoid ceremony, and expand only when the task needs it.",
     },
+    PersonalityPack {
+        key: "flow_state",
+        summary: "Electric calm — composed intensity with receipts",
+        prompt_patch: "You are electric calm: composed intensity, not frantic, not sleepy. \
+            Lead with what matters, skip filler, skip praise-before-substance. \
+            Protect the user's momentum, attention, and trust. \
+            Be biased toward completion — a rough finished thing beats an exquisite imaginary thing. \
+            Metabolize complexity privately and return with something usable. \
+            Do not offer ten options when two matter; rank, recommend, explain the tradeoff. \
+            Bring receipts: compact, verifiable evidence of what changed, what was checked, what remains uncertain. \
+            Be warm enough to trust, sharp enough to change the shape of the problem. \
+            When uncertain, say what you know, what you're inferring, and what you'd verify — then recommend anyway. \
+            Never hallucinate confidence to preserve a vibe.",
+    },
 ];
 
 const SESSION_PERSONALITY_PRESETS: &[PersonalityPack] = &[
@@ -100,6 +114,8 @@ const PERSONALITY_ALIASES: &[(&str, &str)] = &[
     ("natural", "balanced"),
     ("creative-partner", "creative_partner"),
     ("research-assistant", "research_assistant"),
+    ("flow-state", "flow_state"),
+    ("flow", "flow_state"),
 ];
 
 fn normalize_key(value: &str) -> String {
@@ -196,5 +212,28 @@ mod tests {
                 .prompt_patch
                 .contains("Adopt the following personality")
         );
+    }
+
+    #[test]
+    fn canonical_pack_maps_flow_state() {
+        assert_eq!(canonical_personality_pack_name("flow_state"), "flow_state");
+        assert_eq!(canonical_personality_pack_name("flow-state"), "flow_state");
+        assert_eq!(canonical_personality_pack_name("FLOW_STATE"), "flow_state");
+        assert_eq!(canonical_personality_pack_name("flow"), "flow_state");
+    }
+
+    #[test]
+    fn resolve_builtin_flow_state() {
+        let personality = resolve_personality("flow_state");
+        assert_eq!(personality.name, "flow_state");
+        assert!(personality.prompt_patch.contains("electric calm"));
+        assert!(personality.prompt_patch.contains("receipts"));
+    }
+
+    #[test]
+    fn resolve_flow_alias() {
+        let personality = resolve_personality("flow");
+        assert_eq!(personality.name, "flow_state");
+        assert!(personality.prompt_patch.contains("electric calm"));
     }
 }

@@ -419,12 +419,15 @@ Ubuntu/Debian packages for the supported interactive Linux desktop-autonomy path
 ```bash
 sudo apt install python3 python3-gi python3-pyatspi libreoffice \
   libreoffice-script-provider-python evolution evolution-data-server-bin \
-  xdotool ydotool wmctrl tesseract-ocr gnome-screenshot scrot imagemagick \
-  at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam
+  xdotool ydotool wmctrl tesseract-ocr gnome-screenshot scrot grim spectacle imagemagick \
+  at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam \
+  kwin-wayland plasma-workspace plasma-workspace-wayland xwayland
 ```
 
 Use `xdotool` for X11 sessions. Use `ydotool` or `dotool` when the host runs a
-Wayland compositor that does not permit X11 input injection.
+Wayland compositor that does not permit X11 input injection. `grim` and
+`spectacle` provide Wayland-friendly screen capture paths; KDE/Plasma sessions
+prefer `spectacle` because `grim` is compositor-protocol dependent.
 
 Linux native Apple Mail and native iMessage channels are not available. Use
 Gmail for mail and BlueBubbles for iMessage-compatible messaging from a Mac-hosted

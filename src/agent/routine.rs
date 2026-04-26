@@ -370,8 +370,7 @@ pub fn validate_event_trigger(
     let has_structured_filter = channel.is_some()
         || event_type.is_some()
         || actor.is_some()
-        || metadata
-            .is_some_and(|value| value.is_object() && !value.as_object().unwrap().is_empty());
+        || metadata.is_some_and(|value| value.as_object().is_some_and(|obj| !obj.is_empty()));
     if trimmed_pattern.is_empty() && !has_structured_filter {
         return Err(RoutineError::InvalidEventPattern {
             reason: "event trigger needs at least one structured filter or a regex pattern"
