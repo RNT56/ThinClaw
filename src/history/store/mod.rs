@@ -43,11 +43,11 @@ mod settings;
 mod tool_failures;
 mod types;
 
-#[cfg(feature = "postgres")]
-pub use core::Store;
 pub use conversation_queries::{
     ConversationMessage, ConversationSummary, LinkedConversationRecall,
 };
+#[cfg(feature = "postgres")]
+pub use core::Store;
 pub use job_events::JobEventRecord;
 pub use sandbox_jobs::{SandboxJobRecord, SandboxJobSummary};
 pub use settings::SettingRow;

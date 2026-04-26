@@ -290,12 +290,12 @@ fn strip_version(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-        use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
-        fn lock_env() -> MutexGuard<'static, ()> {
-            static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-            LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-        }
+    fn lock_env() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn test_infer_npm_package() {

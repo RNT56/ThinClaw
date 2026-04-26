@@ -134,7 +134,8 @@ fn pi_os_lite_support_is_documented_and_guarded() {
     assert!(ci.contains("openbox-x11"));
     assert!(ci.contains("kwin-wayland"));
     assert!(ci.contains("plasma-workspace"));
-    assert!(ci.contains("spectacle"));
+    assert!(ci.contains("kde-spectacle"));
+    assert!(ci.contains("command -v spectacle"));
     assert!(ci.contains("scripts/ci/linux_desktop_sidecar_smoke.sh"));
     assert!(release.contains("linux/amd64,linux/arm64"));
     assert!(release.contains("ghcr.io/${GITHUB_REPOSITORY,,}"));

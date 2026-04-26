@@ -1,7 +1,7 @@
 //! Core tool traits, schemas, and execution metadata.
 
-pub mod tool;
 pub mod rate_limiter;
+pub mod tool;
 pub mod url_guard;
 
 pub use rate_limiter::{LimitType, RateLimitResult, RateLimiter};

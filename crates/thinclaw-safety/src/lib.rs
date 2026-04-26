@@ -149,7 +149,10 @@ impl SafetyLayer {
         }
 
         let violations = self.policy.check(&content);
-        if violations.iter().any(|rule| rule.action == PolicyAction::Block) {
+        if violations
+            .iter()
+            .any(|rule| rule.action == PolicyAction::Block)
+        {
             return SanitizedOutput {
                 content: "[Output blocked by safety policy]".to_string(),
                 warnings: vec![],

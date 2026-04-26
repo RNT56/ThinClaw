@@ -271,7 +271,7 @@ jobs:
             python3-gi \
             python3-pyatspi \
             scrot \
-            spectacle \
+            kde-spectacle \
             wmctrl \
             wtype \
             x11-utils \
@@ -281,6 +281,7 @@ jobs:
             xvfb
           command -v kwin_wayland
           command -v plasmashell
+          command -v spectacle
       - name: Run desktop sidecar live smoke
         run: dbus-run-session -- bash scripts/ci/linux_desktop_sidecar_smoke.sh "${{ matrix.session }}"
 

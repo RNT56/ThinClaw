@@ -53,9 +53,7 @@ pub(super) use types::{
     RolloutState, RuntimeState,
 };
 #[cfg(test)]
-pub(super) use types::{
-    LINUX_SIDECAR_FILENAME, MACOS_SIDECAR_FILENAME, WINDOWS_SIDECAR_FILENAME,
-};
+pub(super) use types::{LINUX_SIDECAR_FILENAME, MACOS_SIDECAR_FILENAME, WINDOWS_SIDECAR_FILENAME};
 
 #[cfg(test)]
 mod tests;

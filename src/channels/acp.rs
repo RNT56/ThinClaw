@@ -1602,6 +1602,22 @@ async fn approve_pending_tool(
         return;
     };
 
+    let _ = send_outbound(
+        writer_tx,
+        session_update(
+            &pending.session_id,
+            tool_call_update(
+                &pending.tool_call_id,
+                if approved { "in_progress" } else { "failed" },
+                Some(if approved {
+                    "Permission granted"
+                } else {
+                    "Permission denied"
+                }),
+            ),
+        ),
+    );
+
     let metadata = acp_metadata_for_session(state, &pending.session_id).await;
     let message = IncomingMessage::new(ACP_CHANNEL_NAME, ACP_USER_ID, content)
         .with_thread(pending.session_id.clone())

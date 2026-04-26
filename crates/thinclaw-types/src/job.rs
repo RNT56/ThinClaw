@@ -31,13 +31,22 @@ impl JobState {
 
         matches!(
             (self, target),
-            (Pending, InProgress) | (Pending, Cancelled)
-                | (InProgress, Completed) | (InProgress, Failed)
-                | (InProgress, Stuck) | (InProgress, Cancelled)
-                | (Completed, Submitted) | (Completed, Failed)
-                | (Submitted, Accepted) | (Submitted, Failed)
-                | (Stuck, InProgress) | (Stuck, Failed) | (Stuck, Cancelled) | (Stuck, Abandoned)
-                | (Pending, Abandoned) | (InProgress, Abandoned)
+            (Pending, InProgress)
+                | (Pending, Cancelled)
+                | (InProgress, Completed)
+                | (InProgress, Failed)
+                | (InProgress, Stuck)
+                | (InProgress, Cancelled)
+                | (Completed, Submitted)
+                | (Completed, Failed)
+                | (Submitted, Accepted)
+                | (Submitted, Failed)
+                | (Stuck, InProgress)
+                | (Stuck, Failed)
+                | (Stuck, Cancelled)
+                | (Stuck, Abandoned)
+                | (Pending, Abandoned)
+                | (InProgress, Abandoned)
         )
     }
 
@@ -184,7 +193,10 @@ impl JobContext {
         reason: Option<String>,
     ) -> Result<(), String> {
         if !self.state.can_transition_to(new_state) {
-            return Err(format!("Cannot transition from {} to {}", self.state, new_state));
+            return Err(format!(
+                "Cannot transition from {} to {}",
+                self.state, new_state
+            ));
         }
 
         self.transitions.push(StateTransition {
