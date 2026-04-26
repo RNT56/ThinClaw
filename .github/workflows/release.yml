@@ -385,13 +385,27 @@ jobs:
             target/wasm-bundles/checksums.txt
           if-no-files-found: error
 
-  publish-container-images:
+  # ── Container image pipeline ───────────────────────────────────────────
+  # Instead of compiling Rust inside Docker (which hangs under QEMU for
+  # ARM64), we download the pre-built binaries from cargo-dist artifacts
+  # and package them into lightweight Debian images.
+  #
+  # Architecture:
+  #   build-container-amd64  →  ghcr.io/…:v0.x.y-amd64
+  #   build-container-arm64  →  ghcr.io/…:v0.x.y-arm64
+  #   publish-container-manifest  →  ghcr.io/…:v0.x.y  (multi-arch)
+  #                               →  ghcr.io/…:latest  (multi-arch)
+
+  build-container-amd64:
     needs:
       - plan
+      - build-local-artifacts
     if: ${{ needs.plan.outputs.publishing == 'true' }}
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DOCKER_BUILD_SUMMARY: "true"
     steps:
       - uses: actions/checkout@v6
         with:
@@ -401,8 +415,26 @@ jobs:
         id: image
         shell: bash
         run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Download pre-built amd64 binary
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-build-local-x86_64-unknown-linux-gnu*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Extract binary from dist archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(find target/distrib/ -name '*x86_64-unknown-linux-gnu*.tar.gz' -not -name '*dist-manifest*' | head -1)
+          if [ -z "$archive" ]; then
+            echo "::error::No x86_64 linux archive found in artifacts"
+            ls -laR target/distrib/
+            exit 1
+          fi
+          echo "Extracting binary from: $archive"
+          tar xzf "$archive" --wildcards '*/thinclaw' --strip-components=1
+          chmod +x thinclaw
+          file thinclaw
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
       - name: Log in to GHCR
@@ -411,17 +443,135 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push multi-arch image
+      - name: Build and push amd64 image
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
+          provenance: false
           build-args: |
-            BUILD_FEATURES=full
+            THINCLAW_BINARY=thinclaw
           tags: |
-            ${{ steps.image.outputs.ref }}:${{ needs.plan.outputs.tag }}
-            ${{ steps.image.outputs.ref }}:latest
+            ${{ steps.image.outputs.ref }}:${{ needs.plan.outputs.tag }}-amd64
+          outputs: type=registry
+          cache-from: type=gha,scope=container-amd64
+          cache-to: type=gha,mode=max,scope=container-amd64
+
+  build-container-arm64:
+    needs:
+      - plan
+      - build-local-artifacts
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DOCKER_BUILD_SUMMARY: "true"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Set lowercase image ref
+        id: image
+        shell: bash
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Download pre-built arm64 binary
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-build-local-aarch64-unknown-linux-gnu*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Extract binary from dist archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(find target/distrib/ -name '*aarch64-unknown-linux-gnu*.tar.gz' -not -name '*dist-manifest*' | head -1)
+          if [ -z "$archive" ]; then
+            echo "::error::No aarch64 linux archive found in artifacts"
+            ls -laR target/distrib/
+            exit 1
+          fi
+          echo "Extracting binary from: $archive"
+          tar xzf "$archive" --wildcards '*/thinclaw' --strip-components=1
+          chmod +x thinclaw
+          file thinclaw
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push arm64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          build-args: |
+            THINCLAW_BINARY=thinclaw
+          tags: |
+            ${{ steps.image.outputs.ref }}:${{ needs.plan.outputs.tag }}-arm64
+          outputs: type=registry
+          cache-from: type=gha,scope=container-arm64
+          cache-to: type=gha,mode=max,scope=container-arm64
+
+  publish-container-manifest:
+    needs:
+      - plan
+      - build-container-amd64
+      - build-container-arm64
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Set lowercase image ref
+        id: image
+        shell: bash
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create and push multi-arch manifest
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # Create versioned multi-arch manifest
+          docker manifest create "${IMAGE_REF}:${TAG}" \
+            "${IMAGE_REF}:${TAG}-amd64" \
+            "${IMAGE_REF}:${TAG}-arm64"
+          docker manifest annotate "${IMAGE_REF}:${TAG}" \
+            "${IMAGE_REF}:${TAG}-amd64" --os linux --arch amd64
+          docker manifest annotate "${IMAGE_REF}:${TAG}" \
+            "${IMAGE_REF}:${TAG}-arm64" --os linux --arch arm64
+          docker manifest push "${IMAGE_REF}:${TAG}"
+
+          # Create/update :latest multi-arch manifest
+          docker manifest create "${IMAGE_REF}:latest" \
+            "${IMAGE_REF}:${TAG}-amd64" \
+            "${IMAGE_REF}:${TAG}-arm64"
+          docker manifest annotate "${IMAGE_REF}:latest" \
+            "${IMAGE_REF}:${TAG}-amd64" --os linux --arch amd64
+          docker manifest annotate "${IMAGE_REF}:latest" \
+            "${IMAGE_REF}:${TAG}-arm64" --os linux --arch arm64
+          docker manifest push "${IMAGE_REF}:latest"
+
+          echo "✅ Published multi-arch manifest:"
+          echo "   ${IMAGE_REF}:${TAG}"
+          echo "   ${IMAGE_REF}:latest"
 
   # Determines if we should publish/announce
   host:
@@ -431,9 +581,9 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - build-wasm-extensions
-      - publish-container-images
+      - publish-container-manifest
     # Only run if we're "publishing", and only if plan, local, global, and wasm didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.windows-runtime-smoke.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') && needs.publish-container-images.result == 'success' }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.windows-runtime-smoke.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') && needs.publish-container-manifest.result == 'success' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

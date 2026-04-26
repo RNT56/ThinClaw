@@ -1,57 +1,30 @@
-# Multi-stage Dockerfile for the ThinClaw agent (cloud deployment).
+# Lightweight packaging Dockerfile for the ThinClaw agent (cloud deployment).
 #
-# Build:
-#   docker build --platform linux/amd64 -t thinclaw:latest .
-#   docker build --build-arg BUILD_FEATURES=light -t thinclaw:light .
+# This Dockerfile does NOT compile Rust from source. Instead, it packages
+# a pre-built binary (produced by the release workflow's cargo-dist job)
+# into a minimal Debian runtime image.
 #
-# Run:
-#   docker run --env-file .env -p 3000:3000 thinclaw:latest
+# Build (CI — binary injected via --build-arg):
+#   docker build --build-arg THINCLAW_BINARY=./thinclaw \
+#                --platform linux/amd64 -t thinclaw:latest .
+#
+# The old multi-stage build approach compiled Rust inside Docker, which
+# caused ARM64 builds to hang indefinitely under QEMU emulation.
 
-# Stage 1: Build
-FROM rust:1.92-slim-bookworm AS builder
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev cmake gcc g++ \
-    && rm -rf /var/lib/apt/lists/* \
-    && rustup target add wasm32-wasip2 \
-    && cargo install wasm-tools
-
-WORKDIR /app
-ARG BUILD_FEATURES=full
-
-# Copy manifests first for layer caching
-COPY Cargo.toml Cargo.lock ./
-
-# Copy source, build script, tests, and supporting directories
-COPY build.rs build.rs
-COPY crates/ crates/
-COPY src/ src/
-COPY tests/ tests/
-COPY benches/ benches/
-COPY assets/ assets/
-COPY desktop-sidecars/ desktop-sidecars/
-COPY migrations/ migrations/
-COPY patches/ patches/
-COPY registry/ registry/
-COPY channels-src/ channels-src/
-COPY tools-src/ tools-src/
-COPY wit/ wit/
-
-RUN if [ "$BUILD_FEATURES" = "default" ] || [ -z "$BUILD_FEATURES" ]; then \
-        cargo build --release --bin thinclaw; \
-    else \
-        cargo build --release --bin thinclaw --features "$BUILD_FEATURES"; \
-    fi
-
-# Stage 2: Runtime
 FROM debian:bookworm-slim
 
+# Runtime dependencies only — no compiler toolchain
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/thinclaw /usr/local/bin/thinclaw
-COPY --from=builder /app/migrations /app/migrations
+# The pre-built binary is injected by the CI job (downloaded from artifacts)
+ARG THINCLAW_BINARY=thinclaw
+COPY ${THINCLAW_BINARY} /usr/local/bin/thinclaw
+RUN chmod +x /usr/local/bin/thinclaw
+
+# Copy migrations (these are SQL files, not compiled artifacts)
+COPY migrations /app/migrations
 
 # Non-root user
 RUN useradd -m -u 1000 -s /bin/bash thinclaw \
