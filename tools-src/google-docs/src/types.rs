@@ -224,3 +224,85 @@ pub struct BatchUpdateResult {
     pub revision_id: String,
     pub replies: Vec<serde_json::Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GoogleDocsAction;
+
+    #[test]
+    fn insert_text_defaults_append_index_and_body_segment() {
+        let action: GoogleDocsAction = serde_json::from_value(serde_json::json!({
+            "action": "insert_text",
+            "document_id": "doc-123",
+            "text": "Hello"
+        }))
+        .unwrap();
+
+        match action {
+            GoogleDocsAction::InsertText {
+                document_id,
+                text,
+                index,
+                segment_id,
+            } => {
+                assert_eq!(document_id, "doc-123");
+                assert_eq!(text, "Hello");
+                assert_eq!(index, -1);
+                assert!(segment_id.is_empty());
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_list_defaults_bullet_preset() {
+        let action: GoogleDocsAction = serde_json::from_value(serde_json::json!({
+            "action": "create_list",
+            "document_id": "doc-123",
+            "start_index": 1,
+            "end_index": 5
+        }))
+        .unwrap();
+
+        match action {
+            GoogleDocsAction::CreateList {
+                document_id,
+                start_index,
+                end_index,
+                bullet_preset,
+            } => {
+                assert_eq!(document_id, "doc-123");
+                assert_eq!(start_index, 1);
+                assert_eq!(end_index, 5);
+                assert_eq!(bullet_preset, "BULLET_DISC_CIRCLE_SQUARE");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn replace_text_defaults_match_case() {
+        let action: GoogleDocsAction = serde_json::from_value(serde_json::json!({
+            "action": "replace_text",
+            "document_id": "doc-123",
+            "find": "hello",
+            "replace": "hi"
+        }))
+        .unwrap();
+
+        match action {
+            GoogleDocsAction::ReplaceText {
+                document_id,
+                find,
+                replace,
+                match_case,
+            } => {
+                assert_eq!(document_id, "doc-123");
+                assert_eq!(find, "hello");
+                assert_eq!(replace, "hi");
+                assert!(match_case);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+}

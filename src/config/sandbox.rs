@@ -19,6 +19,8 @@ pub struct SandboxModeConfig {
     pub cpu_shares: u32,
     /// Docker image for the sandbox.
     pub image: String,
+    /// Idle timeout in seconds for interactive sandbox jobs.
+    pub interactive_idle_timeout_secs: u64,
     /// Whether to auto-pull the image if not found.
     pub auto_pull_image: bool,
     /// Additional domains to allow through the network proxy.
@@ -34,6 +36,7 @@ impl Default for SandboxModeConfig {
             memory_limit_mb: 2048,
             cpu_shares: 1024,
             image: "thinclaw-worker:latest".to_string(),
+            interactive_idle_timeout_secs: crate::sandbox_jobs::DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS,
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
         }
@@ -55,6 +58,10 @@ impl SandboxModeConfig {
             memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", db.memory_limit_mb)?,
             cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", db.cpu_shares)?,
             image: parse_string_env("SANDBOX_IMAGE", db.image.clone())?,
+            interactive_idle_timeout_secs: parse_optional_env(
+                "SANDBOX_INTERACTIVE_IDLE_TIMEOUT_SECS",
+                db.interactive_idle_timeout_secs,
+            )?,
             auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", db.auto_pull_image)?,
             extra_allowed_domains: extra_domains,
         })
@@ -92,7 +99,7 @@ pub struct ClaudeCodeConfig {
     /// Host directory containing Claude auth config (not mounted into containers;
     /// auth is handled via ANTHROPIC_API_KEY env var instead).
     pub config_dir: std::path::PathBuf,
-    /// Claude model to use (e.g. "sonnet", "opus").
+    /// Claude model to use (e.g. "claude-sonnet-4-6", "claude-opus-4-5").
     pub model: String,
     /// Maximum agentic turns before stopping.
     pub max_turns: u32,
@@ -156,7 +163,7 @@ impl Default for ClaudeCodeConfig {
             config_dir: dirs::home_dir()
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
                 .join(".claude"),
-            model: "sonnet".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             max_turns: 50,
             memory_limit_mb: 4096,
             allowed_tools: default_claude_code_allowed_tools(),

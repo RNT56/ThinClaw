@@ -1,3 +1,5 @@
+#![allow(dead_code)] // Shared fixture helpers are compiled into multiple test targets.
+
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
@@ -16,9 +18,11 @@ use thinclaw::experiments::{
 };
 use thinclaw::history::{
     LearningArtifactVersion, LearningCandidate, LearningCodeProposal, LearningEvaluation,
-    LearningEvent, SandboxJobRecord,
+    LearningEvent, OutcomeContract, OutcomeObservation, SandboxJobRecord,
 };
 use thinclaw::identity::{ActorEndpointRef, ActorStatus, NewActorEndpointRecord, NewActorRecord};
+use thinclaw::sandbox_jobs::SandboxJobSpec;
+use thinclaw::sandbox_types::JobMode;
 use uuid::Uuid;
 
 use crate::db_contract::support::unique_id;
@@ -58,11 +62,15 @@ pub(crate) fn sandbox_job_record(user_id: &str, actor_id: &str, status: &str) ->
     let now = Utc::now();
     SandboxJobRecord {
         id: Uuid::new_v4(),
-        task: format!("task-{}", Uuid::new_v4().simple()),
+        spec: SandboxJobSpec::new(
+            format!("task-{}", Uuid::new_v4().simple()),
+            "contract sandbox job",
+            user_id,
+            actor_id,
+            Some("/tmp/contract".to_string()),
+            JobMode::Worker,
+        ),
         status: status.to_string(),
-        user_id: user_id.to_string(),
-        actor_id: actor_id.to_string(),
-        project_dir: "/tmp/contract".to_string(),
         success: None,
         failure_reason: None,
         created_at: now,
@@ -125,11 +133,13 @@ pub(crate) fn routine(user_id: &str, actor_id: &str) -> Routine {
             dedup_window: Some(Duration::from_secs(300)),
         },
         notify: NotifyConfig::default(),
+        policy: Default::default(),
         last_run_at: None,
         next_fire_at: None,
         run_count: 0,
         consecutive_failures: 0,
         state: serde_json::json!({}),
+        config_version: 1,
         created_at: now,
         updated_at: now,
     }
@@ -141,6 +151,7 @@ pub(crate) fn routine_run(routine_id: Uuid, status: RunStatus) -> RoutineRun {
         routine_id,
         trigger_type: "manual".to_string(),
         trigger_detail: Some("contract".to_string()),
+        trigger_key: None,
         started_at: Utc::now(),
         completed_at: None,
         status,
@@ -163,6 +174,7 @@ pub(crate) fn agent_workspace(agent_id: &str) -> AgentWorkspaceRecord {
         trigger_keywords: vec!["contract".to_string()],
         allowed_tools: Some(vec!["memory_read".to_string()]),
         allowed_skills: Some(vec!["github:github".to_string()]),
+        tool_profile: None,
         is_default: false,
         created_at: now,
         updated_at: now,
@@ -210,6 +222,8 @@ pub(crate) fn experiment_runner_profile() -> ExperimentRunnerProfile {
         secret_references: vec![],
         cache_policy: serde_json::json!({}),
         status: ExperimentRunnerStatus::Draft,
+        readiness_class: thinclaw::experiments::ExperimentRunnerReadinessClass::ManualOnly,
+        launch_eligible: false,
         created_at: now,
         updated_at: now,
     }
@@ -221,6 +235,7 @@ pub(crate) fn experiment_campaign(project_id: Uuid, runner_profile_id: Uuid) -> 
         id: Uuid::new_v4(),
         project_id,
         runner_profile_id,
+        owner_user_id: "default".to_string(),
         status: ExperimentCampaignStatus::PendingBaseline,
         baseline_commit: Some("abc123".to_string()),
         best_commit: None,
@@ -448,5 +463,48 @@ pub(crate) fn learning_code_proposal(
         metadata: serde_json::json!({}),
         created_at: now,
         updated_at: now,
+    }
+}
+
+pub(crate) fn outcome_contract(user_id: &str) -> OutcomeContract {
+    let now = Utc::now();
+    OutcomeContract {
+        id: Uuid::new_v4(),
+        user_id: user_id.to_string(),
+        actor_id: Some(actor_name("outcome")),
+        channel: Some("web".to_string()),
+        thread_id: Some(format!("thread-{}", Uuid::new_v4().simple())),
+        source_kind: "learning_event".to_string(),
+        source_id: Uuid::new_v4().to_string(),
+        contract_type: "turn_usefulness".to_string(),
+        status: "open".to_string(),
+        summary: Some("contract outcome".to_string()),
+        due_at: now,
+        expires_at: now + ChronoDuration::hours(72),
+        final_verdict: None,
+        final_score: None,
+        evaluation_details: serde_json::json!({}),
+        metadata: serde_json::json!({"pattern_key":"contract:test"}),
+        dedupe_key: format!("dedupe-{}", Uuid::new_v4().simple()),
+        claimed_at: None,
+        evaluated_at: None,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+pub(crate) fn outcome_observation(contract_id: Uuid) -> OutcomeObservation {
+    let now = Utc::now();
+    OutcomeObservation {
+        id: Uuid::new_v4(),
+        contract_id,
+        observation_kind: "explicit_approval".to_string(),
+        polarity: "positive".to_string(),
+        weight: 0.6,
+        summary: Some("Looks good".to_string()),
+        evidence: serde_json::json!({"source":"contract_test"}),
+        fingerprint: format!("fp-{}", Uuid::new_v4().simple()),
+        observed_at: now,
+        created_at: now,
     }
 }

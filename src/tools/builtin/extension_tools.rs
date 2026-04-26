@@ -8,8 +8,38 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::context::JobContext;
+use crate::extensions::manager::AuthRequestContext;
 use crate::extensions::{ExtensionKind, ExtensionManager};
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+
+fn auth_request_context_from_job(ctx: &JobContext) -> AuthRequestContext {
+    let browser_origin = ctx
+        .metadata
+        .get("browser_origin")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let thread_id = ctx
+        .metadata
+        .get("thread_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let channel = ctx.metadata.get("channel").and_then(|value| value.as_str());
+    let callback_type = if browser_origin.is_some() || matches!(channel, Some("gateway")) {
+        Some("web".to_string())
+    } else {
+        None
+    };
+
+    AuthRequestContext {
+        callback_base_url: browser_origin,
+        callback_type,
+        thread_id,
+    }
+}
 
 // ── tool_search ──────────────────────────────────────────────────────────
 
@@ -205,15 +235,16 @@ impl Tool for ToolAuthTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
         let name = require_str(&params, "name")?;
+        let auth_context = auth_request_context_from_job(ctx);
 
         let result = self
             .manager
-            .auth(name, None)
+            .auth_with_context(name, None, auth_context)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
@@ -298,11 +329,12 @@ impl Tool for ToolActivateTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
         let name = require_str(&params, "name")?;
+        let auth_context = auth_request_context_from_job(ctx);
 
         match self.manager.activate(name).await {
             Ok(result) => {
@@ -323,7 +355,11 @@ impl Tool for ToolActivateTool {
 
                 // Activation failed due to missing auth; initiate auth flow
                 // so the agent loop can show the auth card.
-                match self.manager.auth(name, None).await {
+                match self
+                    .manager
+                    .auth_with_context(name, None, auth_context)
+                    .await
+                {
                     Ok(auth_result) if auth_result.status == "authenticated" => {
                         // Auth succeeded (e.g. env var was set); retry activation.
                         let result = self
@@ -501,6 +537,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_auth_request_context_from_gateway_job_metadata() {
+        let mut ctx = JobContext::with_user("test-user", "chat", "auth");
+        ctx.metadata = serde_json::json!({
+            "channel": "gateway",
+            "thread_id": "thread-123",
+            "browser_origin": "https://chat.example.com",
+        });
+
+        let auth_context = auth_request_context_from_job(&ctx);
+        assert_eq!(
+            auth_context.callback_base_url.as_deref(),
+            Some("https://chat.example.com")
+        );
+        assert_eq!(auth_context.callback_type.as_deref(), Some("web"));
+        assert_eq!(auth_context.thread_id.as_deref(), Some("thread-123"));
+    }
+
+    #[test]
+    fn test_auth_request_context_without_gateway_metadata() {
+        let mut ctx = JobContext::with_user("test-user", "chat", "auth");
+        ctx.metadata = serde_json::json!({
+            "channel": "repl",
+            "thread_id": "thread-123",
+        });
+
+        let auth_context = auth_request_context_from_job(&ctx);
+        assert_eq!(auth_context.callback_base_url, None);
+        assert_eq!(auth_context.callback_type, None);
+        assert_eq!(auth_context.thread_id.as_deref(), Some("thread-123"));
+    }
+
+    #[test]
     fn test_tool_search_schema() {
         let tool = ToolSearchTool {
             manager: test_manager_stub(),
@@ -604,9 +672,9 @@ mod tests {
             Arc::new(ToolRegistry::new()),
             None,
             None,
+            None,
             std::path::PathBuf::from("/tmp/thinclaw-test-tools"),
             std::path::PathBuf::from("/tmp/thinclaw-test-channels"),
-            None,
             "test".to_string(),
             None,
             Vec::new(),

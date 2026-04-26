@@ -9,6 +9,11 @@ and exposes a programmatic API for chat, memory, jobs, routines, extensions,
 settings, and OpenAI-compatible access. Availability depends on the build
 profile and gateway-enabled configuration.
 
+The gateway follows the shared cross-surface vocabulary: `/personality` is the
+primary session overlay command, `/compress` is the primary compaction command,
+and the WebUI settings surface exposes `agent.name`, `agent.personality_pack`,
+and the shared skin controls.
+
 ## Configuration
 
 ```bash

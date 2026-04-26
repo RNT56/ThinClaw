@@ -29,10 +29,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::agent::BrokenTool;
-use crate::agent::routine::{Routine, RoutineRun, RunStatus};
+use crate::agent::routine::{
+    Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
+    RoutineTriggerDecision, RunStatus,
+};
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::error::DatabaseError;
-use crate::error::WorkspaceError;
 use crate::experiments::{
     ExperimentArtifactRef, ExperimentCampaign, ExperimentLease, ExperimentModelUsageRecord,
     ExperimentProject, ExperimentRunnerProfile, ExperimentTarget, ExperimentTargetLink,
@@ -42,14 +44,16 @@ use crate::history::{
     ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationSummary,
     JobEventRecord, LearningArtifactVersion, LearningCandidate, LearningCodeProposal,
     LearningEvaluation, LearningEvent, LearningFeedbackRecord, LearningRollbackRecord,
-    LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SessionSearchHit, SettingRow,
+    LlmCallRecord, OutcomeContract, OutcomeContractQuery, OutcomeEvaluatorHealth,
+    OutcomeObservation, OutcomePendingUser, OutcomeSummaryStats, SandboxJobRecord,
+    SandboxJobSummary, SessionSearchHit, SettingRow,
 };
 use crate::identity::{
     ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, NewActorEndpointRecord,
     NewActorRecord,
 };
-use crate::workspace::{MemoryChunk, MemoryDocument, WorkspaceEntry};
-use crate::workspace::{SearchConfig, SearchResult};
+use crate::tools::ToolProfile;
+pub use thinclaw_db::WorkspaceStore;
 
 /// Create a database backend from configuration, run migrations, and return it.
 ///
@@ -163,6 +167,7 @@ pub trait ConversationStore: Send + Sync {
     async fn update_conversation_identity(
         &self,
         id: Uuid,
+        principal_id: Option<&str>,
         actor_id: Option<&str>,
         conversation_scope_id: Option<Uuid>,
         conversation_kind: ConversationKind,
@@ -247,6 +252,11 @@ pub trait ConversationStore: Send + Sync {
         risk_tier: Option<&str>,
         limit: i64,
     ) -> Result<Vec<LearningCandidate>, DatabaseError>;
+    async fn update_learning_candidate_proposal(
+        &self,
+        candidate_id: Uuid,
+        proposal: &serde_json::Value,
+    ) -> Result<(), DatabaseError>;
     async fn insert_learning_artifact_version(
         &self,
         version: &LearningArtifactVersion,
@@ -303,6 +313,55 @@ pub trait ConversationStore: Send + Sync {
         pr_url: Option<&str>,
         metadata: Option<&serde_json::Value>,
     ) -> Result<(), DatabaseError>;
+    async fn insert_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn get_outcome_contract(
+        &self,
+        user_id: &str,
+        contract_id: Uuid,
+    ) -> Result<Option<OutcomeContract>, DatabaseError>;
+    async fn list_outcome_contracts(
+        &self,
+        query: &OutcomeContractQuery,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError>;
+    async fn claim_due_outcome_contracts(
+        &self,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError>;
+    async fn claim_due_outcome_contracts_for_user(
+        &self,
+        user_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError>;
+    async fn update_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<(), DatabaseError>;
+    async fn outcome_summary_stats(
+        &self,
+        user_id: &str,
+    ) -> Result<OutcomeSummaryStats, DatabaseError>;
+    async fn list_users_with_pending_outcome_work(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomePendingUser>, DatabaseError>;
+    async fn outcome_evaluator_health(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<OutcomeEvaluatorHealth, DatabaseError>;
+    async fn insert_outcome_observation(
+        &self,
+        observation: &OutcomeObservation,
+    ) -> Result<Uuid, DatabaseError>;
+    async fn list_outcome_observations(
+        &self,
+        contract_id: Uuid,
+    ) -> Result<Vec<OutcomeObservation>, DatabaseError>;
     async fn conversation_belongs_to_user(
         &self,
         conversation_id: Uuid,
@@ -381,12 +440,25 @@ pub trait IdentityStore: Send + Sync {
 pub trait JobStore: Send + Sync {
     async fn save_job(&self, ctx: &JobContext) -> Result<(), DatabaseError>;
     async fn get_job(&self, id: Uuid) -> Result<Option<JobContext>, DatabaseError>;
+    async fn list_jobs_for_user(&self, user_id: &str) -> Result<Vec<JobContext>, DatabaseError>;
+    async fn list_jobs_for_actor(
+        &self,
+        user_id: &str,
+        actor_id: &str,
+    ) -> Result<Vec<JobContext>, DatabaseError> {
+        let jobs = self.list_jobs_for_user(user_id).await?;
+        Ok(jobs
+            .into_iter()
+            .filter(|job| job.owner_actor_id() == actor_id)
+            .collect())
+    }
     async fn update_job_status(
         &self,
         id: Uuid,
         status: JobState,
         failure_reason: Option<&str>,
     ) -> Result<(), DatabaseError>;
+    async fn abandon_active_direct_jobs(&self, reason: &str) -> Result<u64, DatabaseError>;
     async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError>;
     async fn get_stuck_jobs(&self) -> Result<Vec<Uuid>, DatabaseError>;
     async fn save_action(&self, job_id: Uuid, action: &ActionRecord) -> Result<(), DatabaseError>;
@@ -438,7 +510,7 @@ pub trait SandboxStore: Send + Sync {
         let jobs = self.list_sandbox_jobs_for_user(user_id).await?;
         Ok(jobs
             .into_iter()
-            .filter(|job| job.actor_id == actor_id)
+            .filter(|job| job.spec.actor_id == actor_id)
             .collect())
     }
     async fn sandbox_job_summary_for_user(
@@ -459,7 +531,9 @@ pub trait SandboxStore: Send + Sync {
                 "running" => summary.running += 1,
                 "completed" => summary.completed += 1,
                 "failed" => summary.failed += 1,
+                "cancelled" => summary.cancelled += 1,
                 "interrupted" => summary.interrupted += 1,
+                "stuck" => summary.stuck += 1,
                 _ => {}
             }
         }
@@ -479,7 +553,7 @@ pub trait SandboxStore: Send + Sync {
         let Some(job) = self.get_sandbox_job(job_id).await? else {
             return Ok(false);
         };
-        Ok(job.user_id == user_id && job.actor_id == actor_id)
+        Ok(job.spec.principal_id == user_id && job.spec.actor_id == actor_id)
     }
     async fn update_sandbox_job_mode(&self, id: Uuid, mode: &str) -> Result<(), DatabaseError>;
     async fn get_sandbox_job_mode(&self, id: Uuid) -> Result<Option<String>, DatabaseError>;
@@ -527,6 +601,7 @@ pub trait RoutineStore: Send + Sync {
             .collect())
     }
     async fn list_event_routines(&self) -> Result<Vec<Routine>, DatabaseError>;
+    async fn get_routine_event_cache_version(&self) -> Result<i64, DatabaseError>;
     async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError>;
     async fn update_routine(&self, routine: &Routine) -> Result<(), DatabaseError>;
     async fn update_routine_runtime(
@@ -553,18 +628,29 @@ pub trait RoutineStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<RoutineRun>, DatabaseError>;
     async fn count_running_routine_runs(&self, routine_id: Uuid) -> Result<i64, DatabaseError>;
+
+    /// Count ALL routine runs currently in `running` status across all routines.
+    ///
+    /// Used by the routine engine for global concurrency gating. This is the
+    /// single source of truth — replacing the previous fragile `AtomicUsize`
+    /// counter that drifted out of sync with DB state.
+    async fn count_all_running_routine_runs(&self) -> Result<i64, DatabaseError>;
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
         job_id: Uuid,
     ) -> Result<(), DatabaseError>;
 
-    /// Mark all RUNNING routine runs as failed.
+    /// Mark RUNNING routine runs older than 10 minutes as failed.
     ///
-    /// Called at startup to clean up orphaned runs from a previous process
-    /// that crashed or was killed before the worker could update the status.
-    /// Without this, routines with `max_concurrent = 1` would be permanently
-    /// blocked.
+    /// Used by the zombie reaper to clean up orphaned runs whose worker
+    /// crashed, hung, or was killed mid-execution. The 10-minute TTL
+    /// prevents the reaper from killing actively-executing worker jobs
+    /// that were dispatched recently.
+    ///
+    /// At startup, this is called to clean up runs from a previous process.
+    /// Runs started less than 10 minutes before a crash will be caught on
+    /// the next reaper cycle after the TTL window passes.
     async fn cleanup_stale_routine_runs(&self) -> Result<u64, DatabaseError>;
 
     /// Delete all run records for a specific routine.
@@ -572,6 +658,95 @@ pub trait RoutineStore: Send + Sync {
 
     /// Delete ALL routine run records across all routines.
     async fn delete_all_routine_runs(&self) -> Result<u64, DatabaseError>;
+
+    async fn create_routine_event(
+        &self,
+        event: &RoutineEvent,
+    ) -> Result<RoutineEvent, DatabaseError>;
+    async fn claim_routine_event(
+        &self,
+        id: Uuid,
+        worker_id: &str,
+        stale_before: DateTime<Utc>,
+    ) -> Result<Option<RoutineEvent>, DatabaseError>;
+    async fn release_routine_event(
+        &self,
+        id: Uuid,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError>;
+    async fn list_pending_routine_events(
+        &self,
+        stale_before: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<RoutineEvent>, DatabaseError>;
+    async fn complete_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        matched_routines: u32,
+        fired_routines: u32,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError>;
+    async fn fail_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+    ) -> Result<(), DatabaseError>;
+    async fn list_routine_events_for_actor(
+        &self,
+        user_id: &str,
+        actor_id: &str,
+        limit: i64,
+    ) -> Result<Vec<RoutineEvent>, DatabaseError>;
+    async fn upsert_routine_event_evaluation(
+        &self,
+        evaluation: &RoutineEventEvaluation,
+    ) -> Result<(), DatabaseError>;
+    async fn list_routine_event_evaluations_for_event(
+        &self,
+        event_id: Uuid,
+    ) -> Result<Vec<RoutineEventEvaluation>, DatabaseError>;
+    async fn list_routine_event_evaluations(
+        &self,
+        routine_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<RoutineEventEvaluation>, DatabaseError>;
+    async fn routine_run_exists_for_trigger_key(
+        &self,
+        routine_id: Uuid,
+        trigger_key: &str,
+    ) -> Result<bool, DatabaseError>;
+    async fn enqueue_routine_trigger(&self, trigger: &RoutineTrigger) -> Result<(), DatabaseError>;
+    async fn claim_routine_triggers(
+        &self,
+        worker_id: &str,
+        stale_before: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<RoutineTrigger>, DatabaseError>;
+    async fn release_routine_trigger(
+        &self,
+        id: Uuid,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError>;
+    async fn complete_routine_trigger(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        decision: RoutineTriggerDecision,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError>;
+    async fn fail_routine_trigger(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+    ) -> Result<(), DatabaseError>;
+    async fn list_routine_triggers(
+        &self,
+        routine_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<RoutineTrigger>, DatabaseError>;
 }
 
 #[async_trait]
@@ -774,7 +949,16 @@ pub trait ExperimentStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<ExperimentCampaign>, DatabaseError>;
+    async fn get_experiment_campaign_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentCampaign>, DatabaseError>;
     async fn list_experiment_campaigns(&self) -> Result<Vec<ExperimentCampaign>, DatabaseError>;
+    async fn list_experiment_campaigns_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentCampaign>, DatabaseError>;
     async fn update_experiment_campaign(
         &self,
         campaign: &ExperimentCampaign,
@@ -785,9 +969,19 @@ pub trait ExperimentStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<Option<ExperimentTrial>, DatabaseError>;
+    async fn get_experiment_trial_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentTrial>, DatabaseError>;
     async fn list_experiment_trials(
         &self,
         campaign_id: Uuid,
+    ) -> Result<Vec<ExperimentTrial>, DatabaseError>;
+    async fn list_experiment_trials_for_owner(
+        &self,
+        campaign_id: Uuid,
+        owner_user_id: &str,
     ) -> Result<Vec<ExperimentTrial>, DatabaseError>;
     async fn update_experiment_trial(&self, trial: &ExperimentTrial) -> Result<(), DatabaseError>;
 
@@ -799,6 +993,11 @@ pub trait ExperimentStore: Send + Sync {
     async fn list_experiment_artifacts(
         &self,
         trial_id: Uuid,
+    ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError>;
+    async fn list_experiment_artifacts_for_owner(
+        &self,
+        trial_id: Uuid,
+        owner_user_id: &str,
     ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError>;
 
     async fn create_experiment_target(
@@ -891,100 +1090,6 @@ pub trait SettingsStore: Send + Sync {
     async fn has_settings(&self, user_id: &str) -> Result<bool, DatabaseError>;
 }
 
-#[async_trait]
-pub trait WorkspaceStore: Send + Sync {
-    async fn get_document_by_path(
-        &self,
-        user_id: &str,
-        agent_id: Option<Uuid>,
-        path: &str,
-    ) -> Result<MemoryDocument, WorkspaceError>;
-    async fn get_document_by_id(&self, id: Uuid) -> Result<MemoryDocument, WorkspaceError>;
-    async fn get_or_create_document_by_path(
-        &self,
-        user_id: &str,
-        agent_id: Option<Uuid>,
-        path: &str,
-    ) -> Result<MemoryDocument, WorkspaceError>;
-    async fn update_document(&self, id: Uuid, content: &str) -> Result<(), WorkspaceError>;
-    async fn delete_document_by_path(
-        &self,
-        user_id: &str,
-        agent_id: Option<Uuid>,
-        path: &str,
-    ) -> Result<(), WorkspaceError>;
-    async fn list_directory(
-        &self,
-        user_id: &str,
-        agent_id: Option<Uuid>,
-        directory: &str,
-    ) -> Result<Vec<WorkspaceEntry>, WorkspaceError>;
-    async fn list_all_paths(
-        &self,
-        user_id: &str,
-        agent_id: Option<Uuid>,
-    ) -> Result<Vec<String>, WorkspaceError>;
-    async fn list_documents(
-        &self,
-        user_id: &str,
-        agent_id: Option<Uuid>,
-    ) -> Result<Vec<MemoryDocument>, WorkspaceError>;
-    async fn delete_chunks(&self, document_id: Uuid) -> Result<(), WorkspaceError>;
-    async fn insert_chunk(
-        &self,
-        document_id: Uuid,
-        chunk_index: i32,
-        content: &str,
-        embedding: Option<&[f32]>,
-    ) -> Result<Uuid, WorkspaceError>;
-
-    /// Atomically replace all chunks for a document.
-    ///
-    /// Deletes all existing chunks and inserts the new set in a single
-    /// database transaction. This prevents the split-brain state where
-    /// old chunks have been deleted but new ones have not yet been inserted
-    /// (which would leave the document invisible in search).
-    ///
-    /// # Default implementation
-    ///
-    /// Falls back to sequential `delete_chunks` + `insert_chunk` calls for
-    /// backends that do not override this method (e.g. PostgreSQL, where
-    /// connection-pool transactions are less straightforward to express in a
-    /// trait default). Backends with embedded connections (libSQL) override
-    /// this with a proper `BEGIN` / `COMMIT` block.
-    async fn replace_chunks(
-        &self,
-        document_id: Uuid,
-        chunks: &[(i32, String, Option<Vec<f32>>)],
-    ) -> Result<(), WorkspaceError> {
-        self.delete_chunks(document_id).await?;
-        for (index, content, embedding) in chunks {
-            self.insert_chunk(document_id, *index, content, embedding.as_deref())
-                .await?;
-        }
-        Ok(())
-    }
-    async fn update_chunk_embedding(
-        &self,
-        chunk_id: Uuid,
-        embedding: &[f32],
-    ) -> Result<(), WorkspaceError>;
-    async fn get_chunks_without_embeddings(
-        &self,
-        user_id: &str,
-        agent_id: Option<Uuid>,
-        limit: usize,
-    ) -> Result<Vec<MemoryChunk>, WorkspaceError>;
-    async fn hybrid_search(
-        &self,
-        user_id: &str,
-        agent_id: Option<Uuid>,
-        query: &str,
-        embedding: Option<&[f32]>,
-        config: &SearchConfig,
-    ) -> Result<Vec<SearchResult>, WorkspaceError>;
-}
-
 // ==================== Agent Registry ====================
 
 /// Persistent record for an agent workspace configuration.
@@ -1010,6 +1115,9 @@ pub struct AgentWorkspaceRecord {
     /// Optional per-agent skill allowlist.
     #[serde(default)]
     pub allowed_skills: Option<Vec<String>>,
+    /// Optional execution profile override for this agent workspace.
+    #[serde(default)]
+    pub tool_profile: Option<ToolProfile>,
     /// Whether this is the default agent (receives unrouted messages).
     pub is_default: bool,
     /// When the record was created.

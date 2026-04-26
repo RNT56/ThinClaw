@@ -14,6 +14,7 @@ use super::{
     CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig, FailoverProvider,
     LeaseConfig, LeaseSelectionStrategy, LlmProvider, ProviderLeaseEntry, ResponseCacheConfig,
     RetryConfig, RetryProvider, RigAdapter, SmartRoutingConfig, SmartRoutingProvider,
+    StreamSupport, TokenCaptureSupport,
 };
 use crate::config::{LlmBackend, LlmConfig};
 use crate::error::LlmError;
@@ -37,6 +38,20 @@ pub fn create_llm_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
 
 fn credential_entry_id(provider_slug: &str, index: usize) -> String {
     format!("{provider_slug}:credential:{}", index + 1)
+}
+
+fn openai_logprob_capture_support() -> TokenCaptureSupport {
+    TokenCaptureSupport {
+        exact_tokens_supported: true,
+        logprobs_supported: true,
+    }
+}
+
+fn openai_logprob_request_params() -> serde_json::Value {
+    serde_json::json!({
+        "logprobs": true,
+        "top_logprobs": 0
+    })
 }
 
 fn provider_prefers_external_oauth_sync(
@@ -98,7 +113,14 @@ fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
     .completions_api();
 
     let model = client.completion_model(&oai.model);
-    Ok(Arc::new(RigAdapter::new(model, &oai.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &oai.model)
+            .with_provider_label("openai")
+            .with_token_capture(
+                openai_logprob_capture_support(),
+                Some(openai_logprob_request_params()),
+            ),
+    ))
 }
 
 fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -134,11 +156,10 @@ fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
         anth.model,
         anth.base_url.as_deref().unwrap_or("default"),
     );
-    Ok(Arc::new(RigAdapter::new_with_prompt_caching(
-        model,
-        &anth.model,
-        true,
-    )))
+    Ok(Arc::new(
+        RigAdapter::new_with_prompt_caching(model, &anth.model, true)
+            .with_provider_label("anthropic"),
+    ))
 }
 
 fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -164,7 +185,9 @@ fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
         oll.base_url,
         oll.model
     );
-    Ok(Arc::new(RigAdapter::new(model, &oll.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &oll.model).with_provider_label("ollama"),
+    ))
 }
 
 const TINFOIL_BASE_URL: &str = "https://inference.tinfoil.sh/v1";
@@ -197,7 +220,9 @@ fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
     let client = client.completions_api();
     let model = client.completion_model(&tf.model);
     tracing::info!("Using Tinfoil private inference (model: {})", tf.model);
-    Ok(Arc::new(RigAdapter::new(model, &tf.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &tf.model).with_provider_label("tinfoil"),
+    ))
 }
 
 fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -252,7 +277,51 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
         compat.base_url,
         compat.model
     );
-    Ok(Arc::new(RigAdapter::new(model, &compat.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &compat.model)
+            .with_provider_label("openai_compatible")
+            .with_token_capture(
+                openai_logprob_capture_support(),
+                Some(openai_logprob_request_params()),
+            ),
+    ))
+}
+
+fn runtime_extra_headers() -> reqwest::header::HeaderMap {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let raw = crate::config::helpers::optional_env("LLM_EXTRA_HEADERS")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+    for part in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let Some((key, value)) = part.split_once(':') else {
+            tracing::warn!(entry = %part, "Skipping malformed LLM_EXTRA_HEADERS entry");
+            continue;
+        };
+
+        let name = match reqwest::header::HeaderName::from_bytes(key.trim().as_bytes()) {
+            Ok(name) => name,
+            Err(err) => {
+                tracing::warn!(header = %key, error = %err, "Skipping invalid header name");
+                continue;
+            }
+        };
+        let value = match reqwest::header::HeaderValue::from_str(value.trim()) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(header = %key, error = %err, "Skipping invalid header value");
+                continue;
+            }
+        };
+        headers.insert(name, value);
+    }
+
+    headers
 }
 
 /// Create an LLM provider from a catalog entry.
@@ -267,6 +336,29 @@ pub fn create_provider_for_catalog_entry(
     create_provider_for_catalog_entry_with_api_key(provider_slug, model, None)
 }
 
+/// Create an LLM provider from a catalog entry using scoped runtime credentials.
+///
+/// When more than one credential is resolved for the provider, the returned
+/// provider is a credential-level failover chain. This avoids depending on the
+/// process-wide config overlay for secrets loaded from the encrypted store.
+pub fn create_provider_for_catalog_entry_with_settings(
+    provider_slug: &str,
+    model: &str,
+    providers_settings: Option<&ProvidersSettings>,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let entries =
+        create_provider_variants_for_catalog_entry(provider_slug, model, providers_settings)?;
+    if entries.len() == 1 {
+        Ok(Arc::clone(&entries[0].provider))
+    } else {
+        Ok(Arc::new(FailoverProvider::with_entries(
+            entries,
+            CooldownConfig::default(),
+            LeaseConfig::default(),
+        )?))
+    }
+}
+
 fn create_provider_for_catalog_entry_with_api_key(
     provider_slug: &str,
     model: &str,
@@ -278,12 +370,17 @@ fn create_provider_for_catalog_entry_with_api_key(
         provider: provider_slug.to_string(),
         reason: format!("Unknown provider '{}' in catalog", provider_slug),
     })?;
+    let stream_support = if endpoint.supports_streaming {
+        StreamSupport::Native
+    } else {
+        StreamSupport::Unsupported
+    };
 
     // Retrieve API key from the injected vars overlay
     let api_key_str = if let Some(api_key_override) = api_key_override {
         Some(api_key_override.to_string())
     } else {
-        crate::config::helpers::optional_env(endpoint.env_key_name)
+        crate::config::helpers::optional_env(&endpoint.env_key_name)
             .map_err(|e| LlmError::RequestFailed {
                 provider: provider_slug.to_string(),
                 reason: format!("Failed to read env var '{}': {}", endpoint.env_key_name, e),
@@ -308,8 +405,9 @@ fn create_provider_for_catalog_entry_with_api_key(
 
             use rig::providers::openai;
             let client: openai::CompletionsClient = openai::Client::builder()
-                .base_url(endpoint.base_url)
+                .base_url(&endpoint.base_url)
                 .api_key(&key)
+                .http_headers(runtime_extra_headers())
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
                     provider: provider_slug.to_string(),
@@ -323,7 +421,14 @@ fn create_provider_for_catalog_entry_with_api_key(
                 provider_slug,
                 model
             );
-            Ok(Arc::new(RigAdapter::new(m, model)))
+            Ok(Arc::new(
+                RigAdapter::new_with_stream_support(m, model, stream_support)
+                    .with_provider_label(provider_slug)
+                    .with_token_capture(
+                        openai_logprob_capture_support(),
+                        Some(openai_logprob_request_params()),
+                    ),
+            ))
         }
         ApiStyle::Anthropic => {
             // Native Anthropic provider
@@ -344,7 +449,15 @@ fn create_provider_for_catalog_entry_with_api_key(
                 provider_slug,
                 model
             );
-            Ok(Arc::new(RigAdapter::new(m, model)))
+            Ok(Arc::new(
+                RigAdapter::new_with_prompt_caching_and_stream_support(
+                    m,
+                    model,
+                    true,
+                    stream_support,
+                )
+                .with_provider_label(provider_slug),
+            ))
         }
         ApiStyle::OpenAiCompatible => {
             // OpenAI-compatible endpoint (groq, gemini, mistral, xai, etc.)
@@ -352,8 +465,9 @@ fn create_provider_for_catalog_entry_with_api_key(
 
             use rig::providers::openai;
             let client: openai::CompletionsClient = openai::Client::builder()
-                .base_url(endpoint.base_url)
+                .base_url(&endpoint.base_url)
                 .api_key(&key)
+                .http_headers(runtime_extra_headers())
                 .build()
                 .map_err(|e| LlmError::RequestFailed {
                     provider: provider_slug.to_string(),
@@ -368,7 +482,14 @@ fn create_provider_for_catalog_entry_with_api_key(
                 endpoint.base_url,
                 model
             );
-            Ok(Arc::new(RigAdapter::new(m, model)))
+            Ok(Arc::new(
+                RigAdapter::new_with_stream_support(m, model, stream_support)
+                    .with_provider_label(provider_slug)
+                    .with_token_capture(
+                        openai_logprob_capture_support(),
+                        Some(openai_logprob_request_params()),
+                    ),
+            ))
         }
         ApiStyle::Ollama => {
             // Ollama doesn't need an API key
@@ -395,7 +516,10 @@ fn create_provider_for_catalog_entry_with_api_key(
                 base_url,
                 model
             );
-            Ok(Arc::new(RigAdapter::new(m, model)))
+            Ok(Arc::new(
+                RigAdapter::new_with_stream_support(m, model, stream_support)
+                    .with_provider_label(provider_slug),
+            ))
         }
     }
 }
@@ -410,6 +534,17 @@ fn resolve_catalog_api_keys(
         && !value.trim().is_empty()
     {
         return Ok(vec![value]);
+    }
+
+    if let Some(values) = providers_settings
+        .and_then(|settings| settings.resolved_provider_api_keys.get(provider_slug))
+        .filter(|values| !values.is_empty())
+    {
+        return Ok(values
+            .iter()
+            .map(|value| value.expose_secret().trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect());
     }
 
     fn append_from_env(target: &mut Vec<String>, env_name: &str) -> Result<(), LlmError> {
@@ -472,7 +607,7 @@ fn create_provider_variants_for_catalog_entry(
             }
         })?;
     let api_keys =
-        resolve_catalog_api_keys(provider_slug, endpoint.env_key_name, providers_settings)?;
+        resolve_catalog_api_keys(provider_slug, &endpoint.env_key_name, providers_settings)?;
     if api_keys.is_empty() {
         return Ok(vec![ProviderLeaseEntry::new(
             create_provider_for_catalog_entry(provider_slug, model)?,
@@ -586,7 +721,14 @@ fn create_gemini_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
         gem.model,
         gem.base_url,
     );
-    Ok(Arc::new(RigAdapter::new(model, &gem.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &gem.model)
+            .with_provider_label("gemini")
+            .with_token_capture(
+                openai_logprob_capture_support(),
+                Some(openai_logprob_request_params()),
+            ),
+    ))
 }
 
 /// Create a Bedrock provider using the native OpenAI-compatible Mantle endpoint.
@@ -622,7 +764,9 @@ fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
             base_url,
             br.model_id,
         );
-        Ok(Arc::new(RigAdapter::new(model, &br.model_id)))
+        Ok(Arc::new(
+            RigAdapter::new(model, &br.model_id).with_provider_label("bedrock"),
+        ))
     } else if let Some(proxy) = br.proxy_url.clone() {
         let key = br
             .proxy_api_key
@@ -645,7 +789,9 @@ fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
             proxy,
             br.model_id,
         );
-        Ok(Arc::new(RigAdapter::new(model, &br.model_id)))
+        Ok(Arc::new(
+            RigAdapter::new(model, &br.model_id).with_provider_label("bedrock"),
+        ))
     } else {
         Err(LlmError::RequestFailed {
             provider: "bedrock".to_string(),
@@ -690,7 +836,14 @@ fn create_llama_cpp_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
         lc.server_url,
         lc.model,
     );
-    Ok(Arc::new(RigAdapter::new(model, &lc.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &lc.model)
+            .with_provider_label("llama_cpp")
+            .with_token_capture(
+                openai_logprob_capture_support(),
+                Some(openai_logprob_request_params()),
+            ),
+    ))
 }
 
 /// Build the full LLM provider chain with multi-provider support.

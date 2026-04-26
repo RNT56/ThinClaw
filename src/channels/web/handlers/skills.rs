@@ -8,8 +8,30 @@ use axum::{
     http::StatusCode,
 };
 
+use crate::channels::web::identity_helpers::GatewayRequestIdentity;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::context::JobContext;
+use crate::tools::Tool;
+use crate::tools::builtin::{
+    SkillPublishTool, SkillTapAddTool, SkillTapListTool, SkillTapRefreshTool, SkillTapRemoveTool,
+};
+
+fn confirmed(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("x-confirm-action")
+        .and_then(|v| v.to_str().ok())
+        == Some("true")
+}
+
+fn api_job_context(identity: &GatewayRequestIdentity) -> JobContext {
+    JobContext {
+        user_id: identity.principal_id.clone(),
+        principal_id: identity.principal_id.clone(),
+        actor_id: Some(identity.actor_id.clone()),
+        ..JobContext::default()
+    }
+}
 
 pub async fn skills_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -105,6 +127,173 @@ pub async fn skills_search_handler(
         registry_url: catalog.registry_url().to_string(),
         catalog_error,
     }))
+}
+
+pub async fn skills_inspect_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(name): Path<String>,
+    Json(req): Json<SkillInspectRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+    let quarantine = state.skill_quarantine.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skill quarantine not available".to_string(),
+    ))?;
+
+    crate::tools::builtin::skill_tools::inspect_skill_report(
+        registry,
+        quarantine,
+        &name,
+        req.include_content.unwrap_or(false),
+        req.include_files.unwrap_or(true),
+        req.audit.unwrap_or(true),
+    )
+    .await
+    .map(Json)
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
+}
+
+pub async fn skills_publish_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    Json(req): Json<SkillPublishRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let remote_write = req.remote_write.unwrap_or(false);
+    let confirm_remote_write = req.confirm_remote_write.unwrap_or(false);
+    if remote_write && !confirmed(&headers) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill publish remote write requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+    let quarantine = state.skill_quarantine.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skill quarantine not available".to_string(),
+    ))?;
+
+    let tool = SkillPublishTool::new(
+        Arc::clone(registry),
+        state.skill_remote_hub.clone(),
+        Arc::clone(quarantine),
+        state.store.clone(),
+    );
+    let params = serde_json::json!({
+        "name": name,
+        "target_repo": req.target_repo,
+        "dry_run": req.dry_run.unwrap_or(true),
+        "remote_write": remote_write,
+        "confirm_remote_write": confirm_remote_write,
+        "approve_risky": req.approve_risky.unwrap_or(false),
+    });
+    let ctx = api_job_context(&request_identity);
+    tool.execute(params, &ctx)
+        .await
+        .map(|output| Json(output.result))
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
+}
+
+pub async fn skill_taps_list_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let tool = SkillTapListTool::new(state.store.clone(), state.skill_remote_hub.clone());
+    let ctx = api_job_context(&request_identity);
+    tool.execute(serde_json::json!({"include_health": true}), &ctx)
+        .await
+        .map(|output| Json(output.result))
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
+}
+
+pub async fn skill_taps_add_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SkillTapAddRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !confirmed(&headers) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill tap add requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+    let tool = SkillTapAddTool::new(state.store.clone(), state.skill_remote_hub.clone());
+    let ctx = api_job_context(&request_identity);
+    tool.execute(
+        serde_json::json!({
+            "repo": req.repo,
+            "path": req.path.unwrap_or_default(),
+            "branch": req.branch,
+            "trust_level": req.trust_level.unwrap_or_else(|| "community".to_string()),
+            "replace": req.replace.unwrap_or(false),
+        }),
+        &ctx,
+    )
+    .await
+    .map(|output| Json(output.result))
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
+}
+
+pub async fn skill_taps_remove_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SkillTapRemoveRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !confirmed(&headers) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill tap remove requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+    let tool = SkillTapRemoveTool::new(state.store.clone(), state.skill_remote_hub.clone());
+    let ctx = api_job_context(&request_identity);
+    tool.execute(
+        serde_json::json!({
+            "repo": req.repo,
+            "path": req.path.unwrap_or_default(),
+            "branch": req.branch,
+        }),
+        &ctx,
+    )
+    .await
+    .map(|output| Json(output.result))
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
+}
+
+pub async fn skill_taps_refresh_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SkillTapRefreshRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !confirmed(&headers) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill tap refresh requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+    let tool = SkillTapRefreshTool::new(state.store.clone(), state.skill_remote_hub.clone());
+    let ctx = api_job_context(&request_identity);
+    tool.execute(
+        serde_json::json!({
+            "repo": req.repo,
+            "path": req.path,
+        }),
+        &ctx,
+    )
+    .await
+    .map(|output| Json(output.result))
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
 }
 
 pub async fn skills_install_handler(

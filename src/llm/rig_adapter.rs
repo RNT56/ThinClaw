@@ -23,21 +23,27 @@ use std::collections::HashSet;
 use crate::error::LlmError;
 use crate::llm::costs;
 use crate::llm::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, StreamChunk,
-    StreamChunkStream, ThinkingConfig, ToolCall as IronToolCall, ToolCompletionRequest,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
+    ProviderTokenCapture, StreamChunk, StreamChunkStream, StreamPolicy, StreamSupport,
+    ThinkingConfig, TokenCaptureSupport, ToolCall as IronToolCall, ToolCompletionRequest,
     ToolCompletionResponse, ToolDefinition as IronToolDefinition,
 };
+use crate::llm::streaming::{normalize_tool_name, simulate_stream_from_response};
 
 /// Adapter that wraps a rig-core `CompletionModel` and implements `LlmProvider`.
-pub struct RigAdapter<M: CompletionModel> {
+pub struct RigAdapter<M: CompletionModel + 'static> {
     model: M,
     model_name: String,
     input_cost: Decimal,
     output_cost: Decimal,
     prompt_caching: bool,
+    stream_support: StreamSupport,
+    token_capture_support: TokenCaptureSupport,
+    token_capture_params: Option<JsonValue>,
+    provider_label: String,
 }
 
-impl<M: CompletionModel> RigAdapter<M> {
+impl<M: CompletionModel + 'static> RigAdapter<M> {
     /// Create a new adapter wrapping the given rig-core model.
     pub fn new(model: M, model_name: impl Into<String>) -> Self {
         Self::new_with_prompt_caching(model, model_name, false)
@@ -50,6 +56,30 @@ impl<M: CompletionModel> RigAdapter<M> {
         model_name: impl Into<String>,
         prompt_caching: bool,
     ) -> Self {
+        Self::new_with_prompt_caching_and_stream_support(
+            model,
+            model_name,
+            prompt_caching,
+            StreamSupport::Native,
+        )
+    }
+
+    /// Create a new adapter with an explicit streaming capability.
+    pub fn new_with_stream_support(
+        model: M,
+        model_name: impl Into<String>,
+        stream_support: StreamSupport,
+    ) -> Self {
+        Self::new_with_prompt_caching_and_stream_support(model, model_name, false, stream_support)
+    }
+
+    /// Create a new adapter with explicit prompt-caching and streaming metadata.
+    pub fn new_with_prompt_caching_and_stream_support(
+        model: M,
+        model_name: impl Into<String>,
+        prompt_caching: bool,
+        stream_support: StreamSupport,
+    ) -> Self {
         let name = model_name.into();
         let (input_cost, output_cost) =
             costs::model_cost(&name).unwrap_or_else(costs::default_cost);
@@ -59,7 +89,72 @@ impl<M: CompletionModel> RigAdapter<M> {
             input_cost,
             output_cost,
             prompt_caching,
+            stream_support,
+            token_capture_support: TokenCaptureSupport::UNSUPPORTED,
+            token_capture_params: None,
+            provider_label: "rig".to_string(),
         }
+    }
+
+    /// Attach a stable provider label for telemetry and trajectory artifacts.
+    pub fn with_provider_label(mut self, provider_label: impl Into<String>) -> Self {
+        self.provider_label = provider_label.into();
+        self
+    }
+
+    /// Declare provider-native exact token/logprob support and the
+    /// provider-specific request parameters needed to ask for that data.
+    pub fn with_token_capture(
+        mut self,
+        support: TokenCaptureSupport,
+        request_params: Option<JsonValue>,
+    ) -> Self {
+        self.token_capture_support = support;
+        self.token_capture_params = request_params;
+        self
+    }
+
+    fn streaming_policy_error(&self) -> LlmError {
+        crate::llm::streaming::native_required_error(
+            self.model_name.clone(),
+            self.active_model_name(),
+        )
+    }
+
+    async fn simulated_stream_from_completion(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<StreamChunkStream, LlmError> {
+        let resp = self.complete(request).await?;
+        Ok(simulate_stream_from_response(
+            resp.content,
+            resp.provider_model,
+            resp.cost_usd,
+            resp.thinking_content,
+            vec![],
+            resp.input_tokens,
+            resp.output_tokens,
+            resp.finish_reason,
+            resp.token_capture,
+        ))
+    }
+
+    async fn simulated_stream_from_tool_completion(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<StreamChunkStream, LlmError> {
+        let resp = self.complete_with_tools(request).await?;
+        Ok(simulate_stream_from_response(
+            resp.content.unwrap_or_default(),
+            resp.provider_model,
+            resp.cost_usd,
+            resp.thinking_content,
+            resp.tool_calls,
+            resp.input_tokens,
+            resp.output_tokens,
+            resp.finish_reason,
+            resp.token_capture,
+        ))
     }
 }
 
@@ -532,6 +627,7 @@ fn saturate_u32(val: u64) -> u32 {
 fn build_rig_request(
     preamble: Option<String>,
     mut history: Vec<RigMessage>,
+    context_documents: Vec<String>,
     tools: Vec<RigToolDefinition>,
     tool_choice: Option<RigToolChoice>,
     temperature: Option<f32>,
@@ -547,6 +643,7 @@ fn build_rig_request(
         provider: "rig".to_string(),
         reason: format!("Failed to build chat history: {}", e),
     })?;
+    let preamble = merge_ephemeral_context_into_preamble(preamble, context_documents);
 
     Ok(RigRequest {
         preamble,
@@ -558,6 +655,35 @@ fn build_rig_request(
         tool_choice,
         additional_params,
     })
+}
+
+fn merge_ephemeral_context_into_preamble(
+    preamble: Option<String>,
+    context_documents: Vec<String>,
+) -> Option<String> {
+    let ephemeral_context = context_documents
+        .into_iter()
+        .filter_map(|text| {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            Some(text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    match (
+        preamble
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        ephemeral_context.is_empty(),
+    ) {
+        (Some(preamble), true) => Some(preamble),
+        (Some(preamble), false) => Some(format!("{preamble}\n\n{ephemeral_context}")),
+        (None, false) => Some(ephemeral_context),
+        (None, true) => None,
+    }
 }
 
 /// Convert a ThinkingConfig into provider-specific additional_params JSON.
@@ -575,6 +701,208 @@ fn thinking_config_to_params(config: &ThinkingConfig) -> Option<JsonValue> {
             }
         })),
     }
+}
+
+fn merge_additional_params(base: Option<JsonValue>, extra: Option<JsonValue>) -> Option<JsonValue> {
+    match (base, extra) {
+        (None, None) => None,
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (Some(JsonValue::Object(mut base)), Some(JsonValue::Object(extra))) => {
+            for (key, value) in extra {
+                base.insert(key, value);
+            }
+            Some(JsonValue::Object(base))
+        }
+        (Some(base), Some(extra)) => Some(serde_json::json!({
+            "base": base,
+            "token_capture": extra,
+        })),
+    }
+}
+
+fn json_to_u32(value: &JsonValue) -> Option<u32> {
+    value
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .or_else(|| value.as_i64().and_then(|n| u32::try_from(n).ok()))
+}
+
+fn json_to_f32(value: &JsonValue) -> Option<f32> {
+    value.as_f64().filter(|v| v.is_finite()).map(|v| v as f32)
+}
+
+fn nested<'a>(value: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValue> {
+    let mut cur = value;
+    for part in path {
+        cur = if let Ok(index) = part.parse::<usize>() {
+            cur.get(index)?
+        } else {
+            cur.get(*part)?
+        };
+    }
+    Some(cur)
+}
+
+fn extract_openai_logprobs(raw: &JsonValue) -> Option<(Vec<u32>, Vec<String>, Vec<f32>)> {
+    let logprobs = nested(raw, &["choices", "0", "logprobs"]).or_else(|| raw.get("logprobs"))?;
+
+    if let Some(content) = logprobs.get("content").and_then(|v| v.as_array()) {
+        let mut token_ids = Vec::new();
+        let mut tokens = Vec::new();
+        let mut logprobs_out = Vec::new();
+        for item in content {
+            if let Some(token) = item.get("token").and_then(|v| v.as_str()) {
+                tokens.push(token.to_string());
+            }
+            if let Some(id) = item
+                .get("token_id")
+                .or_else(|| item.get("tokenId"))
+                .or_else(|| item.get("id"))
+                .and_then(json_to_u32)
+            {
+                token_ids.push(id);
+            }
+            if let Some(logprob) = item
+                .get("logprob")
+                .or_else(|| item.get("log_probability"))
+                .or_else(|| item.get("logProbability"))
+                .and_then(json_to_f32)
+            {
+                logprobs_out.push(logprob);
+            }
+        }
+        if !tokens.is_empty() || !logprobs_out.is_empty() || !token_ids.is_empty() {
+            return Some((token_ids, tokens, logprobs_out));
+        }
+    }
+
+    let tokens = logprobs
+        .get("tokens")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let logprobs_out = logprobs
+        .get("token_logprobs")
+        .or_else(|| logprobs.get("logprobs"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(json_to_f32).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let token_ids = logprobs
+        .get("token_ids")
+        .or_else(|| logprobs.get("tokenIds"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(json_to_u32).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if !tokens.is_empty() || !logprobs_out.is_empty() || !token_ids.is_empty() {
+        return Some((token_ids, tokens, logprobs_out));
+    }
+
+    None
+}
+
+fn extract_gemini_logprobs(raw: &JsonValue) -> Option<(Vec<u32>, Vec<String>, Vec<f32>)> {
+    let candidates = raw.get("candidates").and_then(|v| v.as_array())?;
+    let first = candidates.first()?;
+    let chosen = nested(first, &["logprobsResult", "chosenCandidates"])
+        .or_else(|| nested(first, &["logprobs_result", "chosen_candidates"]))?
+        .as_array()?;
+
+    let mut tokens = Vec::new();
+    let mut logprobs_out = Vec::new();
+    for item in chosen {
+        if let Some(token) = item.get("token").and_then(|v| v.as_str()) {
+            tokens.push(token.to_string());
+        }
+        if let Some(logprob) = item
+            .get("logProbability")
+            .or_else(|| item.get("log_probability"))
+            .or_else(|| item.get("logprob"))
+            .and_then(json_to_f32)
+        {
+            logprobs_out.push(logprob);
+        }
+    }
+    if !tokens.is_empty() || !logprobs_out.is_empty() {
+        return Some((Vec::new(), tokens, logprobs_out));
+    }
+    None
+}
+
+fn extract_local_token_array(raw: &JsonValue) -> Option<(Vec<u32>, Vec<String>, Vec<f32>)> {
+    let arrays = [
+        raw.get("tokens"),
+        nested(raw, &["response", "tokens"]),
+        nested(raw, &["completion", "tokens"]),
+        nested(raw, &["choices", "0", "tokens"]),
+    ];
+    for maybe_array in arrays.into_iter().flatten() {
+        let Some(array) = maybe_array.as_array() else {
+            continue;
+        };
+        let mut token_ids = Vec::new();
+        let mut tokens = Vec::new();
+        let mut logprobs_out = Vec::new();
+        for item in array {
+            if let Some(id) = item
+                .get("id")
+                .or_else(|| item.get("token_id"))
+                .or_else(|| item.get("tokenId"))
+                .and_then(json_to_u32)
+            {
+                token_ids.push(id);
+            }
+            if let Some(token) = item
+                .get("text")
+                .or_else(|| item.get("token"))
+                .or_else(|| item.get("piece"))
+                .and_then(|v| v.as_str())
+            {
+                tokens.push(token.to_string());
+            }
+            if let Some(logprob) = item
+                .get("logprob")
+                .or_else(|| item.get("log_probability"))
+                .or_else(|| item.get("logProbability"))
+                .and_then(json_to_f32)
+            {
+                logprobs_out.push(logprob);
+            }
+        }
+        if !token_ids.is_empty() || !tokens.is_empty() || !logprobs_out.is_empty() {
+            return Some((token_ids, tokens, logprobs_out));
+        }
+    }
+    None
+}
+
+fn extract_provider_token_capture_from_raw(
+    raw: &JsonValue,
+    provider: impl Into<String>,
+    model: impl Into<String>,
+) -> Option<ProviderTokenCapture> {
+    let (token_ids, tokens, logprobs) = extract_openai_logprobs(raw)
+        .or_else(|| extract_gemini_logprobs(raw))
+        .or_else(|| extract_local_token_array(raw))?;
+
+    let exact_tokens_supported = !tokens.is_empty() || !token_ids.is_empty();
+    let logprobs_supported = !logprobs.is_empty();
+    if !exact_tokens_supported && !logprobs_supported {
+        return None;
+    }
+
+    Some(ProviderTokenCapture {
+        exact_tokens_supported,
+        logprobs_supported,
+        token_ids,
+        tokens,
+        logprobs,
+        provider: Some(provider.into()),
+        model: Some(model.into()),
+    })
 }
 
 #[async_trait]
@@ -611,7 +939,10 @@ where
                 "System message requested prompt caching metadata, but provider-side prompt caching is disabled"
             );
         }
-        let additional_params = thinking_config_to_params(&request.thinking);
+        let thinking_params = thinking_config_to_params(&request.thinking);
+        let capture_params = self.token_capture_params.clone();
+        let additional_params =
+            merge_additional_params(thinking_params.clone(), capture_params.clone());
 
         if additional_params.is_some() {
             tracing::info!(
@@ -620,9 +951,11 @@ where
             );
         }
 
+        let context_documents = request.context_documents;
         let rig_req = build_rig_request(
-            preamble,
-            history,
+            preamble.clone(),
+            history.clone(),
+            context_documents.clone(),
             Vec::new(),
             None,
             request.temperature,
@@ -630,19 +963,54 @@ where
             additional_params,
         )?;
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
+        let response = match self.model.completion(rig_req).await {
+            Ok(response) => response,
+            Err(error) if capture_params.is_some() => {
+                tracing::warn!(
+                    provider = %self.provider_label,
+                    model = %self.model_name,
+                    error = %error,
+                    "Provider rejected token/logprob capture parameters; retrying without them"
+                );
+                let retry_req = build_rig_request(
+                    preamble,
+                    history,
+                    context_documents,
+                    Vec::new(),
+                    None,
+                    request.temperature,
+                    request.max_tokens,
+                    thinking_params,
+                )?;
+                self.model
+                    .completion(retry_req)
+                    .await
+                    .map_err(|retry_error| LlmError::RequestFailed {
+                        provider: self.model_name.clone(),
+                        reason: retry_error.to_string(),
+                    })?
+            }
+            Err(error) => {
+                return Err(LlmError::RequestFailed {
                     provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+                    reason: error.to_string(),
+                });
+            }
+        };
 
         let (text, _tool_calls, thinking, finish) =
             extract_response(&response.choice, &response.usage);
         let input_tokens = saturate_u32(response.usage.input_tokens);
         let output_tokens = saturate_u32(response.usage.output_tokens);
+        let token_capture = serde_json::to_value(&response.raw_response)
+            .ok()
+            .and_then(|raw| {
+                extract_provider_token_capture_from_raw(
+                    &raw,
+                    self.provider_label.clone(),
+                    self.model_name.clone(),
+                )
+            });
         let cost_usd = {
             use rust_decimal::prelude::ToPrimitive;
             self.calculate_cost(input_tokens, output_tokens)
@@ -658,6 +1026,7 @@ where
             input_tokens,
             output_tokens,
             finish_reason: finish,
+            token_capture,
         })
     }
 
@@ -724,7 +1093,10 @@ where
         }
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
-        let additional_params = thinking_config_to_params(&request.thinking);
+        let thinking_params = thinking_config_to_params(&request.thinking);
+        let capture_params = self.token_capture_params.clone();
+        let additional_params =
+            merge_additional_params(thinking_params.clone(), capture_params.clone());
 
         if additional_params.is_some() {
             tracing::info!(
@@ -734,24 +1106,52 @@ where
             );
         }
 
+        let context_documents = request.context_documents;
         let rig_req = build_rig_request(
-            preamble,
-            history,
-            tools,
-            tool_choice,
+            preamble.clone(),
+            history.clone(),
+            context_documents.clone(),
+            tools.clone(),
+            tool_choice.clone(),
             request.temperature,
             request.max_tokens,
             additional_params,
         )?;
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
+        let response = match self.model.completion(rig_req).await {
+            Ok(response) => response,
+            Err(error) if capture_params.is_some() => {
+                tracing::warn!(
+                    provider = %self.provider_label,
+                    model = %self.model_name,
+                    error = %error,
+                    "Provider rejected token/logprob capture parameters for tool completion; retrying without them"
+                );
+                let retry_req = build_rig_request(
+                    preamble,
+                    history,
+                    context_documents,
+                    tools,
+                    tool_choice,
+                    request.temperature,
+                    request.max_tokens,
+                    thinking_params,
+                )?;
+                self.model
+                    .completion(retry_req)
+                    .await
+                    .map_err(|retry_error| LlmError::RequestFailed {
+                        provider: self.model_name.clone(),
+                        reason: retry_error.to_string(),
+                    })?
+            }
+            Err(error) => {
+                return Err(LlmError::RequestFailed {
                     provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+                    reason: error.to_string(),
+                });
+            }
+        };
 
         let (text, mut tool_calls, thinking, finish) =
             extract_response(&response.choice, &response.usage);
@@ -771,6 +1171,15 @@ where
 
         let input_tokens = saturate_u32(response.usage.input_tokens);
         let output_tokens = saturate_u32(response.usage.output_tokens);
+        let token_capture = serde_json::to_value(&response.raw_response)
+            .ok()
+            .and_then(|raw| {
+                extract_provider_token_capture_from_raw(
+                    &raw,
+                    self.provider_label.clone(),
+                    self.model_name.clone(),
+                )
+            });
         let cost_usd = {
             use rust_decimal::prelude::ToPrimitive;
             self.calculate_cost(input_tokens, output_tokens)
@@ -787,6 +1196,7 @@ where
             input_tokens,
             output_tokens,
             finish_reason: finish,
+            token_capture,
         })
     }
 
@@ -813,14 +1223,29 @@ where
         })
     }
 
-    fn supports_streaming(&self) -> bool {
-        true
+    fn stream_support(&self) -> StreamSupport {
+        self.stream_support
+    }
+
+    fn token_capture_support(&self) -> TokenCaptureSupport {
+        self.token_capture_support
     }
 
     async fn complete_stream(
         &self,
         request: CompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
+        if self.stream_support != StreamSupport::Native {
+            return match self.stream_support {
+                StreamSupport::Simulated
+                    if request.stream_policy != StreamPolicy::RequireNative =>
+                {
+                    self.simulated_stream_from_completion(request).await
+                }
+                _ => Err(self.streaming_policy_error()),
+            };
+        }
+
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history, cache_hint_requested) = convert_messages(&messages);
@@ -830,11 +1255,16 @@ where
                 "System message requested prompt caching metadata, but provider-side prompt caching is disabled"
             );
         }
-        let additional_params = thinking_config_to_params(&request.thinking);
+        let thinking_params = thinking_config_to_params(&request.thinking);
+        let capture_params = self.token_capture_params.clone();
+        let additional_params =
+            merge_additional_params(thinking_params.clone(), capture_params.clone());
 
+        let context_documents = request.context_documents;
         let rig_req = build_rig_request(
-            preamble,
-            history,
+            preamble.clone(),
+            history.clone(),
+            context_documents.clone(),
             Vec::new(),
             None,
             request.temperature,
@@ -842,20 +1272,47 @@ where
             additional_params,
         )?;
 
-        let streaming_resp =
-            self.model
-                .stream(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
+        let streaming_resp = match self.model.stream(rig_req).await {
+            Ok(response) => response,
+            Err(error) if capture_params.is_some() => {
+                tracing::warn!(
+                    provider = %self.provider_label,
+                    model = %self.model_name,
+                    error = %error,
+                    "Provider rejected streaming token/logprob capture parameters; retrying without them"
+                );
+                let retry_req = build_rig_request(
+                    preamble,
+                    history,
+                    context_documents,
+                    Vec::new(),
+                    None,
+                    request.temperature,
+                    request.max_tokens,
+                    thinking_params,
+                )?;
+                self.model.stream(retry_req).await.map_err(|retry_error| {
+                    LlmError::RequestFailed {
+                        provider: self.model_name.clone(),
+                        reason: retry_error.to_string(),
+                    }
+                })?
+            }
+            Err(error) => {
+                return Err(LlmError::RequestFailed {
                     provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+                    reason: error.to_string(),
+                });
+            }
+        };
 
         Ok(rig_stream_to_chunks(
             streaming_resp,
             self.model_name.clone(),
             self.input_cost,
             self.output_cost,
+            self.token_capture_support,
+            self.provider_label.clone(),
         ))
     }
 
@@ -863,6 +1320,17 @@ where
         &self,
         request: ToolCompletionRequest,
     ) -> Result<StreamChunkStream, LlmError> {
+        if self.stream_support != StreamSupport::Native {
+            return match self.stream_support {
+                StreamSupport::Simulated
+                    if request.stream_policy != StreamPolicy::RequireNative =>
+                {
+                    self.simulated_stream_from_tool_completion(request).await
+                }
+                _ => Err(self.streaming_policy_error()),
+            };
+        }
+
         let known_tool_names: HashSet<String> =
             request.tools.iter().map(|t| t.name.clone()).collect();
 
@@ -914,26 +1382,56 @@ where
         }
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
-        let additional_params = thinking_config_to_params(&request.thinking);
+        let thinking_params = thinking_config_to_params(&request.thinking);
+        let capture_params = self.token_capture_params.clone();
+        let additional_params =
+            merge_additional_params(thinking_params.clone(), capture_params.clone());
 
+        let context_documents = request.context_documents;
         let rig_req = build_rig_request(
-            preamble,
-            history,
-            tools,
-            tool_choice,
+            preamble.clone(),
+            history.clone(),
+            context_documents.clone(),
+            tools.clone(),
+            tool_choice.clone(),
             request.temperature,
             request.max_tokens,
             additional_params,
         )?;
 
-        let streaming_resp =
-            self.model
-                .stream(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
+        let streaming_resp = match self.model.stream(rig_req).await {
+            Ok(response) => response,
+            Err(error) if capture_params.is_some() => {
+                tracing::warn!(
+                    provider = %self.provider_label,
+                    model = %self.model_name,
+                    error = %error,
+                    "Provider rejected streaming token/logprob capture parameters for tool completion; retrying without them"
+                );
+                let retry_req = build_rig_request(
+                    preamble,
+                    history,
+                    context_documents,
+                    tools,
+                    tool_choice,
+                    request.temperature,
+                    request.max_tokens,
+                    thinking_params,
+                )?;
+                self.model.stream(retry_req).await.map_err(|retry_error| {
+                    LlmError::RequestFailed {
+                        provider: self.model_name.clone(),
+                        reason: retry_error.to_string(),
+                    }
+                })?
+            }
+            Err(error) => {
+                return Err(LlmError::RequestFailed {
                     provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+                    reason: error.to_string(),
+                });
+            }
+        };
 
         Ok(rig_stream_to_chunks_with_normalization(
             streaming_resp,
@@ -941,27 +1439,10 @@ where
             self.input_cost,
             self.output_cost,
             known_tool_names,
+            self.token_capture_support,
+            self.provider_label.clone(),
         ))
     }
-}
-
-/// Normalize a tool call name returned by an OpenAI-compatible provider.
-///
-/// Some proxies (e.g. VibeProxy) prepend `proxy_` to tool names.
-/// If the returned name doesn't match any known tool but stripping a
-/// `proxy_` prefix yields a match, use the stripped version.
-fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
-    if known_tools.contains(name) {
-        return name.to_string();
-    }
-
-    if let Some(stripped) = name.strip_prefix("proxy_")
-        && known_tools.contains(stripped)
-    {
-        return stripped.to_string();
-    }
-
-    name.to_string()
 }
 
 /// Convert a rig-core StreamingCompletionResponse into our StreamChunkStream.
@@ -970,6 +1451,8 @@ fn rig_stream_to_chunks<R>(
     provider_model: String,
     input_cost: Decimal,
     output_cost: Decimal,
+    token_capture_support: TokenCaptureSupport,
+    provider_label: String,
 ) -> StreamChunkStream
 where
     R: Clone
@@ -987,6 +1470,8 @@ where
         input_cost,
         output_cost,
         HashSet::new(),
+        token_capture_support,
+        provider_label,
     )
 }
 
@@ -998,6 +1483,8 @@ fn rig_stream_to_chunks_with_normalization<R>(
     input_cost: Decimal,
     output_cost: Decimal,
     known_tool_names: HashSet<String>,
+    _token_capture_support: TokenCaptureSupport,
+    provider_label: String,
 ) -> StreamChunkStream
 where
     R: Clone
@@ -1083,6 +1570,15 @@ where
                     let usage = resp.token_usage().unwrap_or_default();
                     let input_tokens = saturate_u32(usage.input_tokens);
                     let output_tokens = saturate_u32(usage.output_tokens);
+                    let token_capture = serde_json::to_value(&resp)
+                        .ok()
+                        .and_then(|raw| {
+                            extract_provider_token_capture_from_raw(
+                                &raw,
+                                provider_label.clone(),
+                                provider_model.clone(),
+                            )
+                        });
                     let cost_usd = {
                         use rust_decimal::prelude::ToPrimitive;
                         (input_cost * Decimal::from(input_tokens)
@@ -1096,6 +1592,7 @@ where
                         input_tokens,
                         output_tokens,
                         finish_reason: FinishReason::Stop,
+                        token_capture,
                     });
                 }
                 Err(e) => {
@@ -1120,6 +1617,89 @@ where
 mod tests {
     use super::*;
     use rig::message::Reasoning;
+
+    #[test]
+    fn token_capture_extracts_openai_chat_logprobs() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "logprobs": {
+                    "content": [
+                        {"token": "Hello", "logprob": -0.1, "token_id": 9906},
+                        {"token": " world", "logprob": -0.2, "token_id": 1917}
+                    ]
+                }
+            }]
+        });
+
+        let capture =
+            extract_provider_token_capture_from_raw(&raw, "openai", "gpt-test").expect("capture");
+        assert!(capture.exact_tokens_supported);
+        assert!(capture.logprobs_supported);
+        assert_eq!(capture.token_ids, vec![9906, 1917]);
+        assert_eq!(capture.tokens, vec!["Hello", " world"]);
+        assert_eq!(capture.logprobs, vec![-0.1, -0.2]);
+        assert_eq!(capture.provider.as_deref(), Some("openai"));
+        assert_eq!(capture.model.as_deref(), Some("gpt-test"));
+    }
+
+    #[test]
+    fn token_capture_extracts_gemini_chosen_candidates() {
+        let raw = serde_json::json!({
+            "candidates": [{
+                "logprobsResult": {
+                    "chosenCandidates": [
+                        {"token": "Gem", "logProbability": -0.3},
+                        {"token": "ini", "logProbability": -0.4}
+                    ]
+                }
+            }]
+        });
+
+        let capture = extract_provider_token_capture_from_raw(&raw, "gemini", "gemini-test")
+            .expect("capture");
+        assert!(capture.exact_tokens_supported);
+        assert!(capture.logprobs_supported);
+        assert!(capture.token_ids.is_empty());
+        assert_eq!(capture.tokens, vec!["Gem", "ini"]);
+        assert_eq!(capture.logprobs, vec![-0.3, -0.4]);
+    }
+
+    #[test]
+    fn token_capture_extracts_local_token_arrays() {
+        let raw = serde_json::json!({
+            "tokens": [
+                {"id": 1, "text": "local", "logprob": -0.5},
+                {"id": 2, "text": " model", "logprob": -0.6}
+            ]
+        });
+
+        let capture =
+            extract_provider_token_capture_from_raw(&raw, "llama_cpp", "local").expect("capture");
+        assert_eq!(capture.token_ids, vec![1, 2]);
+        assert_eq!(capture.tokens, vec!["local", " model"]);
+        assert_eq!(capture.logprobs, vec![-0.5, -0.6]);
+    }
+
+    #[test]
+    fn token_capture_ignores_raw_without_provider_data() {
+        let raw = serde_json::json!({
+            "choices": [{"message": {"content": "hello"}}]
+        });
+        assert!(extract_provider_token_capture_from_raw(&raw, "openai", "gpt-test").is_none());
+    }
+
+    #[test]
+    fn merge_additional_params_preserves_thinking_and_logprob_requests() {
+        let merged = merge_additional_params(
+            Some(serde_json::json!({"thinking": {"type": "enabled"}})),
+            Some(serde_json::json!({"logprobs": true, "top_logprobs": 0})),
+        )
+        .expect("merged params");
+
+        assert_eq!(merged["thinking"]["type"], "enabled");
+        assert_eq!(merged["logprobs"], true);
+        assert_eq!(merged["top_logprobs"], 0);
+    }
 
     #[test]
     fn requested_model_match_accepts_full_provider_spec() {
@@ -1160,6 +1740,30 @@ mod tests {
         assert_eq!(preamble, Some("System 1\nSystem 2".to_string()));
         assert_eq!(history.len(), 1);
         assert!(!cache_hint_requested);
+    }
+
+    #[test]
+    fn build_rig_request_merges_context_documents_into_preamble() {
+        let request = build_rig_request(
+            Some("Stable preamble".to_string()),
+            vec![RigMessage::user("hello")],
+            vec![
+                "## External Memory Recall\nRemember this".to_string(),
+                "## Skill Expansion\nUse the active skill".to_string(),
+            ],
+            Vec::new(),
+            None,
+            Some(0.2),
+            Some(512),
+            None,
+        )
+        .expect("rig request should build");
+
+        let preamble = request.preamble.as_deref().unwrap_or_default();
+        assert!(preamble.contains("Stable preamble"));
+        assert!(preamble.contains("External Memory Recall"));
+        assert!(preamble.contains("Skill Expansion"));
+        assert!(request.documents.is_empty());
     }
 
     #[test]

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use clap::Subcommand;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 #[derive(Subcommand, Debug, Clone)]
@@ -96,53 +97,7 @@ pub struct PageLink {
 
 /// Find a usable browser binary.
 fn find_browser() -> Option<PathBuf> {
-    let candidates = if cfg!(target_os = "windows") {
-        vec![
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-            r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
-            "chrome",
-            "msedge",
-            "brave",
-        ]
-    } else {
-        vec![
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            "chromium-browser",
-            "chromium",
-            "google-chrome",
-            "google-chrome-stable",
-            "chrome",
-        ]
-    };
-
-    for candidate in candidates {
-        let path = Path::new(candidate);
-        if path.exists() {
-            return Some(path.to_path_buf());
-        }
-        // Check in PATH
-        let lookup = if cfg!(target_os = "windows") {
-            Command::new("where").arg(candidate).output()
-        } else {
-            Command::new("which").arg(candidate).output()
-        };
-        if let Ok(output) = lookup
-            && output.status.success()
-        {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                return Some(PathBuf::from(path_str));
-            }
-        }
-    }
-
-    None
+    crate::platform::find_browser_executable()
 }
 
 /// Run browser headless and capture DOM content.
@@ -194,47 +149,15 @@ fn headless_screenshot(
 
 /// Extract text content from HTML (very basic — strips tags).
 fn extract_text_from_html(html: &str) -> String {
-    let mut text = String::new();
-    let mut in_tag = false;
-    let mut in_script = false;
-    let mut in_style = false;
+    let script_re =
+        Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("script regex is a tested constant");
+    let style_re =
+        Regex::new(r"(?is)<style[^>]*>.*?</style>").expect("style regex is a tested constant");
+    let tag_re = Regex::new(r"(?is)<[^>]+>").expect("tag regex is a tested constant");
 
-    for c in html.chars() {
-        match c {
-            '<' => {
-                in_tag = true;
-                // Check for script/style opening
-                let lower = html.to_lowercase();
-                if let Some(pos) = lower.find("<script")
-                    && pos == text.len()
-                {
-                    in_script = true;
-                }
-                if let Some(pos) = lower.find("<style")
-                    && pos == text.len()
-                {
-                    in_style = true;
-                }
-            }
-            '>' => {
-                in_tag = false;
-                // Check for script/style closing
-                if in_script || in_style {
-                    let recent: String = text.chars().rev().take(10).collect();
-                    if recent.contains("tpircs/") || recent.contains("elyts/") {
-                        in_script = false;
-                        in_style = false;
-                    }
-                }
-            }
-            _ if !in_tag && !in_script && !in_style => {
-                text.push(c);
-            }
-            _ => {}
-        }
-    }
-
-    // Clean up whitespace
+    let without_scripts = script_re.replace_all(html, " ");
+    let without_styles = style_re.replace_all(&without_scripts, " ");
+    let text = tag_re.replace_all(&without_styles, " ");
     text.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 

@@ -13,7 +13,8 @@ use tempfile::TempDir;
 use thinclaw::channels::Channel;
 use thinclaw::channels::wasm::{
     ChannelCapabilities, EmitRateLimitConfig, PreparedChannelModule, RegisteredEndpoint,
-    WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
+    RegisteredWebhookAuth, WasmChannel, WasmChannelRouter, WasmChannelRuntime,
+    WasmChannelRuntimeConfig,
 };
 use thinclaw::pairing::PairingStore;
 
@@ -71,7 +72,7 @@ mod router_tests {
         }];
 
         router
-            .register(channel.clone(), endpoints, None, None)
+            .register(channel.clone(), endpoints, RegisteredWebhookAuth::default())
             .await;
 
         // Verify channel is found by path
@@ -96,7 +97,14 @@ mod router_tests {
         ));
 
         router
-            .register(channel, vec![], Some("my-secret-123".to_string()), None)
+            .register(
+                channel,
+                vec![],
+                RegisteredWebhookAuth {
+                    signature_secret: Some("my-secret-123".to_string()),
+                    ..Default::default()
+                },
+            )
             .await;
 
         // Correct secret validates
@@ -135,7 +143,9 @@ mod router_tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None).await;
+        router
+            .register(channel, endpoints, RegisteredWebhookAuth::default())
+            .await;
 
         // Channel exists
         assert!(router.get_channel_for_path("/webhook/temp").await.is_some());
@@ -167,7 +177,9 @@ mod router_tests {
                 require_secret: false,
             }];
 
-            router.register(channel, endpoints, None, None).await;
+            router
+                .register(channel, endpoints, RegisteredWebhookAuth::default())
+                .await;
         }
 
         // Verify all channels are registered

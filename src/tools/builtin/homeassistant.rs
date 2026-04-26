@@ -10,7 +10,8 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::tools::tool::{
-    ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
+    ApprovalRequirement, Tool, ToolApprovalClass, ToolError, ToolMetadata, ToolOutput,
+    ToolRateLimitConfig, ToolRouteIntent, ToolSideEffectLevel, require_str,
 };
 
 /// Home Assistant REST API client.
@@ -137,11 +138,9 @@ impl Tool for HomeAssistantTool {
     }
 
     fn description(&self) -> &str {
-        "Control your Home Assistant smart home. Actions: \
-         'list_entities' (list devices, optionally filter by domain), \
-         'get_state' (get detailed state of an entity), \
-         'list_services' (list available services by domain), \
-         'call_service' (invoke a service like turning on lights)."
+        "Interact with Home Assistant to inspect device state or call smart-home \
+         services. Use this for live home-automation questions and actions such as \
+         checking sensors, listing entities, or turning devices on and off."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -172,6 +171,17 @@ impl Tool for HomeAssistantTool {
             },
             "required": ["action"]
         })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata {
+            authoritative_source: true,
+            live_data: true,
+            side_effect_level: ToolSideEffectLevel::Write,
+            approval_class: ToolApprovalClass::Conditional,
+            parallel_safe: false,
+            route_intents: vec![ToolRouteIntent::LocalState],
+        }
     }
 
     async fn execute(

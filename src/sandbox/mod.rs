@@ -88,6 +88,7 @@
 pub mod config;
 pub mod container;
 pub mod detect;
+#[cfg(feature = "browser")]
 pub mod docker_chromium;
 pub mod docker_init;
 pub mod error;

@@ -2150,12 +2150,20 @@ _ironclaw() {
             return 0
             ;;
         ironclaw__onboard)
-            opts="-m -c -h --skip-auth --channels-only --cli-only --no-db --message --config --no-onboard --help"
+            opts="-m -c -h --skip-auth --channels-only --guide --ui --cli-only --no-db --message --config --no-onboard --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
+                --guide)
+                    COMPREPLY=($(compgen -W "menu ai channels agent tools automation runtime" -- "${cur}"))
+                    return 0
+                    ;;
+                --ui)
+                    COMPREPLY=($(compgen -W "auto cli tui" -- "${cur}"))
+                    return 0
+                    ;;
                 --message)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0

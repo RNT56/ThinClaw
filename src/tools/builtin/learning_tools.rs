@@ -8,10 +8,15 @@ use chrono::Utc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::agent::learning::LearningOrchestrator;
+use crate::agent::{learning::LearningOrchestrator, outcomes};
 use crate::context::JobContext;
 use crate::db::Database;
-use crate::history::LearningArtifactVersion as DbLearningArtifactVersion;
+use crate::error::WorkspaceError;
+use crate::history::{
+    LearningArtifactVersion as DbLearningArtifactVersion,
+    OutcomeContractQuery as DbOutcomeContractQuery,
+};
+use crate::settings::LearningSettings;
 use crate::skills::{
     MAX_PROMPT_FILE_SIZE, SkillSource, normalize_line_endings,
     parser::parse_skill_md,
@@ -21,7 +26,7 @@ use crate::tools::ToolRegistry;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{Workspace, paths};
 
-const PROMPT_TARGETS: &[&str] = &[paths::SOUL, paths::AGENTS, paths::USER];
+const PROMPT_TARGETS: &[&str] = &[paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER];
 const SKILL_FILE_NAME: &str = "SKILL.md";
 
 fn tool_error_from_skill(err: SkillRegistryError) -> ToolError {
@@ -69,25 +74,27 @@ fn validate_prompt_content(content: &str) -> Result<(), ToolError> {
 }
 
 fn validate_prompt_safety(target: &str, content: &str) -> Result<(), ToolError> {
-    let lowered = content.to_ascii_lowercase();
-    let required_markers: &[&str] = match target {
-        paths::SOUL => &["boundar", "ask before", "private"],
-        paths::AGENTS => &["red lines", "ask first", "don't"],
-        _ => &[],
-    };
-    if required_markers.is_empty() {
-        return Ok(());
+    match target {
+        paths::SOUL => crate::identity::soul::validate_canonical_soul(content)
+            .map_err(ToolError::InvalidParameters),
+        paths::SOUL_LOCAL => crate::identity::soul::validate_local_overlay(content)
+            .map_err(ToolError::InvalidParameters),
+        paths::AGENTS => {
+            let lowered = content.to_ascii_lowercase();
+            let required_markers = ["red lines", "ask first", "don't"];
+            if required_markers
+                .iter()
+                .all(|marker| !lowered.contains(marker))
+            {
+                return Err(ToolError::InvalidParameters(format!(
+                    "{} update rejected: core safety guidance appears to be missing",
+                    target
+                )));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
-    if required_markers
-        .iter()
-        .all(|marker| !lowered.contains(marker))
-    {
-        return Err(ToolError::InvalidParameters(format!(
-            "{} update rejected: core safety guidance appears to be missing",
-            target
-        )));
-    }
-    Ok(())
 }
 
 fn normalize_heading_name(raw: &str) -> String {
@@ -214,6 +221,26 @@ fn validate_skill_admin_available(ctx: &JobContext, tool_name: &str) -> Result<(
     }
 }
 
+fn validate_prompt_manage_available(ctx: &JobContext) -> Result<(), ToolError> {
+    if ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_skills").is_some() {
+        Err(ToolError::NotAuthorized(
+            "prompt_manage is not available when the current agent is restricted to a specific skill allowlist.".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_prompt_manage_settings(settings: &LearningSettings) -> Result<(), ToolError> {
+    if settings.prompt_mutation.enabled {
+        Ok(())
+    } else {
+        Err(ToolError::ExecutionFailed(
+            "prompt mutation is disabled in the learning settings".to_string(),
+        ))
+    }
+}
+
 fn prompt_manage_user_target(scope: &str, ctx: &JobContext) -> Result<String, ToolError> {
     let actor_id = ctx
         .metadata
@@ -253,6 +280,49 @@ fn prompt_manage_user_target(scope: &str, ctx: &JobContext) -> Result<String, To
             other
         ))),
     }
+}
+
+async fn read_prompt_target_content(
+    workspace: &Workspace,
+    resolved_target: &str,
+) -> Result<String, ToolError> {
+    if resolved_target.eq_ignore_ascii_case(paths::SOUL) {
+        return match crate::identity::soul_store::read_home_soul() {
+            Ok(content) => Ok(content),
+            Err(WorkspaceError::DocumentNotFound { .. }) => Ok(String::new()),
+            Err(err) => Err(ToolError::ExecutionFailed(format!(
+                "failed to read canonical SOUL.md: {}",
+                err
+            ))),
+        };
+    }
+
+    Ok(workspace
+        .read(resolved_target)
+        .await
+        .ok()
+        .map(|doc| doc.content)
+        .unwrap_or_default())
+}
+
+async fn write_prompt_target_content(
+    workspace: &Workspace,
+    resolved_target: &str,
+    content: &str,
+) -> Result<(), ToolError> {
+    if resolved_target.eq_ignore_ascii_case(paths::SOUL) {
+        return crate::identity::soul_store::write_home_soul(content).map_err(|err| {
+            ToolError::ExecutionFailed(format!("failed to update canonical SOUL.md: {}", err))
+        });
+    }
+
+    workspace
+        .write(resolved_target, content)
+        .await
+        .map(|_| ())
+        .map_err(|err| {
+            ToolError::ExecutionFailed(format!("failed to update '{}': {}", resolved_target, err))
+        })
 }
 
 fn validate_relative_skill_path(path: &str) -> Result<PathBuf, ToolError> {
@@ -373,10 +443,19 @@ async fn record_artifact_version(
         provenance,
         created_at: Utc::now(),
     };
-    store
+    let id = store
         .insert_learning_artifact_version(&version)
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    if let Err(err) = outcomes::maybe_create_artifact_contract(store, &version).await {
+        tracing::debug!(
+            artifact_type = %artifact_type,
+            artifact_name = %artifact_name,
+            error = %err,
+            "Outcome-backed artifact contract creation skipped"
+        );
+    }
+    Ok(id)
 }
 
 fn serialized<T: serde::Serialize>(value: T) -> serde_json::Value {
@@ -400,6 +479,10 @@ async fn loaded_skill_root(
         ))),
         SkillSource::Bundled(_) => Err(ToolError::ExecutionFailed(format!(
             "Skill '{}' is bundled and cannot be changed through skill_manage",
+            name
+        ))),
+        SkillSource::External(_) => Err(ToolError::ExecutionFailed(format!(
+            "Skill '{}' is external read-only and cannot be changed through skill_manage",
             name
         ))),
     }
@@ -436,7 +519,7 @@ impl Tool for PromptManageTool {
     }
 
     fn description(&self) -> &str {
-        "Update SOUL.md, AGENTS.md, or USER.md in workspace memory. Run session_search + memory_search before mutation, then apply bounded prompt edits with validation and version recording."
+        "Update the canonical SOUL.md, workspace SOUL.local.md, AGENTS.md, or USER.md. Run session_search + memory_search before mutation, then apply bounded prompt edits with validation and version recording."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -451,7 +534,7 @@ impl Tool for PromptManageTool {
                 },
                 "target": {
                     "type": "string",
-                    "enum": [paths::SOUL, paths::AGENTS, paths::USER],
+                    "enum": [paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER],
                     "description": "Which prompt file to update"
                 },
                 "scope": {
@@ -483,12 +566,9 @@ impl Tool for PromptManageTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        validate_prompt_manage_available(ctx)?;
         let settings = self.orchestrator.load_settings_for_user(&ctx.user_id).await;
-        if !settings.prompt_mutation.enabled {
-            return Err(ToolError::ExecutionFailed(
-                "prompt mutation is disabled in the learning settings".to_string(),
-            ));
-        }
+        validate_prompt_manage_settings(&settings)?;
 
         let operation = params
             .get("operation")
@@ -511,13 +591,22 @@ impl Tool for PromptManageTool {
         } else {
             target.to_string()
         };
-        let before = self
-            .workspace
-            .read(&resolved_target)
-            .await
-            .ok()
-            .map(|doc| doc.content)
-            .unwrap_or_default();
+        let owner_actor_user = if target == paths::USER {
+            Some(paths::actor_user(&ctx.user_id))
+        } else {
+            None
+        };
+        let timezone_sync_target = target == paths::USER
+            && (resolved_target == paths::USER
+                || owner_actor_user
+                    .as_deref()
+                    .is_some_and(|path| resolved_target == path));
+        let before = read_prompt_target_content(&self.workspace, &resolved_target).await?;
+        let before_timezone = if timezone_sync_target {
+            crate::timezone::extract_markdown_timezone(&before)
+        } else {
+            None
+        };
 
         let next_content = match operation.as_str() {
             "replace" => require_str(&params, "content")?.to_string(),
@@ -550,23 +639,33 @@ impl Tool for PromptManageTool {
         };
         validate_prompt_content(&next_content)?;
         validate_prompt_safety(target, &next_content)?;
+        if target == paths::USER {
+            crate::timezone::validate_markdown_timezone_field(&next_content)
+                .map_err(ToolError::InvalidParameters)?;
+        }
 
-        self.workspace
-            .write(&resolved_target, &next_content)
-            .await
-            .map_err(|err| {
-                ToolError::ExecutionFailed(format!(
-                    "failed to update '{}': {}",
-                    resolved_target, err
-                ))
-            })?;
-        let after = self
-            .workspace
-            .read(&resolved_target)
-            .await
-            .ok()
-            .map(|doc| doc.content)
-            .unwrap_or_default();
+        write_prompt_target_content(&self.workspace, &resolved_target, &next_content).await?;
+        let after = read_prompt_target_content(&self.workspace, &resolved_target).await?;
+        let after_timezone = if timezone_sync_target {
+            crate::timezone::extract_markdown_timezone(&after)
+        } else {
+            None
+        };
+        let orchestrator = Arc::clone(&self.orchestrator);
+        let user_id = ctx.user_id.clone();
+        let mirror_payload = serde_json::json!({
+            "tool": "prompt_manage",
+            "target": target,
+            "resolved_target": resolved_target,
+            "scope": scope,
+            "operation": operation,
+            "content_preview": after.chars().take(240).collect::<String>(),
+        });
+        tokio::spawn(async move {
+            orchestrator
+                .mirror_workspace_write(&user_id, &mirror_payload)
+                .await;
+        });
 
         let version_label = Some(Utc::now().to_rfc3339());
         let provenance = serde_json::json!({
@@ -590,11 +689,25 @@ impl Tool for PromptManageTool {
         )
         .await;
 
+        if timezone_sync_target && before_timezone != after_timezone {
+            crate::timezone::apply_user_timezone_change(
+                &self.store,
+                Some(self.workspace.as_ref()),
+                &ctx.user_id,
+                after_timezone.as_deref(),
+            )
+            .await
+            .map_err(|err| {
+                ToolError::ExecutionFailed(format!("failed to apply timezone update: {}", err))
+            })?;
+        }
+
         let result = serde_json::json!({
             "status": "updated",
             "operation": operation,
             "target": resolved_target,
             "bytes_written": next_content.len(),
+            "user_notification_required": target == paths::SOUL || target == paths::SOUL_LOCAL,
             "version_label": version_label,
             "artifact_version_recorded": version_result.is_ok(),
             "artifact_version_error": version_result.err(),
@@ -1085,22 +1198,50 @@ impl Tool for LearningStatusTool {
         let feedback_fut = store.list_learning_feedback(&user_id, None, None, 5);
         let rollbacks_fut = store.list_learning_rollbacks(&user_id, None, None, 5);
         let proposals_fut = store.list_learning_code_proposals(&user_id, None, 5);
+        let outcome_stats_fut = store.outcome_summary_stats(&user_id);
+        let outcome_query = DbOutcomeContractQuery {
+            user_id: user_id.clone(),
+            actor_id: None,
+            status: None,
+            contract_type: None,
+            source_kind: None,
+            source_id: None,
+            thread_id: None,
+            limit: 5,
+        };
+        let outcomes_fut = store.list_outcome_contracts(&outcome_query);
 
-        let (events, evaluations, candidates, artifact_versions, feedback, rollbacks, proposals) =
-            tokio::try_join!(
-                events_fut,
-                evals_fut,
-                candidates_fut,
-                versions_fut,
-                feedback_fut,
-                rollbacks_fut,
-                proposals_fut,
-            )
-            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+        let (
+            events,
+            evaluations,
+            candidates,
+            artifact_versions,
+            feedback,
+            rollbacks,
+            proposals,
+            outcome_stats,
+            outcome_contracts,
+        ) = tokio::try_join!(
+            events_fut,
+            evals_fut,
+            candidates_fut,
+            versions_fut,
+            feedback_fut,
+            rollbacks_fut,
+            proposals_fut,
+            outcome_stats_fut,
+            outcomes_fut,
+        )
+        .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
 
         let summary = serde_json::json!({
             "settings": serialized(&settings),
             "provider_health": providers,
+            "outcomes": {
+                "enabled": settings.enabled && settings.outcomes.enabled,
+                "summary": outcome_stats,
+                "recent": summarize_recent(outcome_contracts),
+            },
             "recent_activity": {
                 "events": summarize_recent(events),
                 "evaluations": summarize_recent(evaluations),
@@ -1125,6 +1266,129 @@ fn summarize_recent<T: serde::Serialize>(items: Vec<T>) -> serde_json::Value {
         "count": items.len(),
         "items": items,
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// learning_outcomes
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub struct LearningOutcomesTool {
+    store: Arc<dyn Database>,
+}
+
+impl LearningOutcomesTool {
+    pub fn new(store: Arc<dyn Database>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl Tool for LearningOutcomesTool {
+    fn name(&self) -> &str {
+        "learning_outcomes"
+    }
+
+    fn description(&self) -> &str {
+        "Inspect outcome-backed learning contracts and their observations."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "contract_id": {
+                    "type": "string",
+                    "description": "Optional outcome contract UUID for detailed inspection"
+                },
+                "status": { "type": "string" },
+                "contract_type": { "type": "string" },
+                "source_kind": { "type": "string" },
+                "thread_id": { "type": "string" },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+        if let Some(contract_id) = params.get("contract_id").and_then(|value| value.as_str()) {
+            let parsed = Uuid::parse_str(contract_id).map_err(|_| {
+                ToolError::InvalidParameters("contract_id must be a valid UUID".to_string())
+            })?;
+            let contract = self
+                .store
+                .get_outcome_contract(&ctx.user_id, parsed)
+                .await
+                .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(format!("Outcome contract '{}' not found", parsed))
+                })?;
+            let observations = self
+                .store
+                .list_outcome_observations(parsed)
+                .await
+                .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+            return Ok(ToolOutput::success(
+                serde_json::json!({
+                    "contract": contract,
+                    "observations": observations,
+                }),
+                start.elapsed(),
+            ));
+        }
+
+        let limit = params
+            .get("limit")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(25)
+            .clamp(1, 100) as i64;
+        let contracts = self
+            .store
+            .list_outcome_contracts(&DbOutcomeContractQuery {
+                user_id: ctx.user_id.clone(),
+                actor_id: None,
+                status: params
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                contract_type: params
+                    .get("contract_type")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                source_kind: params
+                    .get("source_kind")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                source_id: None,
+                thread_id: params
+                    .get("thread_id")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                limit,
+            })
+            .await
+            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
+
+        Ok(ToolOutput::success(
+            serde_json::json!({
+                "count": contracts.len(),
+                "items": contracts,
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1475,5 +1739,25 @@ mod tests {
         let updated = remove_markdown_section(source, "A").expect("section A should exist");
         assert!(!updated.contains("## A"));
         assert!(updated.contains("## B\ntwo"));
+    }
+
+    #[test]
+    fn prompt_manage_is_blocked_for_skill_restricted_contexts() {
+        let mut ctx = JobContext::with_user("learning-test", "chat", "prompt gate");
+        ctx.metadata = serde_json::json!({
+            "allowed_skills": ["github"]
+        });
+
+        let err = validate_prompt_manage_available(&ctx).expect_err("should block");
+        assert!(matches!(err, ToolError::NotAuthorized(_)));
+    }
+
+    #[test]
+    fn prompt_manage_respects_learning_settings_gate() {
+        let mut settings = LearningSettings::default();
+        settings.prompt_mutation.enabled = false;
+
+        let err = validate_prompt_manage_settings(&settings).expect_err("should block");
+        assert!(matches!(err, ToolError::ExecutionFailed(_)));
     }
 }

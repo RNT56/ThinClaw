@@ -144,21 +144,28 @@ impl CanvasStore {
 
     /// Get a panel by ID.
     pub async fn get(&self, panel_id: &str) -> Option<StoredPanel> {
-        let panels = self.panels.read().await;
-        panels
-            .get(panel_id)
-            .filter(|p| !p.is_expired(self.ttl))
-            .cloned()
+        let mut panels = self.panels.write().await;
+        if let Some(panel) = panels.get_mut(panel_id)
+            && !panel.is_expired(self.ttl)
+        {
+            panel.updated_at = Instant::now();
+            return Some(panel.clone());
+        }
+        None
     }
 
     /// List all active (non-expired) panels.
     pub async fn list(&self) -> Vec<StoredPanel> {
-        let panels = self.panels.read().await;
-        panels
-            .values()
-            .filter(|p| !p.is_expired(self.ttl))
-            .cloned()
-            .collect()
+        let mut panels = self.panels.write().await;
+        let now = Instant::now();
+        let mut active = Vec::new();
+        for panel in panels.values_mut() {
+            if !panel.is_expired(self.ttl) {
+                panel.updated_at = now;
+                active.push(panel.clone());
+            }
+        }
+        active
     }
 
     /// Prune expired panels. Returns the count of pruned panels.

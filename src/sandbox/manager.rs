@@ -195,7 +195,7 @@ impl SandboxManager {
         cwd: &Path,
         env: HashMap<String, String>,
     ) -> Result<ExecOutput> {
-        self.execute_with_policy(command, cwd, self.config.policy, env)
+        self.execute_with_policy_and_network(command, cwd, self.config.policy, env, true)
             .await
     }
 
@@ -206,6 +206,19 @@ impl SandboxManager {
         cwd: &Path,
         policy: SandboxPolicy,
         env: HashMap<String, String>,
+    ) -> Result<ExecOutput> {
+        self.execute_with_policy_and_network(command, cwd, policy, env, true)
+            .await
+    }
+
+    /// Execute a command with a specific policy and explicit network setting.
+    pub async fn execute_with_policy_and_network(
+        &self,
+        command: &str,
+        cwd: &Path,
+        policy: SandboxPolicy,
+        env: HashMap<String, String>,
+        allow_network: bool,
     ) -> Result<ExecOutput> {
         // FullAccess policy bypasses the sandbox entirely
         if policy == SandboxPolicy::FullAccess {
@@ -242,7 +255,9 @@ impl SandboxManager {
             max_output_bytes: 64 * 1024,
         };
 
-        let container_output = runner.execute(command, cwd, policy, &limits, env).await?;
+        let container_output = runner
+            .execute(command, cwd, policy, &limits, env, allow_network)
+            .await?;
 
         Ok(container_output.into())
     }
@@ -321,8 +336,14 @@ impl SandboxManager {
         project_dir: &Path,
         env: HashMap<String, String>,
     ) -> Result<ExecOutput> {
-        self.execute_with_policy(command, project_dir, SandboxPolicy::WorkspaceWrite, env)
-            .await
+        self.execute_with_policy_and_network(
+            command,
+            project_dir,
+            SandboxPolicy::WorkspaceWrite,
+            env,
+            true,
+        )
+        .await
     }
 
     /// Get the current configuration.

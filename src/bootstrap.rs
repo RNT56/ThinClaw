@@ -27,17 +27,17 @@ pub fn thinclaw_env_path() -> PathBuf {
 pub fn load_thinclaw_env() {
     let path = thinclaw_env_path();
 
-    if !path.exists() {
-        // One-time upgrade: extract DATABASE_URL from legacy bootstrap.json
-        migrate_bootstrap_json_to_env(&path);
-    }
+    // One-time upgrade: extract bootstrap vars from legacy bootstrap.json.
+    // This still runs when `.env` already exists so we can preserve fields like
+    // ONBOARD_COMPLETED during upgrades from older installs.
+    migrate_bootstrap_json_to_env(&path);
 
     if path.exists() {
         let _ = dotenvy::from_path(&path);
     }
 }
 
-/// If `bootstrap.json` exists, pull `database_url` out of it and write `.env`.
+/// If `bootstrap.json` exists, pull bootstrap vars out of it and write/update `.env`.
 fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
     let thinclaw_dir = env_path
         .parent()
@@ -53,29 +53,66 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
         Err(_) => return,
     };
 
-    // Minimal parse: just grab database_url from the JSON
     let parsed: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
         Err(_) => return,
     };
 
-    if let Some(url) = parsed.get("database_url").and_then(|v| v.as_str()) {
-        if let Some(parent) = env_path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            eprintln!("Warning: failed to create {}: {}", parent.display(), e);
-            return;
-        }
-        if let Err(e) = std::fs::write(env_path, format!("DATABASE_URL=\"{}\"\n", url)) {
-            eprintln!("Warning: failed to migrate bootstrap.json to .env: {}", e);
-            return;
-        }
-        rename_to_migrated(&bootstrap_path);
-        eprintln!(
-            "Migrated DATABASE_URL from bootstrap.json to {}",
-            env_path.display()
-        );
+    let database_url = parsed
+        .get("database_url")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let onboard_completed = parsed
+        .get("onboard_completed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if database_url.is_none() && !onboard_completed {
+        return;
     }
+
+    if let Some(parent) = env_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("Warning: failed to create {}: {}", parent.display(), e);
+        return;
+    }
+
+    let existing = std::fs::read_to_string(env_path).unwrap_or_default();
+    let has_database_url = existing
+        .lines()
+        .any(|line| line.starts_with("DATABASE_URL="));
+    let has_onboard_completed = existing
+        .lines()
+        .any(|line| line.starts_with("ONBOARD_COMPLETED="));
+
+    if !has_database_url
+        && let Some(url) = database_url.as_deref()
+        && let Err(e) = upsert_bootstrap_var_at(env_path, "DATABASE_URL", url)
+    {
+        eprintln!(
+            "Warning: failed to migrate bootstrap DATABASE_URL to .env: {}",
+            e
+        );
+        return;
+    }
+
+    if onboard_completed
+        && !has_onboard_completed
+        && let Err(e) = upsert_bootstrap_var_at(env_path, "ONBOARD_COMPLETED", "true")
+    {
+        eprintln!(
+            "Warning: failed to migrate bootstrap ONBOARD_COMPLETED to .env: {}",
+            e
+        );
+        return;
+    }
+
+    rename_to_migrated(&bootstrap_path);
+    eprintln!(
+        "Migrated bootstrap settings from bootstrap.json to {}",
+        env_path.display()
+    );
 }
 
 /// Write database bootstrap vars to `~/.thinclaw/.env`.
@@ -113,6 +150,12 @@ pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
 /// outside the wizard (which manages the full set via `save_bootstrap_env`).
 pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
     let path = thinclaw_env_path();
+    upsert_bootstrap_var_at(&path, key, value)
+}
+
+/// Update or add a single variable in the provided `.env` path, preserving
+/// existing content.
+fn upsert_bootstrap_var_at(path: &std::path::Path, key: &str, value: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -120,8 +163,7 @@ pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     let new_line = format!("{}=\"{}\"", key, escaped);
     let prefix = format!("{}=", key);
-
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
 
     let mut found = false;
     let mut result = String::new();
@@ -143,9 +185,8 @@ pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
         result.push_str(&new_line);
         result.push('\n');
     }
-
-    std::fs::write(&path, result)?;
-    restrict_file_permissions(&path)?;
+    std::fs::write(path, result)?;
+    restrict_file_permissions(path)?;
     Ok(())
 }
 
@@ -440,13 +481,17 @@ INJECTED="pwned"#;
         // Run the migration
         migrate_bootstrap_json_to_env(&env_path);
 
-        // .env should now exist with DATABASE_URL
+        // .env should now exist with migrated bootstrap variables
         assert!(env_path.exists());
-        let content = std::fs::read_to_string(&env_path).unwrap();
+        let parsed: std::collections::HashMap<String, String> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
         assert_eq!(
-            content,
-            "DATABASE_URL=\"postgres://localhost/thinclaw_upgrade\"\n"
+            parsed.get("DATABASE_URL"),
+            Some(&"postgres://localhost/thinclaw_upgrade".to_string())
         );
+        assert_eq!(parsed.get("ONBOARD_COMPLETED"), Some(&"true".to_string()));
 
         // bootstrap.json should be renamed to .migrated
         assert!(!bootstrap_path.exists());

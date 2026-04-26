@@ -26,6 +26,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
+use crate::db::Database;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
 use crate::safety::SafetyLayer;
 use crate::workspace::Workspace;
@@ -101,6 +102,8 @@ pub struct HeartbeatRunner {
     safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     consecutive_failures: u32,
+    store: Option<Arc<dyn Database>>,
+    outcome_user_id: Option<String>,
     /// Shared cost tracker so heartbeat LLM calls appear in the Cost Dashboard.
     cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
 }
@@ -122,6 +125,8 @@ impl HeartbeatRunner {
             safety,
             response_tx: None,
             consecutive_failures: 0,
+            store: None,
+            outcome_user_id: None,
             cost_tracker: None,
         }
     }
@@ -138,6 +143,17 @@ impl HeartbeatRunner {
         tracker: Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>,
     ) -> Self {
         self.cost_tracker = Some(tracker);
+        self
+    }
+
+    /// Attach DB context for outcome-review summaries in standalone heartbeat mode.
+    pub fn with_outcome_context(
+        mut self,
+        store: Arc<dyn Database>,
+        user_id: impl Into<String>,
+    ) -> Self {
+        self.store = Some(store);
+        self.outcome_user_id = Some(user_id.into());
         self
     }
 
@@ -231,6 +247,15 @@ impl HeartbeatRunner {
         } else {
             ""
         };
+        let outcome_summary = match (&self.store, &self.outcome_user_id) {
+            (Some(store), Some(user_id)) => {
+                match crate::agent::outcomes::heartbeat_review_summary(store, user_id).await {
+                    Ok(Some(summary)) => format!("\n\n## {}\n", summary),
+                    _ => String::new(),
+                }
+            }
+            _ => String::new(),
+        };
 
         let prompt = format!(
             "Read the HEARTBEAT.md checklist below and follow it strictly. \
@@ -243,8 +268,8 @@ impl HeartbeatRunner {
              \n\
              ## HEARTBEAT.md\n\
              \n\
-             {}{}{}",
-            checklist, daily_context, logs_note
+             {}{}{}{}",
+            checklist, daily_context, outcome_summary, logs_note
         );
 
         // Get the system prompt for context
@@ -326,6 +351,7 @@ impl HeartbeatRunner {
             metadata: serde_json::json!({
                 "source": "heartbeat",
             }),
+            attachments: Vec::new(),
         };
 
         if let Err(e) = tx.send(response).await {
@@ -403,7 +429,7 @@ pub fn cap_daily_log(content: &str, max_bytes: usize) -> String {
 /// to avoid token explosion, and returns a formatted string.
 pub async fn build_daily_context(workspace: &crate::workspace::Workspace) -> String {
     let mut daily_context = String::new();
-    let today = chrono::Utc::now().date_naive();
+    let today = workspace.local_today();
 
     if let Ok(doc) = workspace.today_log().await
         && !doc.content.trim().is_empty()

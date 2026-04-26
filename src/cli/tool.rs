@@ -14,9 +14,12 @@ use crate::config::Config;
 use crate::db::Database;
 #[cfg(feature = "postgres")]
 use crate::secrets::PostgresSecretsStore;
-use crate::secrets::{CreateSecretParams, SecretsCrypto, SecretsStore};
+use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::terminal_branding::TerminalBranding;
-use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
+use crate::tools::wasm::{
+    AuthCapabilitySchema, CapabilitiesFile, WasmToolAuthStatus, WasmToolOAuthFlow,
+    compute_binary_hash,
+};
 
 /// Default tools directory.
 fn default_tools_dir() -> PathBuf {
@@ -629,10 +632,18 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
         }
     };
 
-    // Check if already configured
-    let already_configured = secrets_store
-        .exists(&user_id, &auth.secret_name)
+    let oauth_flow = WasmToolOAuthFlow::new(secrets_store.as_ref(), &user_id, &tools_dir);
+    let already_configured = oauth_flow
+        .check_auth_status(&auth)
         .await
+        .map(|status| {
+            matches!(
+                status.auth_status,
+                WasmToolAuthStatus::Authenticated
+                    | WasmToolAuthStatus::NeedsReauth
+                    | WasmToolAuthStatus::InsufficientScope
+            )
+        })
         .unwrap_or(false);
 
     if already_configured {
@@ -679,181 +690,69 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
             }
         }
 
-        // Save the token
-        save_token(secrets_store.as_ref(), &user_id, &auth, &token, None, None).await?;
+        oauth_flow.store_manual_token(&auth, &token).await?;
         print_success(display_name);
         return Ok(());
     }
 
     // Check for OAuth configuration
-    if let Some(ref oauth) = auth.oauth {
-        // For providers with shared tokens (e.g., all Google tools share google_oauth_token),
-        // combine scopes from all installed tools so one auth covers everything.
-        let combined = combine_provider_scopes(&tools_dir, &auth.secret_name, oauth).await;
-        if combined.scopes.len() > oauth.scopes.len() {
-            let extra = combined.scopes.len() - oauth.scopes.len();
-            println!(
-                "  Including scopes from {} other installed tool(s) sharing this credential.",
-                extra
-            );
-            println!();
+    if auth.oauth.is_some() {
+        if let Some(resolved) = oauth_flow.combined_oauth_config(&auth).await? {
+            let base_scope_count = auth
+                .oauth
+                .as_ref()
+                .map(|oauth| oauth.scopes.len())
+                .unwrap_or_default();
+            if resolved.required_scopes.len() > base_scope_count {
+                let extra = resolved.required_scopes.len() - base_scope_count;
+                println!(
+                    "  Including scopes from {} other installed tool(s) sharing this credential.",
+                    extra
+                );
+                println!();
+            }
         }
-        return auth_tool_oauth(secrets_store.as_ref(), &user_id, &auth, &combined).await;
+        return auth_tool_oauth(&oauth_flow, &auth).await;
     }
 
     // Fall back to manual entry
     auth_tool_manual(secrets_store.as_ref(), &user_id, &auth).await
 }
 
-/// Scan the tools directory for all capabilities files sharing the same secret_name
-/// and combine their OAuth scopes. This way, authing any Google tool requests scopes
-/// for ALL installed Google tools, so one login covers everything.
-async fn combine_provider_scopes(
-    tools_dir: &Path,
-    secret_name: &str,
-    base_oauth: &crate::tools::wasm::OAuthConfigSchema,
-) -> crate::tools::wasm::OAuthConfigSchema {
-    let mut all_scopes: std::collections::HashSet<String> =
-        base_oauth.scopes.iter().cloned().collect();
-
-    if let Ok(mut entries) = tokio::fs::read_dir(tools_dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            if !name.ends_with(".capabilities.json") {
-                continue;
-            }
-
-            if let Ok(content) = tokio::fs::read_to_string(&path).await
-                && let Ok(caps) = CapabilitiesFile::from_json(&content)
-                && let Some(auth) = &caps.auth
-                && auth.secret_name == secret_name
-                && let Some(oauth) = &auth.oauth
-            {
-                all_scopes.extend(oauth.scopes.iter().cloned());
-            }
-        }
-    }
-
-    let mut combined = base_oauth.clone();
-    combined.scopes = all_scopes.into_iter().collect();
-    combined.scopes.sort(); // deterministic ordering
-    combined
-}
-
 /// OAuth browser-based login flow.
 async fn auth_tool_oauth(
-    store: &(dyn SecretsStore + Send + Sync),
-    user_id: &str,
-    auth: &crate::tools::wasm::AuthCapabilitySchema,
-    oauth: &crate::tools::wasm::OAuthConfigSchema,
+    flow: &WasmToolOAuthFlow<'_>,
+    auth: &AuthCapabilitySchema,
 ) -> anyhow::Result<()> {
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-    use rand::RngCore;
-    use sha2::{Digest, Sha256};
-
     use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
 
     let display_name = auth.display_name.as_deref().unwrap_or(&auth.secret_name);
-
-    // Get client_id: capabilities file > runtime env var > built-in defaults
-    let builtin = oauth_defaults::builtin_credentials(&auth.secret_name);
-
-    let client_id = oauth
-        .client_id
-        .clone()
-        .or_else(|| {
-            oauth
-                .client_id_env
-                .as_ref()
-                .and_then(|env| std::env::var(env).ok())
-        })
-        .or_else(|| builtin.as_ref().map(|c| c.client_id.to_string()))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "OAuth client_id not configured.\n\
-                 Set {} env var, or build with THINCLAW_GOOGLE_CLIENT_ID.",
-                oauth.client_id_env.as_deref().unwrap_or("the client_id")
-            )
-        })?;
-
-    // Get client_secret: capabilities file > runtime env var > built-in defaults
-    let client_secret = oauth
-        .client_secret
-        .clone()
-        .or_else(|| {
-            oauth
-                .client_secret_env
-                .as_ref()
-                .and_then(|env| std::env::var(env).ok())
-        })
-        .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
+    let resolved = flow
+        .combined_oauth_config(auth)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Tool does not define OAuth configuration"))?;
 
     println!("  Starting OAuth authentication...");
     println!();
 
     let listener = oauth_defaults::bind_callback_listener().await?;
     let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
-
-    // Generate PKCE verifier and challenge
-    let (code_verifier, code_challenge) = if oauth.use_pkce {
-        let mut verifier_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut verifier_bytes);
-        let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
-
-        let mut hasher = Sha256::new();
-        hasher.update(verifier.as_bytes());
-        let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
-
-        (Some(verifier), Some(challenge))
-    } else {
-        (None, None)
-    };
-
-    // Build authorization URL
-    let mut auth_url = format!(
-        "{}?client_id={}&response_type=code&redirect_uri={}",
-        oauth.authorization_url,
-        urlencoding::encode(&client_id),
-        urlencoding::encode(&redirect_uri)
-    );
-
-    if !oauth.scopes.is_empty() {
-        auth_url.push_str(&format!(
-            "&scope={}",
-            urlencoding::encode(&oauth.scopes.join(" "))
-        ));
-    }
-
-    if let Some(ref challenge) = code_challenge {
-        auth_url.push_str(&format!(
-            "&code_challenge={}&code_challenge_method=S256",
-            challenge
-        ));
-    }
-
-    // Add extra params
-    for (key, value) in &oauth.extra_params {
-        auth_url.push_str(&format!(
-            "&{}={}",
-            urlencoding::encode(key),
-            urlencoding::encode(value)
-        ));
-    }
+    let auth_request = flow
+        .prepare_authorization(auth, &redirect_uri, "local", None)
+        .await?;
 
     println!("  Opening browser for {} login...", display_name);
     println!();
+    if oauth_defaults::ssh_or_headless_detected() {
+        oauth_defaults::print_ssh_callback_hint();
+        println!();
+    }
 
-    if let Err(e) = open::that(&auth_url) {
+    if let Err(e) = open::that(&auth_request.auth_url) {
         println!("  Could not open browser: {}", e);
+        oauth_defaults::print_ssh_callback_hint();
         println!("  Please open this URL manually:");
-        println!("  {}", auth_url);
+        println!("  {}", auth_request.auth_url);
     }
 
     println!("  Waiting for authorization...");
@@ -864,76 +763,36 @@ async fn auth_tool_oauth(
     println!();
     println!("  Exchanging code for token...");
 
-    // Exchange code for token
-    let client = reqwest::Client::new();
-    let mut token_params = vec![
-        ("grant_type", "authorization_code".to_string()),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-    ];
-
-    if let Some(ref verifier) = code_verifier {
-        token_params.push(("code_verifier", verifier.to_string()));
-    }
-
-    // Build token request
-    let mut request = client.post(&oauth.token_url);
-
-    // Use Basic auth if client_secret is provided, otherwise include client_id in body
-    if let Some(ref secret) = client_secret {
-        request = request.basic_auth(&client_id, Some(secret));
-    } else {
-        token_params.push(("client_id", client_id));
-    }
-
-    let token_response = request.form(&token_params).send().await?;
-
-    if !token_response.status().is_success() {
-        let status = token_response.status();
-        let body = token_response.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "Token exchange failed: {} - {}",
-            status,
-            body
-        ));
-    }
-
-    let token_data: serde_json::Value = token_response.json().await?;
-    let access_token = token_data
-        .get(&oauth.access_token_field)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No {} in token response: {:?}",
-                oauth.access_token_field,
-                token_data
-            )
-        })?;
-
-    let refresh_token = token_data.get("refresh_token").and_then(|v| v.as_str());
-    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
-
-    // Save the token (with refresh token and expiry if provided)
-    save_token(
-        store,
-        user_id,
-        auth,
-        access_token,
-        refresh_token,
-        expires_in,
-    )
-    .await?;
+    let token = flow
+        .exchange_code(
+            auth,
+            &redirect_uri,
+            &code,
+            auth_request.code_verifier.as_deref(),
+        )
+        .await?;
+    flow.store_token_exchange(auth, &token).await?;
 
     // Extract any additional info for display
-    let workspace_name = token_data
+    let workspace_name = token
+        .raw
         .get("workspace_name")
         .and_then(|v| v.as_str())
-        .or_else(|| token_data.get("team_name").and_then(|v| v.as_str()));
+        .or_else(|| token.raw.get("team_name").and_then(|v| v.as_str()));
 
     println!();
     println!("  ✓ {} connected!", display_name);
     if let Some(workspace) = workspace_name {
         println!("    Workspace: {}", workspace);
+    }
+    if resolved.required_scopes.len()
+        > auth
+            .oauth
+            .as_ref()
+            .map(|oauth| oauth.scopes.len())
+            .unwrap_or_default()
+    {
+        println!("    Shared credential scopes were updated for other installed Google tools.");
     }
     println!();
     println!("  The tool can now access the API.");
@@ -1025,7 +884,8 @@ async fn auth_tool_manual(
     }
 
     // Save the token (manual path: no refresh token or expiry)
-    save_token(store, user_id, auth, &token, None, None).await?;
+    let flow = WasmToolOAuthFlow::new(store, user_id, Path::new("."));
+    flow.store_manual_token(auth, &token).await?;
     print_success(display_name);
     Ok(())
 }
@@ -1117,50 +977,6 @@ async fn validate_token(
             }
         ))
     }
-}
-
-/// Save token to secrets store.
-///
-/// Optionally stores a refresh token (as `{secret_name}_refresh_token`) and
-/// sets `expires_at` on the access token so the runtime can auto-refresh.
-async fn save_token(
-    store: &(dyn SecretsStore + Send + Sync),
-    user_id: &str,
-    auth: &crate::tools::wasm::AuthCapabilitySchema,
-    token: &str,
-    refresh_token: Option<&str>,
-    expires_in: Option<u64>,
-) -> anyhow::Result<()> {
-    let mut params = CreateSecretParams::new(&auth.secret_name, token);
-
-    if let Some(ref provider) = auth.provider {
-        params = params.with_provider(provider);
-    }
-
-    if let Some(secs) = expires_in {
-        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
-        params = params.with_expiry(expires_at);
-    }
-
-    store
-        .create(user_id, params)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to save token: {}", e))?;
-
-    // Store refresh token separately (no expiry, it's long-lived)
-    if let Some(rt) = refresh_token {
-        let refresh_name = format!("{}_refresh_token", auth.secret_name);
-        let mut refresh_params = CreateSecretParams::new(&refresh_name, rt);
-        if let Some(ref provider) = auth.provider {
-            refresh_params = refresh_params.with_provider(provider);
-        }
-        store
-            .create(user_id, refresh_params)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to save refresh token: {}", e))?;
-    }
-
-    Ok(())
 }
 
 /// Print success message.

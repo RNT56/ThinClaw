@@ -358,7 +358,14 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 if !check_sender_permission(&user, &channel, false) {
                     return;
                 }
-                emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id, event.files.as_deref());
+                emit_message(
+                    user,
+                    text,
+                    channel,
+                    event.thread_ts.or(Some(ts)),
+                    team_id,
+                    event.files.as_deref(),
+                );
             }
         }
 
@@ -380,7 +387,14 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                     if !check_sender_permission(&user, &channel, true) {
                         return;
                     }
-                    emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id, event.files.as_deref());
+                    emit_message(
+                        user,
+                        text,
+                        channel,
+                        event.thread_ts.or(Some(ts)),
+                        team_id,
+                        event.files.as_deref(),
+                    );
                 }
             }
         }
@@ -563,8 +577,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
     }
 
     // 4. Check sender (Slack events only have user ID, not username)
-    let is_allowed =
-        allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
+    let is_allowed = allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
 
     if is_allowed {
         return true;
@@ -582,10 +595,7 @@ fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool
             Ok(result) => {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!(
-                        "Pairing request for user {}: code {}",
-                        user_id, result.code
-                    ),
+                    &format!("Pairing request for user {}: code {}", user_id, result.code),
                 );
                 if result.created {
                     let _ = send_pairing_reply(channel_id, &result.code);
@@ -856,7 +866,7 @@ fn parse_md_link(chars: &[char], start: usize) -> Option<(String, String, usize)
         return None;
     }
     i += 1; // skip ]
-    // Expect (
+            // Expect (
     if i >= chars.len() || chars[i] != '(' {
         return None;
     }
@@ -876,7 +886,12 @@ fn parse_md_link(chars: &[char], start: usize) -> Option<(String, String, usize)
 /// Extract content between `count` instances of `delimiter` character.
 /// E.g., with delimiter='*' and count=2, matches `**content**`.
 /// Returns (content, end_position_after_closing_delimiter) or None.
-fn extract_delimited(chars: &[char], start: usize, delimiter: char, count: usize) -> Option<(String, usize)> {
+fn extract_delimited(
+    chars: &[char],
+    start: usize,
+    delimiter: char,
+    count: usize,
+) -> Option<(String, usize)> {
     let len = chars.len();
     // Check opening delimiter
     for j in 0..count {
@@ -933,7 +948,9 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
         let search_area = &remaining[..max_len];
 
-        let split_at = search_area.rfind("\n\n").map(|pos| pos + 1)
+        let split_at = search_area
+            .rfind("\n\n")
+            .map(|pos| pos + 1)
             .or_else(|| search_area.rfind('\n'))
             .or_else(|| search_area.rfind(' '))
             .unwrap_or_else(|| {
@@ -959,4 +976,141 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     }
 
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_url_verification_payload() {
+        let payload = r#"{
+            "type": "url_verification",
+            "challenge": "challenge-token"
+        }"#;
+
+        let parsed: SlackEventWrapper = serde_json::from_str(payload).unwrap();
+        assert_eq!(parsed.event_type, "url_verification");
+        assert_eq!(parsed.challenge.as_deref(), Some("challenge-token"));
+        assert!(parsed.event.is_none());
+    }
+
+    #[test]
+    fn parses_message_event_with_attachment_metadata() {
+        let payload = r#"{
+            "type": "event_callback",
+            "team_id": "T123",
+            "event_id": "Ev123",
+            "event": {
+                "type": "message",
+                "user": "U123",
+                "channel": "D456",
+                "text": "hello there",
+                "thread_ts": "1710000000.100",
+                "ts": "1710000000.100",
+                "files": [{
+                    "id": "F123",
+                    "name": "report.pdf",
+                    "mimetype": "application/pdf",
+                    "size": 1024,
+                    "url_private_download": "https://files.slack.com/files-pri/T123-F123/download/report.pdf"
+                }]
+            }
+        }"#;
+
+        let parsed: SlackEventWrapper = serde_json::from_str(payload).unwrap();
+        assert_eq!(parsed.event_type, "event_callback");
+        assert_eq!(parsed.team_id.as_deref(), Some("T123"));
+        assert_eq!(parsed.event_id.as_deref(), Some("Ev123"));
+
+        let event = parsed.event.expect("event payload should be present");
+        assert_eq!(event.event_type, "message");
+        assert_eq!(event.user.as_deref(), Some("U123"));
+        assert_eq!(event.channel.as_deref(), Some("D456"));
+        assert_eq!(event.text.as_deref(), Some("hello there"));
+        assert_eq!(event.thread_ts.as_deref(), Some("1710000000.100"));
+        let files = event.files.expect("files should be present");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name.as_deref(), Some("report.pdf"));
+        assert_eq!(files[0].mimetype.as_deref(), Some("application/pdf"));
+    }
+
+    #[test]
+    fn strip_bot_mention_removes_leading_slack_mentions_only() {
+        assert_eq!(strip_bot_mention("<@U123> hello world"), "hello world");
+        assert_eq!(strip_bot_mention("  <@U123>\thello world"), "hello world");
+        assert_eq!(strip_bot_mention("no mention here"), "no mention here");
+    }
+
+    #[test]
+    fn parse_heading_accepts_markdown_headings() {
+        assert_eq!(parse_heading("# Heading"), Some("Heading"));
+        assert_eq!(
+            parse_heading("   ### Nested Heading"),
+            Some("Nested Heading")
+        );
+        assert_eq!(parse_heading("####### too many"), None);
+        assert_eq!(parse_heading("#NoSpace"), None);
+    }
+
+    #[test]
+    fn markdown_to_slack_mrkdwn_converts_common_markdown() {
+        let markdown = "# Deploy Plan\nUse **bold** and ~~remove~~ [link](https://example.com)";
+        let converted = markdown_to_slack_mrkdwn(markdown);
+
+        assert_eq!(
+            converted,
+            "*Deploy Plan*\nUse *bold* and ~remove~ <https://example.com|link>"
+        );
+    }
+
+    #[test]
+    fn markdown_to_slack_mrkdwn_preserves_code_blocks_and_inline_code() {
+        let markdown = "Before `code`\n```rust\n**do not touch**\n```";
+        let converted = markdown_to_slack_mrkdwn(markdown);
+
+        assert_eq!(converted, markdown);
+    }
+
+    #[test]
+    fn split_message_respects_breakpoints_and_limits() {
+        let text = format!("{}\n\n{}", "a".repeat(2500), "b".repeat(2500));
+        let chunks = split_message(&text, SLACK_MAX_MESSAGE_LENGTH);
+
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[0].len() <= SLACK_MAX_MESSAGE_LENGTH);
+        assert!(chunks[1].len() <= SLACK_MAX_MESSAGE_LENGTH);
+        assert!(chunks[0].starts_with('a'));
+        assert!(chunks[1].starts_with('b'));
+    }
+
+    #[test]
+    fn slack_metadata_roundtrips() {
+        let metadata = SlackMessageMetadata {
+            channel: "C123".to_string(),
+            thread_ts: Some("1710000000.100".to_string()),
+            message_ts: "1710000000.100".to_string(),
+            team_id: Some("T123".to_string()),
+        };
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        let parsed: SlackMessageMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.channel, "C123");
+        assert_eq!(parsed.thread_ts.as_deref(), Some("1710000000.100"));
+        assert_eq!(parsed.team_id.as_deref(), Some("T123"));
+    }
+
+    #[test]
+    fn json_response_sets_status_headers_and_body() {
+        let response = json_response(202, serde_json::json!({"ok": true}));
+        assert_eq!(response.status, 202);
+        assert_eq!(
+            response.headers_json,
+            r#"{"Content-Type":"application/json"}"#
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&response.body).unwrap(),
+            serde_json::json!({"ok": true})
+        );
+    }
 }

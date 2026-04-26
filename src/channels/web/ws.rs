@@ -1,7 +1,8 @@
 //! WebSocket handler for bidirectional client communication.
 //!
 //! Provides the same event stream as SSE but also accepts incoming messages
-//! (chat, approvals) over a single persistent connection.
+//! (chat, approvals) over a single persistent connection for authenticated
+//! non-browser clients. The browser UI remains SSE-first.
 //!
 //! ```text
 //! Client ──── WS frame: {"type":"message","content":"hello"} ──► Agent Loop
@@ -20,9 +21,14 @@ use uuid::Uuid;
 
 use crate::agent::submission::Submission;
 use crate::channels::IncomingMessage;
+use crate::channels::web::handlers::chat::{
+    active_thread_id_for_identity, clear_auth_mode_for_identity,
+};
+use crate::channels::web::identity_helpers::{
+    GatewayRequestIdentity, sse_event_visible_to_identity,
+};
 use crate::channels::web::server::GatewayState;
-use crate::channels::web::types::{WsClientMessage, WsServerMessage};
-use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
+use crate::channels::web::types::{SseEvent, WsClientMessage, WsServerMessage};
 
 /// Tracks active WebSocket connections.
 pub struct WsConnectionTracker {
@@ -63,7 +69,12 @@ impl Default for WsConnectionTracker {
 ///
 /// When either task ends (client disconnect or broadcast closed), both are
 /// cleaned up.
-pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
+pub async fn handle_ws_connection(
+    socket: WebSocket,
+    state: Arc<GatewayState>,
+    request_identity: GatewayRequestIdentity,
+    browser_origin: Option<String>,
+) {
     let (mut ws_sink, mut ws_stream) = socket.split();
 
     // Track connection
@@ -82,7 +93,26 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
         }
         return;
     };
-    let mut event_stream = Box::pin(raw_stream);
+    let state_for_stream = Arc::clone(&state);
+    let identity_for_stream = request_identity.clone();
+    let mut event_stream = Box::pin(raw_stream.filter_map(move |event| {
+        let state = Arc::clone(&state_for_stream);
+        let identity = identity_for_stream.clone();
+        async move {
+            if sse_event_visible_to_identity(
+                state.store.as_ref(),
+                state.as_ref(),
+                &identity,
+                &event,
+            )
+            .await
+            {
+                Some(event)
+            } else {
+                None
+            }
+        }
+    }));
 
     // Channel for the sender task to receive messages from both
     // the broadcast stream and any direct sends (like Pong)
@@ -118,14 +148,20 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
     });
 
     // Receiver task: read client frames and route to agent
-    let user_id = state.user_id.clone();
     while let Some(Ok(frame)) = ws_stream.next().await {
         match frame {
             Message::Text(text) => {
                 let parsed: Result<WsClientMessage, _> = serde_json::from_str(&text);
                 match parsed {
                     Ok(client_msg) => {
-                        handle_client_message(client_msg, &state, &user_id, &direct_tx).await;
+                        handle_client_message(
+                            client_msg,
+                            &state,
+                            &request_identity,
+                            &direct_tx,
+                            browser_origin.as_deref(),
+                        )
+                        .await;
                     }
                     Err(e) => {
                         let _ = direct_tx
@@ -153,35 +189,28 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
 async fn handle_client_message(
     msg: WsClientMessage,
     state: &GatewayState,
-    user_id: &str,
+    request_identity: &GatewayRequestIdentity,
     direct_tx: &mpsc::Sender<WsServerMessage>,
+    browser_origin: Option<&str>,
 ) {
     match msg {
         WsClientMessage::Message { content, thread_id } => {
-            let mut incoming = IncomingMessage::new("gateway", user_id, &content);
-            let stable_external_conversation_key = match thread_id.as_deref() {
-                Some(thread_id) => format!(
-                    "gateway://direct/{}/actor/{}/thread/{}",
-                    state.user_id, state.actor_id, thread_id
-                ),
-                None => format!(
-                    "gateway://direct/{}/actor/{}",
-                    state.user_id, state.actor_id
-                ),
-            };
-            incoming = incoming.with_identity(ResolvedIdentity {
-                principal_id: state.user_id.clone(),
-                actor_id: state.actor_id.clone(),
-                conversation_scope_id: scope_id_from_key(&stable_external_conversation_key),
-                conversation_kind: ConversationKind::Direct,
-                raw_sender_id: state.actor_id.clone(),
-                stable_external_conversation_key,
-            });
+            let user_id = request_identity.principal_id.clone();
+            let actor_id = request_identity.actor_id.clone();
+            let mut incoming = IncomingMessage::new("gateway", &user_id, &content);
+            incoming =
+                incoming.with_identity(request_identity.resolved_identity(thread_id.as_deref()));
             if let Some(ref tid) = thread_id {
                 incoming = incoming.with_thread(tid);
                 incoming = incoming.with_metadata(serde_json::json!({
                     "thread_id": tid,
-                    "actor_id": state.actor_id,
+                    "actor_id": actor_id,
+                    "browser_origin": browser_origin,
+                }));
+            } else if browser_origin.is_some() {
+                incoming = incoming.with_metadata(serde_json::json!({
+                    "actor_id": actor_id,
+                    "browser_origin": browser_origin,
                 }));
             }
 
@@ -250,42 +279,22 @@ async fn handle_client_message(
                 }
             };
 
-            let mut msg = IncomingMessage::new("gateway", user_id, content);
+            let user_id = request_identity.principal_id.clone();
+            let actor_id = request_identity.actor_id.clone();
+            let mut msg = IncomingMessage::new("gateway", &user_id, content);
+            msg = msg.with_identity(request_identity.resolved_identity(thread_id.as_deref()));
             if let Some(ref tid) = thread_id {
                 msg = msg.with_thread(tid);
                 msg = msg.with_metadata(serde_json::json!({
                     "thread_id": tid,
-                    "actor_id": state.actor_id,
+                    "actor_id": actor_id,
+                    "browser_origin": browser_origin,
                 }));
-                msg = msg.with_identity(ResolvedIdentity {
-                    principal_id: state.user_id.clone(),
-                    actor_id: state.actor_id.clone(),
-                    conversation_scope_id: scope_id_from_key(&format!(
-                        "gateway://direct/{}/actor/{}/thread/{}",
-                        state.user_id, state.actor_id, tid
-                    )),
-                    conversation_kind: ConversationKind::Direct,
-                    raw_sender_id: state.actor_id.clone(),
-                    stable_external_conversation_key: format!(
-                        "gateway://direct/{}/actor/{}/thread/{}",
-                        state.user_id, state.actor_id, tid
-                    ),
-                });
-            } else {
-                msg = msg.with_identity(ResolvedIdentity {
-                    principal_id: state.user_id.clone(),
-                    actor_id: state.actor_id.clone(),
-                    conversation_scope_id: scope_id_from_key(&format!(
-                        "gateway://direct/{}/actor/{}",
-                        state.user_id, state.actor_id
-                    )),
-                    conversation_kind: ConversationKind::Direct,
-                    raw_sender_id: state.actor_id.clone(),
-                    stable_external_conversation_key: format!(
-                        "gateway://direct/{}/actor/{}",
-                        state.user_id, state.actor_id
-                    ),
-                });
+            } else if browser_origin.is_some() {
+                msg = msg.with_metadata(serde_json::json!({
+                    "actor_id": actor_id,
+                    "browser_origin": browser_origin,
+                }));
             }
             let tx_guard = state.msg_tx.read().await;
             if let Some(ref tx) = *tx_guard {
@@ -297,8 +306,12 @@ async fn handle_client_message(
             token,
         } => {
             if let Some(ref ext_mgr) = state.extension_manager {
+                let thread_id = active_thread_id_for_identity(state, request_identity).await;
                 match ext_mgr.auth(&extension_name, Some(&token)).await {
-                    Ok(result) if result.status == "authenticated" => {
+                    Ok(result)
+                        if result.auth_status == "authenticated"
+                            || result.auth_status == "no_auth_required" =>
+                    {
                         let msg = match ext_mgr.activate(&extension_name).await {
                             Ok(r) => format!(
                                 "{} authenticated ({} tools loaded)",
@@ -310,24 +323,34 @@ async fn handle_client_message(
                                 extension_name, e
                             ),
                         };
-                        crate::channels::web::server::clear_auth_mode(state).await;
-                        state
-                            .sse
-                            .broadcast(crate::channels::web::types::SseEvent::AuthCompleted {
+                        clear_auth_mode_for_identity(state, request_identity).await;
+                        let _ = direct_tx
+                            .send(WsServerMessage::from_sse_event(&SseEvent::AuthCompleted {
                                 extension_name,
                                 success: true,
                                 message: msg,
-                            });
+                                auth_mode: Some(result.auth_mode),
+                                auth_status: Some(result.auth_status),
+                                shared_auth_provider: result.shared_auth_provider,
+                                missing_scopes: result.missing_scopes,
+                                thread_id,
+                            }))
+                            .await;
                     }
                     Ok(result) => {
-                        state
-                            .sse
-                            .broadcast(crate::channels::web::types::SseEvent::AuthRequired {
+                        let _ = direct_tx
+                            .send(WsServerMessage::from_sse_event(&SseEvent::AuthRequired {
                                 extension_name,
                                 instructions: result.instructions,
                                 auth_url: result.auth_url,
                                 setup_url: result.setup_url,
-                            });
+                                auth_mode: result.auth_mode,
+                                auth_status: result.auth_status,
+                                shared_auth_provider: result.shared_auth_provider,
+                                missing_scopes: result.missing_scopes,
+                                thread_id,
+                            }))
+                            .await;
                     }
                     Err(e) => {
                         let _ = direct_tx
@@ -346,7 +369,7 @@ async fn handle_client_message(
             }
         }
         WsClientMessage::AuthCancel { .. } => {
-            crate::channels::web::server::clear_auth_mode(state).await;
+            clear_auth_mode_for_identity(state, request_identity).await;
         }
         WsClientMessage::Ping => {
             let _ = direct_tx.send(WsServerMessage::Pong).await;
@@ -383,7 +406,14 @@ async fn handle_client_message(
         WsClientMessage::ConfigSet { key, value } => {
             // Write the setting to the DB-backed settings store
             if let Some(ref store) = state.store {
-                match crate::api::config::set_setting(store, &state.user_id, &key, &value).await {
+                match crate::api::config::set_setting(
+                    store,
+                    &request_identity.principal_id,
+                    &key,
+                    &value,
+                )
+                .await
+                {
                     Ok(()) => {
                         tracing::info!("WS config.set: key={} updated", key);
                         let _ = direct_tx
@@ -423,7 +453,7 @@ async fn handle_client_message(
                 let setting_value = serde_json::Value::String(value);
                 match crate::api::config::set_setting(
                     store,
-                    &state.user_id,
+                    &request_identity.principal_id,
                     &setting_key,
                     &setting_value,
                 )
@@ -490,6 +520,15 @@ async fn handle_client_message(
 mod tests {
     use super::*;
 
+    fn test_request_identity(user_id: &str) -> GatewayRequestIdentity {
+        GatewayRequestIdentity::new(
+            user_id,
+            user_id,
+            crate::channels::web::identity_helpers::GatewayAuthSource::BearerHeader,
+            false,
+        )
+    }
+
     #[test]
     fn test_ws_connection_tracker() {
         let tracker = WsConnectionTracker::new();
@@ -520,7 +559,8 @@ mod tests {
         let (direct_tx, mut direct_rx) = mpsc::channel(16);
         let state = make_test_state(None).await;
 
-        handle_client_message(WsClientMessage::Ping, &state, "user1", &direct_tx).await;
+        let identity = test_request_identity("user1");
+        handle_client_message(WsClientMessage::Ping, &state, &identity, &direct_tx, None).await;
 
         let response = direct_rx.recv().await.unwrap();
         assert!(matches!(response, WsServerMessage::Pong));
@@ -532,6 +572,7 @@ mod tests {
         let (agent_tx, mut agent_rx) = mpsc::channel(16);
         let state = make_test_state(Some(agent_tx)).await;
         let (direct_tx, _direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
 
         handle_client_message(
             WsClientMessage::Message {
@@ -539,8 +580,9 @@ mod tests {
                 thread_id: Some("t1".to_string()),
             },
             &state,
-            "user1",
+            &identity,
             &direct_tx,
+            Some("https://chat.example.com"),
         )
         .await;
 
@@ -549,6 +591,13 @@ mod tests {
         assert_eq!(incoming.thread_id.as_deref(), Some("t1"));
         assert_eq!(incoming.channel, "gateway");
         assert_eq!(incoming.user_id, "user1");
+        assert_eq!(
+            incoming
+                .metadata
+                .get("browser_origin")
+                .and_then(|value| value.as_str()),
+            Some("https://chat.example.com")
+        );
     }
 
     #[tokio::test]
@@ -556,6 +605,7 @@ mod tests {
         // When msg_tx is None, should send an error back
         let state = make_test_state(None).await;
         let (direct_tx, mut direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
 
         handle_client_message(
             WsClientMessage::Message {
@@ -563,8 +613,9 @@ mod tests {
                 thread_id: None,
             },
             &state,
-            "user1",
+            &identity,
             &direct_tx,
+            None,
         )
         .await;
 
@@ -582,6 +633,7 @@ mod tests {
         let (agent_tx, mut agent_rx) = mpsc::channel(16);
         let state = make_test_state(Some(agent_tx)).await;
         let (direct_tx, _direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
 
         let request_id = Uuid::new_v4();
         handle_client_message(
@@ -591,8 +643,9 @@ mod tests {
                 thread_id: Some("thread-42".to_string()),
             },
             &state,
-            "user1",
+            &identity,
             &direct_tx,
+            Some("https://chat.example.com"),
         )
         .await;
 
@@ -607,6 +660,7 @@ mod tests {
     async fn test_handle_client_approval_invalid_action() {
         let state = make_test_state(None).await;
         let (direct_tx, mut direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
 
         handle_client_message(
             WsClientMessage::Approval {
@@ -615,8 +669,9 @@ mod tests {
                 thread_id: None,
             },
             &state,
-            "user1",
+            &identity,
             &direct_tx,
+            None,
         )
         .await;
 
@@ -633,6 +688,7 @@ mod tests {
     async fn test_handle_client_approval_invalid_uuid() {
         let state = make_test_state(None).await;
         let (direct_tx, mut direct_rx) = mpsc::channel(16);
+        let identity = test_request_identity("user1");
 
         handle_client_message(
             WsClientMessage::Approval {
@@ -641,8 +697,9 @@ mod tests {
                 thread_id: None,
             },
             &state,
-            "user1",
+            &identity,
             &direct_tx,
+            None,
         )
         .await;
 
@@ -671,6 +728,8 @@ mod tests {
             store: None,
             job_manager: None,
             prompt_queue: None,
+            context_manager: None,
+            scheduler: tokio::sync::RwLock::new(None),
             user_id: "test".to_string(),
             actor_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
@@ -679,6 +738,8 @@ mod tests {
             llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
+            skill_remote_hub: None,
+            skill_quarantine: None,
             chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,

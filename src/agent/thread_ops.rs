@@ -3,6 +3,7 @@
 //! Extracted from `agent_loop.rs` to isolate thread management (user input
 //! processing, undo/redo, approval, auth, persistence) from the core loop.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -13,22 +14,36 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::context_monitor::{ContextPressure, pressure_message, pressure_transition};
-use crate::agent::dispatcher::{
-    AgenticLoopResult, check_auth_required, execute_chat_tool_standalone, parse_auth_result,
-};
+use crate::agent::dispatcher::{AgenticLoopResult, check_auth_required, parse_auth_result};
 use crate::agent::learning::{ImprovementClass, LearningEvent, LearningOrchestrator, RiskTier};
+use crate::agent::outcomes;
 use crate::agent::session::{
-    PendingApproval, PersistedSubagentState, Session, Thread, ThreadState,
+    PendingApproval, PendingAuthMode, PersistedSubagentState, Session, Thread, ThreadState,
 };
 use crate::agent::submission::SubmissionResult;
 use crate::agent::{load_thread_runtime, mutate_thread_runtime};
+use crate::channels::web::types::SseEvent;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
+use crate::context::post_compaction::{
+    ContextInjector, PostCompactionConfig, extract_markdown_field_facts,
+    extract_pinned_facts_from_markdown, extract_profile_facts,
+};
+use crate::context::read_audit::{ReadAuditConfig, ReadAuditor};
 use crate::db::Database;
 use crate::error::Error;
 use crate::history::ConversationKind as HistoryConversationKind;
 use crate::identity::ResolvedIdentity;
 use crate::llm::ChatMessage;
+use crate::tools::execution_backend::interactive_chat_runtime_descriptor;
+use crate::tools::{ToolExecutionLane, ToolProfile, execution};
+use crate::workspace::paths;
+
+const DIRECT_THREAD_ROLE_KEY: &str = "direct_thread_role";
+const DIRECT_THREAD_ROLE_MAIN: &str = "main";
+const ORIGIN_CHANNEL_KEY: &str = "origin_channel";
+const LAST_ACTIVE_CHANNEL_KEY: &str = "last_active_channel";
+const SEEN_CHANNELS_KEY: &str = "seen_channels";
 
 fn to_history_conversation_kind(
     kind: crate::identity::ConversationKind,
@@ -84,7 +99,209 @@ fn detect_user_correction_signal(role: &str, content: &str) -> u32 {
     0
 }
 
+fn direct_thread_role_from_metadata(metadata: &serde_json::Value) -> Option<&str> {
+    metadata
+        .get(DIRECT_THREAD_ROLE_KEY)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn merge_post_compaction_facts(
+    facts: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    source: &str,
+    candidates: Vec<String>,
+    max_total: usize,
+) {
+    for candidate in candidates {
+        if facts.len() >= max_total {
+            break;
+        }
+        let decorated = format!("{source}: {candidate}");
+        let key = decorated.trim().to_ascii_lowercase();
+        if !key.is_empty() && seen.insert(key) {
+            facts.push(decorated);
+        }
+    }
+}
+
 impl Agent {
+    async fn collect_post_compaction_pinned_facts(
+        &self,
+        identity: Option<&ResolvedIdentity>,
+    ) -> Vec<String> {
+        const MAX_PINNED_FACTS: usize = 8;
+
+        let Some(workspace) = self.workspace().cloned() else {
+            return Vec::new();
+        };
+
+        let mut facts = Vec::new();
+        let mut seen = HashSet::new();
+        let is_group = identity.is_some_and(|resolved| {
+            matches!(
+                resolved.conversation_kind,
+                crate::identity::ConversationKind::Group
+            )
+        });
+
+        if !is_group && let Some(actor_id) = identity.map(|resolved| resolved.actor_id.as_str()) {
+            if let Ok(doc) = workspace.read(&paths::actor_user(actor_id)).await {
+                let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
+                merge_post_compaction_facts(
+                    &mut facts,
+                    &mut seen,
+                    "Actor USER",
+                    extract_markdown_field_facts(&doc.content, remaining),
+                    MAX_PINNED_FACTS,
+                );
+            }
+            if let Ok(doc) = workspace.read(&paths::actor_profile(actor_id)).await {
+                let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
+                merge_post_compaction_facts(
+                    &mut facts,
+                    &mut seen,
+                    "Actor profile",
+                    extract_profile_facts(&doc.content, remaining),
+                    MAX_PINNED_FACTS,
+                );
+            }
+            if let Ok(doc) = workspace.read(&paths::actor_memory(actor_id)).await {
+                let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
+                merge_post_compaction_facts(
+                    &mut facts,
+                    &mut seen,
+                    "Actor memory",
+                    extract_pinned_facts_from_markdown(&doc.content, remaining),
+                    MAX_PINNED_FACTS,
+                );
+            }
+        }
+
+        if let Ok(doc) = workspace.read(paths::USER).await {
+            let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
+            merge_post_compaction_facts(
+                &mut facts,
+                &mut seen,
+                "USER.md",
+                extract_markdown_field_facts(&doc.content, remaining),
+                MAX_PINNED_FACTS,
+            );
+        }
+        if let Ok(doc) = workspace.read(paths::PROFILE).await {
+            let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
+            merge_post_compaction_facts(
+                &mut facts,
+                &mut seen,
+                "Profile",
+                extract_profile_facts(&doc.content, remaining),
+                MAX_PINNED_FACTS,
+            );
+        }
+        if let Ok(doc) = workspace.read(paths::MEMORY).await {
+            let remaining = MAX_PINNED_FACTS.saturating_sub(facts.len());
+            merge_post_compaction_facts(
+                &mut facts,
+                &mut seen,
+                "Memory",
+                extract_pinned_facts_from_markdown(&doc.content, remaining),
+                MAX_PINNED_FACTS,
+            );
+        }
+
+        facts
+    }
+
+    async fn build_post_compaction_context_fragment(
+        &self,
+        query: Option<&str>,
+        identity: Option<&ResolvedIdentity>,
+    ) -> Option<String> {
+        let workspace_root = self
+            .config
+            .workspace_root
+            .clone()
+            .or_else(|| std::env::current_dir().ok())?;
+        let root = workspace_root.to_string_lossy().to_string();
+        let mut auditor = ReadAuditor::new(ReadAuditConfig::default());
+        auditor.scan_rules(&root);
+        let appendix = auditor.build_appendix();
+
+        let mut injector = ContextInjector::new(PostCompactionConfig::from_env());
+        if !appendix.trim().is_empty() {
+            injector.add_rules(&appendix);
+        }
+        for fact in self.collect_post_compaction_pinned_facts(identity).await {
+            injector.add_pinned_fact(&fact);
+        }
+        if let Some(query) = query.filter(|query| !query.trim().is_empty()) {
+            let active_skills = self.select_active_skills(query, None).await;
+            for skill in active_skills {
+                let prompt_content = skill.prompt_content.trim();
+                let context = if prompt_content.is_empty() {
+                    skill.manifest.description.clone()
+                } else {
+                    format!("{}\n\n{}", skill.manifest.description, prompt_content)
+                };
+                injector.add_skill_context(skill.name(), &context);
+            }
+        }
+        let injected = injector.build();
+        if injected.trim().is_empty() {
+            None
+        } else {
+            Some(injected)
+        }
+    }
+
+    async fn update_post_compaction_context(&self, thread_id: Uuid, fragment: Option<String>) {
+        let Some(store) = self.store().map(Arc::clone) else {
+            return;
+        };
+
+        if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
+            runtime.post_compaction_context = fragment.clone();
+        })
+        .await
+        {
+            tracing::debug!(
+                thread = %thread_id,
+                error = %err,
+                "Failed to update post-compaction context"
+            );
+        }
+    }
+
+    async fn clear_thread_runtime_transients(&self, thread_id: Uuid) {
+        let Some(store) = self.store().map(Arc::clone) else {
+            return;
+        };
+
+        if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
+            runtime.pending_approval = None;
+            runtime.pending_auth = None;
+            runtime.post_compaction_context = None;
+            runtime.frozen_workspace_prompt = None;
+            runtime.frozen_provider_system_prompt = None;
+            runtime.prompt_snapshot_hash = None;
+            runtime.ephemeral_overlay_hash = None;
+            runtime.prompt_segment_order.clear();
+            runtime.provider_context_refs.clear();
+            if runtime.state == ThreadState::AwaitingApproval {
+                runtime.state = ThreadState::Idle;
+            }
+        })
+        .await
+        {
+            tracing::debug!(
+                thread = %thread_id,
+                error = %err,
+                "Failed to clear transient thread runtime state"
+            );
+        }
+    }
+
     async fn conversation_visible_to_identity(
         &self,
         store: &Arc<dyn Database>,
@@ -153,6 +370,7 @@ impl Agent {
         if let Err(err) = store
             .update_conversation_identity(
                 thread_id,
+                Some(&identity.principal_id),
                 Some(&identity.actor_id),
                 Some(identity.conversation_scope_id),
                 to_history_conversation_kind(identity.conversation_kind),
@@ -167,7 +385,190 @@ impl Agent {
             );
             return None;
         }
+        self.update_direct_conversation_metadata(&store, thread_id, message, identity)
+            .await;
+        if matches!(
+            identity.conversation_kind,
+            crate::identity::ConversationKind::Direct
+        ) && let Some(workspace) = self.workspace().cloned()
+        {
+            let user_timezone = workspace.effective_timezone().name().to_string();
+            if let Err(err) = crate::profile_evolution::upsert_profile_evolution_routine(
+                &store,
+                &workspace,
+                &identity.principal_id,
+                &identity.actor_id,
+                Some(user_timezone.as_str()),
+            )
+            .await
+            {
+                tracing::debug!(
+                    thread = %thread_id,
+                    actor = %identity.actor_id,
+                    error = %err,
+                    "Failed to upsert actor profile evolution routine"
+                );
+            }
+        }
         Some(store)
+    }
+
+    async fn update_direct_conversation_metadata(
+        &self,
+        store: &Arc<dyn Database>,
+        thread_id: Uuid,
+        message: &IncomingMessage,
+        identity: &ResolvedIdentity,
+    ) {
+        if !matches!(
+            identity.conversation_kind,
+            crate::identity::ConversationKind::Direct
+        ) {
+            return;
+        }
+
+        let Ok(Some(metadata)) = store.get_conversation_metadata(thread_id).await else {
+            return;
+        };
+
+        let mut updates: Vec<(&str, serde_json::Value)> = Vec::new();
+        let current_role = direct_thread_role_from_metadata(&metadata);
+
+        if current_role.is_none() && message.thread_id.is_none() {
+            updates.push((
+                DIRECT_THREAD_ROLE_KEY,
+                serde_json::json!(DIRECT_THREAD_ROLE_MAIN),
+            ));
+        }
+
+        if metadata
+            .get(ORIGIN_CHANNEL_KEY)
+            .is_none_or(|value| value.is_null())
+        {
+            updates.push((
+                ORIGIN_CHANNEL_KEY,
+                serde_json::json!(message.channel.clone()),
+            ));
+        }
+
+        updates.push((
+            LAST_ACTIVE_CHANNEL_KEY,
+            serde_json::json!(message.channel.clone()),
+        ));
+
+        let mut seen_channels: Vec<String> = metadata
+            .get(SEEN_CHANNELS_KEY)
+            .and_then(|value| value.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !seen_channels
+            .iter()
+            .any(|channel| channel == &message.channel)
+        {
+            seen_channels.push(message.channel.clone());
+            seen_channels.sort();
+            seen_channels.dedup();
+            updates.push((SEEN_CHANNELS_KEY, serde_json::json!(seen_channels)));
+        }
+
+        if updates.is_empty() {
+            return;
+        }
+
+        for (key, value) in updates {
+            if let Err(err) = store
+                .update_conversation_metadata_field(thread_id, key, &value)
+                .await
+            {
+                tracing::debug!(
+                    thread = %thread_id,
+                    key,
+                    error = %err,
+                    "Failed to update direct conversation metadata"
+                );
+            }
+        }
+    }
+
+    async fn primary_direct_conversation_id(&self, identity: &ResolvedIdentity) -> Option<Uuid> {
+        if !matches!(
+            identity.conversation_kind,
+            crate::identity::ConversationKind::Direct
+        ) {
+            return None;
+        }
+
+        let store = self.store().map(Arc::clone)?;
+        let summaries = store
+            .list_actor_conversations_for_recall(
+                &identity.principal_id,
+                &identity.actor_id,
+                false,
+                50,
+            )
+            .await
+            .ok()?;
+
+        if summaries.is_empty() {
+            return None;
+        }
+
+        let mut fallback = None;
+        for summary in summaries {
+            fallback.get_or_insert(summary.id);
+            let Ok(Some(metadata)) = store.get_conversation_metadata(summary.id).await else {
+                continue;
+            };
+            if direct_thread_role_from_metadata(&metadata) == Some(DIRECT_THREAD_ROLE_MAIN)
+                || summary.thread_type.as_deref() == Some("assistant")
+            {
+                return Some(summary.id);
+            }
+        }
+
+        fallback
+    }
+
+    pub(super) async fn maybe_hydrate_primary_direct_thread(&self, message: &IncomingMessage) {
+        if message.thread_id.is_some() {
+            return;
+        }
+
+        let identity = message.resolved_identity();
+        if !matches!(
+            identity.conversation_kind,
+            crate::identity::ConversationKind::Direct
+        ) {
+            return;
+        }
+
+        let Some(primary_thread_id) = self.primary_direct_conversation_id(&identity).await else {
+            return;
+        };
+
+        self.maybe_hydrate_thread(message, &primary_thread_id.to_string())
+            .await;
+
+        if let Some(session) = self
+            .session_manager
+            .session_for_thread(primary_thread_id)
+            .await
+        {
+            self.session_manager
+                .register_direct_main_thread_for_scope(
+                    crate::agent::session_manager::SessionManager::scope_id_for_user_id(
+                        &identity.principal_id,
+                    ),
+                    primary_thread_id,
+                    session,
+                )
+                .await;
+        }
     }
 
     fn compact_text_preview(text: &str) -> String {
@@ -180,6 +581,32 @@ impl Agent {
         }
     }
 
+    fn trajectory_learning_metadata(
+        thread_id: Uuid,
+        session_id: Option<Uuid>,
+        turn_number: Option<usize>,
+    ) -> serde_json::Value {
+        let mut metadata = serde_json::json!({});
+        if let Some(obj) = metadata.as_object_mut() {
+            if let Some(session_id) = session_id {
+                obj.insert(
+                    "session_id".to_string(),
+                    serde_json::json!(session_id.to_string()),
+                );
+            }
+            if let Some(turn_number) = turn_number {
+                obj.insert("turn_number".to_string(), serde_json::json!(turn_number));
+            }
+            if let (Some(session_id), Some(turn_number)) = (session_id, turn_number) {
+                obj.insert(
+                    "trajectory_target_id".to_string(),
+                    serde_json::json!(format!("{}:{}:{}", session_id, thread_id, turn_number)),
+                );
+            }
+        }
+        metadata
+    }
+
     async fn best_effort_record_learning_event(
         &self,
         store: &Arc<dyn Database>,
@@ -189,6 +616,7 @@ impl Agent {
         role: &str,
         content: &str,
         persisted_message_id: Option<Uuid>,
+        trajectory_metadata: Option<serde_json::Value>,
     ) {
         let correction_count = detect_user_correction_signal(role, content);
         let class = if correction_count > 0 {
@@ -218,14 +646,7 @@ impl Agent {
             .and_then(|v| v.as_str())
             .and_then(|value| Uuid::parse_str(value).ok());
 
-        let learning_event = LearningEvent::new(
-            format!("thread_ops::persist_{}_message", role),
-            class,
-            risk_tier,
-            summary,
-        )
-        .with_target(target)
-        .with_metadata(json!({
+        let mut learning_metadata = json!({
             "thread_id": thread_id.to_string(),
             "channel": message.channel.clone(),
             "role": role,
@@ -239,7 +660,25 @@ impl Agent {
             "correction_count": correction_count,
             "repeated_failures": correction_count,
             "success": !(role.eq_ignore_ascii_case("user") && correction_count > 0),
-        }));
+        });
+        if let Some(target) = learning_metadata.as_object_mut()
+            && let Some(extra_obj) = trajectory_metadata
+                .as_ref()
+                .and_then(|value| value.as_object())
+        {
+            for (key, value) in extra_obj {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+
+        let learning_event = LearningEvent::new(
+            format!("thread_ops::persist_{}_message", role),
+            class,
+            risk_tier,
+            summary,
+        )
+        .with_target(target)
+        .with_metadata(learning_metadata);
 
         let persisted_event = learning_event.into_persisted(
             identity.principal_id.clone(),
@@ -283,23 +722,21 @@ impl Agent {
                     }
                 }
 
-                orchestrator
-                    .export_turn_to_providers(
-                        &identity.principal_id,
-                        &serde_json::json!({
-                            "event_id": event_id,
-                            "conversation_id": thread_id,
-                            "message_id": persisted_message_id,
-                            "role": role,
-                            "channel": message.channel.clone(),
-                            "content_preview": Self::compact_text_preview(content),
-                            "content_length": content.len(),
-                            "received_at": message.received_at.to_rfc3339(),
-                            "actor_id": identity.actor_id.clone(),
-                            "conversation_kind": identity.conversation_kind.as_str(),
-                        }),
-                    )
-                    .await;
+                let outcome_result = if role.eq_ignore_ascii_case("assistant") {
+                    outcomes::maybe_create_turn_contract(store, &persisted_event).await
+                } else {
+                    outcomes::observe_user_turn(store, &persisted_event)
+                        .await
+                        .map(|_| None)
+                };
+                if let Err(err) = outcome_result {
+                    tracing::debug!(
+                        thread = %thread_id,
+                        event_id = %event_id,
+                        error = %err,
+                        "Outcome-backed learning hook skipped event"
+                    );
+                }
             }
             Err(err) => {
                 tracing::debug!(
@@ -409,6 +846,12 @@ impl Agent {
         if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
             let active_subagents = runtime.active_subagents.clone();
             let preserved_auto_approved = runtime.auto_approved_tools.clone();
+            let prompt_snapshot_hash = runtime.prompt_snapshot_hash.clone();
+            let ephemeral_overlay_hash = runtime.ephemeral_overlay_hash.clone();
+            let prompt_segment_order = runtime.prompt_segment_order.clone();
+            let provider_context_refs = runtime.provider_context_refs.clone();
+            let frozen_workspace_prompt = runtime.frozen_workspace_prompt.clone();
+            let frozen_provider_system_prompt = runtime.frozen_provider_system_prompt.clone();
             *runtime = thread.runtime_state(
                 owner_agent_id.clone(),
                 model_override.clone(),
@@ -420,6 +863,15 @@ impl Agent {
                     .as_ref()
                     .and_then(|runtime| runtime.last_context_pressure),
             );
+            runtime.post_compaction_context = existing_runtime
+                .as_ref()
+                .and_then(|saved| saved.post_compaction_context.clone());
+            runtime.frozen_workspace_prompt = frozen_workspace_prompt;
+            runtime.frozen_provider_system_prompt = frozen_provider_system_prompt;
+            runtime.prompt_snapshot_hash = prompt_snapshot_hash;
+            runtime.ephemeral_overlay_hash = ephemeral_overlay_hash;
+            runtime.prompt_segment_order = prompt_segment_order;
+            runtime.provider_context_refs = provider_context_refs;
         })
         .await
         {
@@ -645,28 +1097,34 @@ impl Agent {
         }
 
         // Load history from DB (may be empty for a newly created thread).
-        let mut chat_messages: Vec<ChatMessage> = Vec::new();
         let msg_count;
 
-        let runtime = if let Some(ref store) = store {
+        let conversation_metadata = if let Some(ref store) = store {
+            store
+                .get_conversation_metadata(thread_uuid)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
+        let db_messages = if let Some(ref store) = store {
             let db_messages = store
                 .list_conversation_messages(thread_uuid)
                 .await
                 .unwrap_or_default();
             msg_count = db_messages.len();
-            chat_messages = db_messages
-                .iter()
-                .filter_map(|m| match m.role.as_str() {
-                    "user" => Some(ChatMessage::user(&m.content)),
-                    "assistant" => Some(ChatMessage::assistant(&m.content)),
-                    _ => None,
-                })
-                .collect();
+            Some(db_messages)
+        } else {
+            msg_count = 0;
+            None
+        };
+        let runtime = if let Some(ref store) = store {
             load_thread_runtime(store, thread_uuid)
                 .await
                 .unwrap_or(None)
         } else {
-            msg_count = 0;
             None
         };
 
@@ -677,8 +1135,10 @@ impl Agent {
         };
 
         let mut thread = crate::agent::session::Thread::with_id(thread_uuid, session_id);
-        if !chat_messages.is_empty() {
-            thread.restore_from_messages(chat_messages);
+        if let Some(db_messages) = db_messages.as_ref()
+            && !db_messages.is_empty()
+        {
+            thread.restore_from_conversation_messages(db_messages);
         }
         if let Some(runtime) = runtime.as_ref() {
             thread.restore_runtime_state(runtime.clone());
@@ -709,6 +1169,22 @@ impl Agent {
                 Arc::clone(&session),
             )
             .await;
+
+        if matches!(
+            identity.conversation_kind,
+            crate::identity::ConversationKind::Direct
+        ) && conversation_metadata.as_ref().is_some_and(|metadata| {
+            direct_thread_role_from_metadata(metadata) == Some(DIRECT_THREAD_ROLE_MAIN)
+                || metadata.get("thread_type").and_then(|value| value.as_str()) == Some("assistant")
+        }) {
+            self.session_manager
+                .register_direct_main_thread_for_scope(
+                    register_scope_id,
+                    thread_uuid,
+                    Arc::clone(&session),
+                )
+                .await;
+        }
 
         if let Some(runtime) = runtime {
             if let Some(owner) = runtime.owner_agent_id.clone() {
@@ -877,11 +1353,13 @@ impl Agent {
 
         // Reset the file checkpoint dedup bucket for this thread's new turn.
         crate::agent::checkpoint::new_turn(thread_id.to_string());
+        let resolved_identity = message.resolved_identity();
 
         // Natural language goes through the agentic loop
         // Job tools (create_job, list_jobs, etc.) are in the tool registry
 
         // Auto-compact if needed BEFORE adding new turn
+        let mut auto_compaction_fragment: Option<Option<String>> = None;
         {
             let mut sess = session.lock().await;
             let thread = sess
@@ -895,7 +1373,7 @@ impl Agent {
                 tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
 
                 if let Some(store) = self.store().map(Arc::clone) {
-                    let identity = message.resolved_identity();
+                    let identity = &resolved_identity;
                     let event = LearningEvent::new(
                         "thread_ops::pre_compaction_nudge",
                         ImprovementClass::Memory,
@@ -954,8 +1432,20 @@ impl Agent {
                     .await
                 {
                     tracing::warn!("Auto-compaction failed: {}", e);
+                } else {
+                    auto_compaction_fragment = Some(
+                        self.build_post_compaction_context_fragment(
+                            Some(&message.content),
+                            Some(&resolved_identity),
+                        )
+                        .await,
+                    );
                 }
             }
+        }
+        if let Some(fragment) = auto_compaction_fragment {
+            self.update_post_compaction_context(thread_id, fragment)
+                .await;
         }
 
         // Create checkpoint before turn
@@ -976,13 +1466,24 @@ impl Agent {
         }
 
         // Start the turn and get messages
+        let hide_user_input_from_ui = message
+            .metadata
+            .get("hide_user_input_from_webui_chat")
+            .and_then(|value| value.as_bool())
+            .or_else(|| {
+                message
+                    .metadata
+                    .get("hide_from_webui_chat")
+                    .and_then(|value| value.as_bool())
+            })
+            .unwrap_or(false);
         let mut turn_messages = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-            thread.start_turn(content);
+            thread.start_turn_with_visibility(content, hide_user_input_from_ui);
             thread.messages()
         };
 
@@ -1034,6 +1535,7 @@ impl Agent {
 
         // Re-acquire lock and check if interrupted
         let mut sess = session.lock().await;
+        let session_id = sess.id;
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -1092,6 +1594,7 @@ impl Agent {
                 thread.complete_turn(&response);
                 let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                 let thread_snapshot = thread.clone();
+                let turn_number = thread.turn_number();
                 let _ = self
                     .channels
                     .send_status(
@@ -1102,8 +1605,14 @@ impl Agent {
                     .await;
 
                 // Persist assistant response (user message already persisted at turn start)
-                self.persist_assistant_response(thread_id, message, &response)
-                    .await;
+                self.persist_assistant_response(
+                    thread_id,
+                    message,
+                    &response,
+                    session_id,
+                    turn_number,
+                )
+                .await;
                 drop(sess);
                 let _ = thread_snapshot;
                 self.sync_context_pressure_warning(message, thread_id, usage_percent)
@@ -1192,6 +1701,21 @@ impl Agent {
     ///
     /// This ensures the user message is durable even if the process crashes
     /// mid-response. Call this right after `thread.start_turn()`.
+    fn emit_conversation_sync_event(
+        &self,
+        thread_id: Uuid,
+        reason: &'static str,
+        channel: Option<&str>,
+    ) {
+        if let Some(ref sender) = self.deps.sse_sender {
+            let _ = sender.send(SseEvent::ConversationUpdated {
+                thread_id: thread_id.to_string(),
+                reason: reason.to_string(),
+                channel: channel.map(str::to_string),
+            });
+        }
+    }
+
     pub(super) async fn persist_user_message(
         &self,
         thread_id: Uuid,
@@ -1233,8 +1757,10 @@ impl Agent {
             "user",
             user_input,
             persisted_message_id,
+            None,
         )
         .await;
+        self.emit_conversation_sync_event(thread_id, "user_message", Some(&message.channel));
     }
 
     /// Persist the assistant response to the DB after the agentic loop completes.
@@ -1247,6 +1773,8 @@ impl Agent {
         thread_id: Uuid,
         message: &IncomingMessage,
         response: &str,
+        session_id: Uuid,
+        turn_number: usize,
     ) {
         let identity = message.resolved_identity();
         let Some(store) = self
@@ -1283,8 +1811,14 @@ impl Agent {
             "assistant",
             response,
             persisted_message_id,
+            Some(Self::trajectory_learning_metadata(
+                thread_id,
+                Some(session_id),
+                Some(turn_number),
+            )),
         )
         .await;
+        self.emit_conversation_sync_event(thread_id, "assistant_response", Some(&message.channel));
     }
 
     pub(super) async fn process_undo(
@@ -1319,6 +1853,7 @@ impl Agent {
             let usage_percent = self.context_monitor.usage_percent(&thread.messages());
             drop(mgr);
             drop(sess);
+            self.clear_thread_runtime_transients(thread_id).await;
             self.record_context_pressure_state(thread_id, usage_percent)
                 .await;
             Ok(SubmissionResult::ok_with_message(format!(
@@ -1356,6 +1891,7 @@ impl Agent {
             let usage_percent = self.context_monitor.usage_percent(&thread.messages());
             drop(mgr);
             drop(sess);
+            self.clear_thread_runtime_transients(thread_id).await;
             self.record_context_pressure_state(thread_id, usage_percent)
                 .await;
             Ok(SubmissionResult::ok_with_message(format!(
@@ -1399,6 +1935,12 @@ impl Agent {
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let mut sess = session.lock().await;
+        let session_user_id = sess.user_id.clone();
+        let session_id = sess.id;
+        let principal_id = sess.principal_id.clone();
+        let actor_id = sess.actor_id.clone();
+        let conversation_scope_id = sess.conversation_scope_id;
+        let conversation_kind = sess.conversation_kind;
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -1423,6 +1965,21 @@ impl Agent {
         {
             Ok(result) => {
                 let usage_after = self.context_monitor.usage_percent(&thread.messages());
+                let session_extract_artifact = crate::agent::AgentRunArtifact::new(
+                    "thread_compaction",
+                    crate::agent::AgentRunStatus::Completed,
+                    chrono::Utc::now(),
+                    Some(chrono::Utc::now()),
+                )
+                .with_runtime_descriptor(Some(&interactive_chat_runtime_descriptor()))
+                .with_metadata(serde_json::json!({
+                    "event": "thread_compaction",
+                    "thread_id": thread_id,
+                    "turn_count": thread.turns.len(),
+                    "strategy": format!("{strategy:?}"),
+                    "tokens_before": result.tokens_before,
+                    "tokens_after": result.tokens_after,
+                }));
                 let mut msg = format!(
                     "Compacted: {} turns removed, {} → {} tokens (was {:.1}% full)",
                     result.turns_removed, result.tokens_before, result.tokens_after, usage
@@ -1431,6 +1988,47 @@ impl Agent {
                     msg.push_str(", summary saved to workspace");
                 }
                 drop(sess);
+                if let Some(store) = self.store().map(Arc::clone) {
+                    let mut artifact = session_extract_artifact.clone();
+                    artifact.session_id = Some(session_id);
+                    artifact.thread_id = Some(thread_id);
+                    artifact.user_id = Some(session_user_id.clone());
+                    artifact.actor_id = Some(actor_id.clone());
+                    artifact.conversation_scope_id = Some(conversation_scope_id);
+                    artifact.conversation_kind = Some(conversation_kind.as_str().to_string());
+                    let manager = crate::agent::learning::MemoryProviderManager::new(store);
+                    let extract_principal_id = principal_id.clone();
+                    tokio::spawn(async move {
+                        let harness = crate::agent::AgentRunHarness::new(None);
+                        if let Err(err) = harness.append_artifact(&artifact).await {
+                            tracing::debug!(error = %err, "Failed to append thread compaction artifact");
+                        }
+                        manager
+                            .session_end_extract(&extract_principal_id, &artifact)
+                            .await;
+                    });
+                }
+                let last_user_query = messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == crate::llm::Role::User)
+                    .map(|message| message.content.as_str());
+                let compaction_identity = ResolvedIdentity {
+                    principal_id: principal_id.clone(),
+                    actor_id: actor_id.clone(),
+                    conversation_scope_id,
+                    conversation_kind,
+                    raw_sender_id: actor_id.clone(),
+                    stable_external_conversation_key: String::new(),
+                };
+                let fragment = self
+                    .build_post_compaction_context_fragment(
+                        last_user_query,
+                        Some(&compaction_identity),
+                    )
+                    .await;
+                self.update_post_compaction_context(thread_id, fragment)
+                    .await;
                 self.record_context_pressure_state(thread_id, usage_after)
                     .await;
                 Ok(SubmissionResult::ok_with_message(msg))
@@ -1445,18 +2043,56 @@ impl Agent {
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let mut sess = session.lock().await;
+        let session_user_id = sess.user_id.clone();
+        let session_id = sess.id;
+        let principal_id = sess.principal_id.clone();
+        let actor_id = sess.actor_id.clone();
+        let conversation_scope_id = sess.conversation_scope_id;
+        let conversation_kind = sess.conversation_kind.as_str().to_string();
         let thread = sess
             .threads
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
         thread.turns.clear();
         thread.state = ThreadState::Idle;
+        thread.pending_approval = None;
+        thread.pending_auth = None;
         let usage_percent = self.context_monitor.usage_percent(&thread.messages());
+        let mut session_extract_artifact = crate::agent::AgentRunArtifact::new(
+            "thread_clear",
+            crate::agent::AgentRunStatus::Completed,
+            chrono::Utc::now(),
+            Some(chrono::Utc::now()),
+        )
+        .with_runtime_descriptor(Some(&interactive_chat_runtime_descriptor()))
+        .with_metadata(serde_json::json!({
+            "event": "thread_clear",
+            "thread_id": thread_id,
+        }));
+        session_extract_artifact.session_id = Some(session_id);
+        session_extract_artifact.thread_id = Some(thread_id);
+        session_extract_artifact.user_id = Some(session_user_id.clone());
+        session_extract_artifact.actor_id = Some(actor_id);
+        session_extract_artifact.conversation_scope_id = Some(conversation_scope_id);
+        session_extract_artifact.conversation_kind = Some(conversation_kind);
 
         // Clear undo history too
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         undo_mgr.lock().await.clear();
         drop(sess);
+        if let Some(store) = self.store().map(Arc::clone) {
+            let manager = crate::agent::learning::MemoryProviderManager::new(store);
+            tokio::spawn(async move {
+                let harness = crate::agent::AgentRunHarness::new(None);
+                if let Err(err) = harness.append_artifact(&session_extract_artifact).await {
+                    tracing::debug!(error = %err, "Failed to append thread clear artifact");
+                }
+                manager
+                    .session_end_extract(&principal_id, &session_extract_artifact)
+                    .await;
+            });
+        }
+        self.clear_thread_runtime_transients(thread_id).await;
         self.record_context_pressure_state(thread_id, usage_percent)
             .await;
 
@@ -1559,6 +2195,10 @@ impl Agent {
             }
             if let Some(metadata) = job_ctx.metadata.as_object_mut() {
                 metadata.insert(
+                    "channel".to_string(),
+                    serde_json::json!(message.channel.clone()),
+                );
+                metadata.insert(
                     "thread_id".to_string(),
                     serde_json::json!(thread_id.to_string()),
                 );
@@ -1599,9 +2239,21 @@ impl Agent {
                                 serde_json::json!(allowed_skills),
                             );
                         }
+                        if let Some(tool_profile) = agent.tool_profile {
+                            metadata.insert(
+                                "tool_profile".to_string(),
+                                serde_json::json!(tool_profile.as_str()),
+                            );
+                        }
                     }
                 }
             }
+
+            let profile_override = job_ctx
+                .metadata
+                .get("tool_profile")
+                .and_then(|value| value.as_str())
+                .and_then(|value| value.parse::<ToolProfile>().ok());
 
             let _ = self
                 .channels
@@ -1615,9 +2267,33 @@ impl Agent {
                 )
                 .await;
 
-            let tool_result = self
-                .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
-                .await;
+            let tool_result = match execution::prepare_tool_call(execution::ToolPrepareRequest {
+                tools: self.tools(),
+                safety: self.safety(),
+                job_ctx: &job_ctx,
+                tool_name: &pending.tool_name,
+                params: &pending.parameters,
+                lane: ToolExecutionLane::DeferredChat,
+                default_profile: self.config.main_tool_profile,
+                profile_override,
+                approval_mode: execution::ToolApprovalMode::Bypass,
+                hooks: None,
+            })
+            .await
+            {
+                Ok(execution::ToolPrepareOutcome::Ready(prepared)) => {
+                    execution::execute_tool_call(&prepared, self.safety(), &job_ctx)
+                        .await
+                        .map(|output| output.sanitized_content)
+                }
+                Ok(execution::ToolPrepareOutcome::NeedsApproval(_)) => {
+                    Err(crate::error::ToolError::AuthRequired {
+                        name: pending.tool_name.clone(),
+                    }
+                    .into())
+                }
+                Err(err) => Err(err),
+            };
 
             let _ = self
                 .channels
@@ -1680,21 +2356,20 @@ impl Agent {
                 }
             }
 
-            // If tool_auth returned awaiting_token, enter auth mode and
+            // If tool auth returned an auth-required state, enter auth mode when needed and
             // return instructions directly (skip agentic loop continuation).
-            if let Some((ext_name, instructions)) =
-                check_auth_required(&pending.tool_name, &tool_result)
-            {
+            if let Some(auth_request) = check_auth_required(&pending.tool_name, &tool_result) {
                 self.handle_auth_intercept(
                     &session,
                     thread_id,
                     message,
                     &tool_result,
-                    ext_name,
-                    instructions.clone(),
+                    auth_request.extension_name,
+                    auth_request.instructions.clone(),
+                    auth_request.auth_mode,
                 )
                 .await;
-                return Ok(SubmissionResult::response(instructions));
+                return Ok(SubmissionResult::response(auth_request.instructions));
             }
 
             // Add tool result to context
@@ -1736,43 +2411,81 @@ impl Agent {
             }
 
             // === Phase 1: Preflight (sequential) ===
-            // Walk deferred tools checking approval. Collect runnable
-            // tools; stop at the first that needs approval.
-            let mut runnable: Vec<crate::llm::ToolCall> = Vec::new();
+            // Walk deferred tools through the shared preparation pipeline so
+            // hooks, approval checks, validation, and rate limits stay
+            // aligned with the live dispatcher path.
+            let mut preflight_tool_calls: Vec<crate::llm::ToolCall> = Vec::new();
+            let mut immediate_results: Vec<(usize, Result<String, Error>)> = Vec::new();
+            let mut runnable: Vec<(usize, crate::llm::ToolCall, execution::PreparedToolCall)> =
+                Vec::new();
             let mut approval_needed: Option<(
                 usize,
                 crate::llm::ToolCall,
-                Arc<dyn crate::tools::Tool>,
+                execution::PendingToolApproval,
             )> = None;
 
-            for (idx, tc) in deferred_tool_calls.iter().enumerate() {
-                if let Some(tool) = self.tools().get(&tc.name).await {
-                    use crate::tools::ApprovalRequirement;
-                    let needs_approval = match tool.requires_approval(&tc.arguments) {
-                        ApprovalRequirement::Never => false,
-                        ApprovalRequirement::UnlessAutoApproved => {
-                            let sess = session.lock().await;
-                            !sess.is_tool_auto_approved_for_channel(&message.channel, &tc.name)
-                        }
-                        ApprovalRequirement::Always => true,
-                    };
+            for (idx, original_tc) in deferred_tool_calls.iter().enumerate() {
+                let session_auto_approved = {
+                    let sess = session.lock().await;
+                    sess.is_tool_auto_approved_for_channel(&message.channel, &original_tc.name)
+                };
 
-                    if needs_approval {
-                        approval_needed = Some((idx, tc.clone(), tool));
-                        break; // remaining tools stay deferred
+                match execution::prepare_tool_call(execution::ToolPrepareRequest {
+                    tools: self.tools(),
+                    safety: self.safety(),
+                    job_ctx: &job_ctx,
+                    tool_name: &original_tc.name,
+                    params: &original_tc.arguments,
+                    lane: ToolExecutionLane::DeferredChat,
+                    default_profile: self.config.main_tool_profile,
+                    profile_override,
+                    approval_mode: execution::ToolApprovalMode::Interactive {
+                        auto_approve_tools: self.config.auto_approve_tools,
+                        session_auto_approved,
+                    },
+                    hooks: Some(execution::ToolHookConfig {
+                        registry: self.hooks().as_ref(),
+                        user_id: &message.user_id,
+                        context: "chat",
+                    }),
+                })
+                .await
+                {
+                    Ok(execution::ToolPrepareOutcome::Ready(prepared)) => {
+                        let mut tc = original_tc.clone();
+                        tc.arguments = prepared.params.clone();
+                        let preflight_idx = preflight_tool_calls.len();
+                        preflight_tool_calls.push(tc.clone());
+                        runnable.push((preflight_idx, tc, prepared));
+                    }
+                    Ok(execution::ToolPrepareOutcome::NeedsApproval(pending_approval)) => {
+                        let mut tc = original_tc.clone();
+                        tc.arguments = pending_approval.params.clone();
+                        approval_needed = Some((idx, tc, pending_approval));
+                        break;
+                    }
+                    Err(err) => {
+                        let preflight_idx = preflight_tool_calls.len();
+                        preflight_tool_calls.push(original_tc.clone());
+                        immediate_results.push((preflight_idx, Err(err)));
                     }
                 }
-
-                runnable.push(tc.clone());
             }
 
             // === Phase 2: Parallel execution ===
-            let exec_results: Vec<(crate::llm::ToolCall, Result<String, Error>)> = if runnable.len()
-                <= 1
-            {
-                // Single tool (or none): execute inline
-                let mut results = Vec::new();
-                for tc in &runnable {
+            let mut exec_results: Vec<Option<Result<String, Error>>> =
+                (0..preflight_tool_calls.len()).map(|_| None).collect();
+            for (idx, result) in immediate_results {
+                exec_results[idx] = Some(result);
+            }
+
+            let parallel_safe = runnable.len() > 1
+                && runnable
+                    .iter()
+                    .all(|(_, _, prepared)| prepared.descriptor.metadata.parallel_safe);
+
+            if !parallel_safe {
+                for (pf_idx, tc, prepared) in runnable {
                     let _ = self
                         .channels
                         .send_status(
@@ -1785,9 +2498,9 @@ impl Agent {
                         )
                         .await;
 
-                    let result = self
-                        .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
-                        .await;
+                    let result = execution::execute_tool_call(&prepared, self.safety(), &job_ctx)
+                        .await
+                        .map(|output| output.sanitized_content);
 
                     let _ =
                         self.channels
@@ -1804,20 +2517,20 @@ impl Agent {
                             )
                             .await;
 
-                    results.push((tc.clone(), result));
+                    exec_results[pf_idx] = Some(result);
                 }
-                results
             } else {
-                // Multiple tools: execute in parallel via JoinSet
                 let mut join_set = JoinSet::new();
+                let runnable_slots = runnable
+                    .iter()
+                    .map(|(pf_idx, tc, _)| (*pf_idx, tc.clone()))
+                    .collect::<Vec<_>>();
                 let runnable_count = runnable.len();
 
-                for (spawn_idx, tc) in runnable.iter().enumerate() {
-                    let tools = self.tools().clone();
+                for (spawn_idx, (pf_idx, tc, prepared)) in runnable.into_iter().enumerate() {
                     let safety = self.safety().clone();
                     let channels = self.channels.clone();
                     let job_ctx = job_ctx.clone();
-                    let tc = tc.clone();
                     let channel = message.channel.clone();
                     let metadata = message.metadata.clone();
 
@@ -1833,14 +2546,9 @@ impl Agent {
                             )
                             .await;
 
-                        let result = execute_chat_tool_standalone(
-                            &tools,
-                            &safety,
-                            &tc.name,
-                            &tc.arguments,
-                            &job_ctx,
-                        )
-                        .await;
+                        let result = execution::execute_tool_call(&prepared, &safety, &job_ctx)
+                            .await
+                            .map(|output| output.sanitized_content);
 
                         let _ = channels
                             .send_status(
@@ -1856,17 +2564,16 @@ impl Agent {
                             )
                             .await;
 
-                        (spawn_idx, tc, result)
+                        (spawn_idx, pf_idx, result)
                     });
                 }
 
-                // Collect and reorder by original index
-                let mut ordered: Vec<Option<(crate::llm::ToolCall, Result<String, Error>)>> =
+                let mut ordered: Vec<Option<(usize, Result<String, Error>)>> =
                     (0..runnable_count).map(|_| None).collect();
                 while let Some(join_result) = join_set.join_next().await {
                     match join_result {
-                        Ok((idx, tc, result)) => {
-                            ordered[idx] = Some((tc, result));
+                        Ok((spawn_idx, pf_idx, result)) => {
+                            ordered[spawn_idx] = Some((pf_idx, result));
                         }
                         Err(e) => {
                             if e.is_panic() {
@@ -1878,30 +2585,39 @@ impl Agent {
                     }
                 }
 
-                // Fill panicked slots with error results
-                ordered
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, opt)| {
-                        opt.unwrap_or_else(|| {
-                            let tc = runnable[i].clone();
-                            let err: Error = crate::error::ToolError::ExecutionFailed {
-                                name: tc.name.clone(),
-                                reason: "Task failed during execution".to_string(),
-                            }
-                            .into();
-                            (tc, Err(err))
-                        })
-                    })
-                    .collect()
-            };
+                for (idx, opt) in ordered.into_iter().enumerate() {
+                    let (pf_idx, result) = opt.unwrap_or_else(|| {
+                        let (pf_idx, tc) = &runnable_slots[idx];
+                        let err: Error = crate::error::ToolError::ExecutionFailed {
+                            name: tc.name.clone(),
+                            reason: "Task failed during execution".to_string(),
+                        }
+                        .into();
+                        (*pf_idx, Err(err))
+                    });
+                    exec_results[pf_idx] = Some(result);
+                }
+            }
 
             // === Phase 3: Post-flight (sequential, in original order) ===
             // Process all results before any conditional return so every
             // tool result is recorded in the session audit trail.
             let mut deferred_auth: Option<String> = None;
 
-            for (tc, deferred_result) in exec_results {
+            for (tc, deferred_result) in preflight_tool_calls
+                .into_iter()
+                .zip(exec_results.into_iter())
+                .map(|(tc, result)| {
+                    let result = result.unwrap_or_else(|| {
+                        Err(crate::error::ToolError::ExecutionFailed {
+                            name: tc.name.clone(),
+                            reason: "Deferred tool result missing after execution".to_string(),
+                        }
+                        .into())
+                    });
+                    (tc, result)
+                })
+            {
                 if let Ok(ref output) = deferred_result
                     && !output.is_empty()
                 {
@@ -1933,19 +2649,19 @@ impl Agent {
 
                 // Auth detection — defer return until all results are recorded
                 if deferred_auth.is_none()
-                    && let Some((ext_name, instructions)) =
-                        check_auth_required(&tc.name, &deferred_result)
+                    && let Some(auth_request) = check_auth_required(&tc.name, &deferred_result)
                 {
                     self.handle_auth_intercept(
                         &session,
                         thread_id,
                         message,
                         &deferred_result,
-                        ext_name,
-                        instructions.clone(),
+                        auth_request.extension_name,
+                        auth_request.instructions.clone(),
+                        auth_request.auth_mode,
                     )
                     .await;
-                    deferred_auth = Some(instructions);
+                    deferred_auth = Some(auth_request.instructions);
                 }
 
                 let deferred_content = match deferred_result {
@@ -1969,12 +2685,12 @@ impl Agent {
             }
 
             // Handle approval if a tool needed it
-            if let Some((approval_idx, tc, tool)) = approval_needed {
+            if let Some((approval_idx, tc, pending_approval)) = approval_needed {
                 let new_pending = PendingApproval {
                     request_id: Uuid::new_v4(),
                     tool_name: tc.name.clone(),
-                    parameters: tc.arguments.clone(),
-                    description: tool.description().to_string(),
+                    parameters: pending_approval.params.clone(),
+                    description: pending_approval.descriptor.description.clone(),
                     tool_call_id: tc.id.clone(),
                     context_messages: context_messages.clone(),
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
@@ -2018,6 +2734,7 @@ impl Agent {
 
             // Handle the result
             let mut sess = session.lock().await;
+            let session_id = sess.id;
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
@@ -2030,9 +2747,16 @@ impl Agent {
                     thread.complete_turn(&response);
                     let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                     let thread_snapshot = thread.clone();
+                    let turn_number = thread.turn_number();
                     // User message already persisted at turn start; save assistant response
-                    self.persist_assistant_response(thread_id, message, &response)
-                        .await;
+                    self.persist_assistant_response(
+                        thread_id,
+                        message,
+                        &response,
+                        session_id,
+                        turn_number,
+                    )
+                    .await;
                     drop(sess);
                     let _ = thread_snapshot;
                     self.sync_context_pressure_warning(message, thread_id, usage_percent)
@@ -2107,14 +2831,22 @@ impl Agent {
             );
             {
                 let mut sess = session.lock().await;
+                let session_id = sess.id;
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
                     let usage_percent = self.context_monitor.usage_percent(&thread.messages());
                     let thread_snapshot = thread.clone();
+                    let turn_number = thread.turn_number();
                     // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(thread_id, message, &rejection)
-                        .await;
+                    self.persist_assistant_response(
+                        thread_id,
+                        message,
+                        &rejection,
+                        session_id,
+                        turn_number,
+                    )
+                    .await;
                     drop(sess);
                     let _ = thread_snapshot;
                     self.sync_context_pressure_warning(message, thread_id, usage_percent)
@@ -2150,16 +2882,25 @@ impl Agent {
         tool_result: &Result<String, Error>,
         ext_name: String,
         instructions: String,
+        auth_mode: PendingAuthMode,
     ) {
         let auth_data = parse_auth_result(tool_result);
         let thread_snapshot = {
             let mut sess = session.lock().await;
+            let session_id = sess.id;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.enter_auth_mode(ext_name.clone());
+                thread.enter_auth_mode(ext_name.clone(), auth_mode);
                 thread.complete_turn(&instructions);
+                let turn_number = thread.turn_number();
                 // User message already persisted at turn start; save auth instructions
-                self.persist_assistant_response(thread_id, message, &instructions)
-                    .await;
+                self.persist_assistant_response(
+                    thread_id,
+                    message,
+                    &instructions,
+                    session_id,
+                    turn_number,
+                )
+                .await;
                 Some(thread.clone())
             } else {
                 None
@@ -2179,6 +2920,16 @@ impl Agent {
                     instructions: Some(instructions.clone()),
                     auth_url: auth_data.auth_url,
                     setup_url: auth_data.setup_url,
+                    auth_mode: auth_data.auth_mode.unwrap_or_else(|| match auth_mode {
+                        PendingAuthMode::ManualToken => "manual_token".to_string(),
+                        PendingAuthMode::ExternalOAuth => "oauth".to_string(),
+                    }),
+                    auth_status: auth_data
+                        .auth_status
+                        .unwrap_or_else(|| "awaiting_token".to_string()),
+                    shared_auth_provider: auth_data.shared_auth_provider,
+                    missing_scopes: auth_data.missing_scopes,
+                    thread_id: Some(thread_id.to_string()),
                 },
                 &message.metadata,
             )
@@ -2248,6 +2999,11 @@ impl Agent {
                                     extension_name: pending.extension_name.clone(),
                                     success: true,
                                     message: msg.clone(),
+                                    auth_mode: Some("manual_token".to_string()),
+                                    auth_status: Some("authenticated".to_string()),
+                                    shared_auth_provider: result.shared_auth_provider.clone(),
+                                    missing_scopes: result.missing_scopes.clone(),
+                                    thread_id: Some(thread_id.to_string()),
                                 },
                                 &message.metadata,
                             )
@@ -2273,6 +3029,11 @@ impl Agent {
                                     extension_name: pending.extension_name.clone(),
                                     success: true,
                                     message: msg.clone(),
+                                    auth_mode: Some("manual_token".to_string()),
+                                    auth_status: Some("authenticated".to_string()),
+                                    shared_auth_provider: result.shared_auth_provider.clone(),
+                                    missing_scopes: result.missing_scopes.clone(),
+                                    thread_id: Some(thread_id.to_string()),
                                 },
                                 &message.metadata,
                             )
@@ -2286,7 +3047,7 @@ impl Agent {
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.enter_auth_mode(pending.extension_name.clone());
+                        thread.enter_auth_mode(pending.extension_name.clone(), pending.auth_mode);
                     }
                 }
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
@@ -2305,6 +3066,11 @@ impl Agent {
                             instructions: Some(msg.clone()),
                             auth_url: result.auth_url,
                             setup_url: result.setup_url,
+                            auth_mode: result.auth_mode.clone(),
+                            auth_status: result.auth_status.clone(),
+                            shared_auth_provider: result.shared_auth_provider.clone(),
+                            missing_scopes: result.missing_scopes.clone(),
+                            thread_id: Some(thread_id.to_string()),
                         },
                         &message.metadata,
                     )
@@ -2324,6 +3090,11 @@ impl Agent {
                             extension_name: pending.extension_name.clone(),
                             success: false,
                             message: msg.clone(),
+                            auth_mode: None,
+                            auth_status: None,
+                            shared_auth_provider: None,
+                            missing_scopes: Vec::new(),
+                            thread_id: Some(thread_id.to_string()),
                         },
                         &message.metadata,
                     )
@@ -2389,6 +3160,8 @@ impl Agent {
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
             thread.restore_from_messages(checkpoint.messages);
+            drop(sess);
+            self.clear_thread_runtime_transients(thread_id).await;
             Ok(SubmissionResult::ok_with_message(format!(
                 "Resumed from checkpoint: {}",
                 checkpoint.description

@@ -26,6 +26,22 @@ const SERVICE_NAME: &str = "thinclaw";
 /// Account name for the master key.
 const MASTER_KEY_ACCOUNT: &str = "master_key";
 
+/// Opt-in plaintext process-memory cache for keychain lookups.
+///
+/// Disabled by default for safer secret handling. Set
+/// `THINCLAW_KEYCHAIN_CACHE=1` to enable the in-memory cache.
+fn keychain_cache_enabled() -> bool {
+    std::env::var("THINCLAW_KEYCHAIN_CACHE")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Generate a random 32-byte master key.
 pub fn generate_master_key() -> Vec<u8> {
     use rand::RngCore;
@@ -68,7 +84,9 @@ mod platform {
             |e| SecretError::KeychainError(format!("Failed to store in keychain: {}", e)),
         )?;
 
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.insert(MASTER_KEY_ACCOUNT.to_string(), key_hex.as_bytes().to_vec());
         }
         Ok(())
@@ -76,7 +94,8 @@ mod platform {
 
     /// Retrieve the master key from the macOS Keychain.
     pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
-        if let Ok(cache) = get_cache().lock()
+        if keychain_cache_enabled()
+            && let Ok(cache) = get_cache().lock()
             && let Some(password) = cache.get(MASTER_KEY_ACCOUNT)
         {
             let hex_str = String::from_utf8(password.clone())
@@ -88,7 +107,9 @@ mod platform {
             SecretError::KeychainError(format!("Failed to get from keychain: {}", e))
         })?;
 
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.insert(MASTER_KEY_ACCOUNT.to_string(), password.clone());
         }
 
@@ -104,7 +125,9 @@ mod platform {
         delete_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|e| {
             SecretError::KeychainError(format!("Failed to delete from keychain: {}", e))
         })?;
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.remove(MASTER_KEY_ACCOUNT);
         }
         Ok(())
@@ -112,14 +135,17 @@ mod platform {
 
     /// Check if a master key exists in the keychain.
     pub async fn has_master_key() -> bool {
-        if let Ok(cache) = get_cache().lock()
+        if keychain_cache_enabled()
+            && let Ok(cache) = get_cache().lock()
             && cache.contains_key(MASTER_KEY_ACCOUNT)
         {
             return true;
         }
         match get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT) {
             Ok(password) => {
-                if let Ok(mut cache) = get_cache().lock() {
+                if keychain_cache_enabled()
+                    && let Ok(mut cache) = get_cache().lock()
+                {
                     cache.insert(MASTER_KEY_ACCOUNT.to_string(), password);
                 }
                 true
@@ -135,7 +161,9 @@ mod platform {
         set_generic_password(SERVICE_NAME, account, value.as_bytes()).map_err(|e| {
             SecretError::KeychainError(format!("Failed to store {} in keychain: {}", account, e))
         })?;
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.insert(account.to_string(), value.as_bytes().to_vec());
         }
         Ok(())
@@ -145,7 +173,8 @@ mod platform {
     ///
     /// Returns `None` if the key doesn't exist (rather than an error).
     pub async fn get_api_key(account: &str) -> Option<String> {
-        if let Ok(cache) = get_cache().lock()
+        if keychain_cache_enabled()
+            && let Ok(cache) = get_cache().lock()
             && let Some(password) = cache.get(account)
         {
             return String::from_utf8(password.clone()).ok();
@@ -153,7 +182,9 @@ mod platform {
         match get_generic_password(SERVICE_NAME, account) {
             Ok(bytes) => {
                 let s = String::from_utf8(bytes.clone()).ok()?;
-                if let Ok(mut cache) = get_cache().lock() {
+                if keychain_cache_enabled()
+                    && let Ok(mut cache) = get_cache().lock()
+                {
                     cache.insert(account.to_string(), bytes);
                 }
                 Some(s)
@@ -167,7 +198,9 @@ mod platform {
         delete_generic_password(SERVICE_NAME, account).map_err(|e| {
             SecretError::KeychainError(format!("Failed to delete {} from keychain: {}", account, e))
         })?;
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.remove(account);
         }
         Ok(())
@@ -227,7 +260,9 @@ mod platform {
             .await
             .map_err(|e| SecretError::KeychainError(format!("Failed to create secret: {}", e)))?;
 
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.insert(MASTER_KEY_ACCOUNT.to_string(), key_hex.as_bytes().to_vec());
         }
 
@@ -236,13 +271,13 @@ mod platform {
 
     /// Retrieve the master key from the Linux secret service.
     pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
-        if let Ok(cache) = get_cache().lock() {
-            if let Some(password) = cache.get(MASTER_KEY_ACCOUNT) {
-                let hex_str = String::from_utf8(password.clone()).map_err(|_| {
-                    SecretError::KeychainError("Invalid UTF-8 in secret".to_string())
-                })?;
-                return hex_to_bytes(&hex_str);
-            }
+        if keychain_cache_enabled()
+            && let Ok(cache) = get_cache().lock()
+            && let Some(password) = cache.get(MASTER_KEY_ACCOUNT)
+        {
+            let hex_str = String::from_utf8(password.clone())
+                .map_err(|_| SecretError::KeychainError("Invalid UTF-8 in secret".to_string()))?;
+            return hex_to_bytes(&hex_str);
         }
 
         let ss = SecretService::connect(EncryptionType::Dh)
@@ -278,7 +313,9 @@ mod platform {
             .await
             .map_err(|e| SecretError::KeychainError(format!("Failed to get secret: {}", e)))?;
 
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.insert(MASTER_KEY_ACCOUNT.to_string(), secret.clone());
         }
 
@@ -311,7 +348,9 @@ mod platform {
                 .map_err(|e| SecretError::KeychainError(format!("Failed to delete: {}", e)))?;
         }
 
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.remove(MASTER_KEY_ACCOUNT);
         }
 
@@ -320,10 +359,11 @@ mod platform {
 
     /// Check if a master key exists in the secret service.
     pub async fn has_master_key() -> bool {
-        if let Ok(cache) = get_cache().lock() {
-            if cache.contains_key(MASTER_KEY_ACCOUNT) {
-                return true;
-            }
+        if keychain_cache_enabled()
+            && let Ok(cache) = get_cache().lock()
+            && cache.contains_key(MASTER_KEY_ACCOUNT)
+        {
+            return true;
         }
 
         let ss = match SecretService::connect(EncryptionType::Dh).await {
@@ -385,7 +425,9 @@ mod platform {
                 SecretError::KeychainError(format!("Failed to store {}: {}", account, e))
             })?;
 
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.insert(account.to_string(), value.as_bytes().to_vec());
         }
         Ok(())
@@ -393,10 +435,11 @@ mod platform {
 
     /// Retrieve an API key string from the secret service.
     pub async fn get_api_key(account: &str) -> Option<String> {
-        if let Ok(cache) = get_cache().lock() {
-            if let Some(password) = cache.get(account) {
-                return String::from_utf8(password.clone()).ok();
-            }
+        if keychain_cache_enabled()
+            && let Ok(cache) = get_cache().lock()
+            && let Some(password) = cache.get(account)
+        {
+            return String::from_utf8(password.clone()).ok();
         }
 
         let ss = SecretService::connect(EncryptionType::Dh).await.ok()?;
@@ -415,7 +458,9 @@ mod platform {
         let secret = item.get_secret().await.ok()?;
 
         // Update cache
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.insert(account.to_string(), secret.clone());
         }
 
@@ -445,7 +490,9 @@ mod platform {
                 .map_err(|e| SecretError::KeychainError(format!("Failed to delete: {}", e)))?;
         }
 
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.remove(account);
         }
 
@@ -466,7 +513,7 @@ mod platform {
     use std::slice;
     use std::sync::{Mutex, OnceLock};
 
-    use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, GetLastError, LocalFree};
+    use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, FILETIME, GetLastError, LocalFree};
     use windows_sys::Win32::Security::Credentials::{
         CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree,
         CredReadW, CredWriteW,
@@ -572,7 +619,10 @@ mod platform {
             Type: CRED_TYPE_GENERIC,
             TargetName: target.as_mut_ptr(),
             Comment: null_mut(),
-            LastWritten: Default::default(),
+            LastWritten: FILETIME {
+                dwLowDateTime: 0,
+                dwHighDateTime: 0,
+            },
             CredentialBlobSize: encrypted.len() as u32,
             CredentialBlob: encrypted.as_ptr() as *mut u8,
             Persist: CRED_PERSIST_LOCAL_MACHINE,
@@ -589,7 +639,9 @@ mod platform {
             ));
         }
 
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.insert(account.to_string(), value.to_vec());
         }
 
@@ -597,7 +649,8 @@ mod platform {
     }
 
     fn read_credential(account: &str) -> Result<Option<Vec<u8>>, SecretError> {
-        if let Ok(cache) = get_cache().lock()
+        if keychain_cache_enabled()
+            && let Ok(cache) = get_cache().lock()
             && let Some(value) = cache.get(account)
         {
             return Ok(Some(value.clone()));
@@ -629,7 +682,9 @@ mod platform {
         }
 
         let decrypted = unprotect_bytes(&encrypted)?;
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.insert(account.to_string(), decrypted.clone());
         }
         Ok(Some(decrypted))
@@ -648,7 +703,9 @@ mod platform {
             }
         }
 
-        if let Ok(mut cache) = get_cache().lock() {
+        if keychain_cache_enabled()
+            && let Ok(mut cache) = get_cache().lock()
+        {
             cache.remove(account);
         }
         Ok(())

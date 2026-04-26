@@ -25,7 +25,7 @@ impl SubmissionParser {
         if lower == "/interrupt" || lower == "/stop" {
             return Submission::Interrupt;
         }
-        if lower == "/compact" {
+        if lower == "/compact" || lower == "/compress" {
             return Submission::Compact;
         }
         if lower == "/clear" {
@@ -59,6 +59,18 @@ impl SubmissionParser {
         if lower == "/tools" {
             return Submission::SystemCommand {
                 command: "tools".to_string(),
+                args: vec![],
+            };
+        }
+        if lower == "/identity" {
+            return Submission::SystemCommand {
+                command: "identity".to_string(),
+                args: vec![],
+            };
+        }
+        if lower == "/memory" {
+            return Submission::SystemCommand {
+                command: "memory".to_string(),
                 args: vec![],
             };
         }
@@ -131,14 +143,18 @@ impl SubmissionParser {
                 args,
             };
         }
-        if lower == "/vibe" || lower.starts_with("/vibe ") {
+        if lower == "/vibe"
+            || lower.starts_with("/vibe ")
+            || lower == "/personality"
+            || lower.starts_with("/personality ")
+        {
             let args: Vec<String> = trimmed
                 .split_whitespace()
                 .skip(1)
                 .map(|s| s.to_string())
                 .collect();
             return Submission::SystemCommand {
-                command: "vibe".to_string(),
+                command: "personality".to_string(),
                 args,
             };
         }
@@ -499,6 +515,9 @@ mod tests {
     fn test_parser_compact() {
         let submission = SubmissionParser::parse("/compact");
         assert!(matches!(submission, Submission::Compact));
+
+        let submission = SubmissionParser::parse("/compress");
+        assert!(matches!(submission, Submission::Compact));
     }
 
     #[test]
@@ -543,12 +562,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parser_vibe_system_command() {
+    fn test_parser_personality_system_command() {
+        let submission = SubmissionParser::parse("/personality playful");
+        assert!(matches!(
+            submission,
+            Submission::SystemCommand { command, args }
+                if command == "personality" && args == vec!["playful"]
+        ));
+
         let submission = SubmissionParser::parse("/vibe playful");
         assert!(matches!(
             submission,
             Submission::SystemCommand { command, args }
-                if command == "vibe" && args == vec!["playful"]
+                if command == "personality" && args == vec!["playful"]
         ));
     }
 
@@ -559,6 +585,26 @@ mod tests {
             submission,
             Submission::SystemCommand { command, args }
                 if command == "skin" && args == vec!["midnight"]
+        ));
+    }
+
+    #[test]
+    fn test_parser_identity_system_command() {
+        let submission = SubmissionParser::parse("/identity");
+        assert!(matches!(
+            submission,
+            Submission::SystemCommand { command, args }
+                if command == "identity" && args.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_parser_memory_system_command() {
+        let submission = SubmissionParser::parse("/memory");
+        assert!(matches!(
+            submission,
+            Submission::SystemCommand { command, args }
+                if command == "memory" && args.is_empty()
         ));
     }
 

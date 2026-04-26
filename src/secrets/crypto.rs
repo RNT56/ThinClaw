@@ -15,7 +15,7 @@
 
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, AeadCore, OsRng},
+    aead::{AeadCore, AeadInPlace, OsRng},
 };
 use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
@@ -69,6 +69,18 @@ impl SecretsCrypto {
     /// - encrypted_value = nonce || ciphertext || tag
     /// - salt = random bytes used for key derivation
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>), SecretError> {
+        self.encrypt_with_aad(plaintext, &[])
+    }
+
+    /// Encrypt a secret value with authenticated associated data.
+    ///
+    /// The AAD is not stored in ciphertext, but it must match exactly on
+    /// decrypt. This binds rows to their logical owner/name/provider metadata.
+    pub fn encrypt_with_aad(
+        &self,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), SecretError> {
         let salt = Self::generate_salt();
         let derived_key = self.derive_key(&salt)?;
 
@@ -79,9 +91,9 @@ impl SecretsCrypto {
         // Generate random nonce
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
-        // Encrypt
-        let ciphertext = cipher
-            .encrypt(&nonce, plaintext)
+        let mut ciphertext = plaintext.to_vec();
+        cipher
+            .encrypt_in_place(&nonce, aad, &mut ciphertext)
             .map_err(|e| SecretError::EncryptionFailed(format!("Encryption failed: {}", e)))?;
 
         // Combine: nonce || ciphertext (which includes tag)
@@ -101,6 +113,16 @@ impl SecretsCrypto {
         encrypted_value: &[u8],
         salt: &[u8],
     ) -> Result<DecryptedSecret, SecretError> {
+        self.decrypt_with_aad(encrypted_value, salt, &[])
+    }
+
+    /// Decrypt a secret value with authenticated associated data.
+    pub fn decrypt_with_aad(
+        &self,
+        encrypted_value: &[u8],
+        salt: &[u8],
+        aad: &[u8],
+    ) -> Result<DecryptedSecret, SecretError> {
         if encrypted_value.len() < NONCE_SIZE + TAG_SIZE {
             return Err(SecretError::DecryptionFailed(
                 "Encrypted value too short".to_string(),
@@ -117,9 +139,9 @@ impl SecretsCrypto {
         let (nonce_bytes, ciphertext) = encrypted_value.split_at(NONCE_SIZE);
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        // Decrypt
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
+        let mut plaintext = ciphertext.to_vec();
+        cipher
+            .decrypt_in_place(nonce, aad, &mut plaintext)
             .map_err(|e| SecretError::DecryptionFailed(format!("Decryption failed: {}", e)))?;
 
         DecryptedSecret::from_bytes(plaintext)
@@ -172,6 +194,17 @@ mod tests {
 
         let decrypted = crypto.decrypt(&encrypted, &salt).unwrap();
         assert_eq!(decrypted.expose().as_bytes(), plaintext);
+    }
+
+    #[test]
+    fn test_aad_tamper_fails() {
+        let crypto = test_crypto();
+        let (encrypted, salt) = crypto
+            .encrypt_with_aad(b"secret-value", b"user1|api_key")
+            .unwrap();
+
+        let result = crypto.decrypt_with_aad(&encrypted, &salt, b"user2|api_key");
+        assert!(result.is_err());
     }
 
     #[test]

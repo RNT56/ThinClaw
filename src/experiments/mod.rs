@@ -50,8 +50,16 @@ fn default_runner_status() -> ExperimentRunnerStatus {
     ExperimentRunnerStatus::Draft
 }
 
+fn default_runner_readiness_class() -> ExperimentRunnerReadinessClass {
+    ExperimentRunnerReadinessClass::ManualOnly
+}
+
 fn default_campaign_status() -> ExperimentCampaignStatus {
     ExperimentCampaignStatus::PendingBaseline
+}
+
+fn default_experiment_owner_user_id() -> String {
+    "default".to_string()
 }
 
 fn default_trial_status() -> ExperimentTrialStatus {
@@ -237,6 +245,7 @@ pub enum ExperimentAutonomyMode {
 pub enum ExperimentRunnerBackend {
     #[default]
     LocalDocker,
+    AgentEnv,
     GenericRemoteRunner,
     Ssh,
     Slurm,
@@ -248,7 +257,7 @@ pub enum ExperimentRunnerBackend {
 
 impl ExperimentRunnerBackend {
     pub fn is_remote(self) -> bool {
-        !matches!(self, Self::LocalDocker)
+        !matches!(self, Self::LocalDocker | Self::AgentEnv)
     }
 
     pub fn is_gpu_cloud(self) -> bool {
@@ -258,6 +267,7 @@ impl ExperimentRunnerBackend {
     pub fn slug(self) -> &'static str {
         match self {
             Self::LocalDocker => "local_docker",
+            Self::AgentEnv => "agent_env",
             Self::GenericRemoteRunner => "generic_remote_runner",
             Self::Ssh => "ssh",
             Self::Slurm => "slurm",
@@ -276,6 +286,15 @@ pub enum ExperimentRunnerStatus {
     Draft,
     Validated,
     Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExperimentRunnerReadinessClass {
+    #[default]
+    ManualOnly,
+    BootstrapReady,
+    LaunchReady,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -404,6 +423,10 @@ pub struct ExperimentRunnerProfile {
     pub cache_policy: serde_json::Value,
     #[serde(default = "default_runner_status")]
     pub status: ExperimentRunnerStatus,
+    #[serde(default = "default_runner_readiness_class")]
+    pub readiness_class: ExperimentRunnerReadinessClass,
+    #[serde(default)]
+    pub launch_eligible: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -413,6 +436,8 @@ pub struct ExperimentCampaign {
     pub id: Uuid,
     pub project_id: Uuid,
     pub runner_profile_id: Uuid,
+    #[serde(default = "default_experiment_owner_user_id")]
+    pub owner_user_id: String,
     #[serde(default = "default_campaign_status")]
     pub status: ExperimentCampaignStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -612,6 +637,14 @@ pub struct ExperimentOpportunity {
     pub suggested_preset: ExperimentPreset,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_target_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub signals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_hint: Option<serde_json::Value>,
     #[serde(default)]
     pub metadata: serde_json::Value,
     pub created_at: DateTime<Utc>,

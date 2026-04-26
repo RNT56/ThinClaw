@@ -250,7 +250,7 @@ SANDBOX_EXTRA_DOMAINS=api.openai.com,api.anthropic.com
 docker build -f Dockerfile.worker -t thinclaw-worker .
 ```
 
-The onboarding wizard (step 8) offers to build this automatically.
+The onboarding wizard offers to build this automatically during worker sandbox setup.
 
 **Verify:**
 
@@ -306,25 +306,132 @@ ThinClaw auto-detects the local browser binary in common locations. No configura
 **Override the binary path:**
 
 ```env
-CHROME_PATH=/usr/bin/google-chrome-stable
+BROWSER_EXECUTABLE=/usr/bin/google-chrome-stable
 ```
+
+`CHROME_PATH` is still accepted as a legacy alias, but new Linux deployments
+should use `BROWSER_EXECUTABLE`.
 
 ---
 
 ### Docker Chromium (headless)
 
-**What it does:** When no local browser is found (or on headless servers), ThinClaw automatically starts a Docker container with Chromium + Xvfb for browser automation.
+**What it does:** When no local browser is found (or on headless servers), ThinClaw automatically starts a Docker container with headless Chromium for browser automation.
 
 **Prerequisites:** Docker Desktop on Windows, or Docker on macOS/Linux (see [Docker section](#docker))
 
 **ThinClaw configuration:**
 
 ```env
-# Force Docker Chromium even if a local binary exists
-BROWSER_DOCKER=always
+# auto: use local browser first, then Docker Chromium fallback
+# always: force Docker Chromium even if a local binary exists
+# never: disable Docker Chromium fallback
+BROWSER_DOCKER=auto
+CHROMIUM_IMAGE=chromedp/headless-shell:latest
 ```
 
-The `BrowserTool` handles the container lifecycle automatically (start, health-check, stop).
+The default image is public and multi-arch (`linux/amd64` and `linux/arm64`).
+Set `CHROMIUM_IMAGE` only if you operate an internal CDP-capable Chromium image.
+The `BrowserTool` handles the container lifecycle automatically (pull, start,
+health-check, stop), and `thinclaw doctor` verifies that the image is local or
+pullable before reporting the fallback as ready.
+
+---
+
+## Linux Runtime Readiness
+
+Use `thinclaw doctor --profile server` for Ubuntu/Debian server or Docker hosts,
+`thinclaw doctor --profile pi-os-lite-64` for Raspberry Pi OS Lite 64-bit,
+`thinclaw doctor --profile desktop-linux` for the supported interactive Linux
+desktop path, and `thinclaw doctor --profile all-features` before building or
+running with every optional feature enabled. `desktop-gnome` remains accepted as
+a compatibility alias.
+
+Raspberry Pi OS Lite 64-bit supports the full headless runtime. Docker, Tailscale,
+camera, microphone, location, and browser automation are optional. Reckless
+desktop autonomy is not supported on Pi OS Lite; keep `DESKTOP_AUTONOMY_ENABLED=false`.
+
+Pi OS Lite quick checks:
+
+```bash
+uname -m                    # expected: aarch64
+cat /etc/os-release         # expected: Raspberry Pi OS / Debian bookworm
+systemctl --version
+thinclaw doctor --profile pi-os-lite-64
+```
+
+Pi OS Lite native service defaults:
+
+```env
+THINCLAW_HOME=/var/lib/thinclaw/.thinclaw
+THINCLAW_RUNTIME_PROFILE=pi-os-lite-64
+THINCLAW_HEADLESS=true
+DATABASE_BACKEND=libsql
+LIBSQL_PATH=/var/lib/thinclaw/.thinclaw/thinclaw.db
+GATEWAY_HOST=0.0.0.0
+GATEWAY_PORT=3000
+THINCLAW_ALLOW_ENV_MASTER_KEY=1
+DESKTOP_AUTONOMY_ENABLED=false
+```
+
+The `THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` and `THINCLAW_HEADLESS=true`
+markers are runtime guards: desktop autonomy tools are not registered under
+that profile, so Pi OS Lite remains a remote/headless setup rather than a
+desktop automation host.
+
+Optional Pi packages:
+
+```bash
+# Useful baseline for source builds and diagnostics
+sudo apt-get install -y build-essential curl git pkg-config ca-certificates
+
+# Optional browser/sandbox fallback
+sudo apt-get install -y docker.io docker-compose-plugin
+sudo systemctl enable --now docker
+
+# Optional private network access
+curl -fsSL https://tailscale.com/install.sh | sh
+```
+
+Important Linux env vars:
+
+```env
+BROWSER_EXECUTABLE=/usr/bin/google-chrome-stable
+BROWSER_DOCKER=auto
+CHROMIUM_IMAGE=chromedp/headless-shell:latest
+SCREEN_CAPTURE_ENABLED=false
+CAMERA_CAPTURE_ENABLED=false
+TALK_MODE_ENABLED=false
+LOCATION_ENABLED=false
+LOCATION_ALLOW_IP_FALLBACK=false
+THINCLAW_CAMERA_DEVICE=/dev/video0
+THINCLAW_MICROPHONE_DEVICE=default
+THINCLAW_MICROPHONE_BACKEND=auto
+THINCLAW_ALLOW_ENV_MASTER_KEY=1
+SECRETS_MASTER_KEY=hex-encoded-32-byte-key-for-headless-hosts
+DESKTOP_AUTONOMY_ENABLED=false
+```
+
+`SECRETS_MASTER_KEY` is ignored by default. Use the environment fallback only for headless hosts or containers where Linux Secret Service is not available, and prefer a service-manager secret mechanism over plain shell exports.
+
+Ubuntu/Debian packages for the supported interactive Linux desktop-autonomy path:
+
+```bash
+sudo apt install python3 python3-gi python3-pyatspi libreoffice \
+  libreoffice-script-provider-python evolution evolution-data-server-bin \
+  xdotool ydotool wmctrl tesseract-ocr gnome-screenshot scrot grim spectacle imagemagick \
+  at-spi2-core libglib2.0-bin geoclue-2.0 ffmpeg fswebcam \
+  kwin-wayland plasma-workspace plasma-workspace-wayland xwayland
+```
+
+Use `xdotool` for X11 sessions. Use `ydotool` or `dotool` when the host runs a
+Wayland compositor that does not permit X11 input injection. `grim` and
+`spectacle` provide Wayland-friendly screen capture paths; KDE/Plasma sessions
+prefer `spectacle` because `grim` is compositor-protocol dependent.
+
+Linux native Apple Mail and native iMessage channels are not available. Use
+Gmail for mail and BlueBubbles for iMessage-compatible messaging from a Mac-hosted
+BlueBubbles server.
 
 ---
 
@@ -413,7 +520,7 @@ ThinClaw gracefully falls back when ffmpeg is not available — video processing
 | Priority | Source | How to Set |
 |----------|--------|------------|
 | 1 | `ANTHROPIC_API_KEY` env var | `export ANTHROPIC_API_KEY=sk-ant-api03-...` |
-| 2 | OS secure store | Set during `thinclaw onboard` (wizard step 12) |
+| 2 | OS secure store | Set during `thinclaw onboard` when Claude Code credentials are configured |
 | 3 | Claude Code OAuth | Run `claude login` on the host machine |
 
 **ThinClaw configuration:**
@@ -624,7 +731,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/thinclaw.yourdomain.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:18789;
+        proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -652,7 +759,7 @@ Use [Let's Encrypt](https://letsencrypt.org/) + [certbot](https://certbot.eff.or
 
 ```
 thinclaw.yourdomain.com {
-    reverse_proxy localhost:18789
+    reverse_proxy localhost:3000
 }
 ```
 
@@ -664,15 +771,16 @@ Caddy **automatically** provisions and renews TLS certificates from Let's Encryp
 
 These are only needed if you **compile ThinClaw from source**:
 
-| Dependency | Purpose | Install (macOS) | Install (Linux) |
-|-----------|---------|-----------------|-----------------|
-| Xcode CLI Tools | C compiler, linker | `xcode-select --install` | N/A |
-| build-essential | C compiler + pkg-config | N/A | `sudo apt install build-essential pkg-config` |
-| Rust 1.92+ | Rust compiler | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | Same |
-| wasm32-wasip2 target | WASM compilation | `rustup target add wasm32-wasip2` | Same |
-| wasm-tools | WASM component model | `cargo install wasm-tools --locked` | Same |
-| cargo-component | Build WASM extensions | `cargo install cargo-component --locked` | Same |
-| Git | Clone the repo | Pre-installed | `apt install git` |
+| Dependency | Purpose | macOS | Linux | Windows / WSL |
+|-----------|---------|-------|-------|---------------|
+| Xcode CLI Tools | C compiler, linker | `xcode-select --install` | N/A | N/A |
+| C/C++ build tools | Native dependency compilation | Xcode CLI Tools | `sudo apt install build-essential pkg-config` or distro equivalent | Use WSL and Linux packages for the supported Linux-style source path |
+| Rust 1.92+ | Rust compiler | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` | Same | Install inside WSL for Linux-style builds |
+| wasm32-wasip2 target | WASM compilation | `rustup target add wasm32-wasip2` | Same | Same inside WSL |
+| wasm-tools | WASM component model | `cargo install wasm-tools --locked` | Same | Same inside WSL |
+| cargo-component | Build WASM extensions | `cargo install cargo-component --locked` | Same | Same inside WSL |
+| Git | Clone the repo | Pre-installed or Xcode CLI Tools | `sudo apt install git` or distro equivalent | Git for Windows or Git inside WSL |
+| CA certificates and curl | Fetch installers/dependencies | Built in on most hosts | `sudo apt install ca-certificates curl` or distro equivalent | Built in PowerShell for release installs; install inside WSL for source builds |
 
 **One-click setup scripts** (install all build dependencies automatically):
 
@@ -690,6 +798,10 @@ These are only needed if you **compile ThinClaw from source**:
 Linux note: the core ThinClaw build now uses Rustls and does not require OpenSSL
 development headers. If you enable the optional `voice` feature, also install
 `libasound2-dev` so `cpal` can link against ALSA.
+
+Windows native source builds are not the primary documented path. Prefer the MSI
+or portable ZIP for native Windows, or use WSL 2 and follow the Linux source
+build instructions when you need a development build on a Windows machine.
 
 ---
 

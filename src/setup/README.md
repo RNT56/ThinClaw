@@ -2,6 +2,8 @@
 
 This is the code-adjacent specification for ThinClaw onboarding. If setup behavior changes in `src/setup/`, update this file in the same change.
 
+For the canonical identity vocabulary used by setup, also keep [../../docs/IDENTITY_AND_PERSONALITY.md](../../docs/IDENTITY_AND_PERSONALITY.md) aligned.
+
 ## Scope
 
 This document owns:
@@ -11,14 +13,14 @@ This document owns:
 - the current wizard shape and persistence behavior
 - setup-specific invariants and operator expectations
 
-This document does not own the broader runtime walkthrough. Use `Agent_flow.md` for boot/runtime flow and `docs/DEPLOYMENT.md` for deployment modes.
+This document does not own deployment or broader trust architecture. Use `docs/DEPLOYMENT.md` for deployment modes and `docs/IDENTITY_AND_PERSONALITY.md` for the current agent identity model.
 
 ## Entry Points
 
 Explicit onboarding:
 
 ```bash
-thinclaw onboard [--skip-auth] [--channels-only] [--ui auto|cli|tui]
+thinclaw onboard [--skip-auth] [--channels-only] [--guide[=<topic>]] [--ui auto|cli|tui] [--profile <profile>]
 ```
 
 Full reset:
@@ -69,6 +71,14 @@ This is the normal onboarding path. `--ui auto` is the default and prefers the
 full-screen onboarding shell when ThinClaw is running in a compatible
 interactive terminal. Operators can force `--ui cli` or `--ui tui`.
 
+When the full onboarding wizard starts (CLI or TUI) and neither `--channels-only`
+nor `--guide` is supplied, the first choice is now:
+
+- `Quick Setup` for the reduced day-one path
+- `Advanced Setup` for the existing topic-guided deeper configuration flow
+
+This keeps Quick Setup short instead of expanding it with extra advanced steps.
+
 Both CLI and TUI presentations now use the same Humanist Cockpit language:
 
 - readiness is framed as launch readiness, not pass/fail setup
@@ -86,6 +96,40 @@ operator still wants to confirm the rest of the AI stack.
 
 Runs only the channel configuration path. This is the supported way to revisit channel setup without re-running the rest of onboarding.
 
+### `--guide [<topic>]`
+
+Opens the guided Advanced Setup lane directly from CLI or TUI without showing
+the Quick/Advanced selector first.
+
+- `thinclaw onboard --guide` opens the guided topic menu
+- `thinclaw onboard --guide ai` jumps directly to AI & Models
+- Valid topics: `menu`, `ai`, `channels`, `agent`, `tools`, `automation`, `runtime`
+
+### `--profile <profile>`
+
+Preselects the onboarding profile and skips the Profile prompt. Valid values:
+`balanced`, `local-private`, `builder-coding`, `channel-first`, `remote`,
+`pi-os-lite-64`, and `custom`.
+
+Use `thinclaw onboard --profile remote` for Raspberry Pi, Mac Mini, VPS, or
+SSH-managed hosts. This profile configures a service-safe runtime:
+
+- `CLI_ENABLED=false`
+- `GATEWAY_ENABLED=true`
+- `GATEWAY_HOST=127.0.0.1` by default for SSH tunnel access
+- `GATEWAY_PORT=3000` unless already configured
+- generated `GATEWAY_AUTH_TOKEN` when missing
+- local libSQL database unless the operator chooses another backend
+- env-backed secrets fallback writes `THINCLAW_ALLOW_ENV_MASTER_KEY=1` when selected
+
+Use `thinclaw onboard --profile pi-os-lite-64` on Raspberry Pi OS Lite 64-bit.
+It applies the same service-safe runtime defaults and additionally writes
+`THINCLAW_RUNTIME_PROFILE=pi-os-lite-64` plus `THINCLAW_HEADLESS=true` so
+desktop autonomy tools are not registered at runtime.
+
+The remote Web UI step offers SSH tunnel, private LAN/Tailscale, and reverse
+proxy/public access modes. The default is SSH tunnel.
+
 ### `reset`
 
 Runs a destructive reset intended for recovery or clean-room re-onboarding. The command:
@@ -98,12 +142,14 @@ It does not uninstall the ThinClaw binary or remove launchd, systemd, or Windows
 
 ### Profile Lanes
 
-The Profile step currently offers five onboarding lanes:
+The Profile step currently offers seven onboarding lanes:
 
 - `Balanced` for the standard first-run path
 - `Local & Private` for a local-first, lower-dependency setup
 - `Builder & Coding` for stronger planning, routing, and tool-heavy work
 - `Channel-First` for messaging reachability and notification routing
+- `Remote / SSH Host` for headless/service hosts reached over SSH, LAN, or tailnet
+- `Pi OS Lite 64-bit` for a Raspberry Pi headless remote service with desktop autonomy blocked
 - `Custom / Advanced` for a neutral baseline with minimal profile-driven defaults
 
 `Custom / Advanced` does not add a different step plan. It runs the same wizard,
@@ -112,39 +158,55 @@ database step.
 
 ## Current Wizard Shape
 
-The current full onboarding path is phase-based and drives both the CLI wizard
-and the onboarding TUI shell from the same step plan:
+The current onboarding flow is phase-based and shared by both the CLI wizard
+and the onboarding TUI shell, but it is not one single 26-step path anymore.
 
-1. Welcome
-2. Profile
-3. Database Connection
-4. Security
-5. Inference Provider
-6. Model Selection
-7. Routing Policy
-8. Fallback Providers
-9. Embeddings
-10. Agent Identity
-11. Timezone
-12. Channel Configuration
-13. Session Continuity
-14. Channel Verification
-15. Notification Preferences
-16. Extensions
-17. Local Tools & Docker Sandbox
-18. Claude Code Sandbox
-19. Codex Code Sandbox
-20. Tool Approval Mode
-21. Routines
-22. Skills
-23. Background Tasks
-24. Web UI
-25. Observability
-26. Finish
+### Quick Setup
 
-The operator-facing phases are:
+Quick Setup is the default reduced path. It currently includes:
 
-- Welcome & Profile
+1. Choose Your Cockpit Skin
+2. Choose Your Setup Lane
+3. Agent Name & Personality
+4. Primary Model Provider
+5. Advisor Model (Primary)
+6. Primary Channel
+7. Channel Verification
+8. Autonomy Level
+9. Worker Sandbox
+10. Coding Workers
+11. Web UI
+12. Finish
+
+The quick path also applies the existing auto-configured runtime defaults and
+quick notification defaults between those visible steps, which is why the user
+experience is shorter than the full catalog of onboarding topics.
+
+### Advanced Setup
+
+Advanced Setup is the topic-guided lane. It opens the existing guided topic
+menu and then builds a focused plan around one topic:
+
+- AI & Models
+- Channels & Notifications
+- Agent & Experience
+- Tools & Safety
+- Automation & Skills
+- Runtime & Diagnostics
+
+Each topic-specific plan still ends with Finish.
+
+### Channels-only
+
+`--channels-only` runs only the Channel Configuration, Channel Verification, and
+Finish parts of the plan.
+
+### Phase Catalog
+
+Across Quick Setup and guided Advanced Setup, the available operator-facing
+phases remain:
+
+- Skin & Profile
 - Core Runtime
 - AI Stack
 - Identity & Presence
@@ -152,9 +214,6 @@ The operator-facing phases are:
 - Capabilities & Automation
 - Experience & Operations
 - Finish
-
-`--channels-only` runs only the Channel Configuration, Channel Verification, and
-Finish parts of the plan.
 
 If you change this order, branching, or phase shape in code, update this
 section immediately.
@@ -164,19 +223,38 @@ section immediately.
 Bootstrap and runtime settings do not all live in one place.
 
 - bootstrap values such as database connection details live in `~/.thinclaw/.env`
+- service/gateway bootstrap values such as `GATEWAY_ENABLED`, `GATEWAY_HOST`,
+  `GATEWAY_PORT`, `GATEWAY_AUTH_TOKEN`, and `CLI_ENABLED` also live in
+  `~/.thinclaw/.env`
 - encrypted credentials and related secure material use the secrets path
 - broader runtime settings are persisted in the database-backed settings store
 
 The design goal is simple: values needed before the database exists must be available earlier than values that can safely live in the database.
+
+Telegram owner binding also seeds that owner into the Telegram pairing
+allowlist so the first onboarding reply can continue immediately without a
+second pairing round-trip. The onboarding path now waits for a fresh private
+Telegram DM after the bot token is accepted and can fall back to manual numeric
+owner ID entry if automatic capture does not complete.
 
 ## Operator Transparency Defaults
 
 The setup/runtime defaults relevant to the new transparency surfaces are:
 
 - `agent.subagent_transparency_level = "balanced"`
+- `agent.main_tool_profile = "standard"`
+- `agent.worker_tool_profile = "restricted"`
+- `agent.subagent_tool_profile = "explicit_only"`
 - `channels.telegram_subagent_session_mode = "temp_topic"`
 
 These are runtime settings, not separate onboarding state. Setup may explain or expose them later, but they persist through the same database-backed settings path as the rest of operator preferences.
+
+Profile behavior is intentionally asymmetric:
+
+- `standard` keeps the main agent's full lane-eligible tool surface after policy and approval checks.
+- `restricted` only grants safe read-only orchestrator tools implicitly; anything broader must be granted explicitly.
+- `explicit_only` keeps delegated agents on coordination tools unless the caller grants additional tools.
+- delegated workers and subagents inherit parent `allowed_tools` and `allowed_skills` ceilings unless a narrower request is supplied.
 
 ## Setup Invariants
 
@@ -186,6 +264,9 @@ These are runtime settings, not separate onboarding state. Setup may explain or 
 - Channel setup must remain reachable through `--channels-only`.
 - The CLI wizard and onboarding TUI shell must use the same step plan and validation logic.
 - The CLI wizard and onboarding TUI shell must keep the same readiness framing and follow-up semantics.
+- Onboarding must clearly point to both local runtime entrypoints: `thinclaw` and `thinclaw tui`.
+- Remote onboarding must point to `thinclaw run --no-onboard`, service commands,
+  and `thinclaw gateway access` instead of implying an interactive REPL handoff.
 - Setup docs must not claim a different step or phase shape than the code.
 
 ## High-Value Setup Areas
@@ -214,5 +295,5 @@ Later steps focus on trust boundaries, operator control, and day-two usability r
 
 - Do not restate onboarding in multiple conflicting docs.
 - Treat `src/setup/wizard/mod.rs` as the ultimate source of truth for step order and wizard branching.
-- Update `docs/DEPLOYMENT.md`, `README.md`, and `Agent_flow.md` when setup-facing behavior changes the public story.
+- Update `docs/DEPLOYMENT.md`, `README.md`, and the identity/surface canonicals when setup-facing behavior changes the public story.
 - If behavior changes affect parity-tracked functionality, update `FEATURE_PARITY.md` in the same branch.

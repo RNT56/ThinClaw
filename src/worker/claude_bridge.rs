@@ -266,6 +266,8 @@ impl ClaudeBridgeRuntime {
                 tracing::error!(job_id = %self.config.job_id, "Claude session failed: {}", e);
                 self.client
                     .report_complete(&CompletionReport {
+                        status: Some("error".to_string()),
+                        session_id: None,
                         success: false,
                         message: Some(format!("Claude Code failed: {}", e)),
                         iterations: 1,
@@ -275,25 +277,80 @@ impl ClaudeBridgeRuntime {
             }
         };
 
+        if !job.interactive {
+            self.client
+                .report_complete(&CompletionReport {
+                    status: Some("completed".to_string()),
+                    session_id: session_id.clone(),
+                    success: true,
+                    message: Some("Claude Code session completed".to_string()),
+                    iterations: 1,
+                })
+                .await?;
+            return Ok(());
+        }
+
         // Follow-up loop: poll for prompts, resume Claude sessions
         let mut iteration = 1u32;
+        let idle_timeout = Duration::from_secs(
+            job.idle_timeout_secs
+                .unwrap_or(crate::sandbox_jobs::DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS),
+        );
+        let mut idle_deadline = tokio::time::Instant::now() + idle_timeout;
         loop {
+            if tokio::time::Instant::now() >= idle_deadline {
+                self.client
+                    .report_complete(&CompletionReport {
+                        status: Some("interrupted".to_string()),
+                        session_id: session_id.clone(),
+                        success: false,
+                        message: Some("Interactive idle timeout".to_string()),
+                        iterations: iteration,
+                    })
+                    .await?;
+                return Ok(());
+            }
+
             // Poll for a follow-up prompt (2 second intervals)
             match self.poll_for_prompt().await {
                 Ok(Some(prompt)) => {
-                    if prompt.done {
+                    idle_deadline = tokio::time::Instant::now() + idle_timeout;
+                    if prompt.done && prompt.content.is_none() {
                         tracing::info!(job_id = %self.config.job_id, "Orchestrator signaled done");
                         break;
                     }
+                    let Some(prompt_content) = prompt.content.as_deref() else {
+                        continue;
+                    };
                     iteration += 1;
+                    let _ = self
+                        .client
+                        .report_status(&crate::worker::api::StatusUpdate {
+                            state: "in_progress".to_string(),
+                            message: Some(format!("Iteration {}", iteration)),
+                            iteration,
+                        })
+                        .await;
                     tracing::info!(
                         job_id = %self.config.job_id,
                         "Got follow-up prompt, resuming session"
                     );
                     if let Err(e) = self
-                        .run_claude_session(&prompt.content, session_id.as_deref(), &extra_env)
+                        .run_claude_session(prompt_content, session_id.as_deref(), &extra_env)
                         .await
                     {
+                        if prompt.done {
+                            self.client
+                                .report_complete(&CompletionReport {
+                                    status: Some("error".to_string()),
+                                    session_id: session_id.clone(),
+                                    success: false,
+                                    message: Some(format!("Claude Code failed: {}", e)),
+                                    iterations: iteration,
+                                })
+                                .await?;
+                            return Ok(());
+                        }
                         tracing::error!(
                             job_id = %self.config.job_id,
                             "Follow-up Claude session failed: {}", e
@@ -306,6 +363,8 @@ impl ClaudeBridgeRuntime {
                             }),
                         )
                         .await;
+                    } else if prompt.done {
+                        break;
                     }
                 }
                 Ok(None) => {
@@ -324,6 +383,8 @@ impl ClaudeBridgeRuntime {
 
         self.client
             .report_complete(&CompletionReport {
+                status: Some("completed".to_string()),
+                session_id: session_id.clone(),
                 success: true,
                 message: Some("Claude Code session completed".to_string()),
                 iterations: iteration,
@@ -463,9 +524,11 @@ impl ClaudeBridgeRuntime {
 
             // Report result event
             self.report_event(
-                "result",
+                "session_result",
                 &serde_json::json!({
                     "status": "error",
+                    "success": false,
+                    "message": format!("claude exited with code {}", code),
                     "exit_code": code,
                     "session_id": session_id,
                 }),
@@ -479,9 +542,11 @@ impl ClaudeBridgeRuntime {
 
         // Report successful result
         self.report_event(
-            "result",
+            "session_result",
             &serde_json::json!({
                 "status": "completed",
+                "success": true,
+                "message": "Claude Code session completed",
                 "session_id": session_id,
             }),
         )
@@ -568,11 +633,20 @@ fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
             if let Some(blocks) = blocks {
                 for block in blocks {
                     if block.block_type == "tool_result" {
+                        let output = block.content.clone();
+                        let output_text = output
+                            .as_ref()
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string);
+                        let output_json =
+                            output.as_ref().filter(|value| !value.is_string()).cloned();
                         payloads.push(JobEventPayload {
                             event_type: "tool_result".to_string(),
                             data: serde_json::json!({
                                 "tool_use_id": block.tool_use_id,
-                                "output": block.content,
+                                "output": output.clone(),
+                                "output_text": output_text,
+                                "output_json": output_json,
                             }),
                         });
                     }
@@ -599,9 +673,15 @@ fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
             }
 
             payloads.push(JobEventPayload {
-                event_type: "result".to_string(),
+                event_type: "session_result".to_string(),
                 data: serde_json::json!({
                     "status": if is_error { "error" } else { "completed" },
+                    "success": !is_error,
+                    "message": event
+                        .result
+                        .as_ref()
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
                     "session_id": event.session_id,
                     "duration_ms": event.duration_ms,
                     "num_turns": event.num_turns,
@@ -814,11 +894,11 @@ mod tests {
             num_turns: Some(5),
         };
         let payloads = stream_event_to_payloads(&event);
-        // Should emit a message (the result text) + a result event
+        // Should emit a message (the result text) + a session result event
         assert_eq!(payloads.len(), 2);
         assert_eq!(payloads[0].event_type, "message");
         assert_eq!(payloads[0].data["content"], "The review is complete.");
-        assert_eq!(payloads[1].event_type, "result");
+        assert_eq!(payloads[1].event_type, "session_result");
         assert_eq!(payloads[1].data["status"], "completed");
     }
 

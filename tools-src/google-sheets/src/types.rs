@@ -227,3 +227,51 @@ pub struct FormatResult {
     pub spreadsheet_id: String,
     pub success: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GoogleSheetsAction;
+
+    #[test]
+    fn create_spreadsheet_defaults_to_empty_sheet_names() {
+        let action: GoogleSheetsAction = serde_json::from_value(serde_json::json!({
+            "action": "create_spreadsheet",
+            "title": "Quarterly Report"
+        }))
+        .unwrap();
+
+        match action {
+            GoogleSheetsAction::CreateSpreadsheet { title, sheet_names } => {
+                assert_eq!(title, "Quarterly Report");
+                assert!(sheet_names.is_empty());
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn write_values_defaults_to_user_entered() {
+        let action: GoogleSheetsAction = serde_json::from_value(serde_json::json!({
+            "action": "write_values",
+            "spreadsheet_id": "sheet-123",
+            "range": "Sheet1!A1",
+            "values": [["hello"]]
+        }))
+        .unwrap();
+
+        match action {
+            GoogleSheetsAction::WriteValues {
+                spreadsheet_id,
+                range,
+                values,
+                value_input_option,
+            } => {
+                assert_eq!(spreadsheet_id, "sheet-123");
+                assert_eq!(range, "Sheet1!A1");
+                assert_eq!(values.len(), 1);
+                assert_eq!(value_input_option, "USER_ENTERED");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+}

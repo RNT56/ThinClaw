@@ -5,6 +5,7 @@
 //! - `models info <model>` — show details for a specific model
 //! - `models test <model>` — test connectivity to a model
 //! - `models verify` — live-discover and optionally probe configured providers
+//! - `models sync` — refresh the local model compat catalog
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -55,6 +56,25 @@ pub enum ModelCommand {
 
         /// Timeout in seconds for discovery and chat probes
         #[arg(long, default_value_t = 12)]
+        timeout_secs: u64,
+    },
+
+    /// Refresh the local model compatibility catalog from provider ingesters
+    Sync {
+        /// Sync only specific providers instead of the supported default set
+        #[arg(long)]
+        provider: Vec<String>,
+
+        /// Override the destination catalog path
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+
+        /// Output format: text (default) or json
+        #[arg(long, default_value = "text")]
+        format: String,
+
+        /// Timeout in seconds for provider sync requests
+        #[arg(long, default_value_t = 15)]
         timeout_secs: u64,
     },
 }
@@ -108,89 +128,18 @@ enum VerificationTransport {
 
 /// Get the list of known models (built-in knowledge).
 fn known_models() -> Vec<ModelInfo> {
-    vec![
-        ModelInfo {
-            name: "gpt-4o".to_string(),
-            provider: "openai".to_string(),
-            context_window: Some(128_000),
-            max_output: Some(16_384),
-            supports_vision: true,
-            supports_tools: true,
-            supports_streaming: true,
-        },
-        ModelInfo {
-            name: "gpt-4o-mini".to_string(),
-            provider: "openai".to_string(),
-            context_window: Some(128_000),
-            max_output: Some(16_384),
-            supports_vision: true,
-            supports_tools: true,
-            supports_streaming: true,
-        },
-        ModelInfo {
-            name: "o3-mini".to_string(),
-            provider: "openai".to_string(),
-            context_window: Some(200_000),
-            max_output: Some(100_000),
-            supports_vision: false,
-            supports_tools: true,
-            supports_streaming: true,
-        },
-        ModelInfo {
-            name: "claude-sonnet-4-20250514".to_string(),
-            provider: "anthropic".to_string(),
-            context_window: Some(200_000),
-            max_output: Some(64_000),
-            supports_vision: true,
-            supports_tools: true,
-            supports_streaming: true,
-        },
-        ModelInfo {
-            name: "claude-3-5-haiku-20241022".to_string(),
-            provider: "anthropic".to_string(),
-            context_window: Some(200_000),
-            max_output: Some(8_192),
-            supports_vision: true,
-            supports_tools: true,
-            supports_streaming: true,
-        },
-        ModelInfo {
-            name: "gemini-2.0-flash".to_string(),
-            provider: "gemini".to_string(),
-            context_window: Some(1_000_000),
-            max_output: Some(8_192),
-            supports_vision: true,
-            supports_tools: true,
-            supports_streaming: true,
-        },
-        ModelInfo {
-            name: "gemini-2.5-pro".to_string(),
-            provider: "gemini".to_string(),
-            context_window: Some(1_000_000),
-            max_output: Some(65_536),
-            supports_vision: true,
-            supports_tools: true,
-            supports_streaming: true,
-        },
-        ModelInfo {
-            name: "llama3.3".to_string(),
-            provider: "ollama".to_string(),
-            context_window: Some(131_072),
-            max_output: None,
-            supports_vision: false,
-            supports_tools: true,
-            supports_streaming: true,
-        },
-        ModelInfo {
-            name: "qwen2.5-coder".to_string(),
-            provider: "ollama".to_string(),
-            context_window: Some(131_072),
-            max_output: None,
-            supports_vision: false,
-            supports_tools: true,
-            supports_streaming: true,
-        },
-    ]
+    crate::config::model_compat::known_models()
+        .into_iter()
+        .map(|model| ModelInfo {
+            name: model.model_id,
+            provider: model.provider,
+            context_window: Some(model.context_window),
+            max_output: Some(model.max_output_tokens),
+            supports_vision: model.supports_vision,
+            supports_tools: model.supports_tools,
+            supports_streaming: model.supports_streaming,
+        })
+        .collect()
 }
 
 /// Run a model CLI command.
@@ -263,15 +212,19 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
         }
 
         ModelCommand::Info { model } => {
-            let models = known_models();
-            if let Some(info) = models.iter().find(|m| m.name == model) {
-                branding.print_banner("Model Info", Some(&info.name));
-                println!("{}", branding.key_value("Model", &info.name));
+            if let Some(info) = crate::config::model_compat::find_model(&model) {
+                branding.print_banner("Model Info", Some(&info.model_id));
+                println!("{}", branding.key_value("Model", &info.model_id));
                 println!("{}", branding.key_value("Provider", &info.provider));
-                if let Some(ctx) = info.context_window {
+                if let Some(alias_of) = &info.alias_of {
+                    println!("{}", branding.key_value("Alias of", alias_of));
+                }
+                let ctx = Some(info.context_window);
+                if let Some(ctx) = ctx {
                     println!("{}", branding.key_value("Context", format!("{ctx} tokens")));
                 }
-                if let Some(max) = info.max_output {
+                let max_output = Some(info.max_output_tokens);
+                if let Some(max) = max_output {
                     println!(
                         "{}",
                         branding.key_value("Max output", format!("{max} tokens"))
@@ -292,6 +245,9 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
                         if info.supports_streaming { "yes" } else { "no" }
                     )
                 );
+                if let Some(source_url) = &info.source_url {
+                    println!("{}", branding.key_value("Source", source_url));
+                }
             } else {
                 println!(
                     "{}",
@@ -392,6 +348,47 @@ pub async fn run_model_command(cmd: ModelCommand) -> anyhow::Result<()> {
                 println!(
                     "{}",
                     render_verify_results_text(&branding, &results, discovery_only)
+                );
+            }
+        }
+
+        ModelCommand::Sync {
+            provider,
+            output,
+            format,
+            timeout_secs,
+        } => {
+            let context = load_verification_context().await?;
+            let providers_settings = crate::llm::normalize_providers_settings(&context.settings);
+            let providers = if provider.is_empty() {
+                crate::llm::model_metadata_sync::supported_sync_providers()
+            } else {
+                provider
+            };
+
+            let credentials =
+                build_sync_credentials(&context, &providers_settings, &providers).await;
+            let result = crate::llm::model_metadata_sync::refresh_model_catalog(
+                &crate::config::model_compat::known_models(),
+                &crate::llm::model_metadata_sync::ModelMetadataSyncOptions {
+                    providers,
+                    timeout: Duration::from_secs(timeout_secs.max(1)),
+                    credentials,
+                },
+            )
+            .await;
+
+            let output_path =
+                output.unwrap_or_else(crate::config::model_compat::preferred_catalog_write_path);
+            crate::config::model_compat::write_catalog_snapshot(&output_path, &result.snapshot)
+                .map_err(anyhow::Error::msg)?;
+
+            if format == "json" {
+                println!("{}", render_sync_results_json(&output_path, &result)?);
+            } else {
+                println!(
+                    "{}",
+                    render_sync_results_text(&branding, &output_path, &result)
                 );
             }
         }
@@ -662,15 +659,15 @@ async fn build_verification_request(
             &context.settings,
             providers_settings,
             slug,
-            endpoint.default_model,
+            &endpoint.default_model,
         );
         return match endpoint.api_style {
             crate::config::provider_catalog::ApiStyle::Anthropic => {
                 let api_key = resolve_provider_secret(
                     slug,
                     providers_settings,
-                    endpoint.env_key_name,
-                    endpoint.secret_name,
+                    &endpoint.env_key_name,
+                    &endpoint.secret_name,
                     context.secrets_store.as_ref(),
                 )
                 .await;
@@ -685,8 +682,8 @@ async fn build_verification_request(
                 let api_key = resolve_provider_secret(
                     slug,
                     providers_settings,
-                    endpoint.env_key_name,
-                    endpoint.secret_name,
+                    &endpoint.env_key_name,
+                    &endpoint.secret_name,
                     context.secrets_store.as_ref(),
                 )
                 .await;
@@ -832,6 +829,31 @@ async fn resolve_provider_secret(
     crate::config::resolve_provider_secret_value("default", env_key, secret_name, secrets).await
 }
 
+async fn build_sync_credentials(
+    context: &VerificationContext,
+    providers_settings: &crate::settings::ProvidersSettings,
+    providers: &[String],
+) -> std::collections::HashMap<String, String> {
+    let mut credentials = std::collections::HashMap::new();
+    for provider in providers {
+        let Some(endpoint) = crate::config::provider_catalog::endpoint_for(provider) else {
+            continue;
+        };
+        if let Some(secret) = resolve_provider_secret(
+            provider,
+            providers_settings,
+            &endpoint.env_key_name,
+            &endpoint.secret_name,
+            context.secrets_store.as_ref(),
+        )
+        .await
+        {
+            credentials.insert(provider.clone(), secret);
+        }
+    }
+    credentials
+}
+
 fn live_model_ids(
     slug: &str,
     discovered_models: Vec<crate::llm::discovery::DiscoveredModel>,
@@ -975,6 +997,18 @@ fn render_verify_results_json(results: &[ProviderVerifyResult]) -> anyhow::Resul
     Ok(serde_json::to_string_pretty(results)?)
 }
 
+fn render_sync_results_json(
+    output_path: &std::path::Path,
+    result: &crate::llm::model_metadata_sync::ModelMetadataSyncResult,
+) -> anyhow::Result<String> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "output_path": output_path.display().to_string(),
+        "generated_at": result.snapshot.generated_at,
+        "model_count": result.snapshot.models.len(),
+        "providers": result.reports,
+    }))?)
+}
+
 fn render_verify_results_text(
     branding: &TerminalBranding,
     results: &[ProviderVerifyResult],
@@ -1025,6 +1059,57 @@ fn render_verify_results_text(
             }
         ));
     }
+    out
+}
+
+fn render_sync_results_text(
+    branding: &TerminalBranding,
+    output_path: &std::path::Path,
+    result: &crate::llm::model_metadata_sync::ModelMetadataSyncResult,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&branding.body_bold("Model Catalog Sync"));
+    out.push('\n');
+    out.push_str(&branding.separator(36));
+    out.push_str("\n\n");
+    out.push_str(&format!(
+        "{}\n",
+        branding.key_value("Output", output_path.display().to_string())
+    ));
+    out.push_str(&format!(
+        "{}\n",
+        branding.key_value("Models", result.snapshot.models.len().to_string())
+    ));
+    if let Some(generated_at) = &result.snapshot.generated_at {
+        out.push_str(&format!(
+            "{}\n\n",
+            branding.key_value("Generated", generated_at)
+        ));
+    } else {
+        out.push('\n');
+    }
+
+    for report in &result.reports {
+        let status = if report.error.is_some() {
+            branding.bad("fail")
+        } else if report.upserted == 0 && report.unresolved.is_empty() {
+            branding.muted("noop")
+        } else {
+            branding.good("ok")
+        };
+        out.push_str(&format!(
+            "{}  {}  upserted={:>4}  unresolved={:>4}",
+            branding.body(format!("{:12}", report.provider)),
+            status,
+            report.upserted,
+            report.unresolved.len(),
+        ));
+        if let Some(error) = &report.error {
+            out.push_str(&format!("  error={error}"));
+        }
+        out.push('\n');
+    }
+
     out
 }
 

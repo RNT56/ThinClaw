@@ -5,6 +5,9 @@ target*/
 .env.*
 *.md
 !CLAUDE.md
+!assets/
+!assets/**
+!desktop-sidecars/
+!desktop-sidecars/**
 node_modules/
-tools-src/
 .cargo-codex-home/

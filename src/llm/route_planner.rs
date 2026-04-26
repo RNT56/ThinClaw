@@ -5,7 +5,7 @@
 //!
 //! - **PrimaryOnly** — all requests → primary model
 //! - **CheapSplit** — classify by complexity, preserve cascade escalation
-//! - **AdvisorExecutor** — executor runs everything, consults advisor on demand
+//! - **AdvisorExecutor** — executor runs everything, auto-escalates on risky and complex turns, and can consult the advisor on demand
 //! - **Policy** — delegated to `RoutingPolicy` rule engine
 //!
 //! Reference: <https://claude.com/blog/the-advisor-strategy>
@@ -129,6 +129,10 @@ pub struct RoutePlannerInput {
     pub last_user_message: Option<String>,
     /// Optional advisor escalation prompt override (AdvisorExecutor mode).
     pub advisor_escalation_prompt: Option<String>,
+    /// Ordered primary-provider preferences derived from user settings.
+    pub primary_provider_preferences: Vec<String>,
+    /// Ordered cheap-provider preferences derived from user settings.
+    pub cheap_provider_preferences: Vec<String>,
 }
 
 /// How to handle post-response quality escalation.
@@ -178,6 +182,14 @@ pub struct RouteDecision {
     pub cascade: CascadePolicy,
     /// Advisor configuration (AdvisorExecutor mode only).
     pub advisor: Option<AdvisorConfig>,
+    /// Whether the advisor lane is usable for this decision.
+    pub advisor_ready: bool,
+    /// Why the advisor lane is disabled, if applicable.
+    pub advisor_disabled_reason: Option<String>,
+    /// Concrete executor target selected for this decision, when applicable.
+    pub executor_target: Option<String>,
+    /// Concrete advisor target selected for this decision, when applicable.
+    pub advisor_target: Option<String>,
     /// Whether two-phase tool synthesis is recommended.
     pub tool_phase_synthesis: bool,
 }
@@ -197,6 +209,10 @@ impl RouteDecision {
             matched_rule_index: None,
             cascade: CascadePolicy::None,
             advisor: None,
+            advisor_ready: false,
+            advisor_disabled_reason: None,
+            executor_target: None,
+            advisor_target: None,
             tool_phase_synthesis: false,
         }
     }
@@ -289,7 +305,7 @@ impl RouteScorer {
         }
 
         // ── Dimension scores ───────────────────────────────────
-        let quality = model_quality_tier_for_candidate(candidate);
+        let quality = quality_score_for_candidate(candidate, capabilities);
         let mut cost = cost_score(candidate.cost_per_m_usd);
         if candidate.cost_stale {
             // Penalize stale dynamic pricing so fresh-priced candidates win ties.
@@ -322,38 +338,35 @@ impl RouteScorer {
     }
 }
 
-/// Quality tier lookup by model target.
-fn model_quality_tier(target: &str) -> f64 {
-    let lower = target.to_lowercase();
-    // Check model family patterns
-    if lower.contains("opus") {
-        0.95
-    } else if lower.contains("gpt-4o") && !lower.contains("mini") {
-        0.90
-    } else if lower.contains("sonnet") || (lower.contains("gemini-2") && lower.contains("pro")) {
-        0.85
-    } else if lower.contains("flash") && !lower.contains("lite") {
-        0.60
-    } else if lower.contains("haiku")
-        || lower.contains("gpt-4o-mini")
-        || lower.contains("4o-mini")
-        || lower == "cheap"
-    {
-        0.50
-    } else if lower.contains("flash-lite") {
-        0.35
-    } else if lower == "primary" {
-        0.85 // assume primary is a quality model
-    } else {
-        0.50 // unknown
+fn quality_score_for_candidate(
+    candidate: &RouteCandidate,
+    capabilities: &ProviderCapabilities,
+) -> f64 {
+    if let Some(compat) = candidate_model_compat(candidate) {
+        return compat.routing_quality_score();
     }
+
+    crate::config::model_compat::estimate_routing_quality(
+        capabilities.supports_streaming,
+        capabilities.supports_tools,
+        capabilities.supports_vision,
+        capabilities.supports_thinking,
+        None,
+        None,
+        capabilities.max_context_tokens,
+        None,
+        candidate.cost_per_m_usd,
+    )
 }
 
-fn model_quality_tier_for_candidate(candidate: &RouteCandidate) -> f64 {
-    if let Some(model_id) = candidate.model_id.as_deref() {
-        return model_quality_tier(model_id);
-    }
-    model_quality_tier(&candidate.target)
+fn candidate_model_compat(
+    candidate: &RouteCandidate,
+) -> Option<crate::config::model_compat::ModelCompat> {
+    candidate
+        .model_id
+        .as_deref()
+        .or_else(|| candidate.target.rsplit_once('/').map(|(_, model)| model))
+        .and_then(crate::config::model_compat::find_model)
 }
 
 /// Cost score: cheaper is higher (inverted, normalized 0–1).
@@ -388,6 +401,9 @@ fn latency_score(p50_ms: Option<f64>) -> f64 {
 pub const ADVISOR_SYSTEM_PROMPT: &str = "\
 You are an advisor to a less capable model that is executing a task. \
 Your role is to provide strategic guidance, NOT to execute the task yourself.\n\
+\n\
+Act like a careful senior reviewer. Prefer preventing bad execution over optimistic continuation. \
+If the executor is missing critical context, stuck, or following a risky plan, say so clearly.\n\
 \n\
 Respond with:\n\
 - A clear plan or recommendation\n\
@@ -459,6 +475,10 @@ impl RoutePlanner {
                 matched_rule_index: None,
                 cascade: CascadePolicy::None,
                 advisor: None,
+                advisor_ready: false,
+                advisor_disabled_reason: None,
+                executor_target: None,
+                advisor_target: None,
                 tool_phase_synthesis: false,
             };
         }
@@ -494,7 +514,9 @@ impl RoutePlanner {
             if input.required_capabilities.tool_use
                 && self.tool_phase_synthesis_enabled
                 && input.model_override.is_none()
-                && self.has_cheap_candidate(input)
+                && input.candidates.iter().any(|candidate| {
+                    candidate.target == "cheap" || candidate.target.ends_with("@cheap")
+                })
             {
                 decision.tool_phase_synthesis = true;
             }
@@ -574,6 +596,10 @@ impl RoutePlanner {
                 matched_rule_index: None,
                 cascade,
                 advisor: None,
+                advisor_ready: false,
+                advisor_disabled_reason: None,
+                executor_target: None,
+                advisor_target: None,
                 tool_phase_synthesis: false,
             };
         }
@@ -598,55 +624,178 @@ impl RoutePlanner {
     // -- AdvisorExecutor (new) --
 
     fn plan_advisor_executor(&self, input: &RoutePlannerInput) -> RouteDecision {
-        // Everything goes to executor (cheap model slot), including tools and streaming.
-        // Advisor config is attached so the dispatcher can inject the consult_advisor tool.
-        let has_cheap = self.has_cheap_candidate(input);
+        let evaluation = self.evaluate_candidates(
+            input,
+            |candidate| advisor_executor_lane_bias(candidate, input),
+            None,
+        );
+        let executor = evaluation
+            .ranked
+            .iter()
+            .find(|candidate| candidate.is_executor_lane())
+            .cloned();
+        let executor_identity =
+            preferred_lane_identity_candidate(&evaluation.ranked, PreferredLaneRole::Cheap)
+                .or_else(|| executor.clone());
+        let request_primary = evaluation
+            .ranked
+            .iter()
+            .find(|candidate| candidate.is_primary_lane())
+            .cloned();
 
-        let (target, reason) = if has_cheap {
-            (
-                "cheap".to_string(),
-                "AdvisorExecutor: executor (cheap) handles all requests".to_string(),
-            )
-        } else {
-            // No cheap model configured — fall back to primary-only.
-            // This gracefully degrades: user gets the advisor prompt but no cost savings.
-            (
-                "primary".to_string(),
-                "AdvisorExecutor: no executor model configured, using primary".to_string(),
-            )
+        let mut advisor_input = input.clone();
+        advisor_input.required_capabilities = RequiredCapabilities {
+            streaming: false,
+            tool_use: false,
+            vision: false,
+            extended_thinking: false,
+        };
+        let advisor_evaluation = self.evaluate_candidates(
+            &advisor_input,
+            |candidate| primary_lane_bias(candidate, &input.primary_provider_preferences),
+            Some(&["primary"]),
+        );
+        let advisor = advisor_evaluation.ranked.first().cloned();
+        let advisor_identity = preferred_lane_identity_candidate(
+            &advisor_evaluation.ranked,
+            PreferredLaneRole::Primary,
+        )
+        .or_else(|| advisor.clone());
+
+        let primary_fallback = request_primary
+            .clone()
+            .or_else(|| advisor_identity.clone())
+            .or_else(|| {
+                evaluation
+                    .ranked_all
+                    .iter()
+                    .find(|candidate| candidate.is_primary_lane())
+                    .cloned()
+            });
+
+        let combined_candidate_list = evaluation.candidate_list.clone();
+        let mut combined_rejections = evaluation.rejections.clone();
+        combined_rejections.extend(advisor_evaluation.rejections.iter().cloned().map(
+            |mut rejection| {
+                rejection.reason = format!("advisor lane: {}", rejection.reason);
+                rejection
+            },
+        ));
+        let mut combined_score_breakdown = evaluation.score_breakdown.clone();
+        let advisor_only_scores = advisor_evaluation
+            .score_breakdown
+            .iter()
+            .filter(|score| {
+                !combined_score_breakdown
+                    .iter()
+                    .any(|existing| existing.target == score.target)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        combined_score_breakdown.extend(advisor_only_scores);
+        let mut combined_diagnostics = evaluation.diagnostics.clone();
+        combined_diagnostics.extend(advisor_evaluation.diagnostics.clone());
+        combined_diagnostics.sort();
+        combined_diagnostics.dedup();
+
+        let disable_reason = match (&executor_identity, &advisor_identity) {
+            (None, _) => {
+                Some("no cheap-capable executor route satisfies the current request".to_string())
+            }
+            (Some(_), None) => {
+                Some("no primary advisor route is available for consultation".to_string())
+            }
+            (Some(executor), Some(advisor)) if executor.same_identity(advisor) => Some(
+                "advisor target resolves to the same provider/model as the executor".to_string(),
+            ),
+            _ => None,
         };
 
-        let advisor = if has_cheap {
-            Some(AdvisorConfig {
-                advisor_target: "primary".to_string(),
+        if let Some(reason) = disable_reason {
+            combined_diagnostics.push(format!("ADVISOR_DISABLED: {}", reason));
+            let fallback = primary_fallback.unwrap_or_else(|| ScoredCandidate {
+                target: "primary".to_string(),
+                telemetry_key: Some("primary||".to_string()),
+                provider_slug: None,
+                model_id: None,
+                breakdown: RoutingScoreBreakdown {
+                    quality: 0.0,
+                    cost: 0.0,
+                    latency: 0.0,
+                    health: 0.0,
+                    policy_bias: 0.0,
+                    composite: 0.0,
+                },
+            });
+            return RouteDecision {
+                target: fallback.target.clone(),
+                fallbacks: Vec::new(),
+                reason: format!("AdvisorExecutor degraded to primary-only: {}", reason),
+                score: Some(fallback.breakdown.clone()),
+                candidate_list: combined_candidate_list,
+                rejections: combined_rejections,
+                score_breakdown: combined_score_breakdown,
+                diagnostics: combined_diagnostics,
+                telemetry_key: fallback
+                    .telemetry_key
+                    .clone()
+                    .unwrap_or_else(|| "primary||".to_string()),
+                matched_rule_index: None,
+                cascade: CascadePolicy::None,
+                advisor: None,
+                advisor_ready: false,
+                advisor_disabled_reason: Some(reason),
+                executor_target: executor_identity
+                    .as_ref()
+                    .map(|candidate| candidate.target.clone())
+                    .or_else(|| Some(fallback.target.clone())),
+                advisor_target: advisor_identity
+                    .as_ref()
+                    .map(|candidate| candidate.target.clone()),
+                tool_phase_synthesis: false,
+            };
+        }
+
+        let executor = executor.expect("executor checked above");
+        let advisor = advisor.expect("advisor checked above");
+        let advisor_target = advisor.target.clone();
+        let executor_identity_target = executor_identity
+            .as_ref()
+            .map(|candidate| candidate.target.clone())
+            .unwrap_or_else(|| executor.target.clone());
+        let advisor_identity_target = advisor_identity
+            .as_ref()
+            .map(|candidate| candidate.target.clone())
+            .unwrap_or_else(|| advisor_target.clone());
+
+        RouteDecision {
+            target: executor.target.clone(),
+            fallbacks: vec![advisor_target.clone()],
+            reason: "AdvisorExecutor: executor lane handles the request and may consult the advisor lane".to_string(),
+            score: Some(executor.breakdown.clone()),
+            candidate_list: combined_candidate_list,
+            rejections: combined_rejections,
+            score_breakdown: combined_score_breakdown,
+            diagnostics: combined_diagnostics,
+            telemetry_key: executor
+                .telemetry_key
+                .clone()
+                .unwrap_or_else(|| "executor||".to_string()),
+            matched_rule_index: None,
+            cascade: CascadePolicy::None,
+            advisor: Some(AdvisorConfig {
+                advisor_target: advisor_target.clone(),
                 max_advisor_calls: self.advisor_max_calls,
                 advisor_system_prompt: input
                     .advisor_escalation_prompt
                     .clone()
                     .filter(|prompt| !prompt.trim().is_empty())
                     .unwrap_or_else(|| ADVISOR_SYSTEM_PROMPT.to_string()),
-            })
-        } else {
-            None
-        };
-
-        RouteDecision {
-            target,
-            fallbacks: vec!["primary".to_string()],
-            reason,
-            score: None,
-            candidate_list: input.candidates.iter().map(|c| c.target.clone()).collect(),
-            rejections: Vec::new(),
-            score_breakdown: Vec::new(),
-            diagnostics: Vec::new(),
-            telemetry_key: if has_cheap {
-                "executor||".to_string()
-            } else {
-                "primary||".to_string()
-            },
-            matched_rule_index: None,
-            cascade: CascadePolicy::None,
-            advisor,
+            }),
+            advisor_ready: true,
+            advisor_disabled_reason: None,
+            executor_target: Some(executor_identity_target),
+            advisor_target: Some(advisor_identity_target),
             tool_phase_synthesis: false,
         }
     }
@@ -728,15 +877,15 @@ impl RoutePlanner {
             matched_rule_index: decision.matched_rule_index,
             cascade: CascadePolicy::None,
             advisor: None,
+            advisor_ready: false,
+            advisor_disabled_reason: None,
+            executor_target: None,
+            advisor_target: None,
             tool_phase_synthesis: false,
         }
     }
 
     // -- Helper --
-
-    fn has_cheap_candidate(&self, input: &RoutePlannerInput) -> bool {
-        input.candidates.iter().any(|c| c.target == "cheap")
-    }
 
     fn derive_cheap_split_complexity(&self, input: &RoutePlannerInput) -> TaskComplexity {
         // Runtime context first: avoid empty-message defaults.
@@ -786,23 +935,30 @@ impl RoutePlanner {
 
         for candidate in &input.candidates {
             let capabilities = ProviderCapabilities::from_candidate(&candidate.capabilities);
-            if input.required_capabilities.streaming && capabilities.supports_streaming.is_none() {
+            let missing_required_capabilities =
+                missing_required_capability_labels(&input.required_capabilities, &capabilities);
+            if !missing_required_capabilities.is_empty() {
+                let joined = missing_required_capabilities.join(", ");
+                let is_executor_lane =
+                    candidate.target == "cheap" || candidate.target.ends_with("@cheap");
                 diagnostics.push(format!(
-                    "Capability metadata unknown (streaming) for '{}'; fail-open",
-                    candidate.target
+                    "Capability metadata unknown ({joined}) for '{}'; {}",
+                    candidate.target,
+                    if is_executor_lane {
+                        "rejecting executor lane"
+                    } else {
+                        "retaining primary fail-open fallback"
+                    }
                 ));
-            }
-            if input.required_capabilities.tool_use && capabilities.supports_tools.is_none() {
-                diagnostics.push(format!(
-                    "Capability metadata unknown (tool_use) for '{}'; fail-open",
-                    candidate.target
-                ));
-            }
-            if input.required_capabilities.vision && capabilities.supports_vision.is_none() {
-                diagnostics.push(format!(
-                    "Capability metadata unknown (vision) for '{}'; fail-open",
-                    candidate.target
-                ));
+                if is_executor_lane {
+                    rejections.push(CandidateRejection {
+                        target: candidate.target.clone(),
+                        reason: format!(
+                            "missing verified capability metadata for executor lane: {joined}"
+                        ),
+                    });
+                    continue;
+                }
             }
 
             let health = candidate
@@ -831,6 +987,8 @@ impl RoutePlanner {
                     let scored = ScoredCandidate {
                         target: candidate.target.clone(),
                         telemetry_key: candidate.telemetry_key.clone(),
+                        provider_slug: candidate.provider_slug.clone(),
+                        model_id: candidate.model_id.clone(),
                         breakdown: breakdown.clone(),
                     };
                     ranked_all.push(scored.clone());
@@ -899,7 +1057,33 @@ impl RoutePlanner {
 struct ScoredCandidate {
     target: String,
     telemetry_key: Option<String>,
+    provider_slug: Option<String>,
+    model_id: Option<String>,
     breakdown: RoutingScoreBreakdown,
+}
+
+impl ScoredCandidate {
+    fn is_executor_lane(&self) -> bool {
+        self.target == "cheap" || self.target.ends_with("@cheap")
+    }
+
+    fn is_primary_lane(&self) -> bool {
+        self.target == "primary" || self.target.ends_with("@primary")
+    }
+
+    fn same_identity(&self, other: &Self) -> bool {
+        match (
+            self.provider_slug.as_deref(),
+            self.model_id.as_deref(),
+            other.provider_slug.as_deref(),
+            other.model_id.as_deref(),
+        ) {
+            (Some(left_provider), Some(left_model), Some(right_provider), Some(right_model)) => {
+                left_provider == right_provider && left_model == right_model
+            }
+            _ => self.target == other.target,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -910,6 +1094,91 @@ struct CandidateEvaluation {
     diagnostics: Vec<String>,
     ranked: Vec<ScoredCandidate>,
     ranked_all: Vec<ScoredCandidate>,
+}
+
+fn missing_required_capability_labels(
+    required: &RequiredCapabilities,
+    capabilities: &ProviderCapabilities,
+) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    if required.streaming && capabilities.supports_streaming.is_none() {
+        missing.push("streaming");
+    }
+    if required.tool_use && capabilities.supports_tools.is_none() {
+        missing.push("tool_use");
+    }
+    if required.vision && capabilities.supports_vision.is_none() {
+        missing.push("vision");
+    }
+    if required.extended_thinking && capabilities.supports_thinking.is_none() {
+        missing.push("extended_thinking");
+    }
+    missing
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PreferredLaneRole {
+    Primary,
+    Cheap,
+}
+
+fn preferred_lane_identity_candidate(
+    candidates: &[ScoredCandidate],
+    role: PreferredLaneRole,
+) -> Option<ScoredCandidate> {
+    let matches_role = |candidate: &&ScoredCandidate| match role {
+        PreferredLaneRole::Primary => candidate.is_primary_lane(),
+        PreferredLaneRole::Cheap => candidate.is_executor_lane(),
+    };
+
+    candidates
+        .iter()
+        .find(|candidate| {
+            matches_role(candidate)
+                && candidate.target.ends_with(match role {
+                    PreferredLaneRole::Primary => "@primary",
+                    PreferredLaneRole::Cheap => "@cheap",
+                })
+        })
+        .cloned()
+        .or_else(|| candidates.iter().find(matches_role).cloned())
+}
+
+fn advisor_executor_lane_bias(candidate: &RouteCandidate, input: &RoutePlannerInput) -> f64 {
+    if candidate.target == "cheap" || candidate.target.ends_with("@cheap") {
+        return cheap_lane_bias(candidate, &input.cheap_provider_preferences);
+    }
+    if candidate.target == "primary" || candidate.target.ends_with("@primary") {
+        return primary_lane_bias(candidate, &input.primary_provider_preferences);
+    }
+    0.0
+}
+
+fn primary_lane_bias(candidate: &RouteCandidate, preferences: &[String]) -> f64 {
+    provider_preference_bias(candidate.provider_slug.as_deref(), preferences, 0.08)
+}
+
+fn cheap_lane_bias(candidate: &RouteCandidate, preferences: &[String]) -> f64 {
+    provider_preference_bias(candidate.provider_slug.as_deref(), preferences, 0.10)
+}
+
+fn provider_preference_bias(
+    provider_slug: Option<&str>,
+    preferences: &[String],
+    top_bias: f64,
+) -> f64 {
+    let Some(provider_slug) = provider_slug else {
+        return 0.0;
+    };
+    let Some(index) = preferences.iter().position(|entry| entry == provider_slug) else {
+        return 0.0;
+    };
+    match index {
+        0 => top_bias,
+        1 => top_bias * 0.5,
+        2 => top_bias * 0.25,
+        _ => 0.0,
+    }
 }
 
 fn merge_complexity(a: TaskComplexity, b: TaskComplexity) -> TaskComplexity {
@@ -1001,6 +1270,10 @@ pub fn log_routing_decision(decision: &RouteDecision, mode: &str) {
         routing_mode = %mode,
         cascade = ?decision.cascade,
         advisor_active = decision.advisor.is_some(),
+        advisor_ready = decision.advisor_ready,
+        advisor_disabled_reason = ?decision.advisor_disabled_reason,
+        executor_target = ?decision.executor_target,
+        advisor_target = ?decision.advisor_target,
         tool_phase_synthesis = decision.tool_phase_synthesis,
         matched_rule = ?decision.matched_rule_index,
         fallback_count = decision.fallbacks.len(),
@@ -1165,13 +1438,31 @@ mod tests {
             model_override: None,
             provider_health: HashMap::new(),
             candidates: vec![
-                RouteCandidate::new("primary", Some(30.0)),
-                RouteCandidate::new("cheap", Some(1.0)),
+                RouteCandidate::new("primary", Some(30.0)).with_capabilities(
+                    crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                        supports_streaming: Some(true),
+                        supports_tools: Some(true),
+                        supports_vision: Some(true),
+                        supports_thinking: Some(true),
+                        ..Default::default()
+                    },
+                ),
+                RouteCandidate::new("cheap", Some(1.0)).with_capabilities(
+                    crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                        supports_streaming: Some(true),
+                        supports_tools: Some(true),
+                        supports_vision: Some(true),
+                        supports_thinking: Some(true),
+                        ..Default::default()
+                    },
+                ),
             ],
             turn_cost_usd: 0.0,
             budget_utilization: None,
             last_user_message: None,
             advisor_escalation_prompt: None,
+            primary_provider_preferences: Vec::new(),
+            cheap_provider_preferences: Vec::new(),
         }
     }
 
@@ -1280,6 +1571,9 @@ mod tests {
         let d = p.plan(&input, None);
         assert_eq!(d.target, "cheap");
         assert!(d.advisor.is_some());
+        assert!(d.advisor_ready);
+        assert_eq!(d.executor_target.as_deref(), Some("cheap"));
+        assert_eq!(d.advisor_target.as_deref(), Some("primary"));
     }
 
     #[test]
@@ -1313,6 +1607,8 @@ mod tests {
         let d = p.plan(&input, None);
         assert_eq!(d.target, "primary");
         assert!(d.advisor.is_none());
+        assert!(!d.advisor_ready);
+        assert!(d.advisor_disabled_reason.is_some());
     }
 
     #[test]
@@ -1322,6 +1618,177 @@ mod tests {
         input.routing_mode = RoutingMode::AdvisorExecutor;
         let d = p.plan(&input, None);
         assert_eq!(d.advisor.as_ref().unwrap().max_advisor_calls, 5);
+    }
+
+    #[test]
+    fn advisor_executor_falls_back_when_cheap_lane_lacks_required_capability() {
+        let p = planner();
+        let mut input = default_input();
+        input.routing_mode = RoutingMode::AdvisorExecutor;
+        input.required_capabilities.tool_use = true;
+        input.candidates = vec![
+            RouteCandidate::new("primary", Some(30.0)).with_capabilities(
+                crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_tools: Some(true),
+                    ..Default::default()
+                },
+            ),
+            RouteCandidate::new("cheap", Some(1.0)).with_capabilities(
+                crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_tools: Some(false),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        let decision = p.plan(&input, None);
+        assert_eq!(decision.target, "primary");
+        assert!(!decision.advisor_ready);
+        assert!(
+            decision
+                .advisor_disabled_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cheap-capable executor")
+        );
+    }
+
+    #[test]
+    fn advisor_executor_rejects_executor_lane_when_required_capability_metadata_is_unknown() {
+        let p = planner();
+        let mut input = default_input();
+        input.routing_mode = RoutingMode::AdvisorExecutor;
+        input.required_capabilities.tool_use = true;
+        input.candidates = vec![
+            RouteCandidate::new("primary", Some(30.0)).with_capabilities(
+                crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_tools: Some(true),
+                    ..Default::default()
+                },
+            ),
+            RouteCandidate::new("cheap", Some(1.0)),
+        ];
+
+        let decision = p.plan(&input, None);
+
+        assert_eq!(decision.target, "primary");
+        assert!(!decision.advisor_ready);
+        assert!(decision.rejections.iter().any(|rejection| {
+            rejection.target == "cheap"
+                && rejection
+                    .reason
+                    .contains("missing verified capability metadata for executor lane")
+        }));
+    }
+
+    #[test]
+    fn advisor_executor_disables_when_executor_and_advisor_resolve_to_same_model() {
+        let p = planner();
+        let mut input = default_input();
+        input.routing_mode = RoutingMode::AdvisorExecutor;
+        input.candidates = vec![
+            RouteCandidate::new("primary", Some(30.0))
+                .with_identity(Some("openai".to_string()), Some("gpt-4o-mini".to_string())),
+            RouteCandidate::new("cheap", Some(1.0))
+                .with_identity(Some("openai".to_string()), Some("gpt-4o-mini".to_string())),
+        ];
+
+        let decision = p.plan(&input, None);
+        assert_eq!(decision.target, "primary");
+        assert!(!decision.advisor_ready);
+        assert!(
+            decision
+                .advisor_disabled_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("same provider/model")
+        );
+    }
+
+    #[test]
+    fn advisor_executor_identity_check_prefers_concrete_slot_targets() {
+        let p = planner();
+        let mut input = default_input();
+        input.routing_mode = RoutingMode::AdvisorExecutor;
+        input.candidates = vec![
+            RouteCandidate::new("cheap", Some(1.0))
+                .with_identity(Some("openai".to_string()), Some("gpt-5.4-mini".to_string())),
+            RouteCandidate::new("primary", Some(30.0))
+                .with_identity(Some("openai".to_string()), Some("gpt-5.4-mini".to_string())),
+            RouteCandidate::new("openai@cheap", Some(1.0))
+                .with_identity(Some("openai".to_string()), Some("gpt-5.4-mini".to_string())),
+            RouteCandidate::new("openai@primary", Some(30.0))
+                .with_identity(Some("openai".to_string()), Some("gpt-5.4".to_string())),
+        ];
+
+        let decision = p.plan(&input, None);
+        assert!(decision.advisor_ready);
+        assert!(decision.advisor_disabled_reason.is_none());
+        assert_eq!(decision.executor_target.as_deref(), Some("openai@cheap"));
+        assert_eq!(decision.advisor_target.as_deref(), Some("openai@primary"));
+    }
+
+    #[test]
+    fn advisor_executor_biases_toward_configured_primary_and_cheap_providers() {
+        let p = planner();
+        let mut input = default_input();
+        input.routing_mode = RoutingMode::AdvisorExecutor;
+        input.primary_provider_preferences = vec!["openai".to_string(), "anthropic".to_string()];
+        input.cheap_provider_preferences = vec!["openai".to_string(), "anthropic".to_string()];
+        input.candidates = vec![
+            RouteCandidate::new("openai@primary", Some(6.0))
+                .with_identity(
+                    Some("openai".to_string()),
+                    Some("unknown-primary".to_string()),
+                )
+                .with_health(Some(0.9))
+                .with_capabilities(crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_streaming: Some(true),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    ..Default::default()
+                }),
+            RouteCandidate::new("anthropic@primary", Some(6.0))
+                .with_identity(
+                    Some("anthropic".to_string()),
+                    Some("unknown-primary-alt".to_string()),
+                )
+                .with_health(Some(1.0))
+                .with_capabilities(crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_streaming: Some(true),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    ..Default::default()
+                }),
+            RouteCandidate::new("openai@cheap", Some(3.0))
+                .with_identity(
+                    Some("openai".to_string()),
+                    Some("unknown-cheap".to_string()),
+                )
+                .with_health(Some(0.9))
+                .with_capabilities(crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_streaming: Some(true),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    ..Default::default()
+                }),
+            RouteCandidate::new("anthropic@cheap", Some(3.0))
+                .with_identity(
+                    Some("anthropic".to_string()),
+                    Some("unknown-cheap-alt".to_string()),
+                )
+                .with_health(Some(1.0))
+                .with_capabilities(crate::llm::routing_policy::ProviderCapabilitiesMetadata {
+                    supports_streaming: Some(true),
+                    supports_tools: Some(true),
+                    supports_vision: Some(true),
+                    ..Default::default()
+                }),
+        ];
+
+        let decision = p.plan(&input, None);
+        assert_eq!(decision.executor_target.as_deref(), Some("openai@cheap"));
+        assert_eq!(decision.advisor_target.as_deref(), Some("openai@primary"));
     }
 
     // -- Policy --
@@ -1482,15 +1949,20 @@ mod tests {
         );
     }
 
-    // -- Quality tiers --
+    // -- Quality scoring --
 
     #[test]
-    fn quality_tier_known_models() {
-        assert!(model_quality_tier("opus") > 0.9);
-        assert!(model_quality_tier("sonnet") > 0.8);
-        assert!(model_quality_tier("haiku") < 0.6);
-        assert!(model_quality_tier("primary") > 0.8);
-        assert!(model_quality_tier("cheap") < 0.6);
+    fn quality_score_uses_model_compat_data() {
+        let caps = ProviderCapabilities::default();
+        let gpt_54 = RouteCandidate::new("openai@primary", Some(17.5))
+            .with_identity(Some("openai".to_string()), Some("gpt-5.4".to_string()));
+        let gpt_54_mini = RouteCandidate::new("openai@cheap", Some(5.25))
+            .with_identity(Some("openai".to_string()), Some("gpt-5.4-mini".to_string()));
+
+        assert!(
+            quality_score_for_candidate(&gpt_54, &caps)
+                > quality_score_for_candidate(&gpt_54_mini, &caps)
+        );
     }
 
     #[test]

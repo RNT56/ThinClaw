@@ -17,8 +17,11 @@
 //! - **DenyList**: All tools except explicitly listed ones are available
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::llm::ToolDefinition;
 
 /// Policy controlling which tools are accessible.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -170,11 +173,208 @@ impl ToolPolicyManager {
 
         &self.default_policy
     }
+
+    fn from_env_override(raw: &str) -> Result<Option<Self>, String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        serde_json::from_str(trimmed)
+            .or_else(|_| toml::from_str(trimmed))
+            .map(Some)
+            .map_err(|err| format!("invalid tool policy override payload: {err}"))
+    }
+
+    fn load_toml_override(path: &Path) -> Result<Option<Self>, String> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(format!("failed to read {}: {err}", path.display())),
+        };
+        let value = toml::from_str::<toml::Value>(&raw)
+            .map_err(|err| format!("invalid TOML in {}: {err}", path.display()))?;
+        if value.get("tool_policies").is_none() {
+            return Ok(None);
+        }
+        crate::settings::Settings::load_toml(path)
+            .map_err(|err| format!("failed to load TOML settings: {err}"))?
+            .map(|settings| settings.tool_policies)
+            .ok_or_else(|| "missing tool_policies section".to_string())
+            .map(Some)
+    }
+
+    fn deny_all_policy_manager() -> Self {
+        Self {
+            default_policy: ToolAccessPolicy::allow_only(std::iter::empty::<String>()),
+            channel_policies: HashMap::new(),
+            group_policies: HashMap::new(),
+        }
+    }
+
+    fn fail_open_overrides_enabled() -> bool {
+        crate::config::helpers::optional_env("THINCLAW_TOOL_POLICIES_FAIL_OPEN")
+            .ok()
+            .flatten()
+            .map(|raw| {
+                matches!(
+                    raw.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// Load the effective policy manager using runtime precedence:
+    /// env var > TOML config > persisted settings > defaults.
+    pub fn load_from_settings() -> Self {
+        let persisted = crate::settings::Settings::load();
+        let toml_path = crate::settings::Settings::default_toml_path();
+        let fail_open = Self::fail_open_overrides_enabled();
+        let toml = match Self::load_toml_override(&toml_path) {
+            Ok(value) => value,
+            Err(err) => {
+                if fail_open {
+                    tracing::warn!(
+                        error = %err,
+                        "Ignoring invalid tool policy TOML due to THINCLAW_TOOL_POLICIES_FAIL_OPEN"
+                    );
+                    None
+                } else {
+                    tracing::error!(
+                        error = %err,
+                        "Tool policy configuration is invalid; failing closed"
+                    );
+                    return Self::deny_all_policy_manager();
+                }
+            }
+        };
+        let env_override = crate::config::helpers::optional_env("THINCLAW_TOOL_POLICIES")
+            .ok()
+            .flatten()
+            .or_else(|| {
+                crate::config::helpers::optional_env("TOOL_POLICIES_JSON")
+                    .ok()
+                    .flatten()
+            });
+        let mut resolved = persisted.tool_policies;
+        if let Some(toml_policy) = toml {
+            resolved = toml_policy;
+        }
+        if let Some(raw) = env_override {
+            match Self::from_env_override(&raw) {
+                Ok(Some(env_policy)) => {
+                    resolved = env_policy;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    if fail_open {
+                        tracing::warn!(
+                            error = %err,
+                            "Ignoring invalid tool policy env override due to THINCLAW_TOOL_POLICIES_FAIL_OPEN"
+                        );
+                    } else {
+                        tracing::error!(
+                            error = %err,
+                            "Tool policy env override is invalid; failing closed"
+                        );
+                        return Self::deny_all_policy_manager();
+                    }
+                }
+            }
+        }
+        resolved
+    }
+
+    /// Resolve the effective `(channel, group_id)` scope from job metadata.
+    pub fn scope_from_metadata(metadata: &serde_json::Value) -> (Option<String>, Option<String>) {
+        let channel = metadata_value_as_string(metadata, "channel");
+        let group_id = [
+            "group_id",
+            "chat_id",
+            "room_id",
+            "conversation_id",
+            "conversation_scope_id",
+            "thread_id",
+        ]
+        .into_iter()
+        .find_map(|key| metadata_value_as_string(metadata, key));
+        (channel, group_id)
+    }
+
+    /// Filter tool definitions for the effective metadata scope.
+    pub fn filter_tool_definitions_for_metadata(
+        &self,
+        defs: Vec<ToolDefinition>,
+        metadata: &serde_json::Value,
+    ) -> Vec<ToolDefinition> {
+        let (channel, group_id) = Self::scope_from_metadata(metadata);
+        defs.into_iter()
+            .filter(|def| self.is_allowed(&def.name, channel.as_deref(), group_id.as_deref()))
+            .collect()
+    }
+
+    /// Return an execution error when a tool is blocked for the metadata scope.
+    pub fn denial_reason_for_metadata(
+        &self,
+        tool_name: &str,
+        metadata: &serde_json::Value,
+    ) -> Option<String> {
+        let (channel, group_id) = Self::scope_from_metadata(metadata);
+        if self.is_allowed(tool_name, channel.as_deref(), group_id.as_deref()) {
+            return None;
+        }
+
+        let scope = match (channel.as_deref(), group_id.as_deref()) {
+            (Some(channel), Some(group_id)) => format!("channel '{channel}' group '{group_id}'"),
+            (Some(channel), None) => format!("channel '{channel}'"),
+            (None, Some(group_id)) => format!("group '{group_id}'"),
+            (None, None) => "the current context".to_string(),
+        };
+
+        Some(format!(
+            "Tool '{tool_name}' is blocked by the configured tool policy for {scope}."
+        ))
+    }
+}
+
+fn metadata_value_as_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    let value = metadata.get(key)?;
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(boolean) => Some(boolean.to_string()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn resolve_from_layers(
+        persisted: Option<&ToolPolicyManager>,
+        toml: Option<&ToolPolicyManager>,
+        env_override: Option<&str>,
+    ) -> ToolPolicyManager {
+        let mut resolved = persisted.cloned().unwrap_or_else(ToolPolicyManager::new);
+        if let Some(toml) = toml {
+            resolved = toml.clone();
+        }
+        if let Some(raw) = env_override
+            && let Ok(Some(env_policy)) = ToolPolicyManager::from_env_override(raw)
+        {
+            resolved = env_policy;
+        }
+        resolved
+    }
 
     #[test]
     fn test_allow_all_default() {
@@ -302,5 +502,78 @@ mod tests {
         assert!(!deserialized.is_allowed("shell", Some("signal"), None));
         assert!(deserialized.is_allowed("calculator", Some("signal"), Some("group1")));
         assert!(!deserialized.is_allowed("shell", Some("signal"), Some("group1")));
+    }
+
+    #[test]
+    fn layered_resolution_prefers_persisted_over_default() {
+        let mut persisted = ToolPolicyManager::new();
+        persisted.set_default(ToolAccessPolicy::deny(["shell"]));
+
+        let resolved = resolve_from_layers(Some(&persisted), None, None);
+        assert!(!resolved.is_allowed("shell", None, None));
+        assert!(resolved.is_allowed("calculator", None, None));
+    }
+
+    #[test]
+    fn layered_resolution_prefers_toml_over_persisted() {
+        let mut persisted = ToolPolicyManager::new();
+        persisted.set_default(ToolAccessPolicy::deny(["shell"]));
+
+        let mut toml = ToolPolicyManager::new();
+        toml.set_default(ToolAccessPolicy::allow_only(["calculator"]));
+
+        let resolved = resolve_from_layers(Some(&persisted), Some(&toml), None);
+        assert!(!resolved.is_allowed("shell", None, None));
+        assert!(resolved.is_allowed("calculator", None, None));
+        assert!(!resolved.is_allowed("search", None, None));
+    }
+
+    #[test]
+    fn layered_resolution_prefers_env_over_toml_and_persisted() {
+        let mut persisted = ToolPolicyManager::new();
+        persisted.set_default(ToolAccessPolicy::deny(["shell"]));
+
+        let mut toml = ToolPolicyManager::new();
+        toml.set_default(ToolAccessPolicy::allow_only(["calculator"]));
+
+        let env = serde_json::json!({
+            "default_policy": {
+                "mode": "deny_list",
+                "tools": ["calculator"]
+            },
+            "channel_policies": {
+                "web": {
+                    "mode": "allow_list",
+                    "tools": ["search"]
+                }
+            },
+            "group_policies": {}
+        })
+        .to_string();
+
+        let resolved = resolve_from_layers(Some(&persisted), Some(&toml), Some(&env));
+        assert!(resolved.is_allowed("shell", None, None));
+        assert!(!resolved.is_allowed("calculator", None, None));
+        assert!(resolved.is_allowed("search", Some("web"), None));
+        assert!(!resolved.is_allowed("shell", Some("web"), None));
+    }
+
+    #[test]
+    fn toml_override_parses_tool_policy_section() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let path = temp_dir.path().join("config.toml");
+        let mut settings = crate::settings::Settings::default();
+        settings.tool_policies.default_policy = ToolAccessPolicy::allow_only(["search"]);
+        settings
+            .tool_policies
+            .set_channel_policy("web", ToolAccessPolicy::deny(["search"]));
+        let raw = toml::to_string(&settings).expect("serialize settings to toml");
+        std::fs::write(&path, raw).expect("write toml");
+
+        let resolved = ToolPolicyManager::load_toml_override(&path)
+            .expect("parse toml override")
+            .expect("tool policy override present");
+        assert!(resolved.is_allowed("search", None, None));
+        assert!(!resolved.is_allowed("search", Some("web"), None));
     }
 }

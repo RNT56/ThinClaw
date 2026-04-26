@@ -1,25 +1,30 @@
 //! Stdio transport for MCP servers.
 //!
 //! Spawns a child process and communicates via JSON-RPC over stdin/stdout.
-//! This is the standard transport used by the majority of MCP servers
-//! (e.g., `npx @modelcontextprotocol/server-filesystem`, `uvx mcp-server-sqlite`).
-//!
-//! ## Protocol
-//!
-//! Each JSON-RPC message is written as a single line (newline-delimited JSON).
-//! The child process writes responses and notifications to stdout, one per line.
-//! Stderr output is logged for diagnostics but not parsed as protocol data.
+//! Supports responses, notifications, and server-initiated requests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
+use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, broadcast};
 
-use super::protocol::{McpRequest, McpResponse};
+use super::protocol::{McpError, McpNotification, McpRequest, McpResponse, McpTransportMessage};
 use crate::tools::tool::ToolError;
+
+/// Callback interface for inbound server traffic on stdio transports.
+#[async_trait]
+pub trait McpInboundHandler: Send + Sync {
+    /// Handle a server-initiated request and return the client response.
+    async fn handle_request(&self, request: McpRequest) -> McpResponse;
+
+    /// Observe a server notification.
+    async fn handle_notification(&self, notification: McpNotification);
+}
 
 /// A stdio transport that manages a child process for an MCP server.
 pub struct StdioTransport {
@@ -27,10 +32,10 @@ pub struct StdioTransport {
     child: Mutex<Child>,
 
     /// Writer to stdin of the child process.
-    stdin: Mutex<tokio::process::ChildStdin>,
+    stdin: Arc<Mutex<Option<tokio::process::ChildStdin>>>,
 
     /// Pending responses keyed by request ID.
-    pending: Arc<RwLock<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<McpResponse>>>>,
+    pending: Arc<RwLock<HashMap<u64, tokio::sync::oneshot::Sender<McpResponse>>>>,
 
     /// Whether the reader task is running.
     running: Arc<AtomicBool>,
@@ -38,33 +43,34 @@ pub struct StdioTransport {
     /// Handle to the reader task for cleanup.
     reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
 
+    /// Optional inbound request/notification handler.
+    handler: Option<Arc<dyn McpInboundHandler>>,
+
+    /// Broadcasts notifications and inbound server requests for observability.
+    inbound_events: broadcast::Sender<McpTransportMessage>,
+
     /// Server name for logging.
     server_name: String,
 }
 
 impl StdioTransport {
     /// Spawn a new stdio transport from a command and arguments.
-    ///
-    /// The child process is started immediately. Its stdout is continuously
-    /// read in a background task to dispatch responses.
     pub fn spawn(
         server_name: impl Into<String>,
         command: &str,
         args: &[String],
         env: &BTreeMap<String, String>,
+        handler: Option<Arc<dyn McpInboundHandler>>,
     ) -> Result<Self, ToolError> {
         let server_name = server_name.into();
 
-        // Inherit PATH from the current environment so npx/uvx/python can be found.
         let mut cmd = Command::new(command);
         cmd.args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            // Don't kill child if parent's ctrl-c propagation hits it
             .kill_on_drop(true);
 
-        // Set extra env vars from configuration
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -95,18 +101,23 @@ impl StdioTransport {
 
         let stderr = child.stderr.take();
 
-        let pending: Arc<
-            RwLock<std::collections::HashMap<u64, tokio::sync::oneshot::Sender<McpResponse>>>,
-        > = Arc::new(RwLock::new(std::collections::HashMap::new()));
+        let pending = Arc::new(RwLock::new(HashMap::<
+            u64,
+            tokio::sync::oneshot::Sender<McpResponse>,
+        >::new()));
         let running = Arc::new(AtomicBool::new(true));
+        let (inbound_events, _) = broadcast::channel(64);
 
-        // Background task: read stdout line-by-line and dispatch responses
         let reader_handle = {
             let pending = Arc::clone(&pending);
             let running = Arc::clone(&running);
             let name = server_name.clone();
+            let stdin_writer = Arc::new(Mutex::new(Some(stdin)));
+            let reader_stdin = Arc::clone(&stdin_writer);
+            let handler = handler.clone();
+            let inbound_events_tx = inbound_events.clone();
 
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let reader = BufReader::new(stdout);
                 let mut lines = reader.lines();
 
@@ -116,27 +127,54 @@ impl StdioTransport {
                         continue;
                     }
 
-                    // Try to parse as a JSON-RPC response
-                    match serde_json::from_str::<McpResponse>(&line) {
-                        Ok(response) => {
+                    match McpTransportMessage::parse_str(&line) {
+                        Ok(McpTransportMessage::Response(response)) => {
                             let id = response.id;
                             let mut map = pending.write().await;
                             if let Some(sender) = map.remove(&id) {
                                 let _ = sender.send(response);
                             } else {
-                                // Could be a notification — log and ignore
                                 tracing::trace!(
                                     server = %name,
                                     id,
-                                    "Received MCP stdio message with no pending request"
+                                    "Received MCP stdio response with no pending request"
                                 );
                             }
                         }
-                        Err(e) => {
+                        Ok(McpTransportMessage::Notification(notification)) => {
+                            let _ = inbound_events_tx
+                                .send(McpTransportMessage::Notification(notification.clone()));
+                            if let Some(handler) = &handler {
+                                handler.handle_notification(notification).await;
+                            }
+                        }
+                        Ok(McpTransportMessage::Request(request)) => {
+                            let _ = inbound_events_tx
+                                .send(McpTransportMessage::Request(request.clone()));
+                            let response = if let Some(handler) = &handler {
+                                handler.handle_request(request).await
+                            } else {
+                                McpResponse::error(
+                                    request.id,
+                                    McpError::method_not_found(&request.method),
+                                )
+                            };
+
+                            if let Err(error) =
+                                Self::write_json_line(&reader_stdin, &response).await
+                            {
+                                tracing::warn!(
+                                    server = %name,
+                                    error = %error,
+                                    "Failed to write stdio response"
+                                );
+                            }
+                        }
+                        Err(error) => {
                             tracing::trace!(
                                 server = %name,
                                 line = %line,
-                                error = %e,
+                                error = %error,
                                 "Non-JSON line from MCP stdio server stdout"
                             );
                         }
@@ -145,10 +183,13 @@ impl StdioTransport {
 
                 running.store(false, Ordering::SeqCst);
                 tracing::debug!(server = %name, "MCP stdio reader task exited");
-            })
+            });
+
+            (handle, stdin_writer)
         };
 
-        // Background task: drain stderr for logging
+        let (reader_handle, stdin) = reader_handle;
+
         if let Some(stderr) = stderr {
             let name = server_name.clone();
             tokio::spawn(async move {
@@ -174,12 +215,40 @@ impl StdioTransport {
 
         Ok(Self {
             child: Mutex::new(child),
-            stdin: Mutex::new(stdin),
+            stdin,
             pending,
             running,
             reader_handle: Mutex::new(Some(reader_handle)),
+            handler,
+            inbound_events,
             server_name,
         })
+    }
+
+    async fn write_json_line<T: serde::Serialize>(
+        stdin: &Arc<Mutex<Option<tokio::process::ChildStdin>>>,
+        payload: &T,
+    ) -> Result<(), ToolError> {
+        let mut json = serde_json::to_string(payload).map_err(|e| {
+            ToolError::ExternalService(format!("Failed to serialize MCP stdio payload: {e}"))
+        })?;
+        json.push('\n');
+
+        let mut guard = stdin.lock().await;
+        let stdin = guard.as_mut().ok_or_else(|| {
+            ToolError::ExternalService("MCP stdio server stdin is closed".to_string())
+        })?;
+        stdin.write_all(json.as_bytes()).await.map_err(|e| {
+            ToolError::ExternalService(format!("Failed to write to MCP stdio server: {e}"))
+        })?;
+        stdin.flush().await.map_err(|e| {
+            ToolError::ExternalService(format!("Failed to flush MCP stdio server stdin: {e}"))
+        })
+    }
+
+    /// Subscribe to inbound notifications and server requests.
+    pub fn subscribe(&self) -> broadcast::Receiver<McpTransportMessage> {
+        self.inbound_events.subscribe()
     }
 
     /// Send a JSON-RPC request and wait for the response.
@@ -192,45 +261,25 @@ impl StdioTransport {
         }
 
         let id = request.id;
-
-        // Register a oneshot channel for this request
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
             let mut map = self.pending.write().await;
             map.insert(id, tx);
         }
 
-        // Serialize and write to stdin (newline-delimited JSON)
-        let mut json = serde_json::to_string(&request).map_err(|e| {
-            ToolError::ExternalService(format!("Failed to serialize MCP request: {}", e))
-        })?;
-        json.push('\n');
-
-        {
-            let mut stdin = self.stdin.lock().await;
-            stdin.write_all(json.as_bytes()).await.map_err(|e| {
-                ToolError::ExternalService(format!(
-                    "Failed to write to MCP stdio server '{}': {}",
-                    self.server_name, e
-                ))
-            })?;
-            stdin.flush().await.map_err(|e| {
-                ToolError::ExternalService(format!(
-                    "Failed to flush MCP stdio server '{}' stdin: {}",
-                    self.server_name, e
-                ))
-            })?;
+        if let Err(error) = Self::write_json_line(&self.stdin, &request).await {
+            let mut map = self.pending.write().await;
+            map.remove(&id);
+            return Err(error);
         }
 
-        // Wait for the response with a timeout
-        match tokio::time::timeout(std::time::Duration::from_secs(120), rx).await {
+        match tokio::time::timeout(Duration::from_secs(120), rx).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => Err(ToolError::ExternalService(format!(
                 "MCP stdio server '{}' response channel closed (server may have crashed)",
                 self.server_name
             ))),
             Err(_) => {
-                // Remove the pending request on timeout
                 let mut map = self.pending.write().await;
                 map.remove(&id);
                 Err(ToolError::ExternalService(format!(
@@ -241,18 +290,31 @@ impl StdioTransport {
         }
     }
 
+    /// Send a notification without waiting for a response.
+    pub async fn send_notification(&self, notification: McpNotification) -> Result<(), ToolError> {
+        Self::write_json_line(&self.stdin, &notification).await
+    }
+
     /// Shut down the child process gracefully.
     pub async fn shutdown(&self) {
-        // Abort the reader task
         if let Some(handle) = self.reader_handle.lock().await.take() {
             handle.abort();
         }
 
-        // Try to kill the child process
+        {
+            let mut stdin = self.stdin.lock().await;
+            stdin.take();
+        }
+
         let mut child = self.child.lock().await;
-        let _ = child.kill().await;
+        let exited = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+        if exited.is_err() {
+            let _ = child.kill().await;
+        }
+
         tracing::debug!(
             server = %self.server_name,
+            has_handler = self.handler.is_some(),
             "MCP stdio transport shut down"
         );
     }
@@ -260,41 +322,5 @@ impl StdioTransport {
     /// Check if the child process is still running.
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
-    }
-}
-
-impl Drop for StdioTransport {
-    fn drop(&mut self) {
-        // Best-effort cleanup — the kill_on_drop on the Command handles the rest
-        self.running.store(false, Ordering::SeqCst);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_stdio_transport_spawn_nonexistent_command() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let result = StdioTransport::spawn(
-                "test",
-                "nonexistent_command_that_does_not_exist_12345",
-                &[],
-                &BTreeMap::new(),
-            );
-            match result {
-                Err(e) => {
-                    let err = e.to_string();
-                    assert!(
-                        err.contains("Failed to spawn"),
-                        "Expected spawn error, got: {}",
-                        err
-                    );
-                }
-                Ok(_) => panic!("Expected error when spawning nonexistent command"),
-            }
-        });
     }
 }

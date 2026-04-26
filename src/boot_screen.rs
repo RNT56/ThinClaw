@@ -54,7 +54,11 @@ pub fn print_boot_screen(info: &BootInfo) {
         "Cockpit online, with storage still warming up."
     };
     let readiness = if info.sandbox_enabled {
-        "Sandboxing is available for work that needs a safer boundary."
+        if info.docker_status.is_ok() {
+            "Sandboxing is available for work that needs a safer boundary."
+        } else {
+            "Sandboxing will activate when Docker becomes available."
+        }
     } else {
         "Sandboxing is currently disabled."
     };
@@ -72,7 +76,7 @@ pub fn print_boot_screen(info: &BootInfo) {
             format!("{warn}sandbox host missing docker{reset}")
         }
         crate::sandbox::detect::DockerStatus::NotRunning => {
-            format!("{warn}sandbox host needs docker started{reset}")
+            format!("{warn}sandbox pending (start docker to activate){reset}")
         }
         crate::sandbox::detect::DockerStatus::Disabled => "sandbox disabled".to_string(),
     });
@@ -173,7 +177,7 @@ pub fn print_boot_screen(info: &BootInfo) {
             features.push(format!("{warn}sandbox (docker not installed){reset}"));
         }
         crate::sandbox::detect::DockerStatus::NotRunning => {
-            features.push(format!("{warn}sandbox (docker not running){reset}"));
+            features.push(format!("{warn}sandbox (pending docker){reset}"));
         }
         crate::sandbox::detect::DockerStatus::Disabled => {
             // Don't show sandbox when disabled
@@ -203,7 +207,14 @@ pub fn print_boot_screen(info: &BootInfo) {
     println!();
     println!("  {bold}Access{reset}");
     if let Some(ref url) = info.gateway_url {
-        println!("    {muted}gateway{reset}   {warn}{url}{reset}");
+        // Show the full tokenized URL so the user can copy-paste it directly.
+        // This is a local terminal on the operator's own machine — safe to display.
+        println!("    {muted}gateway{reset}   {warn}{url}{reset}",);
+        if url.contains("token=") {
+            println!(
+                "    {muted}open{reset}      Copy the URL above and paste it into your browser."
+            );
+        }
     }
     if let Some(ref url) = info.tunnel_url {
         let provider_tag = info
@@ -226,6 +237,34 @@ pub fn print_boot_screen(info: &BootInfo) {
         "  {bold}/help{reset} for commands  {muted}•{reset}  {bold}/quit{reset} to exit  {muted}•{reset}  send a message to begin"
     );
     println!();
+}
+
+#[allow(dead_code)]
+fn redact_gateway_url(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+
+    let mut pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .map(|(key, value)| {
+            if key.eq_ignore_ascii_case("token") {
+                (key.to_string(), "****".to_string())
+            } else {
+                (key.to_string(), value.to_string())
+            }
+        })
+        .collect();
+
+    if pairs.is_empty() {
+        return parsed.to_string();
+    }
+
+    parsed
+        .query_pairs_mut()
+        .clear()
+        .extend_pairs(pairs.drain(..));
+    parsed.to_string()
 }
 
 #[cfg(test)]

@@ -207,6 +207,30 @@ pub fn is_loopback_host(host: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns true when the current shell looks like SSH/headless operation.
+pub fn ssh_or_headless_detected() -> bool {
+    std::env::var_os("SSH_CONNECTION").is_some()
+        || std::env::var_os("SSH_TTY").is_some()
+        || (cfg!(target_os = "linux")
+            && std::env::var_os("DISPLAY").is_none()
+            && std::env::var_os("WAYLAND_DISPLAY").is_none())
+}
+
+/// SSH port-forwarding command for the shared OAuth callback listener.
+pub fn ssh_callback_tunnel_command() -> String {
+    format!(
+        "ssh -L {port}:127.0.0.1:{port} user@host",
+        port = OAUTH_CALLBACK_PORT
+    )
+}
+
+/// Print OAuth callback tunnel guidance for SSH/headless hosts.
+pub fn print_ssh_callback_hint() {
+    println!("  SSH/headless OAuth callback tunnel:");
+    println!("  {}", ssh_callback_tunnel_command());
+    println!("  Keep that tunnel open, then open the auth URL in your local browser.");
+}
+
 /// Error from the OAuth callback listener.
 #[derive(Debug, thiserror::Error)]
 pub enum OAuthCallbackError {

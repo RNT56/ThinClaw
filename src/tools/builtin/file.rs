@@ -17,7 +17,8 @@ use crate::tools::tool::{
 };
 use crate::workspace::paths as ws_paths;
 
-/// Well-known workspace filenames that must go through memory_write, not write_file.
+/// Well-known workspace filenames that must go through memory_write or
+/// prompt_manage, not write_file.
 ///
 /// If the LLM tries to write one of these via the filesystem tool we reject
 /// immediately and point it at the correct tool.
@@ -26,13 +27,14 @@ const WORKSPACE_FILES: &[&str] = &[
     ws_paths::MEMORY,
     ws_paths::IDENTITY,
     ws_paths::SOUL,
+    ws_paths::SOUL_LOCAL,
     ws_paths::AGENTS,
     ws_paths::USER,
     ws_paths::README,
 ];
 
 /// Check whether `path` resolves to a workspace file that should be written
-/// through `memory_write` instead of `write_file`.
+/// through workspace memory tools instead of `write_file`.
 ///
 /// Only blocks files that live directly in the workspace root. Files inside
 /// project subdirectories (e.g. `clawi-site/README.md`) are safe to write
@@ -94,7 +96,7 @@ fn normalize_lexical(path: &Path) -> PathBuf {
 /// and then verify it lives under the canonical base. This prevents escapes through
 /// non-existent parent directories where `canonicalize()` would fall back to the
 /// raw (un-normalized) path.
-fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
+pub(crate) fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
     let path = PathBuf::from(path_str);
 
     // Resolve to absolute path
@@ -178,6 +180,58 @@ async fn checkpoint_before_mutation(
     }
 }
 
+fn metadata_base_dir(ctx: &JobContext) -> Option<PathBuf> {
+    ctx.metadata
+        .get("tool_base_dir")
+        .and_then(|value| value.as_str())
+        .map(PathBuf::from)
+}
+
+pub(crate) fn effective_base_dir(ctx: &JobContext, configured: Option<&Path>) -> Option<PathBuf> {
+    metadata_base_dir(ctx).or_else(|| configured.map(Path::to_path_buf))
+}
+
+fn read_file_result(
+    path: &Path,
+    content: &str,
+    offset: usize,
+    limit: Option<u64>,
+) -> serde_json::Value {
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
+
+    let start_line = if offset > 0 {
+        offset.saturating_sub(1).min(total_lines)
+    } else {
+        0
+    };
+    let end_line = if let Some(lim) = limit {
+        (start_line + lim as usize).min(total_lines)
+    } else {
+        total_lines
+    };
+
+    let selected_lines: Vec<String> = lines[start_line..end_line]
+        .iter()
+        .enumerate()
+        .map(|(i, line)| format!("{:>6}│ {}", start_line + i + 1, line))
+        .collect();
+
+    serde_json::json!({
+        "content": selected_lines.join("\n"),
+        "total_lines": total_lines,
+        "lines_shown": end_line - start_line,
+        "path": path.display().to_string()
+    })
+}
+
+#[cfg(feature = "acp")]
+fn acp_session_id(ctx: &JobContext) -> Option<&str> {
+    ctx.metadata
+        .get("acp_session_id")
+        .and_then(serde_json::Value::as_str)
+}
+
 /// Read file contents tool.
 #[derive(Debug, Default)]
 pub struct ReadFileTool {
@@ -231,7 +285,7 @@ impl Tool for ReadFileTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = require_str(&params, "path")?;
 
@@ -240,7 +294,33 @@ impl Tool for ReadFileTool {
 
         let start = std::time::Instant::now();
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let path = validate_path(path_str, base_dir.as_deref())?;
+
+        #[cfg(feature = "acp")]
+        if let Some(session_id) = acp_session_id(ctx) {
+            match crate::channels::acp::client_read_text_file(
+                session_id,
+                &path.display().to_string(),
+                (offset > 0).then_some(offset as u64),
+                limit,
+            )
+            .await
+            {
+                Ok(Some(content)) => {
+                    return Ok(ToolOutput::success(
+                        read_file_result(&path, &content, offset, limit),
+                        start.elapsed(),
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(ToolError::ExternalService(format!(
+                        "ACP fs/read_text_file failed: {error}"
+                    )));
+                }
+            }
+        }
 
         // Check file size
         let metadata = fs::metadata(&path)
@@ -260,35 +340,10 @@ impl Tool for ReadFileTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read file: {}", e)))?;
 
-        // Apply offset and limit
-        let lines: Vec<&str> = content.lines().collect();
-        let total_lines = lines.len();
-
-        let start_line = if offset > 0 {
-            offset.saturating_sub(1)
-        } else {
-            0
-        };
-        let end_line = if let Some(lim) = limit {
-            (start_line + lim as usize).min(total_lines)
-        } else {
-            total_lines
-        };
-
-        let selected_lines: Vec<String> = lines[start_line..end_line]
-            .iter()
-            .enumerate()
-            .map(|(i, line)| format!("{:>6}│ {}", start_line + i + 1, line))
-            .collect();
-
-        let result = serde_json::json!({
-            "content": selected_lines.join("\n"),
-            "total_lines": total_lines,
-            "lines_shown": end_line - start_line,
-            "path": path.display().to_string()
-        });
-
-        Ok(ToolOutput::success(result, start.elapsed()))
+        Ok(ToolOutput::success(
+            read_file_result(&path, &content, offset, limit),
+            start.elapsed(),
+        ))
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -329,7 +384,7 @@ impl Tool for WriteFileTool {
 
     fn description(&self) -> &str {
         "Write content to a file on the LOCAL FILESYSTEM. NOT for workspace memory \
-         (use memory_write for that). Creates the file if it doesn't exist, overwrites if it does. \
+         (use memory_write or prompt_manage for that). Creates the file if it doesn't exist, overwrites if it does. \
          Parent directories are created automatically. Use apply_patch for targeted edits."
     }
 
@@ -359,10 +414,26 @@ impl Tool for WriteFileTool {
 
         // Reject workspace paths: these live in the database, not on disk.
         if is_workspace_path(path_str) {
+            let normalized = std::path::Path::new(path_str)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path_str);
+            let guidance = if [
+                ws_paths::SOUL,
+                ws_paths::SOUL_LOCAL,
+                ws_paths::AGENTS,
+                ws_paths::USER,
+            ]
+            .iter()
+            .any(|candidate| normalized.eq_ignore_ascii_case(candidate))
+            {
+                "Use the prompt_manage tool instead of write_file."
+            } else {
+                "Use the memory_write tool instead of write_file. For HEARTBEAT.md use target='heartbeat', for MEMORY.md use target='memory'."
+            };
             return Err(ToolError::InvalidParameters(format!(
-                "'{}' is a workspace memory file. Use the memory_write tool instead of write_file. \
-                 For HEARTBEAT.md use target='heartbeat', for MEMORY.md use target='memory'.",
-                path_str
+                "'{}' is a workspace memory file. {}",
+                path_str, guidance
             )));
         }
 
@@ -379,9 +450,37 @@ impl Tool for WriteFileTool {
             )));
         }
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
-        checkpoint_before_mutation(ctx, &path, self.base_dir.as_deref(), "pre: write_file").await?;
+        #[cfg(feature = "acp")]
+        if let Some(session_id) = acp_session_id(ctx) {
+            match crate::channels::acp::client_write_text_file(
+                session_id,
+                &path.display().to_string(),
+                content,
+            )
+            .await
+            {
+                Ok(Some(())) => {
+                    let result = serde_json::json!({
+                        "path": path.display().to_string(),
+                        "bytes_written": content.len(),
+                        "success": true,
+                        "backend": "acp_client_fs"
+                    });
+                    return Ok(ToolOutput::success(result, start.elapsed()));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(ToolError::ExternalService(format!(
+                        "ACP fs/write_text_file failed: {error}"
+                    )));
+                }
+            }
+        }
+
+        checkpoint_before_mutation(ctx, &path, base_dir.as_deref(), "pre: write_file").await?;
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -473,7 +572,7 @@ impl Tool for ListDirTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let path_str = params.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
@@ -489,7 +588,8 @@ impl Tool for ListDirTool {
 
         let start = std::time::Instant::now();
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
         let mut entries = Vec::new();
         list_dir_inner(&path, &path, recursive, max_depth, 0, &mut entries).await?;
@@ -690,10 +790,10 @@ impl Tool for ApplyPatchTool {
 
         let start = std::time::Instant::now();
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
-        checkpoint_before_mutation(ctx, &path, self.base_dir.as_deref(), "pre: apply_patch")
-            .await?;
+        checkpoint_before_mutation(ctx, &path, base_dir.as_deref(), "pre: apply_patch").await?;
 
         // Read current content
         let content = fs::read_to_string(&path)
@@ -844,7 +944,7 @@ impl Tool for GrepTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let pattern_str = require_str(&params, "pattern")?;
 
@@ -869,7 +969,8 @@ impl Tool for GrepTool {
 
         let start = std::time::Instant::now();
 
-        let path = validate_path(path_str, self.base_dir.as_deref())?;
+        let base_dir = effective_base_dir(ctx, self.base_dir.as_deref());
+        let path = validate_path(path_str, base_dir.as_deref())?;
 
         // Build the matcher
         let pattern = if is_regex {
@@ -1179,6 +1280,7 @@ mod tests {
             "MEMORY.md",
             "IDENTITY.md",
             "SOUL.md",
+            "SOUL.local.md",
             "AGENTS.md",
             "USER.md",
             "README.md",
@@ -1197,9 +1299,17 @@ mod tests {
                 .unwrap_err();
 
             let msg = err.to_string();
+            let expects_prompt_manage = matches!(
+                *filename,
+                "SOUL.md" | "SOUL.local.md" | "AGENTS.md" | "USER.md"
+            );
             assert!(
-                msg.contains("memory_write"),
-                "Rejection for {} should mention memory_write, got: {}",
+                if expects_prompt_manage {
+                    msg.contains("prompt_manage")
+                } else {
+                    msg.contains("memory_write")
+                },
+                "Rejection for {} should mention the correct workspace tool, got: {}",
                 filename,
                 msg
             );

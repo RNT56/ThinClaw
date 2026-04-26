@@ -14,8 +14,8 @@ use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamSupport,
+    TokenCaptureSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Returns `true` if the `LlmError` is transient and the request should be retried.
@@ -36,15 +36,21 @@ use crate::llm::provider::{
 /// See also `circuit_breaker::is_transient()` which answers a different
 /// question: "does this error indicate the backend is degraded?"
 pub(crate) fn is_retryable(err: &LlmError) -> bool {
-    matches!(
-        err,
-        LlmError::RequestFailed { .. }
-            | LlmError::RateLimited { .. }
-            | LlmError::InvalidResponse { .. }
-            | LlmError::SessionRenewalFailed { .. }
-            | LlmError::Http(_)
-            | LlmError::Io(_)
-    )
+    match err {
+        LlmError::RequestFailed { reason, .. } => !is_deterministic_request_failure(reason),
+        LlmError::RateLimited { .. }
+        | LlmError::InvalidResponse { .. }
+        | LlmError::SessionRenewalFailed { .. }
+        | LlmError::Http(_)
+        | LlmError::Io(_) => true,
+        _ => false,
+    }
+}
+
+fn is_deterministic_request_failure(reason: &str) -> bool {
+    let normalized = reason.trim().to_ascii_lowercase();
+    normalized.contains("message conversion error")
+        || normalized.contains("only supports pdf documents")
 }
 
 /// Calculate exponential backoff delay with random jitter.
@@ -233,6 +239,25 @@ impl LlmProvider for RetryProvider {
     fn supports_streaming(&self) -> bool {
         self.inner.supports_streaming()
     }
+
+    fn stream_support(&self) -> StreamSupport {
+        self.inner.stream_support()
+    }
+
+    fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
+        self.inner.stream_support_for_model(requested_model)
+    }
+
+    fn token_capture_support(&self) -> TokenCaptureSupport {
+        self.inner.token_capture_support()
+    }
+
+    fn token_capture_support_for_model(
+        &self,
+        requested_model: Option<&str>,
+    ) -> TokenCaptureSupport {
+        self.inner.token_capture_support_for_model(requested_model)
+    }
 }
 
 #[cfg(test)]
@@ -301,6 +326,10 @@ mod tests {
         assert!(is_retryable(&LlmError::RequestFailed {
             provider: "p".into(),
             reason: "err".into(),
+        }));
+        assert!(!is_retryable(&LlmError::RequestFailed {
+            provider: "p".into(),
+            reason: "Message conversion error: Anthropic only supports PDF documents".into(),
         }));
         assert!(is_retryable(&LlmError::RateLimited {
             provider: "p".into(),

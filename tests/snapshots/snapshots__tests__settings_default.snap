@@ -1,6 +1,5 @@
 ---
 source: tests/snapshots.rs
-assertion_line: 18
 expression: settings
 ---
 {
@@ -12,6 +11,13 @@ expression: settings
   "libsql_path": null,
   "libsql_url": null,
   "secrets_master_key_source": "none",
+  "secrets": {
+    "backend": "local_encrypted",
+    "master_key_source": "os_secure_store",
+    "allow_env_master_key": false,
+    "cache_ttl_secs": 0,
+    "strict_sensitive_routes": true
+  },
   "llm_backend": null,
   "ollama_base_url": null,
   "openai_compatible_base_url": null,
@@ -38,6 +44,7 @@ expression: settings
   },
   "channels": {
     "http_enabled": false,
+    "acp_enabled": false,
     "http_port": null,
     "http_host": null,
     "signal_enabled": false,
@@ -50,6 +57,7 @@ expression: settings
     "signal_group_allow_from": null,
     "telegram_owner_id": null,
     "telegram_stream_mode": null,
+    "telegram_transport_mode": "auto",
     "telegram_subagent_session_mode": "temp_topic",
     "discord_enabled": false,
     "discord_bot_token": null,
@@ -62,12 +70,22 @@ expression: settings
     "slack_allow_from": null,
     "nostr_enabled": false,
     "nostr_relays": null,
+    "nostr_owner_pubkey": null,
+    "nostr_social_dm_enabled": false,
     "nostr_allow_from": null,
     "gmail_enabled": false,
     "gmail_project_id": null,
     "gmail_subscription_id": null,
     "gmail_topic_id": null,
     "gmail_allowed_senders": null,
+    "bluebubbles_enabled": false,
+    "bluebubbles_server_url": null,
+    "bluebubbles_password": null,
+    "bluebubbles_webhook_host": null,
+    "bluebubbles_webhook_port": null,
+    "bluebubbles_webhook_path": null,
+    "bluebubbles_allow_from": null,
+    "bluebubbles_send_read_receipts": null,
     "imessage_enabled": false,
     "imessage_allow_from": null,
     "imessage_poll_interval": null,
@@ -76,15 +94,42 @@ expression: settings
     "apple_mail_poll_interval": null,
     "apple_mail_unread_only": true,
     "apple_mail_mark_as_read": true,
+    "gateway_enabled": null,
+    "gateway_host": null,
     "gateway_port": null,
     "gateway_auth_token": null,
+    "cli_enabled": null,
     "wasm_channels": [],
     "wasm_channels_enabled": true,
     "wasm_channels_dir": null
   },
+  "prompt": {
+    "session_freeze_enabled": true,
+    "project_context_max_tokens": 8000
+  },
+  "extensions": {
+    "user_tools_dir": "[home]/.thinclaw/user-tools",
+    "allow_native_plugins": false,
+    "require_plugin_signatures": true,
+    "trusted_manifest_keys": [],
+    "trusted_manifest_public_keys": {},
+    "native_plugin_allowlist_dirs": []
+  },
   "notifications": {
     "preferred_channel": null,
     "recipient": null
+  },
+  "desktop_autonomy": {
+    "enabled": false,
+    "profile": "off",
+    "deployment_mode": "whole_machine_admin",
+    "target_username": null,
+    "desktop_max_concurrent_jobs": 1,
+    "desktop_action_timeout_secs": 60,
+    "capture_evidence": true,
+    "emergency_stop_path": "~/.thinclaw/AUTONOMY_DISABLED",
+    "pause_on_bootstrap_failure": true,
+    "kill_switch_hotkey": "ctrl+option+command+period"
   },
   "heartbeat": {
     "enabled": false,
@@ -106,6 +151,8 @@ expression: settings
   "claude_code_enabled": false,
   "claude_code_model": null,
   "claude_code_max_turns": null,
+  "codex_code_enabled": false,
+  "codex_code_model": null,
   "webchat_theme": "",
   "webchat_skin": null,
   "webchat_accent_color": null,
@@ -128,9 +175,13 @@ expression: settings
     "auto_approve_tools": false,
     "allow_local_tools": false,
     "subagent_transparency_level": "balanced",
+    "main_tool_profile": "standard",
+    "worker_tool_profile": "restricted",
+    "subagent_tool_profile": "explicit_only",
     "workspace_mode": null,
     "model_guidance_enabled": true,
     "cli_skin": "cockpit",
+    "personality_pack": "balanced",
     "persona_seed": "default",
     "checkpoints_enabled": true,
     "max_checkpoints": 50,
@@ -153,6 +204,7 @@ expression: settings
     "memory_limit_mb": 2048,
     "cpu_shares": 1024,
     "image": "thinclaw-worker:latest",
+    "interactive_idle_timeout_secs": 1800,
     "auto_pull_image": true,
     "extra_allowed_domains": []
   },
@@ -197,11 +249,12 @@ expression: settings
     "moa_reference_models": [],
     "moa_aggregator_model": null,
     "moa_min_successful": 1,
-    "advisor_max_calls": 3,
+    "advisor_max_calls": 4,
+    "advisor_auto_escalation_mode": "risk_and_complex_final",
     "advisor_escalation_prompt": null
   },
   "learning": {
-    "enabled": false,
+    "enabled": true,
     "auto_apply_classes": [
       "memory",
       "skill",
@@ -219,25 +272,48 @@ expression: settings
       "min_tool_calls": 2,
       "user_correction_threshold": 1
     },
+    "skill_synthesis": {
+      "enabled": true,
+      "min_tool_calls": 3,
+      "auto_apply": false
+    },
     "prompt_mutation": {
-      "enabled": false
+      "enabled": true
     },
     "providers": {
+      "active": "none",
+      "active_provider": null,
+      "registry": {},
       "honcho": {
         "enabled": false,
-        "config": {}
+        "config": {},
+        "cadence": null,
+        "depth": null,
+        "user_modeling_enabled": false
       },
       "zep": {
         "enabled": false,
-        "config": {}
+        "config": {},
+        "cadence": null,
+        "depth": null,
+        "user_modeling_enabled": false
       }
     },
     "code_proposals": {
       "enabled": true,
-      "publish_mode": "branch_pr_draft"
+      "publish_mode": "branch_pr_draft",
+      "auto_apply_without_review": false
     },
     "exports": {
       "enabled": false
+    },
+    "outcomes": {
+      "enabled": true,
+      "evaluation_interval_secs": 600,
+      "max_due_per_tick": 50,
+      "default_ttl_hours": 72,
+      "llm_assist_enabled": true,
+      "heartbeat_summary_enabled": true
     }
   },
   "experiments": {
@@ -247,5 +323,12 @@ expression: settings
     "allow_remote_runners": true,
     "ui_visibility": "hidden_until_enabled",
     "default_promotion_mode": "branch_pr_draft"
+  },
+  "tool_policies": {
+    "default_policy": {
+      "mode": "allow_all"
+    },
+    "channel_policies": {},
+    "group_policies": {}
   }
 }

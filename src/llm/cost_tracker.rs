@@ -21,6 +21,105 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+use crate::llm::ProviderTokenCapture;
+
+/// Where the billable token counts came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenCountSource {
+    /// Token counts were reported by the provider usage fields.
+    ProviderUsage,
+    /// No token counts were available, usually because the request failed
+    /// before a provider response was produced.
+    None,
+    /// Legacy entry loaded before source provenance was tracked.
+    Unknown,
+}
+
+impl TokenCountSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderUsage => "provider_usage",
+            Self::None => "none",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+fn default_token_count_source() -> TokenCountSource {
+    TokenCountSource::Unknown
+}
+
+/// Where the dollar cost came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CostSource {
+    /// Provider response included an authoritative request cost.
+    ProviderCost,
+    /// Provider omitted dollar cost, so ThinClaw used local model pricing
+    /// against provider-reported token counts.
+    LocalPricingFallback,
+    /// No cost was recorded, usually for a failed request.
+    None,
+    /// Legacy entry loaded before source provenance was tracked.
+    Unknown,
+}
+
+impl CostSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderCost => "provider_cost",
+            Self::LocalPricingFallback => "local_pricing_fallback",
+            Self::None => "none",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+fn default_cost_source() -> CostSource {
+    CostSource::Unknown
+}
+
+/// Compact summary of provider-native exact token/logprob capture.
+///
+/// The cost dashboard stores counts only, not raw token text, so it can surface
+/// provenance without bloating persisted cost history.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenCaptureCostSummary {
+    #[serde(default)]
+    pub exact_tokens_supported: bool,
+    #[serde(default)]
+    pub logprobs_supported: bool,
+    #[serde(default)]
+    pub tokens: u32,
+    #[serde(default)]
+    pub token_ids: u32,
+    #[serde(default)]
+    pub logprobs: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl TokenCaptureCostSummary {
+    pub fn from_capture(capture: &ProviderTokenCapture) -> Self {
+        Self {
+            exact_tokens_supported: capture.exact_tokens_supported,
+            logprobs_supported: capture.logprobs_supported,
+            tokens: capture.tokens.len() as u32,
+            token_ids: capture.token_ids.len() as u32,
+            logprobs: capture.logprobs.len() as u32,
+            provider: capture.provider.clone(),
+            model: capture.model.clone(),
+        }
+    }
+
+    pub fn output_token_count(&self) -> u64 {
+        u64::from(self.tokens.max(self.token_ids))
+    }
+}
+
 /// A single cost entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostEntry {
@@ -32,6 +131,38 @@ pub struct CostEntry {
     pub output_tokens: u32,
     pub cost_usd: f64,
     pub request_id: Option<String>,
+    /// Provenance for `input_tokens` and `output_tokens`.
+    #[serde(default = "default_token_count_source")]
+    pub token_count_source: TokenCountSource,
+    /// Provenance for `cost_usd`.
+    #[serde(default = "default_cost_source")]
+    pub cost_source: CostSource,
+    /// Provider-native exact-token/logprob capture metadata, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_capture: Option<TokenCaptureCostSummary>,
+}
+
+impl CostEntry {
+    fn captured_output_tokens(&self) -> u64 {
+        self.token_capture
+            .as_ref()
+            .map(TokenCaptureCostSummary::output_token_count)
+            .unwrap_or(0)
+    }
+
+    fn captured_token_ids(&self) -> u64 {
+        self.token_capture
+            .as_ref()
+            .map(|capture| u64::from(capture.token_ids))
+            .unwrap_or(0)
+    }
+
+    fn captured_logprobs(&self) -> u64 {
+        self.token_capture
+            .as_ref()
+            .map(|capture| u64::from(capture.logprobs))
+            .unwrap_or(0)
+    }
 }
 
 /// Budget configuration.
@@ -68,6 +199,18 @@ pub struct CompactedStats {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_requests: u64,
+    #[serde(default)]
+    pub token_count_sources: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub cost_sources: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub captured_output_tokens: u64,
+    #[serde(default)]
+    pub captured_token_ids: u64,
+    #[serde(default)]
+    pub captured_logprobs: u64,
+    #[serde(default)]
+    pub token_capture_requests: u64,
 }
 
 /// Per-model aggregate from compacted (evicted) entries.
@@ -77,6 +220,117 @@ pub struct CompactedModelEntry {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub requests: u64,
+    #[serde(default)]
+    pub provider_usage_requests: u64,
+    #[serde(default)]
+    pub unknown_token_count_requests: u64,
+    #[serde(default)]
+    pub provider_cost_requests: u64,
+    #[serde(default)]
+    pub local_pricing_fallback_requests: u64,
+    #[serde(default)]
+    pub captured_output_tokens: u64,
+    #[serde(default)]
+    pub captured_token_ids: u64,
+    #[serde(default)]
+    pub captured_logprobs: u64,
+    #[serde(default)]
+    pub token_capture_requests: u64,
+}
+
+impl CompactedModelEntry {
+    fn add_sources(&mut self, entry: &CostEntry) {
+        match entry.token_count_source {
+            TokenCountSource::ProviderUsage => self.provider_usage_requests += 1,
+            TokenCountSource::Unknown => self.unknown_token_count_requests += 1,
+            TokenCountSource::None => {}
+        }
+        match entry.cost_source {
+            CostSource::ProviderCost => self.provider_cost_requests += 1,
+            CostSource::LocalPricingFallback => self.local_pricing_fallback_requests += 1,
+            CostSource::None | CostSource::Unknown => {}
+        }
+        self.captured_output_tokens += entry.captured_output_tokens();
+        self.captured_token_ids += entry.captured_token_ids();
+        self.captured_logprobs += entry.captured_logprobs();
+        if entry.token_capture.is_some() {
+            self.token_capture_requests += 1;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ModelBreakdownAccumulator {
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+    requests: u64,
+    provider_usage_requests: u64,
+    unknown_token_count_requests: u64,
+    provider_cost_requests: u64,
+    local_pricing_fallback_requests: u64,
+    captured_output_tokens: u64,
+    captured_token_ids: u64,
+    captured_logprobs: u64,
+    token_capture_requests: u64,
+}
+
+impl ModelBreakdownAccumulator {
+    fn add_entry(&mut self, entry: &CostEntry) {
+        self.input_tokens += entry.input_tokens as u64;
+        self.output_tokens += entry.output_tokens as u64;
+        self.cost_usd += entry.cost_usd;
+        self.requests += 1;
+        match entry.token_count_source {
+            TokenCountSource::ProviderUsage => self.provider_usage_requests += 1,
+            TokenCountSource::Unknown => self.unknown_token_count_requests += 1,
+            TokenCountSource::None => {}
+        }
+        match entry.cost_source {
+            CostSource::ProviderCost => self.provider_cost_requests += 1,
+            CostSource::LocalPricingFallback => self.local_pricing_fallback_requests += 1,
+            CostSource::None | CostSource::Unknown => {}
+        }
+        self.captured_output_tokens += entry.captured_output_tokens();
+        self.captured_token_ids += entry.captured_token_ids();
+        self.captured_logprobs += entry.captured_logprobs();
+        if entry.token_capture.is_some() {
+            self.token_capture_requests += 1;
+        }
+    }
+
+    fn add_compacted(&mut self, entry: &CompactedModelEntry) {
+        self.input_tokens += entry.input_tokens;
+        self.output_tokens += entry.output_tokens;
+        self.cost_usd += entry.cost_usd;
+        self.requests += entry.requests;
+        self.provider_usage_requests += entry.provider_usage_requests;
+        self.unknown_token_count_requests += entry.unknown_token_count_requests;
+        self.provider_cost_requests += entry.provider_cost_requests;
+        self.local_pricing_fallback_requests += entry.local_pricing_fallback_requests;
+        self.captured_output_tokens += entry.captured_output_tokens;
+        self.captured_token_ids += entry.captured_token_ids;
+        self.captured_logprobs += entry.captured_logprobs;
+        self.token_capture_requests += entry.token_capture_requests;
+    }
+
+    fn into_breakdown(self, model: String) -> ModelBreakdown {
+        ModelBreakdown {
+            model,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cost_usd: self.cost_usd,
+            requests: self.requests,
+            provider_usage_requests: self.provider_usage_requests,
+            unknown_token_count_requests: self.unknown_token_count_requests,
+            provider_cost_requests: self.provider_cost_requests,
+            local_pricing_fallback_requests: self.local_pricing_fallback_requests,
+            captured_output_tokens: self.captured_output_tokens,
+            captured_token_ids: self.captured_token_ids,
+            captured_logprobs: self.captured_logprobs,
+            token_capture_requests: self.token_capture_requests,
+        }
+    }
 }
 
 /// LLM cost tracker.
@@ -138,12 +392,29 @@ impl CostTracker {
         me.output_tokens += entry.output_tokens as u64;
         me.cost_usd += entry.cost_usd;
         me.requests += 1;
+        me.add_sources(entry);
         let agent_key = entry.agent_id.clone().unwrap_or_else(|| "unknown".into());
         *self.compacted.by_agent.entry(agent_key).or_insert(0.0) += entry.cost_usd;
         self.compacted.total_cost += entry.cost_usd;
         self.compacted.total_input_tokens += entry.input_tokens as u64;
         self.compacted.total_output_tokens += entry.output_tokens as u64;
         self.compacted.total_requests += 1;
+        *self
+            .compacted
+            .token_count_sources
+            .entry(entry.token_count_source.as_str().to_string())
+            .or_insert(0) += 1;
+        *self
+            .compacted
+            .cost_sources
+            .entry(entry.cost_source.as_str().to_string())
+            .or_insert(0) += 1;
+        self.compacted.captured_output_tokens += entry.captured_output_tokens();
+        self.compacted.captured_token_ids += entry.captured_token_ids();
+        self.compacted.captured_logprobs += entry.captured_logprobs();
+        if entry.token_capture.is_some() {
+            self.compacted.token_capture_requests += 1;
+        }
     }
 
     /// Clear all entries and compacted aggregates (full reset).
@@ -251,26 +522,16 @@ impl CostTracker {
     where
         F: FnMut(&CostEntry) -> bool,
     {
-        let mut map: HashMap<String, (u64, u64, f64, u64)> = HashMap::new();
+        let mut map: HashMap<String, ModelBreakdownAccumulator> = HashMap::new();
         for e in &self.entries {
             if !include(e) {
                 continue;
             }
-            let entry = map.entry(e.model.clone()).or_insert((0, 0, 0.0, 0));
-            entry.0 += e.input_tokens as u64;
-            entry.1 += e.output_tokens as u64;
-            entry.2 += e.cost_usd;
-            entry.3 += 1;
+            map.entry(e.model.clone()).or_default().add_entry(e);
         }
         let mut result: Vec<ModelBreakdown> = map
             .into_iter()
-            .map(|(model, (input, output, cost, requests))| ModelBreakdown {
-                model,
-                input_tokens: input,
-                output_tokens: output,
-                cost_usd: cost,
-                requests,
-            })
+            .map(|(model, acc)| acc.into_breakdown(model))
             .collect();
         result.sort_by(|a, b| {
             b.cost_usd
@@ -345,11 +606,11 @@ impl CostTracker {
     /// and malformed output from fields containing commas, quotes, or newlines.
     pub fn export_csv(&self) -> String {
         let mut out = String::from(
-            "timestamp,agent_id,provider,model,input_tokens,output_tokens,cost_usd,request_id\n",
+            "timestamp,agent_id,provider,model,input_tokens,output_tokens,cost_usd,request_id,token_count_source,cost_source,captured_output_tokens,captured_token_ids,captured_logprobs\n",
         );
         for e in &self.entries {
             out.push_str(&format!(
-                "{},{},{},{},{},{},{:.6},{}\n",
+                "{},{},{},{},{},{},{:.6},{},{},{},{},{},{}\n",
                 csv_escape(&e.timestamp),
                 csv_escape(e.agent_id.as_deref().unwrap_or("")),
                 csv_escape(&e.provider),
@@ -358,6 +619,11 @@ impl CostTracker {
                 e.output_tokens,
                 e.cost_usd,
                 csv_escape(e.request_id.as_deref().unwrap_or("")),
+                csv_escape(e.token_count_source.as_str()),
+                csv_escape(e.cost_source.as_str()),
+                e.captured_output_tokens(),
+                e.captured_token_ids(),
+                e.captured_logprobs(),
             ));
         }
         out
@@ -445,6 +711,12 @@ impl CostTracker {
         // Start with compacted daily/monthly, then layer live entries on top.
         let mut daily: BTreeMap<String, f64> = self.compacted.daily.clone();
         let mut monthly: BTreeMap<String, f64> = self.compacted.monthly.clone();
+        let mut token_count_sources = self.compacted.token_count_sources.clone();
+        let mut cost_sources = self.compacted.cost_sources.clone();
+        let mut captured_output_tokens = self.compacted.captured_output_tokens;
+        let mut captured_token_ids = self.compacted.captured_token_ids;
+        let mut captured_logprobs = self.compacted.captured_logprobs;
+        let mut token_capture_requests = self.compacted.token_capture_requests;
 
         for e in &self.entries {
             if let Some(date_key) = e.timestamp.get(..10) {
@@ -452,6 +724,18 @@ impl CostTracker {
             }
             if let Some(month_key) = e.timestamp.get(..7) {
                 *monthly.entry(month_key.to_string()).or_insert(0.0) += e.cost_usd;
+            }
+            *token_count_sources
+                .entry(e.token_count_source.as_str().to_string())
+                .or_insert(0) += 1;
+            *cost_sources
+                .entry(e.cost_source.as_str().to_string())
+                .or_insert(0) += 1;
+            captured_output_tokens += e.captured_output_tokens();
+            captured_token_ids += e.captured_token_ids();
+            captured_logprobs += e.captured_logprobs();
+            if e.token_capture.is_some() {
+                token_capture_requests += 1;
             }
         }
 
@@ -465,23 +749,23 @@ impl CostTracker {
             .unwrap_or_default();
 
         // All-time model breakdown: merge compacted aggregates with live entries.
-        let mut all_time_models = self.model_breakdown(None);
-        for (model, ce) in &self.compacted.by_model {
-            if let Some(existing) = all_time_models.iter_mut().find(|m| m.model == *model) {
-                existing.input_tokens += ce.input_tokens;
-                existing.output_tokens += ce.output_tokens;
-                existing.cost_usd += ce.cost_usd;
-                existing.requests += ce.requests;
-            } else {
-                all_time_models.push(ModelBreakdown {
-                    model: model.clone(),
-                    input_tokens: ce.input_tokens,
-                    output_tokens: ce.output_tokens,
-                    cost_usd: ce.cost_usd,
-                    requests: ce.requests,
-                });
-            }
+        let mut all_time_map: HashMap<String, ModelBreakdownAccumulator> = HashMap::new();
+        for entry in &self.entries {
+            all_time_map
+                .entry(entry.model.clone())
+                .or_default()
+                .add_entry(entry);
         }
+        for (model, ce) in &self.compacted.by_model {
+            all_time_map
+                .entry(model.clone())
+                .or_default()
+                .add_compacted(ce);
+        }
+        let mut all_time_models: Vec<ModelBreakdown> = all_time_map
+            .into_iter()
+            .map(|(model, acc)| acc.into_breakdown(model))
+            .collect();
         all_time_models.sort_by(|a, b| {
             b.cost_usd
                 .partial_cmp(&a.cost_usd)
@@ -493,6 +777,12 @@ impl CostTracker {
             total_input_tokens: self.total_input_tokens(),
             total_output_tokens: self.total_output_tokens(),
             total_requests,
+            token_count_sources,
+            cost_sources,
+            captured_output_tokens,
+            captured_token_ids,
+            captured_logprobs,
+            token_capture_requests,
             avg_cost_per_request: if total_requests > 0 {
                 total_cost / total_requests as f64
             } else {
@@ -552,6 +842,30 @@ pub struct ModelBreakdown {
     pub output_tokens: u64,
     pub cost_usd: f64,
     pub requests: u64,
+    /// Requests whose billable token counts came from provider usage fields.
+    #[serde(default)]
+    pub provider_usage_requests: u64,
+    /// Legacy requests without token-count provenance.
+    #[serde(default)]
+    pub unknown_token_count_requests: u64,
+    /// Requests whose dollar cost came directly from the provider response.
+    #[serde(default)]
+    pub provider_cost_requests: u64,
+    /// Requests whose dollar cost used local pricing against provider usage.
+    #[serde(default)]
+    pub local_pricing_fallback_requests: u64,
+    /// Provider-native captured output token count, when exact capture exists.
+    #[serde(default)]
+    pub captured_output_tokens: u64,
+    /// Provider-native captured token id count.
+    #[serde(default)]
+    pub captured_token_ids: u64,
+    /// Provider-native captured logprob count.
+    #[serde(default)]
+    pub captured_logprobs: u64,
+    /// Requests with provider-native token/logprob capture metadata.
+    #[serde(default)]
+    pub token_capture_requests: u64,
 }
 
 /// Serializable cost summary for the `openclaw_cost_summary` Tauri command.
@@ -563,6 +877,24 @@ pub struct CostSummary {
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_requests: u64,
+    /// Request counts by token-count provenance.
+    #[serde(default)]
+    pub token_count_sources: BTreeMap<String, u64>,
+    /// Request counts by dollar-cost provenance.
+    #[serde(default)]
+    pub cost_sources: BTreeMap<String, u64>,
+    /// Aggregate provider-native captured output tokens.
+    #[serde(default)]
+    pub captured_output_tokens: u64,
+    /// Aggregate provider-native captured token ids.
+    #[serde(default)]
+    pub captured_token_ids: u64,
+    /// Aggregate provider-native captured logprobs.
+    #[serde(default)]
+    pub captured_logprobs: u64,
+    /// Number of requests that included provider-native token capture.
+    #[serde(default)]
+    pub token_capture_requests: u64,
     pub avg_cost_per_request: f64,
     pub daily: BTreeMap<String, f64>,
     pub monthly: BTreeMap<String, f64>,
@@ -607,6 +939,9 @@ mod tests {
             output_tokens: 200,
             cost_usd: cost,
             request_id: None,
+            token_count_source: TokenCountSource::ProviderUsage,
+            cost_source: CostSource::ProviderCost,
+            token_capture: None,
         }
     }
 
@@ -730,6 +1065,36 @@ mod tests {
         assert!((summary.by_model["claude"] - 2.0).abs() < 1e-6);
         assert_eq!(summary.alert_threshold_usd, Some(10.0));
         assert!(!summary.alert_triggered);
+    }
+
+    #[test]
+    fn test_summary_tracks_provider_usage_and_capture_provenance() {
+        let mut tracker = CostTracker::new(BudgetConfig::default());
+        let mut entry = make_entry(0.01, "2026-03-04T10:00:00Z", "gpt-4o");
+        entry.cost_source = CostSource::LocalPricingFallback;
+        entry.token_capture = Some(TokenCaptureCostSummary::from_capture(
+            &ProviderTokenCapture {
+                exact_tokens_supported: true,
+                logprobs_supported: true,
+                token_ids: vec![11, 12],
+                tokens: vec!["he".into(), "llo".into()],
+                logprobs: vec![-0.1, -0.2],
+                provider: Some("openai".into()),
+                model: Some("gpt-4o".into()),
+            },
+        ));
+        tracker.record(entry);
+
+        let summary = tracker.summary("2026-03-04", "2026-03");
+        assert_eq!(summary.token_count_sources["provider_usage"], 1);
+        assert_eq!(summary.cost_sources["local_pricing_fallback"], 1);
+        assert_eq!(summary.captured_output_tokens, 2);
+        assert_eq!(summary.captured_token_ids, 2);
+        assert_eq!(summary.captured_logprobs, 2);
+        assert_eq!(summary.token_capture_requests, 1);
+        assert_eq!(summary.model_details[0].provider_usage_requests, 1);
+        assert_eq!(summary.model_details[0].local_pricing_fallback_requests, 1);
+        assert_eq!(summary.model_details[0].captured_output_tokens, 2);
     }
 
     #[test]

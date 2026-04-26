@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::settings::SkillTapTrustLevel;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingSeverity {
     Info,
@@ -148,7 +148,7 @@ impl QuarantineManager {
                     .find_iter(&skill.content.raw_content)
                     .map(|matched| SecurityFinding {
                         kind: (*kind).to_string(),
-                        severity: severity.clone(),
+                        severity: *severity,
                         excerpt: matched.as_str().to_string(),
                     })
             })

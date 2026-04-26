@@ -14,7 +14,7 @@ use tokio::fs;
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::runtime::WasmChannelRuntime;
-use crate::channels::wasm::schema::ChannelCapabilitiesFile;
+use crate::channels::wasm::schema::{ChannelCapabilitiesFile, WebhookSecretValidation};
 use crate::channels::wasm::wrapper::WasmChannel;
 use crate::pairing::PairingStore;
 
@@ -31,6 +31,10 @@ impl WasmChannelLoader {
             runtime,
             pairing_store,
         }
+    }
+
+    pub async fn invalidate(&self, name: &str) {
+        self.runtime.remove(name).await;
     }
 
     /// Load a single WASM channel from a file pair.
@@ -258,6 +262,28 @@ impl LoadedChannel {
             .as_ref()
             .map(|f| f.webhook_secret_name())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.channel.channel_name()))
+    }
+
+    /// Get the webhook secret validation mode from capabilities.
+    pub fn webhook_secret_validation(&self) -> WebhookSecretValidation {
+        self.capabilities_file
+            .as_ref()
+            .map(|f| f.webhook_secret_validation())
+            .unwrap_or_default()
+    }
+
+    /// Get the verify-token query parameter name from capabilities.
+    pub fn webhook_verify_token_param(&self) -> Option<&str> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.webhook_verify_token_param())
+    }
+
+    /// Get the verify-token secret name from capabilities.
+    pub fn webhook_verify_token_secret_name(&self) -> Option<String> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.webhook_verify_token_secret_name())
     }
 }
 

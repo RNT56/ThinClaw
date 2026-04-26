@@ -705,6 +705,11 @@ pub async fn ensure_app_running(app_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    static APPLE_MAIL_HOME_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_extract_email_angle_brackets() {
@@ -723,8 +728,71 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_email_missing_brackets() {
+        assert_eq!(
+            AppleMailChannel::extract_email("john <john@example.com"),
+            "john <john@example.com"
+        );
+    }
+
+    #[test]
     fn test_extract_email_empty() {
         assert_eq!(AppleMailChannel::extract_email("unknown"), "unknown");
+    }
+
+    #[test]
+    fn test_find_envelope_index_found() {
+        let _guard = APPLE_MAIL_HOME_LOCK.lock().unwrap();
+
+        let home = tempdir().unwrap();
+        let mail_dir = home
+            .path()
+            .join("Library")
+            .join("Mail")
+            .join("V12")
+            .join("MailData");
+        fs::create_dir_all(&mail_dir).unwrap();
+        let expected = mail_dir.join("Envelope Index");
+        fs::write(&expected, b"").unwrap();
+
+        let original_home = std::env::var_os("HOME");
+        // SAFETY: Tests are sequential within this locked section and restore HOME immediately after use.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+        let found = find_envelope_index().unwrap();
+        assert_eq!(found, expected);
+
+        match original_home {
+            Some(home) => unsafe {
+                std::env::set_var("HOME", home);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
+        }
+    }
+
+    #[test]
+    fn test_find_envelope_index_missing() {
+        let _guard = APPLE_MAIL_HOME_LOCK.lock().unwrap();
+
+        let home = tempdir().unwrap();
+        let original_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("HOME", home.path());
+        }
+        let result = find_envelope_index();
+        assert!(result.is_err());
+
+        match original_home {
+            Some(home) => unsafe {
+                std::env::set_var("HOME", home);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
+        }
     }
 
     #[test]

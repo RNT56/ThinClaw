@@ -34,7 +34,7 @@ impl Tunnel for CloudflareTunnel {
 
     async fn start(&self, local_host: &str, local_port: u16) -> Result<String> {
         let origin = format!("http://{local_host}:{local_port}");
-        let mut child = Command::new("cloudflared")
+        let mut child = Command::new(crate::tunnel::resolve_binary("cloudflared"))
             .args([
                 "tunnel",
                 "--no-autoupdate",

@@ -106,45 +106,118 @@ async fn capture_screen(
 
 /// Capture the screen on Linux using available tools.
 #[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinuxScreenCaptureCommand {
+    program: &'static str,
+    args: Vec<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn linux_screen_capture_commands(
+    path: &std::path::Path,
+    interactive: bool,
+    window: bool,
+    delay_secs: Option<u32>,
+) -> Vec<LinuxScreenCaptureCommand> {
+    let output = path.to_string_lossy().to_string();
+    let mut commands = Vec::new();
+
+    let mut gnome_args = Vec::new();
+    if interactive {
+        gnome_args.push("-a".to_string());
+    } else if window {
+        gnome_args.push("-w".to_string());
+    }
+    if let Some(delay) = delay_secs {
+        gnome_args.push("-d".to_string());
+        gnome_args.push(delay.to_string());
+    }
+    gnome_args.push("-f".to_string());
+    gnome_args.push(output.clone());
+    commands.push(LinuxScreenCaptureCommand {
+        program: "gnome-screenshot",
+        args: gnome_args,
+    });
+
+    let mut scrot_args = Vec::new();
+    if let Some(delay) = delay_secs {
+        scrot_args.push("-d".to_string());
+        scrot_args.push(delay.to_string());
+    }
+    if interactive || window {
+        scrot_args.push("-s".to_string());
+    }
+    scrot_args.push(output.clone());
+    commands.push(LinuxScreenCaptureCommand {
+        program: "scrot",
+        args: scrot_args,
+    });
+
+    if delay_secs.is_none() {
+        let args = if interactive || window {
+            vec![output]
+        } else {
+            vec!["-window".to_string(), "root".to_string(), output]
+        };
+        commands.push(LinuxScreenCaptureCommand {
+            program: "import",
+            args,
+        });
+    }
+
+    commands
+}
+
+#[cfg(target_os = "linux")]
 async fn capture_screen(
     path: &std::path::Path,
     interactive: bool,
     window: bool,
     delay_secs: Option<u32>,
 ) -> Result<(), ToolError> {
-    if interactive || window || delay_secs.is_some() {
-        return Err(ToolError::ExecutionFailed(
-            "Interactive, window, and delayed screen capture are not supported on Windows yet. Use mode=fullscreen without delay.".to_string(),
-        ));
-    }
-
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Create screenshot dir: {e}")))?;
     }
 
-    let path_str = path.to_string_lossy().to_string();
+    let mut attempted = Vec::new();
+    for plan in linux_screen_capture_commands(path, interactive, window, delay_secs) {
+        if !crate::platform::executable_available(plan.program) {
+            continue;
+        }
 
-    // Try gnome-screenshot first, then scrot, then import
-    let tools: [(&str, Vec<&str>); 3] = [
-        ("gnome-screenshot", vec!["-f", &path_str]),
-        ("scrot", vec![&path_str]),
-        ("import", vec!["-window", "root", &path_str]),
-    ];
-
-    for (tool_name, args) in &tools {
-        let result = Command::new(tool_name).args(args).output().await;
-        if let Ok(output) = result {
-            if output.status.success() {
+        match Command::new(plan.program).args(&plan.args).output().await {
+            Ok(output) if output.status.success() && path.exists() => {
                 return Ok(());
             }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                attempted.push(if stderr.is_empty() {
+                    format!("{} exited with {}", plan.program, output.status)
+                } else {
+                    format!("{}: {stderr}", plan.program)
+                });
+            }
+            Err(error) => attempted.push(format!("{}: {error}", plan.program)),
         }
     }
 
-    Err(ToolError::ExecutionFailed(
-        "No screenshot tool found. Install gnome-screenshot, scrot, or imagemagick.".to_string(),
-    ))
+    let mode = if interactive {
+        "interactive"
+    } else if window {
+        "window"
+    } else {
+        "fullscreen"
+    };
+    let attempted = if attempted.is_empty() {
+        "No compatible command was available for the requested mode.".to_string()
+    } else {
+        attempted.join("; ")
+    };
+    Err(ToolError::ExecutionFailed(format!(
+        "Linux screen capture failed for mode={mode}. Install gnome-screenshot, scrot, or ImageMagick import. Details: {attempted}"
+    )))
 }
 
 /// Capture the screen on Windows using PowerShell.
@@ -196,10 +269,9 @@ impl Tool for ScreenCaptureTool {
     }
 
     fn description(&self) -> &str {
-        "Capture the screen and save to a PNG file. \
-         On macOS: uses built-in screencapture. \
-         Options: full screen (default), interactive region selection, \
-         or window capture. Can specify output path and delay."
+        "Capture the screen and save to a PNG file. Supports full screen, \
+         interactive region selection, or window capture where the host screenshot \
+         command supports it. Can specify output path and delay."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -218,7 +290,7 @@ impl Tool for ScreenCaptureTool {
                 },
                 "delay_seconds": {
                     "type": "integer",
-                    "description": "Delay in seconds before capturing (macOS only)",
+                    "description": "Delay in seconds before capturing (supported by macOS, gnome-screenshot, and scrot)",
                     "minimum": 0,
                     "maximum": 30
                 }
@@ -310,5 +382,26 @@ mod tests {
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::UnlessAutoApproved
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_command_selection_covers_modes_and_delay() {
+        let path = std::path::Path::new("/tmp/thinclaw-screen.png");
+        let full = linux_screen_capture_commands(path, false, false, None);
+        assert!(full.iter().any(|cmd| cmd.program == "gnome-screenshot"));
+        assert!(
+            full.iter()
+                .any(|cmd| cmd.args.contains(&"-window".to_string()))
+        );
+
+        let interactive = linux_screen_capture_commands(path, true, false, Some(2));
+        let gnome = interactive
+            .iter()
+            .find(|cmd| cmd.program == "gnome-screenshot")
+            .expect("gnome plan");
+        assert!(gnome.args.contains(&"-a".to_string()));
+        assert!(gnome.args.contains(&"-d".to_string()));
+        assert!(!interactive.iter().any(|cmd| cmd.program == "import"));
     }
 }

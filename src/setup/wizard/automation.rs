@@ -9,7 +9,7 @@ impl SetupWizard {
         print_info("Routines let ThinClaw run scheduled work for you.");
         print_info("Examples: backups, daily summaries, and cron-style jobs.");
         print_info("Recommended: keep routines on unless you want a very minimal setup.");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         if !confirm("Enable routines?", true).map_err(SetupError::Io)? {
             self.settings.routines_enabled = false;
@@ -30,7 +30,7 @@ impl SetupWizard {
         );
         print_info("They load from ~/.thinclaw/skills/.");
         print_info("Recommended: keep skills on unless you want a very minimal local runtime.");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         if !confirm("Enable skills system?", true).map_err(SetupError::Io)? {
             self.settings.skills_enabled = false;
@@ -67,7 +67,7 @@ impl SetupWizard {
                 "Recommended: keep heartbeat off for day one unless you already know where alerts should go.",
             );
         }
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let default_enabled = matches!(
             self.selected_profile,

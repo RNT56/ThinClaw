@@ -94,9 +94,9 @@ impl Tool for DiscordActionsTool {
     }
 
     fn description(&self) -> &str {
-        "Perform Discord moderation actions: send/delete/pin messages, \
-         kick/ban/unban users, manage roles, get guild/channel info. \
-         Requires the bot to have appropriate permissions."
+        "Perform live Discord actions such as sending or moderating messages, \
+         managing users and roles, and reading guild or channel info. Use this for \
+         real Discord-side changes, not for searching past conversation history."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

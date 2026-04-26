@@ -7,6 +7,8 @@
 //! All endpoints are authenticated via per-job bearer tokens.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -22,6 +24,7 @@ use crate::db::Database;
 use crate::llm::{CompletionRequest, LlmProvider, ToolCompletionRequest};
 use crate::orchestrator::auth::{TokenStore, worker_auth_middleware};
 use crate::orchestrator::job_manager::ContainerJobManager;
+use crate::sandbox_jobs::SandboxJobController;
 use crate::secrets::SecretsStore;
 use crate::worker::api::JobEventPayload;
 use crate::worker::api::{
@@ -32,7 +35,8 @@ use crate::worker::api::{
 /// A follow-up prompt queued for a Claude Code bridge.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingPrompt {
-    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
     pub done: bool,
 }
 
@@ -50,8 +54,6 @@ pub struct OrchestratorState {
     pub store: Option<Arc<dyn Database>>,
     /// Encrypted secrets store for credential injection into containers.
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
-    /// User ID for secret lookups (single-tenant, typically "default").
-    pub user_id: String,
 }
 
 /// The orchestrator's internal API server.
@@ -97,20 +99,54 @@ impl OrchestratorApi {
         state: OrchestratorState,
         port: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Self::start_with_shutdown(state, port, std::future::pending()).await
+    }
+
+    pub async fn start_with_shutdown<F>(
+        state: OrchestratorState,
+        port: u16,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let router = Self::router(state);
-        let addr = if cfg!(target_os = "linux") {
-            std::net::SocketAddr::from(([0, 0, 0, 0], port))
-        } else {
-            std::net::SocketAddr::from(([127, 0, 0, 1], port))
-        };
+        let addr = orchestrator_bind_addr(port);
 
         tracing::info!("Orchestrator internal API listening on {}", addr);
 
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, router).await?;
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => listener,
+            Err(error) if cfg!(target_os = "linux") => {
+                let fallback = linux_orchestrator_fallback_bind_addr(port);
+                tracing::warn!(
+                    %addr,
+                    %fallback,
+                    %error,
+                    "Failed to bind orchestrator to Docker bridge address; falling back to all interfaces"
+                );
+                tokio::net::TcpListener::bind(fallback).await?
+            }
+            Err(error) => return Err(Box::new(error)),
+        };
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown)
+            .await?;
 
         Ok(())
     }
+}
+
+fn orchestrator_bind_addr(port: u16) -> SocketAddr {
+    if cfg!(target_os = "linux") {
+        SocketAddr::from(([172, 17, 0, 1], port))
+    } else {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+}
+
+fn linux_orchestrator_fallback_bind_addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([0, 0, 0, 0], port))
 }
 
 // -- Handlers --
@@ -126,16 +162,32 @@ async fn get_job(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
 ) -> Result<Json<JobDescription>, StatusCode> {
-    let handle = state
-        .job_manager
-        .get_handle(job_id)
-        .await
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let spec = if let Some(handle) = state.job_manager.get_handle(job_id).await {
+        handle.spec
+    } else if let Some(store) = state.store.as_ref() {
+        store
+            .get_sandbox_job(job_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|record| record.spec)
+            .ok_or(StatusCode::NOT_FOUND)?
+    } else {
+        return Err(StatusCode::NOT_FOUND);
+    };
 
     Ok(Json(JobDescription {
-        title: format!("Job {}", job_id),
-        description: handle.task_description,
-        project_dir: handle.project_dir.map(|p| p.display().to_string()),
+        title: spec.title,
+        description: spec.description,
+        project_dir: spec.project_dir,
+        principal_id: Some(spec.principal_id),
+        actor_id: Some(spec.actor_id),
+        metadata: Some(spec.metadata),
+        allowed_tools: spec.allowed_tools,
+        allowed_skills: spec.allowed_skills,
+        tool_profile: spec.tool_profile,
+        interactive: spec.interactive,
+        idle_timeout_secs: Some(spec.idle_timeout_secs),
     }))
 }
 
@@ -144,13 +196,20 @@ async fn llm_complete(
     Path(job_id): Path<Uuid>,
     Json(req): Json<ProxyCompletionRequest>,
 ) -> Result<Json<ProxyCompletionResponse>, StatusCode> {
+    if !state.token_store.check_llm_rate_limit(job_id).await {
+        tracing::warn!(job_id = %job_id, "Worker LLM completion rate limited");
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
     let completion_req = CompletionRequest {
         messages: req.messages,
+        context_documents: req.context_documents,
         model: req.model,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         stop_sequences: req.stop_sequences,
         thinking: crate::llm::ThinkingConfig::Disabled,
+        stream_policy: crate::llm::StreamPolicy::AllowSimulated,
         metadata: std::collections::HashMap::new(),
     };
 
@@ -174,14 +233,21 @@ async fn llm_complete_with_tools(
     Path(job_id): Path<Uuid>,
     Json(req): Json<ProxyToolCompletionRequest>,
 ) -> Result<Json<ProxyToolCompletionResponse>, StatusCode> {
+    if !state.token_store.check_llm_rate_limit(job_id).await {
+        tracing::warn!(job_id = %job_id, "Worker LLM tool completion rate limited");
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
     let tool_req = ToolCompletionRequest {
         messages: req.messages,
+        context_documents: req.context_documents,
         tools: req.tools,
         model: req.model,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         tool_choice: req.tool_choice,
         thinking: crate::llm::ThinkingConfig::Disabled,
+        stream_policy: crate::llm::StreamPolicy::AllowSimulated,
         metadata: std::collections::HashMap::new(),
     };
 
@@ -226,25 +292,48 @@ async fn report_complete(
     Path(job_id): Path<Uuid>,
     Json(report): Json<CompletionReport>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    let status = report
+        .status
+        .clone()
+        .unwrap_or_else(|| if report.success { "completed" } else { "error" }.to_string());
+
     if report.success {
         tracing::info!(
             job_id = %job_id,
+            status = %status,
+            session_id = ?report.session_id,
+            iterations = report.iterations,
             "Worker reported job complete"
         );
     } else {
         tracing::warn!(
             job_id = %job_id,
+            status = %status,
+            session_id = ?report.session_id,
+            iterations = report.iterations,
             message = ?report.message,
             "Worker reported job failure"
         );
     }
 
     // Store the result and clean up the container
-    let result = crate::orchestrator::job_manager::CompletionResult {
-        success: report.success,
-        message: report.message.clone(),
-    };
-    if let Err(e) = state.job_manager.complete_job(job_id, result).await {
+    let controller = SandboxJobController::new(
+        state.store.clone(),
+        Some(Arc::clone(&state.job_manager)),
+        state.job_event_tx.clone(),
+        Some(Arc::clone(&state.prompt_queue)),
+    );
+    if let Err(e) = controller
+        .finalize_job(
+            job_id,
+            &status,
+            report.success,
+            report.message.clone(),
+            report.session_id.clone(),
+            report.iterations,
+        )
+        .await
+    {
         tracing::error!(job_id = %job_id, "Failed to complete job cleanup: {}", e);
     }
 
@@ -279,6 +368,13 @@ async fn job_event_handler(
 
     // Convert to SSE event and broadcast
     let job_id_str = job_id.to_string();
+    let render_value = |value: Option<&serde_json::Value>| -> String {
+        match value {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Null) | None => String::new(),
+            Some(other) => serde_json::to_string(other).unwrap_or_default(),
+        }
+    };
     let sse_event = match payload.event_type.as_str() {
         "message" => SseEvent::JobMessage {
             job_id: job_id_str,
@@ -317,14 +413,28 @@ async fn job_event_handler(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string(),
-            output: payload
+            output: render_value(
+                payload
+                    .data
+                    .get("output_text")
+                    .or_else(|| payload.data.get("output"))
+                    .or_else(|| payload.data.get("output_json")),
+            ),
+            output_text: payload
                 .data
-                .get("output")
+                .get("output_text")
+                .or_else(|| payload.data.get("output"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
+                .map(str::to_string),
+            output_json: payload.data.get("output_json").cloned().or_else(|| {
+                payload
+                    .data
+                    .get("output")
+                    .filter(|value| !value.is_string())
+                    .cloned()
+            }),
         },
-        "result" => SseEvent::JobResult {
+        "session_result" => SseEvent::JobSessionResult {
             job_id: job_id_str,
             status: payload
                 .data
@@ -337,7 +447,48 @@ async fn job_event_handler(
                 .get("session_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            success: payload
+                .data
+                .get("success")
+                .and_then(|value| value.as_bool()),
+            message: payload
+                .data
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         },
+        "result" => {
+            let status = payload
+                .data
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let success = payload
+                .data
+                .get("success")
+                .and_then(|value| value.as_bool())
+                .or(match status.as_str() {
+                    "completed" | "success" => Some(true),
+                    "failed" | "error" => Some(false),
+                    _ => None,
+                });
+            SseEvent::JobResult {
+                job_id: job_id_str,
+                status,
+                session_id: payload
+                    .data
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                success,
+                message: payload
+                    .data
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            }
+        }
         _ => SseEvent::JobStatus {
             job_id: job_id_str,
             message: payload
@@ -398,12 +549,39 @@ async fn get_credentials_handler(
         tracing::error!("Credentials requested but no secrets store configured");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
+    let principal_id = if let Some(handle) = state.job_manager.get_handle(job_id).await {
+        handle.spec.principal_id
+    } else if let Some(store) = state.store.as_ref() {
+        store
+            .get_sandbox_job(job_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|job| job.spec.principal_id)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if principal_id.is_empty() {
+        tracing::error!(
+            job_id = %job_id,
+            "Credentials requested but sandbox job record is unavailable"
+        );
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     let mut credentials: Vec<CredentialResponse> = Vec::with_capacity(grants.len());
 
     for grant in &grants {
         let decrypted = secrets
-            .get_decrypted(&state.user_id, &grant.secret_name)
+            .get_for_injection(
+                &principal_id,
+                &grant.secret_name,
+                crate::secrets::SecretAccessContext::new(
+                    "orchestrator.api",
+                    "sandbox_credential_grant",
+                ),
+            )
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -412,17 +590,6 @@ async fn get_credentials_handler(
                 );
                 StatusCode::INTERNAL_SERVER_ERROR
             })?;
-
-        // Record usage for audit trail
-        if let Ok(secret) = secrets.get(&state.user_id, &grant.secret_name).await
-            && let Err(e) = secrets.record_usage(secret.id).await
-        {
-            tracing::warn!(
-                job_id = %job_id,
-                "Failed to record credential usage: {}", e
-            );
-        }
-
         tracing::debug!(
             job_id = %job_id,
             env_var = %grant.env_var,
@@ -460,7 +627,7 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use crate::orchestrator::auth::TokenStore;
+    use crate::orchestrator::auth::{LLM_RATE_LIMIT_MAX_REQUESTS, TokenStore};
     use crate::orchestrator::job_manager::{ContainerJobConfig, ContainerJobManager};
     use crate::testing::StubLlm;
 
@@ -477,8 +644,62 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
         }
+    }
+
+    fn completion_body() -> Body {
+        Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "messages": [],
+                "context_documents": [],
+                "model": null,
+                "max_tokens": null,
+                "temperature": null,
+                "stop_sequences": null
+            }))
+            .unwrap(),
+        )
+    }
+
+    fn tool_completion_body() -> Body {
+        Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "messages": [],
+                "context_documents": [],
+                "tools": [],
+                "model": null,
+                "max_tokens": null,
+                "temperature": null,
+                "tool_choice": null
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn orchestrator_bind_addr_uses_docker_bridge_on_linux() {
+        assert_eq!(
+            orchestrator_bind_addr(50051),
+            std::net::SocketAddr::from(([172, 17, 0, 1], 50051))
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn orchestrator_bind_addr_uses_loopback_off_linux() {
+        assert_eq!(
+            orchestrator_bind_addr(50051),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 50051))
+        );
+    }
+
+    #[tokio::test]
+    async fn start_with_shutdown_exits_when_signal_received() {
+        let state = test_state();
+        OrchestratorApi::start_with_shutdown(state, 0, async {})
+            .await
+            .expect("server exits after shutdown signal");
     }
 
     #[tokio::test]
@@ -546,6 +767,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn llm_complete_returns_429_after_per_token_limit() {
+        let state = test_state();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        for _ in 0..LLM_RATE_LIMIT_MAX_REQUESTS {
+            assert!(state.token_store.check_llm_rate_limit(job_id).await);
+        }
+
+        let router = OrchestratorApi::router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/llm/complete", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(completion_body())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn llm_complete_rate_limit_is_isolated_per_job() {
+        let state = test_state();
+        let job_a = Uuid::new_v4();
+        let job_b = Uuid::new_v4();
+        let _token_a = state.token_store.create_token(job_a).await;
+        let token_b = state.token_store.create_token(job_b).await;
+        for _ in 0..LLM_RATE_LIMIT_MAX_REQUESTS {
+            assert!(state.token_store.check_llm_rate_limit(job_a).await);
+        }
+
+        let router = OrchestratorApi::router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/llm/complete", job_b))
+            .header("Authorization", format!("Bearer {}", token_b))
+            .header("Content-Type", "application/json")
+            .body(completion_body())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn llm_complete_with_tools_returns_429_after_per_token_limit() {
+        let state = test_state();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        for _ in 0..LLM_RATE_LIMIT_MAX_REQUESTS {
+            assert!(state.token_store.check_llm_rate_limit(job_id).await);
+        }
+
+        let router = OrchestratorApi::router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/llm/complete_with_tools", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(tool_completion_body())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
     async fn token_for_job_a_rejected_on_job_b() {
         let state = test_state();
         let job_a = Uuid::new_v4();
@@ -594,7 +883,7 @@ mod tests {
         {
             let mut q = state.prompt_queue.lock().await;
             q.entry(job_id).or_default().push_back(PendingPrompt {
-                content: "What is the status?".to_string(),
+                content: Some("What is the status?".to_string()),
                 done: false,
             });
         }
@@ -682,6 +971,7 @@ mod tests {
                     value: SecretString::from("supersecretvalue".to_string()),
                     provider: None,
                     expires_at: None,
+                    created_by: None,
                 },
             )
             .await
@@ -701,6 +991,31 @@ mod tests {
             )
             .await;
 
+        {
+            let mut containers = jm.containers.write().await;
+            containers.insert(
+                job_id,
+                crate::orchestrator::job_manager::ContainerHandle {
+                    job_id,
+                    container_id: "test-container".to_string(),
+                    state: crate::orchestrator::job_manager::ContainerState::Running,
+                    mode: crate::orchestrator::job_manager::JobMode::Worker,
+                    created_at: chrono::Utc::now(),
+                    spec: crate::sandbox_jobs::SandboxJobSpec::new(
+                        "test",
+                        "test",
+                        "default",
+                        "default",
+                        None,
+                        crate::orchestrator::job_manager::JobMode::Worker,
+                    ),
+                    last_worker_status: None,
+                    worker_iteration: 0,
+                    completion_result: None,
+                },
+            );
+        }
+
         let state = OrchestratorState {
             llm: Arc::new(StubLlm::default()),
             job_manager: Arc::new(jm),
@@ -709,7 +1024,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: Some(secrets_store),
-            user_id: "default".to_string(),
         };
 
         let router = OrchestratorApi::router(state);
@@ -744,7 +1058,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
         };
 
         let job_id = Uuid::new_v4();
@@ -799,7 +1112,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
         };
 
         let job_id = Uuid::new_v4();
@@ -847,7 +1159,6 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
-            user_id: "default".to_string(),
         };
 
         let job_id = Uuid::new_v4();
@@ -894,8 +1205,14 @@ mod tests {
                     state: crate::orchestrator::job_manager::ContainerState::Running,
                     mode: crate::orchestrator::job_manager::JobMode::Worker,
                     created_at: chrono::Utc::now(),
-                    project_dir: None,
-                    task_description: "test".to_string(),
+                    spec: crate::sandbox_jobs::SandboxJobSpec::new(
+                        "test",
+                        "test",
+                        "default",
+                        "default",
+                        None,
+                        crate::orchestrator::job_manager::JobMode::Worker,
+                    ),
                     last_worker_status: None,
                     worker_iteration: 0,
                     completion_result: None,

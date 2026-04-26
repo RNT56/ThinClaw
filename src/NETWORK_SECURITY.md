@@ -32,7 +32,7 @@ ThinClaw operates across four trust boundaries:
 |----------|-------------|-------------|----------------|----------------|--------|
 | Web Gateway | 3000 | `127.0.0.1` | Bearer token (constant-time) | `GATEWAY_HOST`, `GATEWAY_PORT`, `GATEWAY_AUTH_TOKEN` | `server.rs` — `start_server()` |
 | HTTP Webhook Server | 8080 | `0.0.0.0` | Shared secret (body field) | `HTTP_HOST`, `HTTP_PORT`, `HTTP_WEBHOOK_SECRET` | `webhook_server.rs` — `start()` |
-| Orchestrator Internal API | 50051 | `127.0.0.1` (macOS/Win) / `0.0.0.0` (Linux) | Per-job bearer token (constant-time) | `ORCHESTRATOR_PORT` | `api.rs` — `OrchestratorApi::start()` |
+| Orchestrator Internal API | 50051 | `127.0.0.1` (macOS/Win) / `172.17.0.1` when available (Linux Docker bridge; warning fallback to `0.0.0.0`) | Per-job bearer token (constant-time), LLM proxy rate limit | `ORCHESTRATOR_PORT` | `api.rs` — `OrchestratorApi::start()` |
 | OAuth Callback Listener | 9876 | `127.0.0.1` | None (ephemeral, 5-min timeout) | N/A (hardcoded) | `oauth_defaults.rs` — `bind_callback_listener()` |
 | Sandbox HTTP Proxy | OS-assigned (ephemeral) | `127.0.0.1` | None (loopback only) | N/A (auto-assigned) | `proxy/http.rs` — `SandboxProxy::start()` |
 
@@ -195,7 +195,7 @@ Shutdown is triggered via a `oneshot::Sender` stored on the `WebhookServer` stru
 Platform-dependent:
 
 - **macOS / Windows**: `127.0.0.1:<port>` — Docker Desktop routes `host.docker.internal` through its VM to `127.0.0.1`
-- **Linux**: `0.0.0.0:<port>` — containers reach the host via the Docker bridge gateway (`172.17.0.1`), which is not loopback
+- **Linux**: `172.17.0.1:<port>` — containers reach the host via the Docker bridge gateway. If that address is unavailable, startup logs a warning and falls back to `0.0.0.0:<port>` to preserve sandbox compatibility.
 
 Default port: `50051`.
 
@@ -232,9 +232,9 @@ The orchestrator can grant per-job access to specific secrets from the encrypted
 
 ### Rate Limiting
 
-**None.** The orchestrator API has no rate limiting. All `/worker/*` endpoints are authenticated via per-job bearer tokens, but a compromised container could spam authenticated endpoints without throttling.
+The LLM proxy endpoints enforce an in-memory per-job-token sliding-window limit. All `/worker/*` endpoints are authenticated via per-job bearer tokens; liveness/reporting routes remain unthrottled so workers can still report status and complete cleanly.
 
-**Mitigation:** Tokens are scoped per-job so a compromised container can only abuse its own job's endpoints. Container execution is time-bounded (see [Docker Container Security](#docker-container-security)), which limits the window for abuse.
+**Mitigation:** Tokens are scoped per-job so a compromised container can only abuse its own job's endpoints. Container execution is time-bounded (see [Docker Container Security](#docker-container-security)), which limits the window for abuse. Rate-limit state is revoked with the token.
 
 ### Routes
 
@@ -252,7 +252,7 @@ The orchestrator can grant per-job access to specific secrets from the encrypted
 
 ### Graceful Shutdown
 
-**None.** The orchestrator calls `axum::serve(listener, router).await?` without `.with_graceful_shutdown()`. The server stops only when the task is dropped (process exit or tokio task cancellation). In-flight requests may be interrupted.
+The orchestrator exposes `start_with_shutdown()` and the main process sends its shutdown signal during normal agent teardown. The server uses Axum graceful shutdown so in-flight requests can drain when ThinClaw exits normally.
 
 **Reference:** `src/orchestrator/api.rs` — `OrchestratorApi::start()`
 
@@ -465,13 +465,11 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 **Mitigation:** The web gateway and OAuth callback bind to loopback by default. For production, users are expected to front the gateway with a reverse proxy (nginx, Caddy) or tunnel (Cloudflare, ngrok) that provides TLS.
 **Recommendation:** Document the requirement for a TLS-terminating reverse proxy in deployment guides.
 
-#### F-3. Orchestrator binds to `0.0.0.0` on Linux
+#### F-3. ~~Orchestrator binds to `0.0.0.0` on Linux~~ (Mitigated)
 
 **Severity:** Medium
 **Location:** `src/orchestrator/api.rs` — platform-conditional bind in `OrchestratorApi::start()`
-**Details:** On Linux, the orchestrator API binds to all interfaces because Docker containers reach the host via the bridge gateway (`172.17.0.1`), not loopback. This means the API is reachable from any network interface on the host.
-**Mitigation:** All `/worker/*` endpoints require per-job bearer tokens (constant-time, cryptographically random). The `/health` endpoint is the only unauthenticated route and returns only `"ok"`. Firewall rules should block external access to port 50051.
-**Recommendation:** Document firewall requirements for Linux deployments. Consider binding to the Docker bridge IP (`172.17.0.1`) instead of `0.0.0.0`.
+**Status:** Mitigated — Linux now binds to the Docker bridge IP (`172.17.0.1`) when available. If that address is unavailable, startup warns and falls back to `0.0.0.0` to preserve worker compatibility. All `/worker/*` endpoints still require per-job bearer tokens.
 
 #### F-6. WebSocket/SSE connection limit
 
@@ -479,18 +477,15 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 **Details:** The `SseManager` enforces a hard limit of **100 concurrent connections** (`MAX_CONNECTIONS` constant in `src/channels/web/sse.rs`). Both SSE subscribers and WebSocket connections share this counter. When exceeded, new WebSocket upgrades are rejected with a warning log and the connection is immediately closed.
 **Reference:** `src/channels/web/sse.rs` — `MAX_CONNECTIONS`, `src/channels/web/ws.rs` — `handle_ws_connection()` early return
 
-#### F-7. Orchestrator API has no rate limiting
+#### F-7. ~~Orchestrator API has no rate limiting~~ (Mitigated)
 
 **Severity:** Low
-**Details:** The orchestrator API has no request-rate throttling. A compromised container could spam authenticated endpoints (e.g., `/worker/{job_id}/llm/complete`) to drive up LLM costs or degrade service for other jobs.
-**Mitigation:** Tokens are scoped per-job, limiting blast radius. Container execution is time-bounded by the sandbox timeout, which caps the abuse window.
-**Recommendation:** Consider adding per-token rate limiting on the LLM proxy endpoints.
+**Status:** Mitigated — LLM proxy endpoints (`/worker/{job_id}/llm/complete` and `/worker/{job_id}/llm/complete_with_tools`) now enforce per-job-token rate limiting. Non-cost liveness/reporting routes are intentionally left unthrottled.
 
-#### F-8. Orchestrator API has no graceful shutdown
+#### F-8. ~~Orchestrator API has no graceful shutdown~~ (Resolved)
 
 **Severity:** Info
-**Details:** The orchestrator calls `axum::serve(listener, router).await?` without `.with_graceful_shutdown()`. In-flight requests (including LLM proxy calls) may be interrupted during process shutdown.
-**Reference:** `src/orchestrator/api.rs` — `OrchestratorApi::start()`
+**Status:** Resolved — `OrchestratorApi::start_with_shutdown()` uses Axum graceful shutdown, and the main runtime sends the shutdown signal during normal teardown.
 
 ### Resolved / Mitigated
 

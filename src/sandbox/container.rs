@@ -26,6 +26,8 @@
 //! ```
 
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -33,8 +35,8 @@ use std::time::Duration;
 
 use bollard::Docker;
 use bollard::container::{
-    Config, CreateContainerOptions, LogOutput, LogsOptions, RemoveContainerOptions,
-    StartContainerOptions, WaitContainerOptions,
+    Config, CreateContainerOptions, InspectContainerOptions, LogOutput, LogsOptions,
+    RemoveContainerOptions, StartContainerOptions, WaitContainerOptions,
 };
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::HostConfig;
@@ -65,7 +67,33 @@ pub struct ContainerRunner {
     proxy_port: u16,
 }
 
+fn container_user_for_workspace(working_dir: &Path) -> String {
+    #[cfg(unix)]
+    {
+        if let Ok(metadata) = std::fs::metadata(working_dir) {
+            let uid = metadata.uid();
+            let gid = metadata.gid();
+            if uid != 0 {
+                return format!("{uid}:{gid}");
+            }
+        }
+    }
+
+    "1000:1000".to_string()
+}
+
 impl ContainerRunner {
+    fn push_log_chunk(target: &mut String, text: &str, half_max: usize, truncated: &mut bool) {
+        if target.len() + text.len() > half_max {
+            *truncated = true;
+            let remaining = half_max.saturating_sub(target.len());
+            let safe = crate::util::floor_char_boundary(text, remaining.min(text.len()));
+            target.push_str(&text[..safe]);
+        } else {
+            target.push_str(text);
+        }
+    }
+
     /// Create a new container runner.
     pub fn new(docker: Docker, image: String, proxy_port: u16) -> Self {
         Self {
@@ -125,12 +153,13 @@ impl ContainerRunner {
         policy: SandboxPolicy,
         limits: &ResourceLimits,
         env: HashMap<String, String>,
+        allow_network: bool,
     ) -> Result<ContainerOutput> {
         let start_time = std::time::Instant::now();
 
         // Create the container
         let container_id = self
-            .create_container(command, working_dir, policy, limits, env)
+            .create_container(command, working_dir, policy, limits, env, allow_network)
             .await?;
 
         // Start the container
@@ -221,6 +250,7 @@ impl ContainerRunner {
         policy: SandboxPolicy,
         limits: &ResourceLimits,
         env: HashMap<String, String>,
+        allow_network: bool,
     ) -> Result<String> {
         let working_dir_str = working_dir.display().to_string();
 
@@ -237,7 +267,7 @@ impl ContainerRunner {
             "host.docker.internal"
         };
 
-        if self.proxy_port > 0 && policy.is_sandboxed() {
+        if allow_network && self.proxy_port > 0 && policy.is_sandboxed() {
             env_vec.push(format!(
                 "http_proxy=http://{}:{}",
                 proxy_host, self.proxy_port
@@ -277,8 +307,15 @@ impl ContainerRunner {
             binds: Some(binds),
             memory: Some((limits.memory_bytes) as i64),
             cpu_shares: Some(limits.cpu_shares as i64),
-            auto_remove: Some(true),
-            network_mode: Some("bridge".to_string()),
+            // Keep the container around until after log collection completes.
+            // Fast-running commands can otherwise disappear before `docker logs`
+            // has a chance to read their stdout/stderr.
+            auto_remove: Some(false),
+            network_mode: Some(if allow_network {
+                "bridge".to_string()
+            } else {
+                "none".to_string()
+            }),
             // Security: drop all capabilities and add back only what's needed
             cap_drop: Some(vec!["ALL".to_string()]),
             cap_add: Some(vec!["CHOWN".to_string()]),
@@ -301,6 +338,8 @@ impl ContainerRunner {
             ..Default::default()
         };
 
+        let user = container_user_for_workspace(working_dir);
+
         let config = Config {
             image: Some(self.image.clone()),
             cmd: Some(vec![
@@ -311,7 +350,9 @@ impl ContainerRunner {
             working_dir: Some("/workspace".to_string()),
             env: Some(env_vec),
             host_config: Some(host_config),
-            user: Some("1000:1000".to_string()), // Non-root user
+            // Match the bind-mounted workspace owner on Unix so Linux CI and
+            // rootless Docker workspaces remain writable without using root.
+            user: Some(user),
             ..Default::default()
         };
 
@@ -348,14 +389,19 @@ impl ContainerRunner {
         let exit_code = match wait_stream.next().await {
             Some(Ok(response)) => response.status_code,
             Some(Err(e)) => {
-                return Err(SandboxError::ExecutionFailed {
-                    reason: format!("wait failed: {}", e),
-                });
+                tracing::warn!(
+                    error = %e,
+                    container_id,
+                    "Docker wait stream failed; falling back to inspect polling"
+                );
+                self.poll_container_exit(container_id).await?
             }
             None => {
-                return Err(SandboxError::ExecutionFailed {
-                    reason: "container wait stream ended unexpectedly".to_string(),
-                });
+                tracing::warn!(
+                    container_id,
+                    "Docker wait stream ended unexpectedly; falling back to inspect polling"
+                );
+                self.poll_container_exit(container_id).await?
             }
         };
 
@@ -369,6 +415,28 @@ impl ContainerRunner {
             duration: Duration::ZERO, // Will be set by caller
             truncated,
         })
+    }
+
+    async fn poll_container_exit(&self, container_id: &str) -> Result<i64> {
+        loop {
+            let inspect = self
+                .docker
+                .inspect_container(container_id, None::<InspectContainerOptions>)
+                .await
+                .map_err(|e| SandboxError::ExecutionFailed {
+                    reason: format!("container inspect failed after wait error: {}", e),
+                })?;
+
+            if let Some(state) = inspect.state {
+                let running = state.running.unwrap_or(false);
+                let restarting = state.restarting.unwrap_or(false);
+                if !running && !restarting {
+                    return Ok(state.exit_code.unwrap_or(-1));
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Collect stdout and stderr from a container.
@@ -395,27 +463,15 @@ impl ContainerRunner {
             match result {
                 Ok(LogOutput::StdOut { message }) => {
                     let text = String::from_utf8_lossy(&message);
-                    if stdout.len() + text.len() > half_max {
-                        truncated = true;
-                        let remaining = half_max.saturating_sub(stdout.len());
-                        let safe =
-                            crate::util::floor_char_boundary(&text, remaining.min(text.len()));
-                        stdout.push_str(&text[..safe]);
-                    } else {
-                        stdout.push_str(&text);
-                    }
+                    Self::push_log_chunk(&mut stdout, &text, half_max, &mut truncated);
                 }
                 Ok(LogOutput::StdErr { message }) => {
                     let text = String::from_utf8_lossy(&message);
-                    if stderr.len() + text.len() > half_max {
-                        truncated = true;
-                        let remaining = half_max.saturating_sub(stderr.len());
-                        let safe =
-                            crate::util::floor_char_boundary(&text, remaining.min(text.len()));
-                        stderr.push_str(&text[..safe]);
-                    } else {
-                        stderr.push_str(&text);
-                    }
+                    Self::push_log_chunk(&mut stderr, &text, half_max, &mut truncated);
+                }
+                Ok(LogOutput::Console { message }) => {
+                    let text = String::from_utf8_lossy(&message);
+                    Self::push_log_chunk(&mut stdout, &text, half_max, &mut truncated);
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -445,27 +501,15 @@ impl ContainerRunner {
                 match result {
                     Ok(LogOutput::StdOut { message }) => {
                         let text = String::from_utf8_lossy(&message);
-                        if stdout.len() < half_max {
-                            let remaining = half_max.saturating_sub(stdout.len());
-                            let safe =
-                                crate::util::floor_char_boundary(&text, remaining.min(text.len()));
-                            stdout.push_str(&text[..safe]);
-                            if text.len() > remaining {
-                                truncated = true;
-                            }
-                        }
+                        Self::push_log_chunk(&mut stdout, &text, half_max, &mut truncated);
                     }
                     Ok(LogOutput::StdErr { message }) => {
                         let text = String::from_utf8_lossy(&message);
-                        if stderr.len() < half_max {
-                            let remaining = half_max.saturating_sub(stderr.len());
-                            let safe =
-                                crate::util::floor_char_boundary(&text, remaining.min(text.len()));
-                            stderr.push_str(&text[..safe]);
-                            if text.len() > remaining {
-                                truncated = true;
-                            }
-                        }
+                        Self::push_log_chunk(&mut stderr, &text, half_max, &mut truncated);
+                    }
+                    Ok(LogOutput::Console { message }) => {
+                        let text = String::from_utf8_lossy(&message);
+                        Self::push_log_chunk(&mut stdout, &text, half_max, &mut truncated);
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -507,13 +551,25 @@ impl ContainerRunner {
 /// 6. `$XDG_RUNTIME_DIR/docker.sock` (common rootless Docker socket on Linux)
 /// 7. `/run/user/$UID/docker.sock` (rootless Docker fallback on Linux)
 pub async fn connect_docker() -> Result<Docker> {
+    /// Per-probe timeout for Docker daemon pings during startup detection.
+    /// The bollard default is 120 seconds — far too long for a startup probe.
+    /// 5 seconds is generous for a local Unix-socket ping.
+    const PROBE_TIMEOUT: u64 = 5;
+
+    /// Timeout applied to the returned Docker client for actual runtime
+    /// operations (container create, image pull, exec).  Must be long enough
+    /// for heavy operations but short enough to surface real daemon problems.
+    const RUNTIME_TIMEOUT: u64 = 30;
+
     // First try bollard defaults (checks DOCKER_HOST env var, then /var/run/docker.sock).
     // This covers Linux, OrbStack (updates the /var/run symlink), and any user with
     // DOCKER_HOST set to their runtime's socket.
     if let Ok(docker) = Docker::connect_with_local_defaults()
+        .map(|d| d.with_timeout(Duration::from_secs(PROBE_TIMEOUT)))
         && docker.ping().await.is_ok()
     {
-        return Ok(docker);
+        // Widen timeout for runtime use before returning.
+        return Ok(docker.with_timeout(Duration::from_secs(RUNTIME_TIMEOUT)));
     }
 
     #[cfg(unix)]
@@ -525,11 +581,13 @@ pub async fn connect_docker() -> Result<Docker> {
         for sock in unix_socket_candidates() {
             if sock.exists() {
                 let sock_str = sock.to_string_lossy();
-                if let Ok(docker) =
-                    Docker::connect_with_socket(&sock_str, 120, bollard::API_DEFAULT_VERSION)
-                    && docker.ping().await.is_ok()
+                if let Ok(docker) = Docker::connect_with_socket(
+                    &sock_str,
+                    PROBE_TIMEOUT,
+                    bollard::API_DEFAULT_VERSION,
+                ) && docker.ping().await.is_ok()
                 {
-                    return Ok(docker);
+                    return Ok(docker.with_timeout(Duration::from_secs(RUNTIME_TIMEOUT)));
                 }
             }
         }

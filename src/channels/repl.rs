@@ -12,10 +12,12 @@
 //! - `/undo` - Undo the last turn
 //! - `/redo` - Redo an undone turn
 //! - `/clear` - Clear the conversation
-//! - `/compact` - Compact the context
-//! - `/new` - Start a new thread
+//! - `/compress` - Compact the context (`/compact` alias)
+//! - `/new` or `/thread new` - Start a new thread
 //! - `/rollback` - Filesystem rollback command family
-//! - `/vibe` - Set, show, or clear a temporary session vibe
+//! - `/identity` - Show the active identity stack
+//! - `/memory` - Show memory and learning surfaces
+//! - `/personality` - Set, show, or clear a temporary session personality (`/vibe` alias)
 //! - `/skin` - Runtime CLI skin command family
 //! - `yes`/`no`/`always` - Respond to tool approval prompts
 //! - `Esc` - Interrupt current operation
@@ -41,7 +43,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::agent::truncate_for_preview;
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, StreamMode,
+};
 use crate::error::ChannelError;
 use crate::terminal_branding::{TerminalBranding, resolve_cli_skin_name};
 use crate::tui::skin::CliSkin;
@@ -62,22 +66,28 @@ const SLASH_COMMANDS: &[&str] = &[
     "/undo",
     "/redo",
     "/clear",
+    "/compress",
     "/compact",
     "/new",
     "/interrupt",
     "/version",
     "/tools",
     "/ping",
+    "/context",
     "/job",
     "/status",
     "/cancel",
     "/list",
+    "/identity",
+    "/memory",
+    "/skills",
     "/heartbeat",
     "/summarize",
     "/suggest",
     "/thread",
     "/resume",
     "/rollback",
+    "/personality",
     "/vibe",
     "/skin",
 ];
@@ -130,7 +140,23 @@ impl Highlighter for ReplHelper {
     }
 }
 
-impl Validator for ReplHelper {}
+impl Validator for ReplHelper {
+    fn validate(
+        &self,
+        ctx: &mut rustyline::validate::ValidationContext,
+    ) -> rustyline::Result<rustyline::validate::ValidationResult> {
+        let input = ctx.input();
+        // Backslash continuation: if the line ends with '\', request more input.
+        if input.ends_with('\\') {
+            return Ok(rustyline::validate::ValidationResult::Incomplete);
+        }
+        // Triple-backtick fencing: if odd number of ```, request more input.
+        if !input.matches("```").count().is_multiple_of(2) {
+            return Ok(rustyline::validate::ValidationResult::Incomplete);
+        }
+        Ok(rustyline::validate::ValidationResult::Valid(None))
+    }
+}
 impl Helper for ReplHelper {}
 
 struct EscInterruptHandler {
@@ -291,8 +317,8 @@ fn print_help(skin: &CliSkin) {
     let branding = TerminalBranding::from_skin(skin.clone());
 
     branding.print_banner(
-        "ThinClaw REPL",
-        Some("Interactive shell with skin-aware status, approvals, and markdown rendering."),
+        "Agent REPL",
+        Some("Interactive shell with shared identity, memory, and skin-aware controls."),
     );
     println!("  {}", branding.body_bold("Commands"));
     println!(
@@ -329,13 +355,28 @@ fn print_help(skin: &CliSkin) {
     );
     println!(
         "  {} {}",
-        branding.accent("/compact"),
-        branding.muted("compact context window")
+        branding.accent("/compress"),
+        branding.muted("compact context window (/compact alias)")
     );
     println!(
         "  {} {}",
         branding.accent("/new"),
         branding.muted("new conversation thread")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/thread new"),
+        branding.muted("new conversation thread")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/thread <id>"),
+        branding.muted("switch to an existing thread")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/resume <id>"),
+        branding.muted("restore a saved checkpoint into the current thread")
     );
     println!(
         "  {} {}",
@@ -354,8 +395,28 @@ fn print_help(skin: &CliSkin) {
     );
     println!(
         "  {} {}",
-        branding.accent("/vibe"),
-        branding.muted("set, show, or clear a temporary session vibe")
+        branding.accent("/identity"),
+        branding.muted("show the active agent name, base pack, skin, and session overlay")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/memory"),
+        branding.muted("show memory, recall, learning, and continuity surfaces")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/heartbeat"),
+        branding.muted("run the live heartbeat check")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/skills"),
+        branding.muted("list installed skills or search the registry")
+    );
+    println!(
+        "  {} {}",
+        branding.accent("/personality"),
+        branding.muted("set, show, or clear a temporary session personality (/vibe alias)")
     );
     println!(
         "  {} {}",
@@ -395,6 +456,10 @@ impl Channel for ReplChannel {
 
     fn formatting_hints(&self) -> Option<String> {
         None
+    }
+
+    fn stream_mode(&self) -> StreamMode {
+        StreamMode::EventChunks
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
@@ -647,7 +712,9 @@ impl Channel for ReplChannel {
         match status {
             StatusUpdate::Thinking(msg) => {
                 let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
-                eprintln!("  {muted}\u{25CB} {display}{reset}");
+                let spinner_frame = skin.resolved_spinner_frames();
+                let frame_char = spinner_frame.first().copied().unwrap_or("⠋");
+                eprintln!("  {accent}{frame_char}{reset} {muted}{display}{reset}");
             }
             StatusUpdate::ToolStarted { name, .. } => {
                 eprintln!("  {warn}\u{25CB} {}{reset}", skin.tool_label(&name));
@@ -688,6 +755,32 @@ impl Channel for ReplChannel {
                 if debug || msg.contains("approval") || msg.contains("Approval") {
                     let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
                     eprintln!("  {muted}{display}{reset}");
+                }
+            }
+            StatusUpdate::Plan { entries } => {
+                if debug {
+                    let display = serde_json::to_string(&entries)
+                        .unwrap_or_else(|_| "plan update".to_string());
+                    eprintln!("  {muted}{display}{reset}");
+                }
+            }
+            StatusUpdate::Usage {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                model,
+            } => {
+                if debug {
+                    let cost = cost_usd
+                        .map(|cost| format!(" ${cost:.6}"))
+                        .unwrap_or_default();
+                    let model = model
+                        .as_deref()
+                        .map(|model| format!(" {model}"))
+                        .unwrap_or_default();
+                    eprintln!(
+                        "  {muted}usage:{model} {input_tokens} in / {output_tokens} out{cost}{reset}"
+                    );
                 }
             }
             StatusUpdate::ApprovalNeeded {
@@ -772,6 +865,7 @@ impl Channel for ReplChannel {
                 extension_name,
                 success,
                 message,
+                ..
             } => {
                 if success {
                     eprintln!(

@@ -4,10 +4,13 @@
 //! - `gateway start` — start the web gateway (foreground or background)
 //! - `gateway stop` — stop a running gateway
 //! - `gateway status` — show gateway status
+//! - `gateway access` — print WebUI access URLs and SSH tunnel guidance
 
 use clap::Subcommand;
 use sysinfo::{Pid, ProcessesToUpdate, Signal, System};
 
+use crate::platform::gateway_access::GatewayAccessInfo;
+use crate::settings::Settings;
 use crate::terminal_branding::TerminalBranding;
 
 #[derive(Subcommand, Debug, Clone)]
@@ -47,6 +50,13 @@ pub enum GatewayCommand {
 
     /// Show gateway status
     Status,
+
+    /// Print WebUI access URLs, token status, and SSH tunnel guidance
+    Access {
+        /// Show the full token URL instead of redacting the token.
+        #[arg(long)]
+        show_token: bool,
+    },
 }
 
 /// Run a gateway command.
@@ -75,6 +85,10 @@ pub async fn run_gateway_command(cmd: GatewayCommand) -> anyhow::Result<()> {
         GatewayCommand::Status => {
             TerminalBranding::current().print_banner("Gateway", Some("Inspect the web cockpit"));
             gateway_status().await
+        }
+        GatewayCommand::Access { show_token } => {
+            TerminalBranding::current().print_banner("Gateway", Some("WebUI access"));
+            gateway_access(show_token).await
         }
     }
 }
@@ -151,35 +165,32 @@ async fn start_gateway(
         println!("  {}", branding.muted("Press Ctrl+C to stop."));
         println!();
 
-        // Set env vars so the agent picks them up.
-        // SAFETY: We are single-threaded at this point (before any agent tasks start).
-        unsafe {
-            std::env::set_var("GATEWAY_HOST", &gw_host);
-            std::env::set_var("GATEWAY_PORT", gw_port.to_string());
-            std::env::set_var("GATEWAY_ENABLED", "true");
-        }
+        let exe = std::env::current_exe()?;
+        let mut child = std::process::Command::new(&exe)
+            .arg("run")
+            .env("GATEWAY_ENABLED", "true")
+            .env("GATEWAY_HOST", &gw_host)
+            .env("GATEWAY_PORT", gw_port.to_string())
+            .env("CLI_ENABLED", "false")
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()?;
 
         // Write PID file.
-        let pid = std::process::id();
+        let pid = child.id();
         if let Some(parent) = pid_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
         std::fs::write(&pid_path, pid.to_string())?;
-
-        // The actual gateway runs as part of `thinclaw run`. In foreground mode,
-        // we tell the user to use `thinclaw run` with gateway enabled.
-        let command_text = if cfg!(target_os = "windows") {
-            format!(
-                "Run with gateway enabled:\n\n  $env:GATEWAY_ENABLED = \"true\"; $env:GATEWAY_HOST = \"{}\"; $env:GATEWAY_PORT = \"{}\"; thinclaw run\n",
-                gw_host, gw_port
-            )
-        } else {
-            format!(
-                "Run with gateway enabled:\n\n  GATEWAY_ENABLED=true GATEWAY_HOST={} GATEWAY_PORT={} thinclaw run\n",
-                gw_host, gw_port
-            )
-        };
-        println!("{}", branding.body(command_text));
+        println!(
+            "  {}",
+            branding.muted(format!("Gateway process running (PID {}).", pid))
+        );
+        let status = child.wait()?;
+        if !status.success() {
+            anyhow::bail!("Gateway process exited with status {}", status);
+        }
 
         // Clean up PID file.
         let _ = std::fs::remove_file(&pid_path);
@@ -192,6 +203,7 @@ async fn start_gateway(
             .env("GATEWAY_ENABLED", "true")
             .env("GATEWAY_HOST", &gw_host)
             .env("GATEWAY_PORT", gw_port.to_string())
+            .env("CLI_ENABLED", "false")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -216,6 +228,63 @@ async fn start_gateway(
     }
 
     Ok(())
+}
+
+/// Print gateway access guidance.
+async fn gateway_access(show_token: bool) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
+    let settings = Settings::load();
+    let access = GatewayAccessInfo::from_env_and_settings(Some(&settings));
+    let health_ok = gateway_health_ok(&access).await.unwrap_or(false);
+
+    println!("{}", branding.key_value("Enabled", access.enabled));
+    println!("{}", branding.key_value("Bind", access.bind_display()));
+    println!("{}", branding.key_value("Port", access.port));
+    println!("{}", branding.key_value("Auth", access.auth_status()));
+    println!("{}", branding.key_value("Local URL", access.local_url()));
+    if let Some(url) = access.token_url(show_token) {
+        println!("{}", branding.key_value("Token URL", url));
+    }
+    println!(
+        "{}",
+        branding.key_value("SSH tunnel", access.ssh_tunnel_command())
+    );
+    println!(
+        "{}",
+        branding.key_value(
+            "Health",
+            if health_ok {
+                branding.good("reachable")
+            } else {
+                branding.warn("not reachable")
+            },
+        )
+    );
+
+    for warning in access.service_warnings() {
+        println!("{}", branding.warn(format!("Warning: {warning}")));
+    }
+    if !show_token && access.auth_token.is_some() {
+        println!(
+            "{}",
+            branding
+                .muted("Use `thinclaw gateway access --show-token` to print the full token URL.")
+        );
+    }
+
+    Ok(())
+}
+
+async fn gateway_health_ok(access: &GatewayAccessInfo) -> anyhow::Result<bool> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()?;
+    Ok(client
+        .get(access.health_url())
+        .send()
+        .await
+        .map(|response| response.status().is_success())
+        .unwrap_or(false))
 }
 
 async fn reload_gateway(

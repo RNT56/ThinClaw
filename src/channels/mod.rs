@@ -42,8 +42,11 @@
 //! See the [`wasm`] module for details.
 
 pub mod ack_reaction;
+#[cfg(feature = "acp")]
+pub mod acp;
 #[cfg(target_os = "macos")]
 mod apple_mail;
+mod bluebubbles;
 pub mod canvas_gateway;
 mod channel;
 mod discord;
@@ -55,21 +58,24 @@ pub mod health_monitor;
 mod http;
 #[cfg(target_os = "macos")]
 mod imessage;
-pub mod imessage_wiring;
 mod manager;
+#[cfg(feature = "nostr")]
 mod nostr;
+#[cfg(feature = "nostr")]
+pub(crate) mod nostr_runtime;
 pub mod reaction_machine;
 mod repl;
 pub mod self_message;
 mod signal;
 pub mod status_view;
-pub mod tool_stream;
+mod tui_channel;
 pub mod wasm;
 pub mod web;
 mod webhook_server;
 
 #[cfg(target_os = "macos")]
 pub use apple_mail::{AppleMailChannel, AppleMailConfig, AppleMailDiagnostic, ensure_app_running};
+pub use bluebubbles::{BlueBubblesChannel, BlueBubblesConfig, BlueBubblesDiagnostic};
 pub use channel::{
     Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
     StreamMode,
@@ -80,10 +86,15 @@ pub use health_monitor::{ChannelHealthMonitor, ChannelHealthStatus, HealthMonito
 pub use http::HttpChannel;
 #[cfg(target_os = "macos")]
 pub use imessage::{IMessageChannel, IMessageConfig, IMessageDiagnostic};
-pub use manager::ChannelManager;
+pub use manager::{
+    ChannelManager, IncomingEvent, SlashCommand, legacy_session_key_aliases, mint_session_key,
+    normalize_incoming_event, parse_slash_command,
+};
+#[cfg(feature = "nostr")]
 pub use nostr::NostrChannel;
 pub use repl::ReplChannel;
 pub use self_message::{SelfMessageConfig, TrustedMetadata};
 pub use signal::SignalChannel;
+pub use tui_channel::TuiChannel;
 pub use web::GatewayChannel;
 pub use webhook_server::{WebhookServer, WebhookServerConfig};

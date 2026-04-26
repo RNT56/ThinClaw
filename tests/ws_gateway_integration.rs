@@ -11,7 +11,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -24,6 +24,7 @@ use thinclaw::channels::web::server::{GatewayState, start_server};
 use thinclaw::channels::web::sse::SseManager;
 use thinclaw::channels::web::types::SseEvent;
 use thinclaw::channels::web::ws::WsConnectionTracker;
+use thinclaw::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 
 const AUTH_TOKEN: &str = "test-token-12345";
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,7 +42,7 @@ async fn start_test_server() -> (
         msg_tx: tokio::sync::RwLock::new(Some(agent_tx)),
         sse: SseManager::new(),
         workspace: None,
-        session_manager: None,
+        session_manager: Some(Arc::new(thinclaw::agent::SessionManager::new())),
         log_broadcaster: None,
         log_level_handle: None,
         extension_manager: None,
@@ -49,6 +50,8 @@ async fn start_test_server() -> (
         store: None,
         job_manager: None,
         prompt_queue: None,
+        context_manager: None,
+        scheduler: tokio::sync::RwLock::new(None),
         user_id: "test-user".to_string(),
         actor_id: "test-actor".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
@@ -57,6 +60,8 @@ async fn start_test_server() -> (
         llm_runtime: None,
         skill_registry: None,
         skill_catalog: None,
+        skill_remote_hub: None,
+        skill_quarantine: None,
         chat_rate_limiter: thinclaw::channels::web::rate_limiter::RateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
@@ -106,6 +111,40 @@ async fn recv_text(
         Message::Text(text) => text.to_string(),
         other => panic!("Expected Text frame, got {:?}", other),
     }
+}
+
+async fn wait_for_sse_subscribers(state: &GatewayState, expected: u64) {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if state.sse.connection_count() >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Timed out waiting for {expected} SSE/WS broadcast subscriber(s)"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+async fn create_visible_thread(state: &GatewayState) -> String {
+    let session_manager = state
+        .session_manager
+        .as_ref()
+        .expect("test server should have a session manager");
+    let identity = ResolvedIdentity {
+        principal_id: "test-user".to_string(),
+        actor_id: "test-actor".to_string(),
+        conversation_scope_id: scope_id_from_key("principal:test-user"),
+        conversation_kind: ConversationKind::Direct,
+        raw_sender_id: "test-actor".to_string(),
+        stable_external_conversation_key: "gateway://direct/test-user/actor/test-actor".to_string(),
+    };
+    let session = session_manager
+        .get_or_create_session_for_identity(&identity)
+        .await;
+    let mut guard = session.lock().await;
+    guard.create_thread().id.to_string()
 }
 
 // ============================================================================
@@ -196,13 +235,13 @@ async fn test_ws_broadcast_event_received() {
     let (addr, state, _agent_rx) = start_test_server().await;
     let mut ws = connect_ws(addr).await;
 
-    // Give the connection a moment to fully establish
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_sse_subscribers(&state, 1).await;
+    let thread_id = create_visible_thread(&state).await;
 
     // Broadcast an SSE event (simulates agent sending a response)
     state.sse.broadcast(SseEvent::Response {
         content: "agent says hi".to_string(),
-        thread_id: "t1".to_string(),
+        thread_id,
     });
 
     // The WS client should receive it
@@ -219,7 +258,7 @@ async fn test_ws_broadcast_event_received() {
 async fn test_ws_thinking_event() {
     let (addr, state, _agent_rx) = start_test_server().await;
     let mut ws = connect_ws(addr).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_sse_subscribers(&state, 1).await;
 
     state.sse.broadcast(SseEvent::Thinking {
         message: "analyzing...".to_string(),
@@ -343,7 +382,8 @@ async fn test_ws_no_auth_rejected() {
 async fn test_ws_multiple_events_in_sequence() {
     let (addr, state, _agent_rx) = start_test_server().await;
     let mut ws = connect_ws(addr).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_for_sse_subscribers(&state, 1).await;
+    let thread_id = create_visible_thread(&state).await;
 
     // Broadcast multiple events rapidly
     state.sse.broadcast(SseEvent::Thinking {
@@ -361,7 +401,7 @@ async fn test_ws_multiple_events_in_sequence() {
     });
     state.sse.broadcast(SseEvent::Response {
         content: "done".to_string(),
-        thread_id: "t1".to_string(),
+        thread_id,
     });
 
     // Receive all 4 in order

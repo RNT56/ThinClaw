@@ -1,14 +1,14 @@
 //! Web gateway channel for browser-based access to ThinClaw.
 //!
 //! Provides a single-page web UI with:
-//! - Chat with the agent (via REST + SSE)
+//! - Chat with the agent (browser UI uses REST + SSE)
 //! - Workspace/memory browsing
 //! - Job management
 //!
 //! ```text
 //! Browser ─── POST /api/chat/send ──► Agent Loop
 //!         ◄── GET  /api/chat/events ── SSE stream
-//!         ─── GET  /api/chat/ws ─────► WebSocket (bidirectional)
+//! Programmatic client ─ GET /api/chat/ws ─► Authenticated WebSocket (bidirectional)
 //!         ─── GET  /api/memory/* ────► Workspace
 //!         ─── GET  /api/jobs/* ──────► Database
 //!         ◄── GET  / ───────────────── Static HTML/CSS/JS
@@ -34,7 +34,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::agent::SessionManager;
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, StreamMode,
+};
 use crate::config::GatewayConfig;
 use crate::db::Database;
 use crate::error::ChannelError;
@@ -73,6 +75,30 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
             message: msg,
             thread_id,
         },
+        StatusUpdate::Plan { entries } => SseEvent::Status {
+            message: serde_json::to_string(&entries).unwrap_or_else(|_| "plan update".to_string()),
+            thread_id,
+        },
+        StatusUpdate::Usage {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            model,
+        } => SseEvent::Status {
+            message: format!(
+                "usage: {} input + {} output tokens{}{}",
+                input_tokens,
+                output_tokens,
+                cost_usd
+                    .map(|cost| format!(", ${cost:.6}"))
+                    .unwrap_or_default(),
+                model
+                    .as_deref()
+                    .map(|model| format!(" ({model})"))
+                    .unwrap_or_default()
+            ),
+            thread_id,
+        },
         StatusUpdate::JobStarted {
             job_id,
             title,
@@ -100,20 +126,40 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
             instructions,
             auth_url,
             setup_url,
+            auth_mode,
+            auth_status,
+            shared_auth_provider,
+            missing_scopes,
+            thread_id: auth_thread_id,
         } => SseEvent::AuthRequired {
             extension_name,
             instructions,
             auth_url,
             setup_url,
+            auth_mode,
+            auth_status,
+            shared_auth_provider,
+            missing_scopes,
+            thread_id: auth_thread_id.or(thread_id),
         },
         StatusUpdate::AuthCompleted {
             extension_name,
             success,
             message,
+            auth_mode,
+            auth_status,
+            shared_auth_provider,
+            missing_scopes,
+            thread_id: auth_thread_id,
         } => SseEvent::AuthCompleted {
             extension_name,
             success,
             message,
+            auth_mode,
+            auth_status,
+            shared_auth_provider,
+            missing_scopes,
+            thread_id: auth_thread_id.or(thread_id),
         },
         StatusUpdate::Error { message, code } => SseEvent::Status {
             message: format!(
@@ -199,10 +245,22 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
             agent_id,
             name,
             task,
+            task_packet,
+            allowed_tools,
+            allowed_skills,
+            memory_mode,
+            tool_mode,
+            skill_mode,
         } => SseEvent::SubagentSpawned {
             agent_id,
             name,
             task,
+            task_packet,
+            allowed_tools,
+            allowed_skills,
+            memory_mode,
+            tool_mode,
+            skill_mode,
             timestamp: chrono::Utc::now().to_rfc3339(),
             thread_id,
         },
@@ -224,6 +282,12 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
             response,
             duration_ms,
             iterations,
+            task_packet,
+            allowed_tools,
+            allowed_skills,
+            memory_mode,
+            tool_mode,
+            skill_mode,
         } => SseEvent::SubagentCompleted {
             agent_id,
             name,
@@ -231,6 +295,12 @@ fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String>) -
             response,
             duration_ms,
             iterations,
+            task_packet,
+            allowed_tools,
+            allowed_skills,
+            memory_mode,
+            tool_mode,
+            skill_mode,
             timestamp: chrono::Utc::now().to_rfc3339(),
             thread_id,
         },
@@ -275,6 +345,8 @@ impl GatewayChannel {
             store: None,
             job_manager: None,
             prompt_queue: None,
+            context_manager: None,
+            scheduler: tokio::sync::RwLock::new(None),
             user_id: config.user_id.clone(),
             actor_id: config
                 .actor_id
@@ -286,6 +358,8 @@ impl GatewayChannel {
             llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
+            skill_remote_hub: None,
+            skill_quarantine: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
@@ -319,6 +393,8 @@ impl GatewayChannel {
             store: self.state.store.clone(),
             job_manager: self.state.job_manager.clone(),
             prompt_queue: self.state.prompt_queue.clone(),
+            context_manager: self.state.context_manager.clone(),
+            scheduler: tokio::sync::RwLock::new(None),
             user_id: self.state.user_id.clone(),
             actor_id: self.state.actor_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
@@ -327,6 +403,8 @@ impl GatewayChannel {
             llm_runtime: self.state.llm_runtime.clone(),
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
+            skill_remote_hub: self.state.skill_remote_hub.clone(),
+            skill_quarantine: self.state.skill_quarantine.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
@@ -337,6 +415,11 @@ impl GatewayChannel {
             secrets_store: self.state.secrets_store.clone(),
             channel_manager: self.state.channel_manager.clone(),
         };
+        if let Ok(existing_scheduler) = self.state.scheduler.try_read()
+            && let Ok(mut next_scheduler) = new_state.scheduler.try_write()
+        {
+            *next_scheduler = existing_scheduler.clone();
+        }
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
     }
@@ -402,6 +485,15 @@ impl GatewayChannel {
         self
     }
 
+    /// Inject the direct-job context manager for local job visibility APIs.
+    pub fn with_context_manager(
+        mut self,
+        context_manager: Arc<crate::context::ContextManager>,
+    ) -> Self {
+        self.rebuild_state(|s| s.context_manager = Some(context_manager));
+        self
+    }
+
     /// Inject the skill registry for skill management API.
     pub fn with_skill_registry(mut self, sr: Arc<tokio::sync::RwLock<SkillRegistry>>) -> Self {
         self.rebuild_state(|s| s.skill_registry = Some(sr));
@@ -411,6 +503,21 @@ impl GatewayChannel {
     /// Inject the skill catalog for skill search API.
     pub fn with_skill_catalog(mut self, sc: Arc<SkillCatalog>) -> Self {
         self.rebuild_state(|s| s.skill_catalog = Some(sc));
+        self
+    }
+
+    /// Inject refreshable remote skill discovery for GitHub taps and marketplaces.
+    pub fn with_skill_remote_hub(mut self, hub: crate::skills::SharedRemoteSkillHub) -> Self {
+        self.rebuild_state(|s| s.skill_remote_hub = Some(hub));
+        self
+    }
+
+    /// Inject the skill quarantine manager for inspection and publish scans.
+    pub fn with_skill_quarantine(
+        mut self,
+        quarantine: Arc<crate::skills::quarantine::QuarantineManager>,
+    ) -> Self {
+        self.rebuild_state(|s| s.skill_quarantine = Some(quarantine));
         self
     }
 
@@ -503,6 +610,10 @@ impl Channel for GatewayChannel {
         )
     }
 
+    fn stream_mode(&self) -> StreamMode {
+        StreamMode::EventChunks
+    }
+
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(256);
         *self.state.msg_tx.write().await = Some(tx);
@@ -565,7 +676,7 @@ impl Channel for GatewayChannel {
     ) -> Result<(), ChannelError> {
         self.state.sse.broadcast(SseEvent::Response {
             content: response.content,
-            thread_id: String::new(),
+            thread_id: response.thread_id.unwrap_or_default(),
         });
         Ok(())
     }
@@ -580,6 +691,13 @@ impl Channel for GatewayChannel {
         }
     }
 
+    async fn diagnostics(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "user_id": self.state.user_id.clone(),
+            "actor_id": self.state.actor_id.clone(),
+        }))
+    }
+
     async fn shutdown(&self) -> Result<(), ChannelError> {
         if let Some(tx) = self.state.shutdown_tx.write().await.take() {
             let _ = tx.send(());
@@ -591,9 +709,13 @@ impl Channel for GatewayChannel {
 
 #[cfg(test)]
 mod tests {
-    use super::status_update_to_sse_event;
+    use super::{GatewayChannel, status_update_to_sse_event};
+    use crate::channels::OutgoingResponse;
     use crate::channels::StatusUpdate;
+    use crate::channels::channel::Channel;
     use crate::channels::web::types::SseEvent;
+    use crate::config::GatewayConfig;
+    use futures::StreamExt;
 
     #[test]
     fn subagent_spawned_maps_to_typed_sse_event() {
@@ -602,6 +724,15 @@ mod tests {
                 agent_id: "agent-1".to_string(),
                 name: "researcher".to_string(),
                 task: "Check docs".to_string(),
+                task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                    objective: "Check docs".to_string(),
+                    ..Default::default()
+                },
+                allowed_tools: vec!["read_file".to_string()],
+                allowed_skills: vec![],
+                memory_mode: "provided_context_only".to_string(),
+                tool_mode: "explicit_only".to_string(),
+                skill_mode: "explicit_only".to_string(),
             },
             Some("thread-1".to_string()),
         );
@@ -611,12 +742,17 @@ mod tests {
                 agent_id,
                 name,
                 task,
+                task_packet,
+                allowed_tools,
                 timestamp,
                 thread_id,
+                ..
             } => {
                 assert_eq!(agent_id, "agent-1");
                 assert_eq!(name, "researcher");
                 assert_eq!(task, "Check docs");
+                assert_eq!(task_packet.objective, "Check docs");
+                assert_eq!(allowed_tools, vec!["read_file".to_string()]);
                 assert!(!timestamp.is_empty());
                 assert_eq!(thread_id.as_deref(), Some("thread-1"));
             }
@@ -634,6 +770,15 @@ mod tests {
                 response: "Done".to_string(),
                 duration_ms: 2400,
                 iterations: 4,
+                task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                    objective: "Summarize findings".to_string(),
+                    ..Default::default()
+                },
+                allowed_tools: vec![],
+                allowed_skills: vec![],
+                memory_mode: "provided_context_only".to_string(),
+                tool_mode: "explicit_only".to_string(),
+                skill_mode: "explicit_only".to_string(),
             },
             None,
         );
@@ -646,8 +791,10 @@ mod tests {
                 response,
                 duration_ms,
                 iterations,
+                task_packet,
                 timestamp,
                 thread_id,
+                ..
             } => {
                 assert_eq!(agent_id, "agent-2");
                 assert_eq!(name, "summarizer");
@@ -655,8 +802,68 @@ mod tests {
                 assert_eq!(response, "Done");
                 assert_eq!(duration_ms, 2400);
                 assert_eq!(iterations, 4);
+                assert_eq!(task_packet.objective, "Summarize findings");
                 assert!(!timestamp.is_empty());
                 assert!(thread_id.is_none());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_diagnostics_expose_identity_scope() {
+        let gateway = GatewayChannel::new(GatewayConfig {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+            auth_token: Some("test-token".to_string()),
+            user_id: "household-user".to_string(),
+            actor_id: Some("desk-actor".to_string()),
+        });
+
+        let diagnostics = gateway
+            .diagnostics()
+            .await
+            .expect("gateway should expose diagnostics");
+
+        assert_eq!(
+            diagnostics.get("user_id").and_then(|v| v.as_str()),
+            Some("household-user")
+        );
+        assert_eq!(
+            diagnostics.get("actor_id").and_then(|v| v.as_str()),
+            Some("desk-actor")
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_broadcast_uses_outgoing_thread_id() {
+        let gateway = GatewayChannel::new(GatewayConfig {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+            auth_token: Some("test-token".to_string()),
+            user_id: "household-user".to_string(),
+            actor_id: Some("desk-actor".to_string()),
+        });
+        let mut events = Box::pin(
+            gateway
+                .state()
+                .sse
+                .subscribe_raw()
+                .expect("should subscribe to SSE"),
+        );
+
+        gateway
+            .broadcast(
+                "household-user",
+                OutgoingResponse::text("boot reply").in_thread("thread-123"),
+            )
+            .await
+            .expect("broadcast should succeed");
+
+        match events.next().await.expect("expected SSE event") {
+            SseEvent::Response { content, thread_id } => {
+                assert_eq!(content, "boot reply");
+                assert_eq!(thread_id, "thread-123");
             }
             other => panic!("unexpected event: {other:?}"),
         }

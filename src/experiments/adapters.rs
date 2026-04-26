@@ -1,14 +1,36 @@
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::StatusCode;
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::experiments::{
     ExperimentLeaseAuthentication, ExperimentRunnerBackend, ExperimentRunnerProfile,
+    ExperimentRunnerReadinessClass,
 };
 use crate::settings::Settings;
+use crate::tools::execution_backend::{
+    ExecutionBackend, ExecutionResult, LocalHostExecutionBackend, ScriptExecutionRequest,
+};
+
+fn docker_sandbox_config(settings: &Settings) -> crate::sandbox::SandboxConfig {
+    crate::config::SandboxModeConfig::resolve(settings)
+        .unwrap_or_else(|_| crate::config::SandboxModeConfig {
+            enabled: settings.sandbox.enabled,
+            policy: settings.sandbox.policy.clone(),
+            timeout_secs: settings.sandbox.timeout_secs,
+            memory_limit_mb: settings.sandbox.memory_limit_mb,
+            cpu_shares: settings.sandbox.cpu_shares,
+            image: settings.sandbox.image.clone(),
+            interactive_idle_timeout_secs: settings.sandbox.interactive_idle_timeout_secs,
+            auto_pull_image: settings.sandbox.auto_pull_image,
+            extra_allowed_domains: settings.sandbox.extra_allowed_domains.clone(),
+        })
+        .to_sandbox_config()
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunnerLaunchOutcome {
@@ -27,6 +49,14 @@ pub struct RunnerLaunchOutcome {
     pub requires_operator_action: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RunnerValidationOutcome {
+    pub valid: bool,
+    pub message: String,
+    pub readiness_class: ExperimentRunnerReadinessClass,
+    pub launch_eligible: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteLaunchAction {
     Pause,
@@ -38,6 +68,7 @@ const RUNPOD_API_BASE: &str = "https://rest.runpod.io/v1";
 const VAST_API_BASE: &str = "https://console.vast.ai";
 const LAMBDA_API_BASE: &str = "https://cloud.lambda.ai/api/v1";
 const DEFAULT_RESEARCH_RUNNER_IMAGE: &str = "ghcr.io/thinclaw/research-runner:latest";
+const REMOTE_ADAPTER_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct LambdaLaunchTemplateInput {
@@ -60,58 +91,111 @@ pub async fn validate_runner_profile(
     runner: &ExperimentRunnerProfile,
     settings: &Settings,
     provider_api_key: Option<&str>,
-) -> (bool, String) {
+) -> RunnerValidationOutcome {
     if runner.backend.is_remote() && !settings.experiments.allow_remote_runners {
-        return (
-            false,
-            "Remote runners are disabled in settings.".to_string(),
-        );
+        return RunnerValidationOutcome {
+            valid: false,
+            message: "Remote runners are disabled in settings.".to_string(),
+            readiness_class: ExperimentRunnerReadinessClass::ManualOnly,
+            launch_eligible: false,
+        };
     }
 
     match runner.backend {
         ExperimentRunnerBackend::LocalDocker => {
-            if runner.image_or_runtime.is_none() {
-                (
-                    true,
-                    "Validated with host-execution fallback. Set image_or_runtime to use Docker."
-                        .to_string(),
-                )
-            } else if command_exists("docker").await {
-                (true, "Docker CLI detected.".to_string())
+            let mut sandbox_config = docker_sandbox_config(settings);
+            sandbox_config.enabled = true;
+            sandbox_config.policy = crate::sandbox::SandboxPolicy::WorkspaceWrite;
+            if let Some(image) = runner
+                .image_or_runtime
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                sandbox_config.image = image.trim().to_string();
+            }
+            let sandbox = crate::sandbox::SandboxManager::new(sandbox_config.clone());
+            if sandbox.is_available().await {
+                RunnerValidationOutcome {
+                    valid: true,
+                    message: format!(
+                        "Docker sandbox is reachable for local_docker using image '{}'.",
+                        sandbox_config.image
+                    ),
+                    readiness_class: ExperimentRunnerReadinessClass::LaunchReady,
+                    launch_eligible: true,
+                }
             } else {
-                (false, "Docker CLI not found on this host.".to_string())
+                RunnerValidationOutcome {
+                    valid: false,
+                    message: "Docker sandbox is not reachable on this host.".to_string(),
+                    readiness_class: ExperimentRunnerReadinessClass::ManualOnly,
+                    launch_eligible: false,
+                }
             }
         }
-        ExperimentRunnerBackend::GenericRemoteRunner => (
-            true,
-            "Generic remote runner lease flow is available.".to_string(),
-        ),
+        ExperimentRunnerBackend::AgentEnv => RunnerValidationOutcome {
+            valid: true,
+            message: "AgentEnv benchmark runner is available for local EnvRunner campaigns."
+                .to_string(),
+            readiness_class: ExperimentRunnerReadinessClass::LaunchReady,
+            launch_eligible: true,
+        },
+        ExperimentRunnerBackend::GenericRemoteRunner => RunnerValidationOutcome {
+            valid: true,
+            message: "Generic remote runner lease flow is available.".to_string(),
+            readiness_class: ExperimentRunnerReadinessClass::ManualOnly,
+            launch_eligible: false,
+        },
         ExperimentRunnerBackend::Ssh => {
             let host_ok = backend_string(runner, "host").is_some();
             if host_ok && command_exists("ssh").await {
-                (
-                    true,
-                    "SSH backend is configured for outbound bootstrap.".to_string(),
-                )
+                RunnerValidationOutcome {
+                    valid: true,
+                    message: "SSH backend is configured for outbound bootstrap.".to_string(),
+                    readiness_class: ExperimentRunnerReadinessClass::LaunchReady,
+                    launch_eligible: true,
+                }
+            } else if host_ok {
+                RunnerValidationOutcome {
+                    valid: true,
+                    message: "SSH backend can build bootstrap commands, but this host cannot controller-launch without the ssh binary.".to_string(),
+                    readiness_class: ExperimentRunnerReadinessClass::BootstrapReady,
+                    launch_eligible: false,
+                }
             } else {
-                (
-                    false,
-                    "SSH backend requires backend_config.host and the ssh binary.".to_string(),
-                )
+                RunnerValidationOutcome {
+                    valid: false,
+                    message: "SSH backend requires backend_config.host and the ssh binary."
+                        .to_string(),
+                    readiness_class: ExperimentRunnerReadinessClass::ManualOnly,
+                    launch_eligible: false,
+                }
             }
         }
         ExperimentRunnerBackend::Slurm => {
-            if backend_string(runner, "login_host").is_some() && command_exists("ssh").await {
-                (
-                    true,
-                    "Slurm backend is configured for sbatch launch via SSH.".to_string(),
-                )
+            let login_host_ok = backend_string(runner, "login_host").is_some();
+            if login_host_ok && command_exists("ssh").await {
+                RunnerValidationOutcome {
+                    valid: true,
+                    message: "Slurm backend is configured for sbatch launch via SSH.".to_string(),
+                    readiness_class: ExperimentRunnerReadinessClass::LaunchReady,
+                    launch_eligible: true,
+                }
+            } else if login_host_ok {
+                RunnerValidationOutcome {
+                    valid: true,
+                    message: "Slurm backend can build sbatch bootstrap instructions, but this host cannot controller-launch without the ssh binary.".to_string(),
+                    readiness_class: ExperimentRunnerReadinessClass::BootstrapReady,
+                    launch_eligible: false,
+                }
             } else {
-                (
-                    false,
-                    "Slurm backend requires backend_config.login_host and the ssh binary."
+                RunnerValidationOutcome {
+                    valid: false,
+                    message: "Slurm backend requires backend_config.login_host and the ssh binary."
                         .to_string(),
-                )
+                    readiness_class: ExperimentRunnerReadinessClass::ManualOnly,
+                    launch_eligible: false,
+                }
             }
         }
         ExperimentRunnerBackend::Kubernetes => {
@@ -119,16 +203,27 @@ pub async fn validate_runner_profile(
             let image_ok =
                 runner.image_or_runtime.is_some() || backend_string(runner, "image").is_some();
             if namespace_ok && image_ok && command_exists("kubectl").await {
-                (
-                    true,
-                    "Kubernetes backend is configured for Job launch.".to_string(),
-                )
+                RunnerValidationOutcome {
+                    valid: true,
+                    message: "Kubernetes backend is configured for Job launch.".to_string(),
+                    readiness_class: ExperimentRunnerReadinessClass::LaunchReady,
+                    launch_eligible: true,
+                }
+            } else if namespace_ok && image_ok {
+                RunnerValidationOutcome {
+                    valid: true,
+                    message: "Kubernetes backend can build launch manifests, but this host cannot controller-launch without kubectl.".to_string(),
+                    readiness_class: ExperimentRunnerReadinessClass::BootstrapReady,
+                    launch_eligible: false,
+                }
             } else {
-                (
-                    false,
-                    "Kubernetes backend requires namespace, image/image_or_runtime, and kubectl."
+                RunnerValidationOutcome {
+                    valid: false,
+                    message: "Kubernetes backend requires namespace, image/image_or_runtime, and kubectl."
                         .to_string(),
-                )
+                    readiness_class: ExperimentRunnerReadinessClass::ManualOnly,
+                    launch_eligible: false,
+                }
             }
         }
         ExperimentRunnerBackend::Runpod
@@ -152,42 +247,60 @@ pub async fn validate_runner_profile(
                             if runner.backend == ExperimentRunnerBackend::Lambda
                                 && !lambda_launch_payload_ok
                             {
-                                (
-                                    true,
-                                    format!(
+                                RunnerValidationOutcome {
+                                    valid: true,
+                                    message: format!(
                                         "{message} Controller-managed Lambda launches require backend_config.launch_payload with the official Lambda Cloud API launch body; until then, this runner stays in manual bootstrap/template mode."
                                     ),
-                                )
+                                    readiness_class: ExperimentRunnerReadinessClass::BootstrapReady,
+                                    launch_eligible: false,
+                                }
                             } else {
-                                (true, message)
+                                RunnerValidationOutcome {
+                                    valid: true,
+                                    message,
+                                    readiness_class: ExperimentRunnerReadinessClass::LaunchReady,
+                                    launch_eligible: true,
+                                }
                             }
                         }
-                        Err(message) => (false, message),
+                        Err(message) => RunnerValidationOutcome {
+                            valid: false,
+                            message,
+                            readiness_class: ExperimentRunnerReadinessClass::ManualOnly,
+                            launch_eligible: false,
+                        },
                     }
                 } else if runner.backend == ExperimentRunnerBackend::Lambda
                     && !lambda_launch_payload_ok
                 {
-                    (
-                        true,
-                        "Lambda runner is configured with provider credentials, but live validation was skipped because no decrypted API key is available in this process. Add backend_config.launch_payload to enable controller-managed launches; otherwise the runner will use the manual bootstrap/template path.".to_string(),
-                    )
+                    RunnerValidationOutcome {
+                        valid: true,
+                        message: "Lambda runner is configured with provider credentials, but live validation was skipped because no decrypted API key is available in this process. Add backend_config.launch_payload to enable controller-managed launches; otherwise the runner will use the manual bootstrap/template path.".to_string(),
+                        readiness_class: ExperimentRunnerReadinessClass::BootstrapReady,
+                        launch_eligible: false,
+                    }
                 } else {
-                    (
-                        true,
-                        format!(
+                    RunnerValidationOutcome {
+                        valid: true,
+                        message: format!(
                             "{} runner is configured with provider credentials and a launch template. Live provider validation was skipped because no decrypted API key is available in this process.",
                             gpu_cloud_display_name(runner.backend)
                         ),
-                    )
+                        readiness_class: ExperimentRunnerReadinessClass::BootstrapReady,
+                        launch_eligible: false,
+                    }
                 }
             } else {
-                (
-                    false,
-                    format!(
+                RunnerValidationOutcome {
+                    valid: false,
+                    message: format!(
                         "{} backend requires its provider secret reference plus template/image metadata.",
                         gpu_cloud_display_name(runner.backend)
                     ),
-                )
+                    readiness_class: ExperimentRunnerReadinessClass::ManualOnly,
+                    launch_eligible: false,
+                }
             }
         }
     }
@@ -439,6 +552,12 @@ pub async fn try_auto_launch(
     provider_api_key: Option<&str>,
 ) -> Result<RunnerLaunchOutcome, String> {
     let gateway_url = gateway_url.unwrap_or_default().trim();
+    if gateway_url.is_empty() {
+        return Err(
+            "Experiment runner launch requires a non-empty gateway_url (set campaign.gateway_url)."
+                .to_string(),
+        );
+    }
     let bootstrap_command = build_bootstrap_command(gateway_url, auth);
 
     match runner.backend {
@@ -493,19 +612,12 @@ pub async fn try_auto_launch(
                 auth.lease_id.simple(),
                 auth.lease_id.simple()
             );
-            let mut command = Command::new("ssh");
-            apply_ssh_options(&mut command, runner);
-            command.arg(&host).arg(remote_cmd);
-            let output = command
-                .output()
+            let mut args = ssh_args(runner);
+            args.push(host.clone());
+            args.push(remote_cmd);
+            run_local_cli_command("ssh", args, true)
                 .await
-                .map_err(|err| format!("failed to launch SSH runner: {err}"))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "ssh launch failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
-            }
+                .map_err(|err| format!("ssh launch failed: {err}"))?;
             Ok(RunnerLaunchOutcome {
                 message: "SSH runner launched.".to_string(),
                 bootstrap_command: Some(bootstrap_command),
@@ -528,31 +640,21 @@ pub async fn try_auto_launch(
                 "cat <<'EOF' | sbatch --job-name={} {}\n#!/bin/bash\nset -euo pipefail\n{}\nEOF",
                 job_name, sbatch_args, bootstrap_command
             );
-            let mut command = Command::new("ssh");
-            apply_ssh_options(&mut command, runner);
-            command.arg(&host).arg(remote_cmd);
-            let output = command
-                .output()
+            let mut args = ssh_args(runner);
+            args.push(host.clone());
+            args.push(remote_cmd);
+            let output = run_local_cli_command("ssh", args, true)
                 .await
-                .map_err(|err| format!("failed to submit Slurm job: {err}"))?;
-            if !output.status.success() {
-                return Err(format!(
-                    "slurm launch failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
-            }
+                .map_err(|err| format!("slurm launch failed: {err}"))?;
             Ok(RunnerLaunchOutcome {
-                message: format!(
-                    "Slurm job submitted: {}",
-                    String::from_utf8_lossy(&output.stdout).trim()
-                ),
+                message: format!("Slurm job submitted: {}", output.stdout.trim()),
                 bootstrap_command: Some(bootstrap_command),
                 provider_template: None,
-                provider_job_id: parse_first_word(&String::from_utf8_lossy(&output.stdout)),
+                provider_job_id: parse_first_word(&output.stdout),
                 provider_job_metadata: serde_json::json!({
                     "provider": "slurm",
                     "login_host": host,
-                    "submission_output": String::from_utf8_lossy(&output.stdout).trim(),
+                    "submission_output": output.stdout.trim(),
                 }),
                 auto_launched: true,
                 requires_operator_action: false,
@@ -597,15 +699,22 @@ pub async fn try_auto_launch(
                 requires_operator_action: false,
             })
         }
-        ExperimentRunnerBackend::LocalDocker => Ok(RunnerLaunchOutcome {
-            message: "Local runner executes on the controller host.".to_string(),
-            bootstrap_command: None,
-            provider_template: None,
-            provider_job_id: None,
-            provider_job_metadata: serde_json::json!({}),
-            auto_launched: false,
-            requires_operator_action: false,
-        }),
+        ExperimentRunnerBackend::LocalDocker | ExperimentRunnerBackend::AgentEnv => {
+            Ok(RunnerLaunchOutcome {
+                message: if runner.backend == ExperimentRunnerBackend::AgentEnv {
+                    "AgentEnv runner executes inside the local controller.".to_string()
+                } else {
+                    "Local runner executes inside the controller-managed Docker sandbox."
+                        .to_string()
+                },
+                bootstrap_command: None,
+                provider_template: None,
+                provider_job_id: None,
+                provider_job_metadata: serde_json::json!({}),
+                auto_launched: false,
+                requires_operator_action: false,
+            })
+        }
     }
 }
 
@@ -626,22 +735,20 @@ pub async fn revoke_remote_launch(
                 auth.lease_id.simple(),
                 auth.lease_id.simple()
             );
-            let mut command = Command::new("ssh");
-            apply_ssh_options(&mut command, runner);
-            command.arg(host).arg(remote_cmd);
-            let _ = command.output().await;
+            let mut args = ssh_args(runner);
+            args.push(host);
+            args.push(remote_cmd);
+            let _ = run_local_cli_command("ssh", args, true).await;
             Ok(Some(
                 "Best-effort SSH runner termination requested.".to_string(),
             ))
         }
         ExperimentRunnerBackend::Slurm => {
             let host = ssh_login_host(runner)?;
-            let mut command = Command::new("ssh");
-            apply_ssh_options(&mut command, runner);
-            command
-                .arg(host)
-                .arg(format!("scancel --name {}", remote_job_name(auth)));
-            let _ = command.output().await;
+            let mut args = ssh_args(runner);
+            args.push(host);
+            args.push(format!("scancel --name {}", remote_job_name(auth)));
+            let _ = run_local_cli_command("ssh", args, true).await;
             Ok(Some(
                 "Best-effort Slurm job cancellation requested.".to_string(),
             ))
@@ -649,14 +756,20 @@ pub async fn revoke_remote_launch(
         ExperimentRunnerBackend::Kubernetes => {
             let namespace = backend_string(runner, "namespace")
                 .ok_or_else(|| "kubernetes backend requires namespace".to_string())?;
-            let output = Command::new("kubectl")
-                .args(["delete", "job", &remote_job_name(auth), "-n", &namespace])
-                .output()
-                .await
-                .map_err(|err| format!("failed to delete kubernetes job: {err}"))?;
-            Ok(Some(
-                String::from_utf8_lossy(&output.stdout).trim().to_string(),
-            ))
+            let output = run_local_cli_command(
+                "kubectl",
+                vec![
+                    "delete".to_string(),
+                    "job".to_string(),
+                    remote_job_name(auth),
+                    "-n".to_string(),
+                    namespace,
+                ],
+                true,
+            )
+            .await
+            .map_err(|err| format!("failed to delete kubernetes job: {err}"))?;
+            Ok(Some(output.stdout.trim().to_string()))
         }
         ExperimentRunnerBackend::Runpod => {
             let api_key = provider_api_key.ok_or_else(|| {
@@ -812,13 +925,43 @@ fn ssh_login_host(runner: &ExperimentRunnerProfile) -> Result<String, String> {
     })
 }
 
-fn apply_ssh_options(command: &mut Command, runner: &ExperimentRunnerProfile) {
+fn cli_workdir() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+fn ssh_args(runner: &ExperimentRunnerProfile) -> Vec<String> {
+    let mut args = Vec::new();
     if let Some(port) = backend_string(runner, "port") {
-        command.arg("-p").arg(port);
+        args.push("-p".to_string());
+        args.push(port);
     }
     if let Some(identity) = backend_string(runner, "identity_file") {
-        command.arg("-i").arg(identity);
+        args.push("-i".to_string());
+        args.push(identity);
     }
+    args
+}
+
+async fn run_local_cli_command(
+    binary: &str,
+    args: Vec<String>,
+    allow_network: bool,
+) -> Result<ExecutionResult, String> {
+    local_cli_execution_backend()
+        .run_script(ScriptExecutionRequest {
+            program: binary.to_string(),
+            args,
+            workdir: cli_workdir(),
+            timeout: REMOTE_ADAPTER_COMMAND_TIMEOUT,
+            extra_env: HashMap::new(),
+            allow_network,
+        })
+        .await
+        .map_err(|err| err.to_string())
+}
+
+fn local_cli_execution_backend() -> Arc<dyn ExecutionBackend> {
+    LocalHostExecutionBackend::shared()
 }
 
 fn remote_job_name(auth: &ExperimentLeaseAuthentication) -> String {
@@ -1571,23 +1714,77 @@ async fn run_command_with_stdin(
     args: &[&str],
     stdin_payload: &str,
 ) -> Result<String, std::io::Error> {
-    let mut command = Command::new(binary);
-    command
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_payload.as_bytes()).await?;
-    }
-    let output = child.wait_with_output().await?;
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    if !output.stderr.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
+    let temp_dir = tempfile::tempdir()?;
+    let manifest_path = temp_dir.path().join("stdin-payload.txt");
+    tokio::fs::write(&manifest_path, stdin_payload).await?;
+    let mut rendered_args = Vec::with_capacity(args.len() + 1);
+    for arg in args {
+        if *arg == "-" {
+            rendered_args.push(manifest_path.to_string_lossy().to_string());
+        } else {
+            rendered_args.push((*arg).to_string());
         }
-        text.push_str(String::from_utf8_lossy(&output.stderr).trim());
     }
-    Ok(text)
+    let output = run_local_cli_command(binary, rendered_args, true)
+        .await
+        .map_err(std::io::Error::other)?;
+    Ok(output.output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn runner_profile(backend: ExperimentRunnerBackend) -> ExperimentRunnerProfile {
+        ExperimentRunnerProfile {
+            id: Uuid::new_v4(),
+            name: "runner".to_string(),
+            backend,
+            backend_config: serde_json::json!({}),
+            image_or_runtime: None,
+            gpu_requirements: serde_json::json!({}),
+            env_grants: serde_json::json!({}),
+            secret_references: Vec::new(),
+            cache_policy: serde_json::json!({}),
+            status: crate::experiments::ExperimentRunnerStatus::Draft,
+            readiness_class: ExperimentRunnerReadinessClass::ManualOnly,
+            launch_eligible: false,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_remote_runner_validates_as_manual_only() {
+        let settings = Settings::default();
+        let runner = runner_profile(ExperimentRunnerBackend::GenericRemoteRunner);
+        let outcome = validate_runner_profile(&runner, &settings, None).await;
+        assert!(outcome.valid);
+        assert_eq!(
+            outcome.readiness_class,
+            ExperimentRunnerReadinessClass::ManualOnly
+        );
+        assert!(!outcome.launch_eligible);
+    }
+
+    #[tokio::test]
+    async fn lambda_runner_without_launch_payload_stays_bootstrap_ready() {
+        let settings = Settings::default();
+        let mut runner = runner_profile(ExperimentRunnerBackend::Lambda);
+        runner.image_or_runtime = Some("ghcr.io/thinclaw/research-runner:latest".to_string());
+        runner.secret_references = vec!["research_lambda_api_key".to_string()];
+        runner.backend_config = serde_json::json!({
+            "template_id": "lambda-template"
+        });
+
+        let outcome = validate_runner_profile(&runner, &settings, None).await;
+        assert!(outcome.valid);
+        assert_eq!(
+            outcome.readiness_class,
+            ExperimentRunnerReadinessClass::BootstrapReady
+        );
+        assert!(!outcome.launch_eligible);
+    }
 }

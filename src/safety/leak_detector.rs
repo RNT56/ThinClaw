@@ -134,12 +134,29 @@ pub struct LeakDetector {
     /// For fast prefix matching of known patterns
     prefix_matcher: Option<AhoCorasick>,
     known_prefixes: Vec<(String, usize)>, // (prefix, pattern_index)
+    /// Exact secret values loaded by the trusted host for boundary checks.
+    exact_values: Vec<String>,
+    exact_matcher: Option<AhoCorasick>,
 }
 
 impl LeakDetector {
     /// Create a new detector with default patterns.
     pub fn new() -> Self {
         Self::with_patterns(default_patterns())
+    }
+
+    /// Create a detector with default patterns plus exact host-loaded values.
+    ///
+    /// Exact matching is useful for provider keys that do not follow a public
+    /// token shape. Very short values are ignored to avoid noisy false positives.
+    pub fn with_exact_values<I, S>(values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut detector = Self::new();
+        detector.set_exact_values(values);
+        detector
     }
 
     /// Create a detector with custom patterns.
@@ -168,7 +185,36 @@ impl LeakDetector {
             patterns,
             prefix_matcher,
             known_prefixes: prefixes,
+            exact_values: Vec::new(),
+            exact_matcher: None,
         }
+    }
+
+    /// Replace the exact host-loaded values scanned alongside token patterns.
+    pub fn set_exact_values<I, S>(&mut self, values: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut exact_values: Vec<String> = values
+            .into_iter()
+            .map(|value| value.as_ref().trim().to_string())
+            .filter(|value| value.len() >= 8)
+            .collect();
+        exact_values.sort();
+        exact_values.dedup();
+
+        let exact_matcher = if exact_values.is_empty() {
+            None
+        } else {
+            AhoCorasick::builder()
+                .ascii_case_insensitive(false)
+                .build(&exact_values)
+                .ok()
+        };
+
+        self.exact_values = exact_values;
+        self.exact_matcher = exact_matcher;
     }
 
     /// Scan content for potential secret leaks.
@@ -221,6 +267,21 @@ impl LeakDetector {
                 }
 
                 matches.push(leak_match);
+            }
+        }
+
+        if let Some(ref matcher) = self.exact_matcher {
+            for mat in matcher.find_iter(content) {
+                let location = mat.start()..mat.end();
+                let matched_text = &content[location.clone()];
+                should_block = true;
+                matches.push(LeakMatch {
+                    pattern_name: "exact_loaded_secret".to_string(),
+                    severity: LeakSeverity::Critical,
+                    action: LeakAction::Block,
+                    location,
+                    masked_preview: mask_secret(matched_text),
+                });
             }
         }
 
@@ -345,13 +406,14 @@ pub enum LeakDetectionError {
 ///
 /// Shows first 4 and last 4 characters, masks the middle.
 fn mask_secret(secret: &str) -> String {
-    let len = secret.len();
+    let chars: Vec<char> = secret.chars().collect();
+    let len = chars.len();
     if len <= 8 {
         return "*".repeat(len);
     }
 
-    let prefix: String = secret.chars().take(4).collect();
-    let suffix: String = secret.chars().skip(len - 4).collect();
+    let prefix: String = chars.iter().take(4).collect();
+    let suffix: String = chars.iter().skip(len - 4).collect();
     let middle_len = len - 8;
     format!("{}{}{}", prefix, "*".repeat(middle_len.min(8)), suffix)
 }
@@ -658,6 +720,20 @@ mod tests {
 
         let result = detector.scan(content);
         assert_eq!(result.matches.len(), 2);
+    }
+
+    #[test]
+    fn test_exact_loaded_secret_blocks_unknown_shape() {
+        let detector = LeakDetector::with_exact_values(["plain-local-secret-value"]);
+        let result = detector.scan("attempting to leak plain-local-secret-value");
+
+        assert!(result.should_block);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "exact_loaded_secret")
+        );
     }
 
     #[test]

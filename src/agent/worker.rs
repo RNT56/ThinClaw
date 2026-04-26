@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::llm::cost_tracker::CostTracker;
+use chrono::Utc;
 
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
@@ -11,6 +12,11 @@ use uuid::Uuid;
 
 use std::sync::Mutex as StdMutex;
 
+use crate::agent::outcomes;
+use crate::agent::routine::{
+    routine_state_has_runtime_advance_for_run, routine_state_with_runtime_advance,
+};
+use crate::agent::routine_engine::persist_routine_runtime_update;
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
 use crate::channels::web::types::SseEvent;
@@ -22,8 +28,7 @@ use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
 use crate::safety::SafetyLayer;
-use crate::tools::ToolRegistry;
-use crate::tools::rate_limiter::RateLimitResult;
+use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
 use crate::workspace::Workspace;
 
 /// Shared dependencies for worker execution.
@@ -45,6 +50,8 @@ pub struct WorkerDeps {
     pub sse_tx: Option<tokio::sync::broadcast::Sender<SseEvent>>,
     /// Routine name if this worker was dispatched from a routine.
     pub routine_name: Option<String>,
+    /// Stable routine ID for completion/finalization lookups.
+    pub routine_id: Option<Uuid>,
     /// Routine run ID for correlation.
     pub routine_run_id: Option<String>,
     /// Workspace for loading identity files (SOUL.md, IDENTITY.md, USER.md).
@@ -55,6 +62,8 @@ pub struct WorkerDeps {
     /// this worker. Without this, autonomous worker costs are invisible to the
     /// Cost Dashboard.
     pub cost_tracker: Option<Arc<tokio::sync::Mutex<CostTracker>>>,
+    /// Default tool profile for this worker lane.
+    pub tool_profile: ToolProfile,
 }
 
 /// Worker that executes a single job.
@@ -163,13 +172,41 @@ impl Worker {
     fn persist_status(&self, status: JobState, reason: Option<String>) {
         if let Some(store) = self.store() {
             let store = store.clone();
+            let context_manager = self.context_manager().clone();
             let job_id = self.job_id;
             tokio::spawn(async move {
-                if let Err(e) = store
-                    .update_job_status(job_id, status, reason.as_deref())
-                    .await
-                {
-                    tracing::warn!("Failed to persist status for job {}: {}", job_id, e);
+                match context_manager.get_context(job_id).await {
+                    Ok(ctx) => {
+                        if let Err(error) = store.save_job(&ctx).await {
+                            tracing::warn!(
+                                "Failed to persist job snapshot for job {}: {}",
+                                job_id,
+                                error
+                            );
+                            if let Err(update_error) = store
+                                .update_job_status(job_id, status, reason.as_deref())
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to persist status fallback for job {}: {}",
+                                    job_id,
+                                    update_error
+                                );
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        if let Err(error) = store
+                            .update_job_status(job_id, status, reason.as_deref())
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to persist status for job {}: {}",
+                                job_id,
+                                error
+                            );
+                        }
+                    }
                 }
             });
         }
@@ -314,6 +351,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                                 | JobState::Failed
                                 | JobState::Stuck
                                 | JobState::Cancelled
+                                | JobState::Abandoned
                         )
                     })
                     .unwrap_or(false);
@@ -381,6 +419,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             &capability_metadata,
             "allowed_skills",
         );
+        let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
 
         let mut iteration = 0;
 
@@ -393,6 +432,20 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             .tool_definitions_for_autonomous_capabilities(
                 allowed_tools.as_deref(),
                 allowed_skills.as_deref(),
+                None,
+            )
+            .await;
+        reason_ctx.available_tools = tool_policies.filter_tool_definitions_for_metadata(
+            reason_ctx.available_tools.clone(),
+            &capability_metadata,
+        );
+        reason_ctx.available_tools = self
+            .tools()
+            .filter_tool_definitions_for_execution_profile(
+                reason_ctx.available_tools.clone(),
+                ToolExecutionLane::Worker,
+                self.deps.tool_profile,
+                &capability_metadata,
             )
             .await;
 
@@ -454,7 +507,11 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
                 && matches!(
                     ctx.state,
-                    JobState::Completed | JobState::Failed | JobState::Stuck | JobState::Cancelled
+                    JobState::Completed
+                        | JobState::Failed
+                        | JobState::Stuck
+                        | JobState::Cancelled
+                        | JobState::Abandoned
                 )
             {
                 return Ok(());
@@ -569,6 +626,20 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                 .tool_definitions_for_autonomous_capabilities(
                     allowed_tools.as_deref(),
                     allowed_skills.as_deref(),
+                    None,
+                )
+                .await;
+            reason_ctx.available_tools = tool_policies.filter_tool_definitions_for_metadata(
+                reason_ctx.available_tools.clone(),
+                &capability_metadata,
+            );
+            reason_ctx.available_tools = self
+                .tools()
+                .filter_tool_definitions_for_execution_profile(
+                    reason_ctx.available_tools.clone(),
+                    ToolExecutionLane::Worker,
+                    self.deps.tool_profile,
+                    &capability_metadata,
                 )
                 .await;
 
@@ -745,6 +816,32 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             return results;
         }
 
+        let mut parallel_safe = true;
+        for selection in selections {
+            match self.tools().tool_descriptor(&selection.tool_name).await {
+                Some(descriptor) if descriptor.metadata.parallel_safe => {}
+                _ => {
+                    parallel_safe = false;
+                    break;
+                }
+            }
+        }
+
+        if !parallel_safe {
+            let mut results = Vec::with_capacity(count);
+            for selection in selections {
+                let result = Self::execute_tool_inner(
+                    &self.deps,
+                    self.job_id,
+                    &selection.tool_name,
+                    &selection.parameters,
+                )
+                .await;
+                results.push(ToolExecResult { result });
+            }
+            return results;
+        }
+
         let keepalive =
             WorkerActivityKeepalive::spawn(activity_tx.clone(), Duration::from_secs(15));
         let mut join_set = JoinSet::new();
@@ -820,87 +917,8 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         tool_name: &str,
         params: &serde_json::Value,
     ) -> Result<String, Error> {
-        let tool =
-            deps.tools
-                .get(tool_name)
-                .await
-                .ok_or_else(|| crate::error::ToolError::NotFound {
-                    name: tool_name.to_string(),
-                })?;
-
-        // In autonomous workers (routines), `UnlessAutoApproved` tools are
-        // auto-approved — there is no human to prompt.  Only block tools
-        // that unconditionally require explicit approval (`Always`).
-        if tool.requires_approval(params) == crate::tools::ApprovalRequirement::Always {
-            return Err(crate::error::ToolError::AuthRequired {
-                name: tool_name.to_string(),
-            }
-            .into());
-        }
-
         // Fetch job context early so we have the real user_id for hooks and rate limiting
         let job_ctx = deps.context_manager.get_context(job_id).await?;
-        if !crate::tools::ToolRegistry::tool_name_allowed_by_metadata(&job_ctx.metadata, tool_name)
-        {
-            return Err(crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason: "Tool is not permitted in this agent context".to_string(),
-            }
-            .into());
-        }
-
-        // Check per-tool rate limit before running hooks or executing (cheaper check first)
-        if let Some(config) = tool.rate_limit_config()
-            && let RateLimitResult::Limited { retry_after, .. } = deps
-                .tools
-                .rate_limiter()
-                .check_and_record(&job_ctx.user_id, tool_name, &config)
-                .await
-        {
-            return Err(crate::error::ToolError::RateLimited {
-                name: tool_name.to_string(),
-                retry_after: Some(retry_after),
-            }
-            .into());
-        }
-
-        // Run BeforeToolCall hook
-        let params = {
-            use crate::hooks::{HookError, HookEvent, HookOutcome};
-            let event = HookEvent::ToolCall {
-                tool_name: tool_name.to_string(),
-                parameters: params.clone(),
-                user_id: job_ctx.user_id.clone(),
-                context: format!("job:{}", job_id),
-            };
-            match deps.hooks.run(&event).await {
-                Err(HookError::Rejected { reason }) => {
-                    return Err(crate::error::ToolError::ExecutionFailed {
-                        name: tool_name.to_string(),
-                        reason: format!("Blocked by hook: {}", reason),
-                    }
-                    .into());
-                }
-                Err(err) => {
-                    return Err(crate::error::ToolError::ExecutionFailed {
-                        name: tool_name.to_string(),
-                        reason: format!("Blocked by hook failure mode: {}", err),
-                    }
-                    .into());
-                }
-                Ok(HookOutcome::Continue {
-                    modified: Some(new_params),
-                }) => serde_json::from_str(&new_params).unwrap_or_else(|e| {
-                    tracing::warn!(
-                        tool = %tool_name,
-                        "Hook returned non-JSON modification for ToolCall, ignoring: {}",
-                        e
-                    );
-                    params.clone()
-                }),
-                _ => params.clone(),
-            }
-        };
         if job_ctx.state == JobState::Cancelled {
             return Err(crate::error::ToolError::ExecutionFailed {
                 name: tool_name.to_string(),
@@ -909,131 +927,74 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             .into());
         }
 
-        // Validate tool parameters
-        let validation = deps.safety.validator().validate_tool_params(&params);
-        if !validation.is_valid {
-            let details = validation
-                .errors
-                .iter()
-                .map(|e| format!("{}: {}", e.field, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(crate::error::ToolError::InvalidParameters {
-                name: tool_name.to_string(),
-                reason: format!("Invalid tool parameters: {}", details),
-            }
-            .into());
-        }
-
-        tracing::debug!(
-            tool = %tool_name,
-            params = %params,
-            job = %job_id,
-            "Tool call started"
-        );
-
-        // Execute with per-tool timeout and timing
-        let tool_timeout = tool.execution_timeout();
-        let start = std::time::Instant::now();
-        let result = tokio::time::timeout(tool_timeout, async {
-            tool.execute(params.clone(), &job_ctx).await
+        let hook_context = format!("job:{job_id}");
+        let prepared = match execution::prepare_tool_call(execution::ToolPrepareRequest {
+            tools: &deps.tools,
+            safety: &deps.safety,
+            job_ctx: &job_ctx,
+            tool_name,
+            params,
+            lane: ToolExecutionLane::Worker,
+            default_profile: deps.tool_profile,
+            profile_override: None,
+            approval_mode: execution::ToolApprovalMode::Autonomous,
+            hooks: Some(execution::ToolHookConfig {
+                registry: &deps.hooks,
+                user_id: &job_ctx.user_id,
+                context: &hook_context,
+            }),
         })
-        .await;
-        let elapsed = start.elapsed();
+        .await?
+        {
+            execution::ToolPrepareOutcome::Ready(prepared) => prepared,
+            execution::ToolPrepareOutcome::NeedsApproval(_) => {
+                return Err(crate::error::ToolError::AuthRequired {
+                    name: tool_name.to_string(),
+                }
+                .into());
+            }
+        };
 
-        match &result {
-            Ok(Ok(output)) => {
-                let result_str = serde_json::to_string(&output.result)
-                    .unwrap_or_else(|_| "<serialize error>".to_string());
-                tracing::debug!(
-                    tool = %tool_name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    result = %result_str,
-                    "Tool call succeeded"
-                );
-            }
-            Ok(Err(e)) => {
-                tracing::debug!(
-                    tool = %tool_name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    error = %e,
-                    "Tool call failed"
-                );
-            }
-            Err(_) => {
-                tracing::debug!(
-                    tool = %tool_name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    timeout_secs = tool_timeout.as_secs(),
-                    "Tool call timed out"
-                );
-            }
-        }
+        let params = prepared.params.clone();
+        let result = execution::execute_tool_call(&prepared, &deps.safety, &job_ctx).await;
 
         // Record action in memory and get the ActionRecord for persistence
         let action = match &result {
-            Ok(Ok(output)) => {
-                let output_str = serde_json::to_string_pretty(&output.result)
-                    .ok()
-                    .map(|s| deps.safety.sanitize_tool_output(tool_name, &s).content);
-                match deps
-                    .context_manager
-                    .update_memory(job_id, |mem| {
-                        let rec = mem.create_action(tool_name, params.clone()).succeed(
-                            output_str.clone(),
-                            output.result.clone(),
-                            elapsed,
-                        );
-                        mem.record_action(rec.clone());
-                        rec
-                    })
-                    .await
-                {
-                    Ok(rec) => Some(rec),
-                    Err(e) => {
-                        tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {e}");
-                        None
-                    }
+            Ok(output) => match deps
+                .context_manager
+                .update_memory(job_id, |mem| {
+                    let rec = mem
+                        .create_action(tool_name, params.clone())
+                        .succeed(None, output.sanitized_value.clone(), output.elapsed)
+                        .with_warnings(output.warnings.clone());
+                    mem.record_action(rec.clone());
+                    rec
+                })
+                .await
+            {
+                Ok(rec) => Some(rec),
+                Err(e) => {
+                    tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {e}");
+                    None
                 }
-            }
-            Ok(Err(e)) => {
-                match deps
-                    .context_manager
-                    .update_memory(job_id, |mem| {
-                        let rec = mem
-                            .create_action(tool_name, params.clone())
-                            .fail(e.to_string(), elapsed);
-                        mem.record_action(rec.clone());
-                        rec
-                    })
-                    .await
-                {
-                    Ok(rec) => Some(rec),
-                    Err(e) => {
-                        tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {e}");
-                        None
-                    }
+            },
+            Err(e) => match deps
+                .context_manager
+                .update_memory(job_id, |mem| {
+                    let rec = mem
+                        .create_action(tool_name, params.clone())
+                        .fail(e.to_string(), std::time::Duration::ZERO);
+                    mem.record_action(rec.clone());
+                    rec
+                })
+                .await
+            {
+                Ok(rec) => Some(rec),
+                Err(err) => {
+                    tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {err}");
+                    None
                 }
-            }
-            Err(_) => {
-                match deps
-                    .context_manager
-                    .update_memory(job_id, |mem| {
-                        let rec = mem
-                            .create_action(tool_name, params.clone())
-                            .fail("Execution timeout", elapsed);
-                        mem.record_action(rec.clone());
-                        rec
-                    })
-                    .await
-                {
-                    Ok(rec) => Some(rec),
-                    Err(e) => {
-                        tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {e}");
-                        None
-                    }
-                }
-            }
+            },
         };
 
         // Persist action to database (fire-and-forget)
@@ -1045,25 +1006,8 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             });
         }
 
-        // Handle the result
-        let output = result
-            .map_err(|_| crate::error::ToolError::Timeout {
-                name: tool_name.to_string(),
-                timeout: tool_timeout,
-            })?
-            .map_err(|e| crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason: e.to_string(),
-            })?;
-
-        // Return result as string
-        serde_json::to_string_pretty(&output.result).map_err(|e| {
-            crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason: format!("Failed to serialize result: {}", e),
-            }
-            .into()
-        })
+        let output = result?;
+        Ok(output.sanitized_content)
     }
 
     /// Process a tool execution result and add it to the reasoning context.
@@ -1240,21 +1184,57 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                 action.reasoning
             );
 
-            // Execute the planned tool
-            let result = self
-                .execute_tool(&action.tool_name, &action.parameters, activity_tx)
-                .await;
-
-            // Create a synthetic ToolSelection for process_tool_result.
-            // Plan actions don't originate from an LLM tool_call response so
-            // there is no real tool_call_id; generate a unique one.
-            let selection = ToolSelection {
+            let mut selection = ToolSelection {
                 tool_name: action.tool_name.clone(),
                 parameters: action.parameters.clone(),
                 reasoning: action.reasoning.clone(),
                 alternatives: vec![],
                 tool_call_id: format!("plan_{}_{}", self.job_id, i),
             };
+
+            // Execute the planned tool
+            let mut result = self
+                .execute_tool(&action.tool_name, &selection.parameters, activity_tx)
+                .await;
+
+            if let Err(crate::error::Error::Tool(crate::error::ToolError::InvalidParameters {
+                reason,
+                ..
+            })) = &result
+            {
+                let repair_action = crate::llm::PlannedAction {
+                    tool_name: action.tool_name.clone(),
+                    parameters: selection.parameters.clone(),
+                    reasoning: action.reasoning.clone(),
+                    expected_outcome: action.expected_outcome.clone(),
+                };
+
+                match reasoning
+                    .repair_plan_action(reason_ctx, &repair_action, reason)
+                    .await
+                {
+                    Ok(repaired_params) if repaired_params != selection.parameters => {
+                        tracing::info!(
+                            job_id = %self.job_id,
+                            tool = %action.tool_name,
+                            "Retrying planned action with repaired parameters"
+                        );
+                        selection.parameters = repaired_params;
+                        result = self
+                            .execute_tool(&action.tool_name, &selection.parameters, activity_tx)
+                            .await;
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::warn!(
+                            job_id = %self.job_id,
+                            tool = %action.tool_name,
+                            "Planned action repair failed: {}",
+                            err
+                        );
+                    }
+                }
+            }
 
             // Process the result
             let completed = self
@@ -1332,44 +1312,64 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         };
 
         // Derive RunStatus + summary from the job's actual terminal state.
-        let (status, event, summary) = match self.context_manager().get_context(self.job_id).await {
-            Ok(ctx) => {
-                // Extract the reason from the last state transition (if any).
-                let reason = ctx.transitions.last().and_then(|t| t.reason.clone());
-                match ctx.state {
-                    JobState::Completed => (
-                        crate::agent::routine::RunStatus::Ok,
-                        "completed",
-                        "Job completed successfully".to_string(),
-                    ),
-                    JobState::Failed => (
-                        crate::agent::routine::RunStatus::Failed,
-                        "failed",
-                        reason.unwrap_or_else(|| "Job failed".to_string()),
-                    ),
-                    JobState::Stuck => (
-                        crate::agent::routine::RunStatus::Failed,
-                        "failed",
-                        reason.unwrap_or_else(|| "Job stuck".to_string()),
-                    ),
-                    JobState::Cancelled => (
-                        crate::agent::routine::RunStatus::Failed,
-                        "failed",
-                        "Job cancelled".to_string(),
-                    ),
-                    other => (
-                        crate::agent::routine::RunStatus::Failed,
-                        "failed",
-                        format!("Job ended in unexpected state: {:?}", other),
-                    ),
+        let (status, event, summary, job_user_id, job_actor_id) =
+            match self.context_manager().get_context(self.job_id).await {
+                Ok(ctx) => {
+                    // Extract the reason from the last state transition (if any).
+                    let reason = ctx.transitions.last().and_then(|t| t.reason.clone());
+                    match ctx.state {
+                        JobState::Completed => (
+                            crate::agent::routine::RunStatus::Ok,
+                            "completed",
+                            "Job completed successfully".to_string(),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
+                        JobState::Failed => (
+                            crate::agent::routine::RunStatus::Failed,
+                            "failed",
+                            reason.unwrap_or_else(|| "Job failed".to_string()),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
+                        JobState::Stuck => (
+                            crate::agent::routine::RunStatus::Failed,
+                            "failed",
+                            reason.unwrap_or_else(|| "Job stuck".to_string()),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
+                        JobState::Cancelled => (
+                            crate::agent::routine::RunStatus::Failed,
+                            "failed",
+                            "Job cancelled".to_string(),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
+                        JobState::Abandoned => (
+                            crate::agent::routine::RunStatus::Failed,
+                            "failed",
+                            reason.unwrap_or_else(|| "Job abandoned".to_string()),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
+                        other => (
+                            crate::agent::routine::RunStatus::Failed,
+                            "failed",
+                            format!("Job ended in unexpected state: {:?}", other),
+                            Some(ctx.user_id.clone()),
+                            Some(ctx.owner_actor_id().to_string()),
+                        ),
+                    }
                 }
-            }
-            Err(e) => (
-                crate::agent::routine::RunStatus::Failed,
-                "failed",
-                format!("Could not read final job state: {}", e),
-            ),
-        };
+                Err(e) => (
+                    crate::agent::routine::RunStatus::Failed,
+                    "failed",
+                    format!("Could not read final job state: {}", e),
+                    None,
+                    None,
+                ),
+            };
 
         // Use the last meaningful output from the worker (LLM's final response
         // or last emit_user_message) as the result_summary for the SSE event
@@ -1384,6 +1384,87 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                 .await
             {
                 tracing::error!(run_id = %run_id, "Failed to complete routine run: {}", e);
+            }
+            if let (Some(user_id), Some(actor_id)) =
+                (job_user_id.as_deref(), job_actor_id.as_deref())
+            {
+                let mut routine = None;
+                if let Some(routine_id) = self.deps.routine_id
+                    && let Ok(Some(found)) = store.get_routine(routine_id).await
+                    && found.user_id == user_id
+                    && found.owner_actor_id() == actor_id
+                {
+                    routine = Some(found);
+                }
+                if routine.is_none()
+                    && let Ok(Some(found)) = store
+                        .get_routine_by_name_for_actor(user_id, actor_id, &routine_name)
+                        .await
+                {
+                    routine = Some(found);
+                }
+                if let Some(routine) = routine {
+                    let completed_at = Utc::now();
+                    let runtime_already_advanced =
+                        routine_state_has_runtime_advance_for_run(&routine.state, run_id);
+                    let next_fire_at = if runtime_already_advanced {
+                        routine.next_fire_at
+                    } else {
+                        crate::agent::routine::next_fire_for_routine(&routine, None, completed_at)
+                            .unwrap_or(routine.next_fire_at)
+                    };
+                    let run_count = if runtime_already_advanced {
+                        routine.run_count
+                    } else {
+                        routine.run_count + 1
+                    };
+                    let consecutive_failures = if status == crate::agent::routine::RunStatus::Failed
+                    {
+                        routine.consecutive_failures + 1
+                    } else {
+                        0
+                    };
+                    let state =
+                        routine_state_with_runtime_advance(&routine.state, run_id, completed_at);
+                    if let Err(error) = persist_routine_runtime_update(
+                        &store,
+                        routine.id,
+                        completed_at,
+                        next_fire_at,
+                        run_count,
+                        consecutive_failures,
+                        &state,
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            routine = %routine.name,
+                            run_id = %run_id,
+                            "Failed to update routine runtime after worker finalization: {}",
+                            error
+                        );
+                    }
+                    let completed_run = crate::agent::routine::RoutineRun {
+                        id: run_id,
+                        routine_id: routine.id,
+                        trigger_type: "worker".to_string(),
+                        trigger_detail: Some("worker_finalization".to_string()),
+                        trigger_key: None,
+                        started_at: completed_at,
+                        completed_at: Some(completed_at),
+                        status,
+                        result_summary: Some(summary_ref.clone()),
+                        tokens_used: None,
+                        job_id: Some(self.job_id),
+                        created_at: completed_at,
+                    };
+                    if let Err(err) =
+                        outcomes::maybe_create_routine_contract(&store, &routine, &completed_run)
+                            .await
+                    {
+                        tracing::debug!(run_id = %run_id, error = %err, "Outcome worker routine hook skipped");
+                    }
+                }
             }
         }
 
@@ -1635,8 +1716,12 @@ fn compact_post_plan(messages: &mut Vec<ChatMessage>, plan_goal: &str) {
 mod tests {
     use crate::llm::ToolSelection;
     use crate::util::llm_signals_completion;
+    use chrono::Utc;
 
     use super::*;
+    use crate::agent::routine::{
+        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
+    };
     use crate::config::SafetyConfig;
     use crate::context::JobContext;
     use crate::llm::{
@@ -1644,6 +1729,8 @@ mod tests {
         ToolCompletionResponse,
     };
     use crate::safety::SafetyLayer;
+    #[cfg(feature = "libsql")]
+    use crate::testing::test_db;
     use crate::tools::{Tool, ToolError, ToolOutput};
 
     /// A test tool that sleeps for a configurable duration before returning.
@@ -1662,6 +1749,12 @@ mod tests {
         }
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn metadata(&self) -> crate::tools::ToolMetadata {
+            crate::tools::ToolMetadata {
+                parallel_safe: true,
+                ..crate::tools::ToolMetadata::read_only()
+            }
         }
         async fn execute(
             &self,
@@ -1695,13 +1788,32 @@ mod tests {
             &self,
             _req: CompletionRequest,
         ) -> Result<CompletionResponse, crate::error::LlmError> {
-            unimplemented!("stub")
+            Ok(CompletionResponse {
+                content: "stub response".to_string(),
+                provider_model: Some("stub".to_string()),
+                cost_usd: None,
+                thinking_content: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: crate::llm::FinishReason::Stop,
+                token_capture: None,
+            })
         }
         async fn complete_with_tools(
             &self,
             _req: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
-            unimplemented!("stub")
+            Ok(ToolCompletionResponse {
+                content: Some("stub response".to_string()),
+                provider_model: Some("stub".to_string()),
+                cost_usd: None,
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: crate::llm::FinishReason::Stop,
+                token_capture: None,
+            })
         }
     }
 
@@ -1733,9 +1845,11 @@ mod tests {
             use_planning: false,
             sse_tx: None,
             routine_name: None,
+            routine_id: None,
             routine_run_id: None,
             workspace: None,
             cost_tracker: None,
+            tool_profile: ToolProfile::Standard,
         };
 
         Worker::new(job_id, deps)
@@ -1940,5 +2054,114 @@ mod tests {
             results[0].result.is_err(),
             "Missing tool should produce an error, not a panic"
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn finalize_routine_run_resolves_routine_by_id_when_name_changes() {
+        let (db, _tmp) = test_db().await;
+        let context_manager = Arc::new(crate::context::ContextManager::new(5));
+        let job_id = context_manager
+            .create_job_for_identity("default", "default", "routine job", "test")
+            .await
+            .unwrap();
+        context_manager
+            .update_context(job_id, |ctx| {
+                ctx.transition_to(JobState::InProgress, Some("started".to_string()))
+                    .unwrap();
+                ctx.transition_to(JobState::Completed, Some("done".to_string()))
+                    .unwrap();
+            })
+            .await
+            .unwrap();
+
+        let routine = Routine {
+            id: Uuid::new_v4(),
+            name: "renamed-routine".to_string(),
+            description: "test routine".to_string(),
+            user_id: "default".to_string(),
+            actor_id: "default".to_string(),
+            enabled: true,
+            trigger: Trigger::Cron {
+                schedule: "0 */15 * * * * *".to_string(),
+            },
+            action: RoutineAction::FullJob {
+                title: "Test".to_string(),
+                description: "Test".to_string(),
+                max_iterations: 1,
+                allowed_tools: None,
+                allowed_skills: None,
+                tool_profile: None,
+            },
+            guardrails: RoutineGuardrails::default(),
+            notify: NotifyConfig::default(),
+            policy: Default::default(),
+            last_run_at: None,
+            next_fire_at: Some(Utc::now()),
+            run_count: 0,
+            consecutive_failures: 0,
+            state: serde_json::json!({}),
+            config_version: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.create_routine(&routine).await.unwrap();
+
+        let run = RoutineRun {
+            id: Uuid::new_v4(),
+            routine_id: routine.id,
+            trigger_type: "cron".to_string(),
+            trigger_detail: Some("0 */15 * * * * *".to_string()),
+            trigger_key: None,
+            started_at: Utc::now(),
+            completed_at: None,
+            status: RunStatus::Running,
+            result_summary: None,
+            tokens_used: None,
+            job_id: None,
+            created_at: Utc::now(),
+        };
+        db.create_routine_run(&run).await.unwrap();
+
+        let deps = WorkerDeps {
+            context_manager,
+            llm: Arc::new(StubLlm),
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+                redact_pii_in_prompts: true,
+                smart_approval_mode: "off".to_string(),
+                external_scanner_mode: "off".to_string(),
+                external_scanner_path: None,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            store: Some(db.clone()),
+            hooks: Arc::new(crate::hooks::HookRegistry::new()),
+            timeout: Duration::from_secs(30),
+            use_planning: false,
+            sse_tx: None,
+            routine_name: Some("stale-routine-name".to_string()),
+            routine_id: Some(routine.id),
+            routine_run_id: Some(run.id.to_string()),
+            workspace: None,
+            cost_tracker: None,
+            tool_profile: ToolProfile::Restricted,
+        };
+
+        let worker = Worker::new(job_id, deps);
+        worker.finalize_routine_run().await;
+
+        let refreshed_routine = db.get_routine(routine.id).await.unwrap().unwrap();
+        assert_eq!(refreshed_routine.run_count, 1);
+        assert_eq!(refreshed_routine.consecutive_failures, 0);
+
+        let completed_run = db
+            .list_routine_runs(routine.id, 1)
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(completed_run.status, RunStatus::Ok);
     }
 }

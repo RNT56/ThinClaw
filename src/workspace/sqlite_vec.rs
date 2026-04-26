@@ -66,7 +66,7 @@ impl SqliteVecConfig {
     /// SQL to create the vec0 virtual table.
     pub fn create_table_sql(&self) -> String {
         format!(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(\n  id TEXT PRIMARY KEY,\n  embedding float[{}],\n  +document_id TEXT,\n  +chunk_index INTEGER,\n  +content TEXT\n);",
+            "CREATE VIRTUAL TABLE IF NOT EXISTS vec_embeddings USING vec0(\n  id TEXT PRIMARY KEY,\n  embedding float[{}],\n  document_id TEXT,\n  chunk_index INTEGER,\n  content TEXT\n);",
             self.dimensions
         )
     }

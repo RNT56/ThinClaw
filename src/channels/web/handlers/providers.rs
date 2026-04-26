@@ -6,6 +6,8 @@ use axum::{
     http::StatusCode,
 };
 
+use crate::channels::web::identity_helpers::{GatewayAuthSource, GatewayRequestIdentity};
+use crate::channels::web::rate_limiter::RateLimiter;
 use crate::channels::web::server::GatewayState;
 
 /// Response for GET /api/providers — lists all catalog providers with key status.
@@ -31,6 +33,31 @@ pub(crate) struct ProviderInfo {
     pub(crate) oauth_source_label: Option<String>,
     #[serde(default)]
     pub(crate) oauth_source_location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) setup_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) credential: Option<ProviderCredentialMetadata>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub(crate) struct ProviderCredentialMetadata {
+    pub(crate) source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) masked_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) key_version: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) encryption_version: Option<i32>,
 }
 
 #[derive(serde::Serialize)]
@@ -73,6 +100,10 @@ pub(crate) struct ProviderConfigEntry {
     pub(crate) cheap_model: Option<String>,
     pub(crate) suggested_primary_model: Option<String>,
     pub(crate) suggested_cheap_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) setup_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tier: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -101,7 +132,16 @@ pub(crate) struct ProvidersConfigResponse {
     pub(crate) runtime_revision: Option<u64>,
     pub(crate) last_reload_error: Option<String>,
     pub(crate) advisor_max_calls: u32,
+    pub(crate) advisor_auto_escalation_mode: crate::settings::AdvisorAutoEscalationMode,
     pub(crate) advisor_escalation_prompt: Option<String>,
+    #[serde(default)]
+    pub(crate) advisor_ready: bool,
+    #[serde(default)]
+    pub(crate) advisor_disabled_reason: Option<String>,
+    #[serde(default)]
+    pub(crate) executor_target: Option<String>,
+    #[serde(default)]
+    pub(crate) advisor_target: Option<String>,
     #[serde(default)]
     pub(crate) diagnostics: Vec<String>,
     pub(crate) derived_defaults: crate::settings::ProvidersSettings,
@@ -135,13 +175,15 @@ pub(crate) struct ProvidersConfigWriteRequest {
     #[serde(default = "default_advisor_max_calls_api")]
     pub(crate) advisor_max_calls: u32,
     #[serde(default)]
+    pub(crate) advisor_auto_escalation_mode: crate::settings::AdvisorAutoEscalationMode,
+    #[serde(default)]
     pub(crate) advisor_escalation_prompt: Option<String>,
     #[serde(default)]
     pub(crate) auto_fix: bool,
 }
 
 fn default_advisor_max_calls_api() -> u32 {
-    3
+    4
 }
 
 #[derive(serde::Serialize)]
@@ -247,6 +289,7 @@ fn provider_oauth_ui_state(slug: &str) -> ProviderOauthUiState {
 
 pub(crate) async fn providers_list_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<Json<ProvidersListResponse>, StatusCode> {
     let catalog = crate::config::provider_catalog::catalog();
     let secrets = state.secrets_store.as_ref();
@@ -256,17 +299,24 @@ pub(crate) async fn providers_list_handler(
     entries.sort_by_key(|(slug, _)| *slug);
 
     for (slug, endpoint) in entries {
-        let has_env = crate::config::helpers::optional_env(endpoint.env_key_name)
+        let has_env = crate::config::helpers::optional_env(&endpoint.env_key_name)
             .ok()
             .flatten()
             .is_some();
         let has_secret = if let Some(ss) = secrets {
-            ss.exists(&state.user_id, endpoint.secret_name)
+            ss.exists(&request_identity.principal_id, &endpoint.secret_name)
                 .await
                 .unwrap_or(false)
         } else {
             false
         };
+        let credential = provider_credential_metadata(
+            secrets,
+            &request_identity.principal_id,
+            &endpoint.secret_name,
+            &endpoint.env_key_name,
+        )
+        .await;
         let oauth = provider_oauth_ui_state(slug);
 
         let api_style_str = match endpoint.api_style {
@@ -295,6 +345,9 @@ pub(crate) async fn providers_list_handler(
             oauth_available: oauth.available,
             oauth_source_label: oauth.source_label,
             oauth_source_location: oauth.source_location,
+            setup_url: endpoint.setup_url.clone(),
+            tier: endpoint.tier.clone(),
+            credential,
         });
     }
 
@@ -302,7 +355,12 @@ pub(crate) async fn providers_list_handler(
         .ok()
         .flatten()
         .is_some()
-        || secret_exists(secrets, &state.user_id, "llm_compatible_api_key").await;
+        || secret_exists(
+            secrets,
+            &request_identity.principal_id,
+            "llm_compatible_api_key",
+        )
+        .await;
     providers.push(ProviderInfo {
         slug: "openai_compatible".to_string(),
         display_name: "OpenAI-compatible".to_string(),
@@ -318,6 +376,15 @@ pub(crate) async fn providers_list_handler(
         oauth_available: false,
         oauth_source_label: None,
         oauth_source_location: None,
+        setup_url: None,
+        tier: None,
+        credential: provider_credential_metadata(
+            secrets,
+            &request_identity.principal_id,
+            "llm_compatible_api_key",
+            "LLM_API_KEY",
+        )
+        .await,
     });
 
     let bedrock_has_key = crate::config::helpers::optional_env("BEDROCK_API_KEY")
@@ -328,12 +395,22 @@ pub(crate) async fn providers_list_handler(
             .ok()
             .flatten()
             .is_some()
-        || secret_exists(secrets, &state.user_id, "llm_bedrock_api_key").await
+        || secret_exists(
+            secrets,
+            &request_identity.principal_id,
+            "llm_bedrock_api_key",
+        )
+        .await
         || crate::config::helpers::optional_env("BEDROCK_PROXY_API_KEY")
             .ok()
             .flatten()
             .is_some()
-        || secret_exists(secrets, &state.user_id, "llm_bedrock_proxy_api_key").await;
+        || secret_exists(
+            secrets,
+            &request_identity.principal_id,
+            "llm_bedrock_proxy_api_key",
+        )
+        .await;
     providers.push(ProviderInfo {
         slug: "bedrock".to_string(),
         display_name: "AWS Bedrock".to_string(),
@@ -349,6 +426,15 @@ pub(crate) async fn providers_list_handler(
         oauth_available: false,
         oauth_source_label: None,
         oauth_source_location: None,
+        setup_url: None,
+        tier: None,
+        credential: provider_credential_metadata(
+            secrets,
+            &request_identity.principal_id,
+            "llm_bedrock_api_key",
+            "BEDROCK_API_KEY",
+        )
+        .await,
     });
 
     providers.sort_by(|a, b| a.display_name.cmp(&b.display_name));
@@ -358,15 +444,19 @@ pub(crate) async fn providers_list_handler(
 
 pub(crate) async fn providers_config_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<Json<ProvidersConfigResponse>, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let map = store.get_all_settings(&state.user_id).await.map_err(|e| {
-        tracing::error!("Failed to load provider settings: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let map = store
+        .get_all_settings(&request_identity.principal_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load provider settings: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let settings = crate::settings::Settings::from_db_map(&map);
     let providers_settings = crate::llm::normalize_providers_settings(&settings);
     let diagnostics = crate::llm::validate_providers_settings(&settings.providers);
@@ -374,8 +464,13 @@ pub(crate) async fn providers_config_handler(
     let persisted = settings.providers.clone();
     let runtime_status = state.llm_runtime.as_ref().map(|runtime| runtime.status());
     let secrets = state.secrets_store.as_ref();
-    let providers =
-        build_routing_provider_entries(&state.user_id, &settings, &persisted, secrets).await;
+    let providers = build_routing_provider_entries(
+        &request_identity.principal_id,
+        &settings,
+        &persisted,
+        secrets,
+    )
+    .await;
 
     Ok(Json(ProvidersConfigResponse {
         routing_enabled: providers_settings.smart_routing_enabled,
@@ -398,9 +493,25 @@ pub(crate) async fn providers_config_handler(
         policy_rules: providers_settings.policy_rules.clone(),
         providers,
         runtime_revision: runtime_status.as_ref().map(|status| status.revision),
-        last_reload_error: runtime_status.and_then(|status| status.last_error),
+        last_reload_error: runtime_status
+            .as_ref()
+            .and_then(|status| status.last_error.clone()),
         advisor_max_calls: providers_settings.advisor_max_calls,
+        advisor_auto_escalation_mode: providers_settings.advisor_auto_escalation_mode,
         advisor_escalation_prompt: providers_settings.advisor_escalation_prompt.clone(),
+        advisor_ready: runtime_status
+            .as_ref()
+            .map(|status| status.advisor_ready)
+            .unwrap_or(false),
+        advisor_disabled_reason: runtime_status
+            .as_ref()
+            .and_then(|status| status.advisor_disabled_reason.clone()),
+        executor_target: runtime_status
+            .as_ref()
+            .and_then(|status| status.executor_target.clone()),
+        advisor_target: runtime_status
+            .as_ref()
+            .and_then(|status| status.advisor_target.clone()),
         diagnostics,
         derived_defaults,
         persisted,
@@ -419,24 +530,24 @@ pub(crate) async fn build_routing_provider_entries(
     entries.sort_by_key(|(slug, _)| *slug);
 
     for (slug, endpoint) in entries {
-        let has_env = crate::config::helpers::optional_env(endpoint.env_key_name)
+        let has_env = crate::config::helpers::optional_env(&endpoint.env_key_name)
             .ok()
             .flatten()
             .is_some();
-        let has_secret = secret_exists(secrets, user_id, endpoint.secret_name).await;
+        let has_secret = secret_exists(secrets, user_id, &endpoint.secret_name).await;
         let auth_mode = provider_auth_mode(providers_settings, slug);
         let oauth = provider_oauth_ui_state(slug);
         let primary_model = provider_primary_model_for_slug(
             settings,
             providers_settings,
             slug,
-            endpoint.default_model,
+            &endpoint.default_model,
         );
         let cheap_model = provider_cheap_model_for_slug(
             settings,
             providers_settings,
             slug,
-            endpoint.default_model,
+            &endpoint.default_model,
         );
         providers.push(ProviderConfigEntry {
             slug: (*slug).to_string(),
@@ -480,7 +591,9 @@ pub(crate) async fn build_routing_provider_entries(
             suggested_primary_model: primary_model
                 .or_else(|| Some(endpoint.default_model.to_string())),
             suggested_cheap_model: cheap_model
-                .or_else(|| suggested_cheap_model_for_slug(slug, endpoint.default_model)),
+                .or_else(|| suggested_cheap_model_for_slug(slug, &endpoint.default_model)),
+            setup_url: endpoint.setup_url.clone(),
+            tier: endpoint.tier.clone(),
         });
     }
 
@@ -617,6 +730,8 @@ fn synthetic_provider_entry(
         ),
         suggested_primary_model: Some(default_model.to_string()),
         suggested_cheap_model: suggested_cheap_model_for_slug(slug, default_model),
+        setup_url: None,
+        tier: None,
     }
 }
 
@@ -683,16 +798,15 @@ fn provider_cheap_model_for_slug(
 }
 
 fn suggested_cheap_model_for_slug(slug: &str, default_model: &str) -> Option<String> {
-    match slug {
-        "openai" => Some("gpt-4o-mini".to_string()),
-        "anthropic" => Some("claude-3-5-haiku-latest".to_string()),
-        "gemini" => Some("gemini-2.5-flash-lite".to_string()),
-        "minimax" => Some("MiniMax-M2.5-highspeed".to_string()),
-        "cohere" => Some("command-r7b-12-2024".to_string()),
-        "openrouter" => Some("openai/gpt-4o-mini".to_string()),
-        "tinfoil" => Some("kimi-k2-5".to_string()),
-        _ if !default_model.is_empty() => Some(default_model.to_string()),
-        _ => None,
+    if let Some(endpoint) = crate::config::provider_catalog::endpoint_for(slug)
+        && let Some(ref cheap) = endpoint.suggested_cheap_model
+    {
+        return Some(cheap.clone());
+    }
+    if !default_model.is_empty() {
+        Some(default_model.to_string())
+    } else {
+        None
     }
 }
 
@@ -868,8 +982,8 @@ async fn discover_provider_models(
                     user_id,
                     slug,
                     settings,
-                    endpoint.env_key_name,
-                    endpoint.secret_name,
+                    &endpoint.env_key_name,
+                    &endpoint.secret_name,
                     secrets,
                 )
                 .await
@@ -894,8 +1008,8 @@ async fn discover_provider_models(
                     user_id,
                     slug,
                     settings,
-                    endpoint.env_key_name,
-                    endpoint.secret_name,
+                    &endpoint.env_key_name,
+                    &endpoint.secret_name,
                     secrets,
                 )
                 .await;
@@ -908,7 +1022,7 @@ async fn discover_provider_models(
                         api_key.ok_or_else(missing_credentials)?
                     ));
                     Ok(discovery
-                        .discover_openai_compatible(endpoint.base_url, auth.as_deref())
+                        .discover_openai_compatible(&endpoint.base_url, auth.as_deref())
                         .await)
                 }
             }
@@ -1079,11 +1193,15 @@ pub(crate) fn provider_model_options_from_discovery(
         current_primary_model.filter(|model| discovered_map.contains_key(*model));
     let current_cheap_model =
         current_cheap_model.filter(|model| discovered_map.contains_key(*model));
+    let preferred_default_model = (!default_model.is_empty()
+        && discovered_map.contains_key(default_model))
+    .then(|| default_model.to_string());
     let suggested_provider_cheap = suggested_cheap_model_for_slug(slug, default_model)
         .filter(|model| discovered_map.contains_key(model.as_str()));
 
     let suggested_primary_model = current_primary_model
         .map(str::to_string)
+        .or_else(|| preferred_default_model.clone())
         .or_else(|| {
             discovered_map
                 .keys()
@@ -1221,11 +1339,11 @@ fn fallback_provider_model_options(
         }
     }
 
-    for (static_id, _label) in static_fallback_models(slug) {
-        if seen.insert(static_id.to_string()) {
+    for (static_id, label) in static_fallback_models(slug) {
+        if seen.insert(static_id.clone()) {
             models.push(ProviderModelOption {
-                id: static_id.to_string(),
-                label: static_id.to_string(),
+                id: static_id,
+                label,
                 context_length: None,
                 source: "curated".to_string(),
                 recommended_primary: false,
@@ -1249,80 +1367,162 @@ fn fallback_provider_model_options(
     models
 }
 
-fn static_fallback_models(slug: &str) -> Vec<(&'static str, &'static str)> {
+fn static_fallback_models(slug: &str) -> Vec<(String, String)> {
+    let dynamic: Vec<(String, String)> = crate::config::model_compat::models_by_provider(slug)
+        .into_iter()
+        .map(|model| {
+            let label = if model.display_name.trim().is_empty() {
+                model.model_id.clone()
+            } else {
+                model.display_name
+            };
+            (model.model_id, label)
+        })
+        .collect();
+    if !dynamic.is_empty() {
+        return dynamic;
+    }
+
     match slug {
         "anthropic" => vec![
-            ("claude-opus-4-6", "Claude Opus 4.6 (latest)"),
-            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
-            ("claude-opus-4-5", "Claude Opus 4.5"),
-            ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
-            ("claude-haiku-4-5", "Claude Haiku 4.5 (fast)"),
+            (
+                "claude-opus-4-7".to_string(),
+                "Claude Opus 4.7 (recommended)".to_string(),
+            ),
+            (
+                "claude-opus-4-6".to_string(),
+                "Claude Opus 4.6 (latest)".to_string(),
+            ),
+            (
+                "claude-sonnet-4-6".to_string(),
+                "Claude Sonnet 4.6".to_string(),
+            ),
+            ("claude-opus-4-5".to_string(), "Claude Opus 4.5".to_string()),
+            (
+                "claude-sonnet-4-5".to_string(),
+                "Claude Sonnet 4.5".to_string(),
+            ),
+            (
+                "claude-haiku-4-5".to_string(),
+                "Claude Haiku 4.5 (fast)".to_string(),
+            ),
         ],
         "openai" => vec![
-            ("gpt-5.3-codex", "GPT-5.3 Codex (latest)"),
-            ("gpt-5.2-codex", "GPT-5.2 Codex"),
-            ("gpt-5.2", "GPT-5.2"),
-            ("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini (fast)"),
-            ("gpt-5", "GPT-5"),
-            ("gpt-5-mini", "GPT-5 Mini"),
-            ("gpt-4.1", "GPT-4.1"),
-            ("gpt-4.1-mini", "GPT-4.1 Mini"),
-            ("o4-mini", "o4-mini (fast reasoning)"),
-            ("o3", "o3 (reasoning)"),
+            (
+                "gpt-5.3-codex".to_string(),
+                "GPT-5.3 Codex (latest)".to_string(),
+            ),
+            ("gpt-5.2-codex".to_string(), "GPT-5.2 Codex".to_string()),
+            ("gpt-5.2".to_string(), "GPT-5.2".to_string()),
+            (
+                "gpt-5.1-codex-mini".to_string(),
+                "GPT-5.1 Codex Mini (fast)".to_string(),
+            ),
+            ("gpt-5".to_string(), "GPT-5".to_string()),
+            ("gpt-5-mini".to_string(), "GPT-5 Mini".to_string()),
+            ("gpt-4.1".to_string(), "GPT-4.1".to_string()),
+            ("gpt-4.1-mini".to_string(), "GPT-4.1 Mini".to_string()),
+            (
+                "o4-mini".to_string(),
+                "o4-mini (fast reasoning)".to_string(),
+            ),
+            ("o3".to_string(), "o3 (reasoning)".to_string()),
         ],
         "gemini" => vec![
-            ("gemini-2.5-pro", "Gemini 2.5 Pro"),
-            ("gemini-2.5-flash", "Gemini 2.5 Flash"),
-            ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite"),
+            ("gemini-2.5-pro".to_string(), "Gemini 2.5 Pro".to_string()),
+            (
+                "gemini-2.5-flash".to_string(),
+                "Gemini 2.5 Flash".to_string(),
+            ),
+            (
+                "gemini-2.5-flash-lite".to_string(),
+                "Gemini 2.5 Flash Lite".to_string(),
+            ),
         ],
         "groq" => vec![
-            ("llama-3.3-70b-versatile", "Llama 3.3 70B"),
-            ("llama-3.1-8b-instant", "Llama 3.1 8B Instant"),
+            (
+                "llama-3.3-70b-versatile".to_string(),
+                "Llama 3.3 70B".to_string(),
+            ),
+            (
+                "llama-3.1-8b-instant".to_string(),
+                "Llama 3.1 8B Instant".to_string(),
+            ),
         ],
         "mistral" => vec![
-            ("mistral-large-latest", "Mistral Large"),
-            ("mistral-small-latest", "Mistral Small"),
+            (
+                "mistral-large-latest".to_string(),
+                "Mistral Large".to_string(),
+            ),
+            (
+                "mistral-small-latest".to_string(),
+                "Mistral Small".to_string(),
+            ),
         ],
-        "xai" => vec![("grok-3", "Grok 3"), ("grok-3-mini", "Grok 3 Mini")],
+        "xai" => vec![
+            ("grok-3".to_string(), "Grok 3".to_string()),
+            ("grok-3-mini".to_string(), "Grok 3 Mini".to_string()),
+        ],
         "deepseek" => vec![
-            ("deepseek-chat", "DeepSeek Chat"),
-            ("deepseek-reasoner", "DeepSeek Reasoner"),
+            ("deepseek-chat".to_string(), "DeepSeek Chat".to_string()),
+            (
+                "deepseek-reasoner".to_string(),
+                "DeepSeek Reasoner".to_string(),
+            ),
         ],
         "openrouter" => vec![
             (
-                "anthropic/claude-sonnet-4-20250514",
-                "Claude Sonnet 4 (via OR)",
+                "anthropic/claude-sonnet-4-20250514".to_string(),
+                "Claude Sonnet 4 (via OR)".to_string(),
             ),
-            ("openai/gpt-5.3-codex", "GPT-5.3 Codex (via OR)"),
-            ("google/gemini-2.5-flash", "Gemini 2.5 Flash (via OR)"),
+            (
+                "openai/gpt-5.3-codex".to_string(),
+                "GPT-5.3 Codex (via OR)".to_string(),
+            ),
+            (
+                "google/gemini-2.5-flash".to_string(),
+                "Gemini 2.5 Flash (via OR)".to_string(),
+            ),
         ],
         "together" => vec![
             (
-                "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-                "Llama 3.3 70B Turbo",
+                "meta-llama/Llama-3.3-70B-Instruct-Turbo".to_string(),
+                "Llama 3.3 70B Turbo".to_string(),
             ),
             (
-                "meta-llama/Llama-3.1-8B-Instruct-Turbo",
-                "Llama 3.1 8B Turbo",
+                "meta-llama/Llama-3.1-8B-Instruct-Turbo".to_string(),
+                "Llama 3.1 8B Turbo".to_string(),
             ),
         ],
-        "cerebras" => vec![("llama-3.3-70b", "Llama 3.3 70B")],
-        "nvidia" => vec![("meta/llama-3.3-70b-instruct", "Llama 3.3 70B")],
+        "cerebras" => vec![("llama-3.3-70b".to_string(), "Llama 3.3 70B".to_string())],
+        "nvidia" => vec![(
+            "meta/llama-3.3-70b-instruct".to_string(),
+            "Llama 3.3 70B".to_string(),
+        )],
         "minimax" => vec![
-            ("MiniMax-M2.7", "MiniMax M2.7"),
-            ("MiniMax-M2.5", "MiniMax M2.5"),
-            ("MiniMax-M2.5-highspeed", "MiniMax M2.5 Highspeed"),
-            ("MiniMax-M2.1", "MiniMax M2.1"),
-            ("MiniMax-M2.1-highspeed", "MiniMax M2.1 Highspeed"),
-            ("MiniMax-M2", "MiniMax M2"),
+            ("MiniMax-M2.7".to_string(), "MiniMax M2.7".to_string()),
+            ("MiniMax-M2.5".to_string(), "MiniMax M2.5".to_string()),
+            (
+                "MiniMax-M2.5-highspeed".to_string(),
+                "MiniMax M2.5 Highspeed".to_string(),
+            ),
+            ("MiniMax-M2.1".to_string(), "MiniMax M2.1".to_string()),
+            (
+                "MiniMax-M2.1-highspeed".to_string(),
+                "MiniMax M2.1 Highspeed".to_string(),
+            ),
+            ("MiniMax-M2".to_string(), "MiniMax M2".to_string()),
         ],
         "cohere" => vec![
-            ("command-a-03-2025", "Command A"),
-            ("command-r-plus-08-2024", "Command R+"),
-            ("command-r-08-2024", "Command R"),
-            ("command-r7b-12-2024", "Command R7B"),
+            ("command-a-03-2025".to_string(), "Command A".to_string()),
+            (
+                "command-r-plus-08-2024".to_string(),
+                "Command R+".to_string(),
+            ),
+            ("command-r-08-2024".to_string(), "Command R".to_string()),
+            ("command-r7b-12-2024".to_string(), "Command R7B".to_string()),
         ],
-        "tinfoil" => vec![("kimi-k2-5", "Kimi K2.5")],
+        "tinfoil" => vec![("kimi-k2-5".to_string(), "Kimi K2.5".to_string())],
         _ => vec![],
     }
 }
@@ -1445,21 +1645,75 @@ pub(crate) async fn secret_exists(
     }
 }
 
+async fn provider_credential_metadata(
+    secrets: Option<&Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
+    user_id: &str,
+    secret_name: &str,
+    env_key: &str,
+) -> Option<ProviderCredentialMetadata> {
+    if let Ok(Some(value)) = crate::config::helpers::optional_env(env_key)
+        && !value.trim().is_empty()
+    {
+        return Some(ProviderCredentialMetadata {
+            source: "env".to_string(),
+            masked_preview: Some(mask_provider_key(&value)),
+            fingerprint: Some(provider_key_fingerprint(&value)),
+            created_at: None,
+            updated_at: None,
+            last_used_at: None,
+            key_version: None,
+            encryption_version: None,
+        });
+    }
+
+    let store = secrets?;
+    let secret = store.get(user_id, secret_name).await.ok()?;
+    let value = store
+        .get_for_injection(
+            user_id,
+            secret_name,
+            crate::secrets::SecretAccessContext::new(
+                "provider_vault.metadata",
+                "credential_metadata",
+            ),
+        )
+        .await
+        .ok();
+    Some(ProviderCredentialMetadata {
+        source: "local_encrypted".to_string(),
+        masked_preview: value
+            .as_ref()
+            .map(|secret| mask_provider_key(secret.expose())),
+        fingerprint: value
+            .as_ref()
+            .map(|secret| provider_key_fingerprint(secret.expose())),
+        created_at: Some(secret.created_at),
+        updated_at: Some(secret.updated_at),
+        last_used_at: secret.last_used_at,
+        key_version: Some(secret.key_version),
+        encryption_version: Some(secret.encryption_version),
+    })
+}
+
 pub(crate) async fn providers_config_set_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Json(body): Json<ProvidersConfigWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let map = store.get_all_settings(&state.user_id).await.map_err(|e| {
-        tracing::error!(
-            "Failed to load settings before provider config write: {}",
-            e
-        );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let map = store
+        .get_all_settings(&request_identity.principal_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to load settings before provider config write: {}",
+                e
+            );
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
     let mut settings = crate::settings::Settings::from_db_map(&map);
 
     settings.providers.smart_routing_enabled = body.routing_enabled;
@@ -1522,6 +1776,7 @@ pub(crate) async fn providers_config_set_handler(
     settings.providers.fallback_chain = body.fallback_chain.clone();
     settings.providers.policy_rules = body.policy_rules.clone();
     settings.providers.advisor_max_calls = body.advisor_max_calls;
+    settings.providers.advisor_auto_escalation_mode = body.advisor_auto_escalation_mode;
     settings.providers.advisor_escalation_prompt = body
         .advisor_escalation_prompt
         .as_deref()
@@ -1669,7 +1924,7 @@ pub(crate) async fn providers_config_set_handler(
 
     for key in stale_provider_keys {
         store
-            .delete_setting(&state.user_id, &key)
+            .delete_setting(&request_identity.principal_id, &key)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to delete stale provider setting '{}': {}", key, e);
@@ -1678,7 +1933,7 @@ pub(crate) async fn providers_config_set_handler(
     }
 
     store
-        .set_all_settings(&state.user_id, &next_settings_map)
+        .set_all_settings(&request_identity.principal_id, &next_settings_map)
         .await
         .map_err(|e| {
             tracing::error!("Failed to save provider config: {}", e);
@@ -1795,16 +2050,20 @@ pub(crate) fn route_target_is_available_for_enabled_providers(
 
 pub(crate) async fn provider_models_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(slug): Path<String>,
 ) -> Result<Json<ProviderModelsResponse>, StatusCode> {
     let settings = if let Some(ref store) = state.store {
-        let map = store.get_all_settings(&state.user_id).await.map_err(|e| {
-            tracing::error!(
-                "Failed to load provider settings for model discovery: {}",
-                e
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        let map = store
+            .get_all_settings(&request_identity.principal_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to load provider settings for model discovery: {}",
+                    e
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
         crate::settings::Settings::from_db_map(&map)
     } else {
         crate::settings::Settings::load()
@@ -1812,7 +2071,7 @@ pub(crate) async fn provider_models_handler(
 
     let providers_settings = crate::llm::normalize_providers_settings(&settings);
     let response = build_provider_models_response(
-        &state.user_id,
+        &request_identity.principal_id,
         &slug,
         &settings,
         &providers_settings,
@@ -1869,11 +2128,71 @@ pub(crate) struct ProviderKeyRequest {
     api_key: Option<String>,
 }
 
+fn provider_key_write_limiter() -> &'static RateLimiter {
+    static LIMITER: std::sync::OnceLock<RateLimiter> = std::sync::OnceLock::new();
+    LIMITER.get_or_init(|| RateLimiter::new(10, 60))
+}
+
+fn require_sensitive_route_auth(identity: &GatewayRequestIdentity) -> Result<(), StatusCode> {
+    match identity.auth_source {
+        GatewayAuthSource::BearerHeader | GatewayAuthSource::TrustedProxy => Ok(()),
+        GatewayAuthSource::BearerQuery => Err(StatusCode::FORBIDDEN),
+    }
+}
+
+fn validate_provider_api_key(raw: Option<&str>) -> Result<String, StatusCode> {
+    let api_key = raw.unwrap_or("").trim().to_string();
+    if api_key.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if api_key
+        .chars()
+        .any(|ch| ch.is_control() || ch == '\n' || ch == '\r')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(api_key)
+}
+
+fn mask_provider_key(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= 8 {
+        "****".to_string()
+    } else {
+        format!(
+            "{}...{}",
+            chars.iter().take(4).collect::<String>(),
+            chars
+                .iter()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<String>()
+        )
+    }
+}
+
+fn provider_key_fingerprint(value: &str) -> String {
+    let key = blake3::derive_key(
+        "thinclaw.provider-vault.fingerprint.v1",
+        b"local-display-only",
+    );
+    let hash = blake3::keyed_hash(&key, value.as_bytes());
+    hex::encode(&hash.as_bytes()[..12])
+}
+
 pub(crate) async fn providers_save_key_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(slug): Path<String>,
     Json(body): Json<ProviderKeyRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    require_sensitive_route_auth(&request_identity)?;
+    if !provider_key_write_limiter().check() {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     let secrets = state
         .secrets_store
         .as_ref()
@@ -1882,21 +2201,33 @@ pub(crate) async fn providers_save_key_handler(
 
     match &spec {
         ProviderCredentialSpec::ApiKey { secret_name, .. } => {
-            let api_key = body.api_key.as_deref().unwrap_or("").trim().to_string();
-            if api_key.is_empty() {
-                return Err(StatusCode::BAD_REQUEST);
-            }
-            let _ = secrets.delete(&state.user_id, secret_name).await;
+            let api_key = validate_provider_api_key(body.api_key.as_deref())?;
+            let masked = mask_provider_key(&api_key);
+            let fingerprint = provider_key_fingerprint(&api_key);
             let params = crate::secrets::CreateSecretParams::new(*secret_name, api_key)
-                .with_provider(slug.clone());
-            secrets.create(&state.user_id, params).await.map_err(|e| {
-                tracing::error!("Failed to save API key for '{}': {}", slug, e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+                .with_provider(slug.clone())
+                .with_created_by(format!(
+                    "provider_vault:{}",
+                    request_identity.auth_source.as_str()
+                ));
+            secrets
+                .create(&request_identity.principal_id, params)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to save API key for '{}': {}", slug, e);
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            tracing::info!(
+                provider = %slug,
+                fingerprint = %fingerprint,
+                masked = %masked,
+                "Provider Vault credential atomically upserted"
+            );
         }
     }
 
-    let count = crate::config::refresh_secrets(secrets.as_ref(), &state.user_id).await;
+    let count =
+        crate::config::refresh_secrets(secrets.as_ref(), &request_identity.principal_id).await;
     tracing::info!(
         provider = %slug,
         refreshed = count,
@@ -1904,7 +2235,13 @@ pub(crate) async fn providers_save_key_handler(
     );
 
     if let Some(ref db) = state.store {
-        auto_enable_provider(db.as_ref(), &state.user_id, &slug, spec.default_model()).await;
+        auto_enable_provider(
+            db.as_ref(),
+            &request_identity.principal_id,
+            &slug,
+            spec.default_model(),
+        )
+        .await;
     }
     if let Err(e) = reload_llm_runtime(state.as_ref()).await {
         tracing::warn!("Provider Vault runtime reload failed after save: {}", e);
@@ -1925,14 +2262,25 @@ pub(crate) async fn providers_save_key_handler(
         Json(serde_json::json!({
             "status": "ok",
             "message": format!("Credentials saved for {}", spec.display_name()),
+            "credential": {
+                "source": "local_encrypted",
+                "provider": slug,
+                "masked_preview": body.api_key.as_deref().map(mask_provider_key),
+                "fingerprint": body.api_key.as_deref().map(provider_key_fingerprint),
+            }
         })),
     ))
 }
 
 pub(crate) async fn providers_delete_key_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(slug): Path<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    require_sensitive_route_auth(&request_identity)?;
+    if !provider_key_write_limiter().check() {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
     let secrets = state
         .secrets_store
         .as_ref()
@@ -1942,7 +2290,7 @@ pub(crate) async fn providers_delete_key_handler(
     match &spec {
         ProviderCredentialSpec::ApiKey { secret_name, .. } => {
             secrets
-                .delete(&state.user_id, secret_name)
+                .delete(&request_identity.principal_id, secret_name)
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to delete API key for '{}': {}", slug, e);
@@ -1951,7 +2299,8 @@ pub(crate) async fn providers_delete_key_handler(
         }
     }
 
-    let count = crate::config::refresh_secrets(secrets.as_ref(), &state.user_id).await;
+    let count =
+        crate::config::refresh_secrets(secrets.as_ref(), &request_identity.principal_id).await;
     tracing::info!(
         provider = %slug,
         refreshed = count,
@@ -1959,7 +2308,7 @@ pub(crate) async fn providers_delete_key_handler(
     );
 
     if let Some(ref db) = state.store {
-        auto_disable_provider(db.as_ref(), &state.user_id, &slug).await;
+        auto_disable_provider(db.as_ref(), &request_identity.principal_id, &slug).await;
     }
     if let Err(e) = reload_llm_runtime(state.as_ref()).await {
         tracing::warn!("Provider Vault runtime reload failed after delete: {}", e);
@@ -2009,9 +2358,9 @@ impl ProviderCredentialSpec {
 fn provider_credential_spec(slug: &str) -> Option<ProviderCredentialSpec> {
     if let Some(endpoint) = crate::config::provider_catalog::endpoint_for(slug) {
         return Some(ProviderCredentialSpec::ApiKey {
-            display_name: endpoint.display_name,
-            secret_name: endpoint.secret_name,
-            default_model: endpoint.default_model,
+            display_name: endpoint.display_name.as_str(),
+            secret_name: endpoint.secret_name.as_str(),
+            default_model: endpoint.default_model.as_str(),
         });
     }
 
@@ -2156,13 +2505,9 @@ async fn reconcile_advisor_tool_registration(state: &GatewayState) {
     };
 
     let status = runtime.status();
-    if status.routing_mode == crate::settings::RoutingMode::AdvisorExecutor {
-        registry.register_advisor_tool(status.routing_mode);
-    } else {
-        let _ = registry
-            .unregister(crate::tools::builtin::advisor::ADVISOR_TOOL_NAME)
-            .await;
-    }
+    registry
+        .reconcile_advisor_tool_readiness(status.advisor_ready)
+        .await;
 }
 
 pub(crate) fn sync_legacy_llm_settings(settings: &mut crate::settings::Settings) {

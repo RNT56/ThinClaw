@@ -9,12 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Releases prior to v0.13.0 were published under the IronClaw name and are not listed here.
 > See the [IronClaw releases](https://github.com/nearai/ironclaw/releases) for earlier history.
 
+## [Unreleased]
+
+### Added
+
+### Changed
+
+### Fixed
+
+## [0.13.7](https://github.com/RNT56/ThinClaw/releases/tag/v0.13.7) - 2026-04-24
+
+### Added
+
+- ACP v1 compatibility work for editor clients, including typed wire messages, JSON-RPC transcript coverage, prompt/session lifecycle handling, permission round-tripping, client filesystem/terminal bridges, MCP stdio descriptor wiring, and stdout cleanliness checks.
+- AgentEnv and research campaign plumbing with benchmark adapters, Research WebUI/API surfaces, and trajectory metadata for token/logprob capture when providers support it.
+- Extension manifest foundations for tool, channel, memory, context, and native-plugin contributions, with native plugin loading gated behind explicit unsafe configuration and signature metadata.
+- WASM tool host-mediated invocation support through declared aliases with policy, approval, timeout, recursion-depth, and audit controls.
+- Provider-native streaming capability metadata and streaming paths across the LLM stack, with simulated streaming retained only as an explicit fallback.
+- Release and deployment improvements for Linux, Docker Compose, gateway access, readiness probes, WASM extension bundles, and build-profile documentation.
+
+### Changed
+
+- ACP capability advertisement now tracks implemented and tested behavior instead of exposing placeholder features.
+- Release workflow validation now fails when WASM extension manifests are missing sources, capabilities, or bundle outputs instead of publishing incomplete artifacts.
+- Setup wizard tests and docs now agree on the documented 12-step quick setup flow.
+- User-tools documentation now prefers the canonical `~/.thinclaw/user-tools/` path while preserving the legacy underscore path as an alias.
+
+### Fixed
+
+- Docker availability detection no longer hangs when Docker Desktop or compatible runtimes leave `docker version`/`docker info` blocked; CLI probes now have killable per-command timeouts.
+- Dispatcher streaming tests now model native streaming support explicitly, matching the production gate that avoids fake progressive streaming for non-native providers.
+- ACP local validation, default build checks, feature-profile checks, and the broad library suite are green with the Docker hang fixed.
+- Trusted-proxy web gateway identities no longer accept compatibility user/actor override parameters intended only for bearer-token development paths.
+- Cargo-deny advisory coverage is clean after updating `rustls-webpki`, and default/full clippy gates are clean under `-D warnings`.
+- Web gateway CORS now uses the actual bound listener port for ephemeral port binds.
+
 ## [0.13.6](https://github.com/RNT56/ThinClaw/releases/tag/v0.13.6) - 2026-04-14
 
 ### Added
 
 #### Routing Engine V2
-- Unified `RoutePlanner` with three strategies: `Solo`, `Failover`, and new `AdvisorExecutor` mode (lightweight model drafts, heavyweight model verifies)
+- Unified `RoutePlanner` with three strategies: `Solo`, `Failover`, and new `AdvisorExecutor` mode (executor lane runs the turn, advisor lane consults and auto-escalates on risky or complex turns)
 - Dispatcher interception layer: all outbound LLM calls flow through the routing policy
 - Live cutover from legacy routing — no migration required
 - Routing telemetry: per-call latency, token counts, and strategy-hit histograms
@@ -27,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Agent Subsystems
 - **Checkpoint system**: durable mid-turn state snapshots for crash recovery and long-running tasks
-- **Vibe engine**: adaptive tone/style selection based on conversation context and channel type
+- **Personality overlay engine**: adaptive tone/style selection based on conversation context and channel type
 - **Session search**: full-text search across all agent sessions with relevance ranking
 - **Context monitor**: proactive context-window utilisation tracking with compaction triggers
 
@@ -46,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `skill_tools`: runtime skill management (install, reload, inspect)
 - `learning_tools`: manual learning annotation and pattern review
 - `moa` (Mixture of Agents): fan-out queries across multiple models and merge results
-- `advisor`: lightweight pre-screening tool for the AdvisorExecutor routing strategy
+- `advisor`: strategic consultation tool for the AdvisorExecutor routing strategy
 - Enhanced `browser` tool with screenshot capture, element interaction, and cookie management
 - Enhanced `shell` tool with working directory tracking and environment variable passthrough
 
@@ -63,8 +98,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `quarantine`: sandboxed skill staging with integrity checks before promotion to active use
 - Skill file watcher for automatic hot-reload on disk changes
 
-#### Persona Seed Library
-- 6 production-ready persona seeds: `default`, `creative_partner`, `mentor`, `minimal`, `professional`, `research_assistant`
+#### Personality Pack Library
+- 6 production-ready personality packs: `default`, `creative_partner`, `mentor`, `minimal`, `professional`, `research_assistant`
 - Psychographic identity profiles with tonal overlays and channel-aware formatting hints
 
 #### TUI Skin System

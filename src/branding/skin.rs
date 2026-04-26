@@ -8,7 +8,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use ratatui::style::{Color, Style};
+use ratatui::widgets::BorderType;
 use serde::Deserialize;
+
+use crate::tui::spinner::SpinnerStyle;
 
 #[derive(Debug, Clone, Deserialize)]
 struct SkinToml {
@@ -29,9 +32,26 @@ struct SkinToml {
     #[serde(default)]
     ascii_art: Vec<String>,
     #[serde(default)]
+    hero_art: Vec<String>,
+    #[serde(default)]
     tool_emojis: HashMap<String, String>,
     #[serde(default)]
     web: Option<SkinWebToml>,
+    /// Border style for TUI panels: "plain", "rounded", "double", "thick".
+    #[serde(default)]
+    border_style: Option<String>,
+    /// Header alignment: "left", "center", "right".
+    #[serde(default)]
+    header_alignment: Option<String>,
+    /// Whether to render a gradient bar on the TUI status line.
+    #[serde(default)]
+    status_gradient: Option<bool>,
+    /// Custom spinner frames (overrides spinner_style preset).
+    #[serde(default)]
+    spinner_frames: Vec<String>,
+    /// Spinner preset style: "kawaii", "dots", "braille", "arrows".
+    #[serde(default)]
+    spinner_style: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,9 +182,19 @@ pub struct CliSkin {
     pub bad: Color,
     pub header: Color,
     pub prompt_symbol: String,
-    pub ascii_art: Vec<String>,
+    pub hero_art: Vec<String>,
     pub tool_emojis: HashMap<String, String>,
     pub web: SkinWebColors,
+    /// Border style for TUI panels (resolved from TOML string).
+    pub border_type: BorderType,
+    /// Header alignment for TUI header bar.
+    pub header_alignment: ratatui::layout::Alignment,
+    /// Whether to render a gradient on the TUI status bar.
+    pub status_gradient: bool,
+    /// Custom spinner frames (may be empty — use [`resolved_spinner_frames()`]).
+    pub spinner_frames: Vec<String>,
+    /// Spinner preset style.
+    pub spinner_style: SpinnerStyle,
 }
 
 const BUILTIN_SKINS: &[&str] = &[
@@ -223,8 +253,8 @@ impl CliSkin {
         self.tagline.as_deref()
     }
 
-    pub fn ascii_art(&self) -> &[String] {
-        &self.ascii_art
+    pub fn hero_art(&self) -> &[String] {
+        &self.hero_art
     }
 
     pub fn tool_label(&self, tool_name: &str) -> String {
@@ -303,6 +333,25 @@ impl CliSkin {
 
     pub fn web_elevation(&self) -> &'static str {
         self.web.elevation.as_str()
+    }
+
+    /// The ratatui [`BorderType`] for TUI panel borders.
+    pub fn tui_border_type(&self) -> BorderType {
+        self.border_type
+    }
+
+    /// Resolved spinner frames: custom from skin TOML, or preset defaults.
+    pub fn resolved_spinner_frames(&self) -> Vec<&str> {
+        if self.spinner_frames.is_empty() {
+            self.spinner_style.default_frames().to_vec()
+        } else {
+            self.spinner_frames.iter().map(String::as_str).collect()
+        }
+    }
+
+    /// Compute a gradient color between two skin colors at a given ratio.
+    pub fn gradient_at(&self, from: Color, to: Color, ratio: f32) -> Color {
+        mix_color(from, to, ratio.clamp(0.0, 1.0))
     }
 
     pub fn to_termimad_skin(&self) -> termimad::MadSkin {
@@ -398,6 +447,23 @@ fn load_builtin_skin(name: &str) -> Option<CliSkin> {
     Some(parse_skin_toml(raw, name).expect("builtin skin TOML is valid"))
 }
 
+fn parse_border_type(s: Option<&str>) -> BorderType {
+    match s.unwrap_or("rounded").trim().to_ascii_lowercase().as_str() {
+        "plain" => BorderType::Plain,
+        "double" => BorderType::Double,
+        "thick" => BorderType::Thick,
+        _ => BorderType::Rounded,
+    }
+}
+
+fn parse_header_alignment(s: Option<&str>) -> ratatui::layout::Alignment {
+    match s.unwrap_or("left").trim().to_ascii_lowercase().as_str() {
+        "center" => ratatui::layout::Alignment::Center,
+        "right" => ratatui::layout::Alignment::Right,
+        _ => ratatui::layout::Alignment::Left,
+    }
+}
+
 fn parse_skin_toml(data: &str, fallback_name: &str) -> Result<CliSkin, String> {
     let raw: SkinToml = toml::from_str(data).map_err(|e| e.to_string())?;
     let name = raw.name.unwrap_or_else(|| fallback_name.to_string());
@@ -410,6 +476,15 @@ fn parse_skin_toml(data: &str, fallback_name: &str) -> Result<CliSkin, String> {
     let bad = parse_color(&raw.bad)?;
     let header = parse_color(&raw.header)?;
     let web = parse_web_colors(raw.web.as_ref(), accent, border, header, body)?;
+
+    let border_type = parse_border_type(raw.border_style.as_deref());
+    let header_alignment = parse_header_alignment(raw.header_alignment.as_deref());
+    let status_gradient = raw.status_gradient.unwrap_or(false);
+    let spinner_style = raw
+        .spinner_style
+        .as_deref()
+        .map(SpinnerStyle::from_str_lossy)
+        .unwrap_or_default();
 
     Ok(CliSkin {
         name,
@@ -425,9 +500,18 @@ fn parse_skin_toml(data: &str, fallback_name: &str) -> Result<CliSkin, String> {
         bad,
         header,
         prompt_symbol: raw.prompt_symbol,
-        ascii_art: raw.ascii_art,
+        hero_art: if raw.hero_art.is_empty() {
+            raw.ascii_art
+        } else {
+            raw.hero_art
+        },
         tool_emojis: raw.tool_emojis,
         web,
+        border_type,
+        header_alignment,
+        status_gradient,
+        spinner_frames: raw.spinner_frames,
+        spinner_style,
     })
 }
 
@@ -556,9 +640,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_skin_includes_ascii_art() {
+    fn builtin_skin_includes_hero_art() {
         let skin = CliSkin::load("athena");
-        assert!(!skin.ascii_art().is_empty());
+        assert!(!skin.hero_art().is_empty());
         assert!(skin.tagline().is_some());
     }
 
@@ -575,7 +659,7 @@ warn = "#FFD166"
 bad = "#FF6B6B"
 header = "#C9E1FF"
 prompt_symbol = ">"
-ascii_art = ["DERIVED"]
+hero_art = ["DERIVED"]
 "##;
         let parsed: SkinToml = toml::from_str(toml).expect("parse test skin");
         let web = parse_web_colors(

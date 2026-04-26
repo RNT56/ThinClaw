@@ -34,8 +34,18 @@ pub mod session;
 pub mod stdio;
 
 pub use auth::{is_authenticated, refresh_access_token};
-pub use client::McpClient;
-pub use config::{McpServerConfig, McpServersFile, McpTransport, OAuthConfig};
-pub use protocol::{InitializeResult, McpRequest, McpResponse, McpTool};
+pub use client::{McpClient, McpInteractionKind, McpPendingInteraction};
+pub use config::{
+    McpCapabilityPolicy, McpLoggingLevel, McpRuntimeHealth, McpServerConfig, McpServersFile,
+    McpTransport, OAuthConfig,
+};
+pub use protocol::{
+    CallToolResult, CompleteArgument, CompleteResult, ElicitationCreateRequest, GetPromptResult,
+    InitializeResult, ListPromptsResult, ListResourceTemplatesResult, ListResourcesResult,
+    ListToolsResult, McpNotification, McpPrompt, McpPromptMessage, McpRequest, McpResource,
+    McpResourceContents, McpResourceTemplate, McpResponse, McpTool, PROTOCOL_VERSION,
+    PromptContent, SamplingCreateMessageRequest, SamplingCreateMessageResult,
+    SamplingResponseContent,
+};
 pub use session::McpSessionManager;
-pub use stdio::StdioTransport;
+pub use stdio::{McpInboundHandler, StdioTransport};

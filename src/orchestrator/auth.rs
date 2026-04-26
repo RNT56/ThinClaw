@@ -7,8 +7,9 @@
 //! - A token for Job A cannot access endpoints for Job B
 //! - Credential grants are per-job: only secrets explicitly granted are accessible
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -19,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+const LLM_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+pub(crate) const LLM_RATE_LIMIT_MAX_REQUESTS: usize = 60;
 
 /// A credential grant that maps a secret (stored in SecretsStore) to an
 /// environment variable name the container worker expects.
@@ -39,6 +43,9 @@ pub struct TokenStore {
     tokens: Arc<RwLock<HashMap<Uuid, String>>>,
     /// Maps job_id -> granted credentials. Revoked alongside the token.
     credential_grants: Arc<RwLock<HashMap<Uuid, Vec<CredentialGrant>>>>,
+    /// Per-job LLM proxy request timestamps. Tokens are one-per-job, so this is
+    /// effectively per-token and follows the same revocation lifecycle.
+    llm_rate_limits: Arc<RwLock<HashMap<Uuid, VecDeque<Instant>>>>,
 }
 
 impl TokenStore {
@@ -46,6 +53,7 @@ impl TokenStore {
         Self {
             tokens: Arc::new(RwLock::new(HashMap::new())),
             credential_grants: Arc::new(RwLock::new(HashMap::new())),
+            llm_rate_limits: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -70,6 +78,7 @@ impl TokenStore {
     pub async fn revoke(&self, job_id: Uuid) {
         self.tokens.write().await.remove(&job_id);
         self.credential_grants.write().await.remove(&job_id);
+        self.llm_rate_limits.write().await.remove(&job_id);
     }
 
     /// Get the number of active tokens (for diagnostics).
@@ -87,6 +96,24 @@ impl TokenStore {
     /// Retrieve credential grants for a job.
     pub async fn get_grants(&self, job_id: Uuid) -> Option<Vec<CredentialGrant>> {
         self.credential_grants.read().await.get(&job_id).cloned()
+    }
+
+    /// Check and record a proxied LLM request for this job's bearer token.
+    pub async fn check_llm_rate_limit(&self, job_id: Uuid) -> bool {
+        let now = Instant::now();
+        let mut limits = self.llm_rate_limits.write().await;
+        let timestamps = limits.entry(job_id).or_default();
+        while timestamps
+            .front()
+            .is_some_and(|seen| now.duration_since(*seen) >= LLM_RATE_LIMIT_WINDOW)
+        {
+            timestamps.pop_front();
+        }
+        if timestamps.len() >= LLM_RATE_LIMIT_MAX_REQUESTS {
+            return false;
+        }
+        timestamps.push_back(now);
+        true
     }
 }
 
@@ -288,5 +315,45 @@ mod tests {
         let grants_b = store.get_grants(job_b).await.unwrap();
         assert_eq!(grants_b.len(), 1);
         assert_eq!(grants_b[0].secret_name, "secret_b");
+    }
+
+    #[tokio::test]
+    async fn llm_rate_limit_allows_up_to_window_limit() {
+        let store = TokenStore::new();
+        let job_id = Uuid::new_v4();
+
+        for _ in 0..LLM_RATE_LIMIT_MAX_REQUESTS {
+            assert!(store.check_llm_rate_limit(job_id).await);
+        }
+        assert!(!store.check_llm_rate_limit(job_id).await);
+    }
+
+    #[tokio::test]
+    async fn llm_rate_limit_is_per_job() {
+        let store = TokenStore::new();
+        let job_a = Uuid::new_v4();
+        let job_b = Uuid::new_v4();
+
+        for _ in 0..LLM_RATE_LIMIT_MAX_REQUESTS {
+            assert!(store.check_llm_rate_limit(job_a).await);
+        }
+        assert!(!store.check_llm_rate_limit(job_a).await);
+        assert!(store.check_llm_rate_limit(job_b).await);
+    }
+
+    #[tokio::test]
+    async fn revoke_clears_llm_rate_limit() {
+        let store = TokenStore::new();
+        let job_id = Uuid::new_v4();
+        let token = store.create_token(job_id).await;
+
+        for _ in 0..LLM_RATE_LIMIT_MAX_REQUESTS {
+            assert!(store.check_llm_rate_limit(job_id).await);
+        }
+        assert!(!store.check_llm_rate_limit(job_id).await);
+
+        store.revoke(job_id).await;
+        assert!(!store.validate(job_id, &token).await);
+        assert!(store.check_llm_rate_limit(job_id).await);
     }
 }

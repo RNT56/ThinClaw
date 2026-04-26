@@ -7,10 +7,11 @@
 //! Uses `chromiumoxide` to connect to a Chrome/Chromium instance via CDP.
 //!
 //! **Chrome resolution order:**
-//! 1. Local Chrome/Chromium binary (macOS, Linux, Windows)
+//! 1. `BROWSER_EXECUTABLE` override, then local Chrome/Chromium/Brave/Edge
+//!    binary (macOS, Linux, Windows)
 //! 2. Docker container with Chromium + Xvfb (automatic fallback when no
 //!    local binary is found and Docker is available, or forced via
-//!    `BROWSER_DOCKER=always` env var)
+//!    `BROWSER_DOCKER=always` env var). Set `BROWSER_DOCKER=never` to disable.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -156,8 +157,8 @@ type SharedBrowser = Arc<RwLock<Option<BrowserInstance>>>;
 ///
 /// When no local Chrome binary is found, the tool automatically falls back to
 /// running Chromium inside a Docker container (if Docker is available).
-/// Set `BROWSER_DOCKER=always` to force Docker mode even when local Chrome
-/// exists.
+/// Set `BROWSER_DOCKER=always` to force Docker mode even when a local browser
+/// exists, or `BROWSER_DOCKER=never` to disable the fallback.
 pub struct BrowserTool {
     instance: SharedBrowser,
     profile_dir: PathBuf,
@@ -198,68 +199,16 @@ impl BrowserTool {
         }
     }
 
-    /// Find Chrome/Chromium executable on the system.
+    /// Find Chrome/Chromium/Brave/Edge executable on the system.
     fn find_chrome() -> Option<PathBuf> {
-        let candidates = if cfg!(target_os = "macos") {
-            vec![
-                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-                "/Applications/Chromium.app/Contents/MacOS/Chromium",
-                "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-            ]
-        } else if cfg!(target_os = "linux") {
-            vec![
-                "/usr/bin/google-chrome",
-                "/usr/bin/google-chrome-stable",
-                "/usr/bin/chromium",
-                "/usr/bin/chromium-browser",
-                "/snap/bin/chromium",
-            ]
-        } else {
-            vec![
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-                r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-                r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
-            ]
-        };
-
-        for path in candidates {
-            let p = PathBuf::from(path);
-            if p.exists() {
-                return Some(p);
-            }
-        }
-
-        let path_env = std::env::var_os("PATH")?;
-        let path_names: &[&str] = if cfg!(target_os = "windows") {
-            &["chrome.exe", "msedge.exe", "brave.exe"]
-        } else {
-            &[
-                "google-chrome",
-                "google-chrome-stable",
-                "chromium",
-                "chromium-browser",
-            ]
-        };
-        for dir in std::env::split_paths(&path_env) {
-            for binary in path_names {
-                let candidate = dir.join(binary);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-        None
+        crate::platform::find_browser_executable()
     }
 
     /// Get or launch the browser instance.
     ///
     /// Resolution order:
-    /// 1. If `BROWSER_DOCKER=always`, skip local Chrome and use Docker.
-    /// 2. Try to find and launch a local Chrome/Chromium binary.
+    /// 1. If `BROWSER_DOCKER=always`, skip local browser and use Docker.
+    /// 2. Try to find and launch a local Chrome/Chromium/Brave/Edge binary.
     /// 3. If no local binary found and Docker is available with a
     ///    `DockerChromiumConfig`, start a container and connect via CDP.
     ///
@@ -301,18 +250,20 @@ impl BrowserTool {
                 .await;
         }
 
-        // Check if Docker mode is forced via env var.
-        let force_docker = std::env::var("BROWSER_DOCKER")
-            .map(|v| v.eq_ignore_ascii_case("always"))
-            .unwrap_or(false);
+        let docker_mode =
+            crate::platform::BrowserDockerMode::from_env().map_err(ToolError::ExecutionFailed)?;
 
         // Try local Chrome first (unless Docker is forced).
-        if !force_docker && let Some(chrome_path) = Self::find_chrome() {
+        if !docker_mode.forces_docker()
+            && let Some(chrome_path) = Self::find_chrome()
+        {
             return self.launch_local_chrome(&mut guard, chrome_path).await;
         }
 
         // Fall back to Docker Chromium.
-        if let Some(ref docker_config) = self.docker_config {
+        if docker_mode.allows_docker()
+            && let Some(ref docker_config) = self.docker_config
+        {
             if DockerChromiumConfig::is_docker_available() {
                 return self.connect_docker_chrome(&mut guard, docker_config).await;
             }
@@ -321,13 +272,13 @@ impl BrowserTool {
 
         // Neither local Chrome nor Docker available.
         Err(ToolError::ExecutionFailed(if cfg!(target_os = "windows") {
-            "Chrome, Edge, or Brave not found. Install a supported local browser, or install Docker Desktop and set BROWSER_DOCKER=always."
+            "Chrome, Edge, or Brave not found. Install a supported local browser, set BROWSER_EXECUTABLE, or install Docker Desktop and set BROWSER_DOCKER=auto/always."
                 .to_string()
         } else {
-            "Chrome/Chromium not found. Either install Google Chrome \
-             (https://www.google.com/chrome), or install Docker and set \
-             BROWSER_DOCKER=always. On macOS: brew install --cask google-chrome. \
-             On Linux: apt install chromium-browser."
+            "Chrome, Chromium, Edge, or Brave not found. Install a supported local browser, \
+             set BROWSER_EXECUTABLE to its path, or install Docker and use BROWSER_DOCKER=auto/always. \
+             On macOS: brew install --cask google-chrome. On Linux: apt install chromium-browser \
+             or install google-chrome-stable, brave-browser, or microsoft-edge-stable."
                 .to_string()
         }))
     }

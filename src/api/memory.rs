@@ -7,11 +7,38 @@ use std::sync::Arc;
 
 use crate::channels::web::types::*;
 use crate::workspace::Workspace;
+use crate::workspace::paths;
 
 use super::error::{ApiError, ApiResult};
 
+fn root_list_with_home_soul(mut entries: Vec<ListEntry>) -> Vec<ListEntry> {
+    let has_soul = entries.iter().any(|entry| entry.path == paths::SOUL);
+    if !has_soul && crate::identity::soul_store::read_home_soul().is_ok() {
+        entries.insert(
+            0,
+            ListEntry {
+                name: paths::SOUL.to_string(),
+                path: paths::SOUL.to_string(),
+                is_dir: false,
+                updated_at: None,
+            },
+        );
+    }
+    entries
+}
+
 /// Read a file from the workspace.
 pub async fn get_file(workspace: &Arc<Workspace>, path: &str) -> ApiResult<MemoryReadResponse> {
+    if path == paths::SOUL
+        && let Ok(content) = crate::identity::soul_store::read_home_soul()
+    {
+        return Ok(MemoryReadResponse {
+            path: path.to_string(),
+            content,
+            updated_at: None,
+        });
+    }
+
     let doc = workspace
         .read(path)
         .await
@@ -26,6 +53,12 @@ pub async fn get_file(workspace: &Arc<Workspace>, path: &str) -> ApiResult<Memor
 
 /// Write content to a file in the workspace (creates or overwrites).
 pub async fn write_file(workspace: &Arc<Workspace>, path: &str, content: &str) -> ApiResult<()> {
+    if path == paths::SOUL {
+        crate::identity::soul_store::write_home_soul(content)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        return Ok(());
+    }
+
     workspace
         .write(path, content)
         .await
@@ -63,6 +96,12 @@ pub async fn list_files(
         })
         .collect();
 
+    let list_entries = if dir.is_empty() {
+        root_list_with_home_soul(list_entries)
+    } else {
+        list_entries
+    };
+
     Ok(MemoryListResponse {
         path: dir.to_string(),
         entries: list_entries,
@@ -92,6 +131,15 @@ pub async fn file_tree(workspace: &Arc<Workspace>) -> ApiResult<MemoryTreeRespon
         }
         entries.push(TreeEntry {
             path: path.clone(),
+            is_dir: false,
+        });
+    }
+
+    if !all_paths.iter().any(|path| path == paths::SOUL)
+        && crate::identity::soul_store::read_home_soul().is_ok()
+    {
+        entries.push(TreeEntry {
+            path: paths::SOUL.to_string(),
             is_dir: false,
         });
     }

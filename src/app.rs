@@ -32,6 +32,54 @@ use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingProvider, Workspace};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeExecRegistrationMode {
+    Disabled,
+    LocalHost,
+    DockerSandbox,
+}
+
+fn process_registration_mode(workspace_mode: &str) -> RuntimeExecRegistrationMode {
+    match workspace_mode {
+        "sandboxed" | "project" => RuntimeExecRegistrationMode::Disabled,
+        _ => RuntimeExecRegistrationMode::LocalHost,
+    }
+}
+
+fn execute_code_registration_mode(
+    workspace_mode: &str,
+    sandbox_enabled: bool,
+) -> RuntimeExecRegistrationMode {
+    match workspace_mode {
+        "sandboxed" if sandbox_enabled => RuntimeExecRegistrationMode::DockerSandbox,
+        "sandboxed" | "project" => RuntimeExecRegistrationMode::Disabled,
+        _ => RuntimeExecRegistrationMode::LocalHost,
+    }
+}
+
+fn desktop_autonomy_headless_blocker() -> Option<&'static str> {
+    let runtime_profile = std::env::var("THINCLAW_RUNTIME_PROFILE").unwrap_or_default();
+    desktop_autonomy_headless_blocker_for(
+        runtime_profile.trim(),
+        crate::platform::env_flag_enabled("THINCLAW_HEADLESS"),
+    )
+}
+
+fn desktop_autonomy_headless_blocker_for(
+    runtime_profile: &str,
+    headless_enabled: bool,
+) -> Option<&'static str> {
+    let normalized_profile = runtime_profile
+        .trim()
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    match normalized_profile.as_str() {
+        "pi" | "pi-os-lite" | "pi-os-lite-64" | "raspberry-pi-os-lite" => Some("pi-os-lite-64"),
+        _ if headless_enabled => Some("headless"),
+        _ => None,
+    }
+}
+
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
 pub struct AppComponents {
@@ -55,6 +103,8 @@ pub struct AppComponents {
     pub hooks: Arc<HookRegistry>,
     pub skill_registry: Option<Arc<tokio::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<SkillCatalog>>,
+    pub skill_remote_hub: Option<crate::skills::SharedRemoteSkillHub>,
+    pub skill_quarantine: Option<Arc<crate::skills::quarantine::QuarantineManager>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
@@ -472,7 +522,7 @@ impl AppBuilder {
         );
 
         // Create embeddings provider using the unified method
-        let embeddings = self.config.embeddings.create_provider();
+        let embeddings = self.config.embeddings.create_provider().await;
 
         // Warn if libSQL backend is used with non-1536 embedding dimension.
         if self.config.database.backend == crate::config::DatabaseBackend::LibSql
@@ -555,6 +605,14 @@ impl AppBuilder {
                     Some(self.config.builder.to_builder_config()),
                     builder_base_dir,
                     builder_working_dir,
+                    (self.config.agent.workspace_mode == "sandboxed"
+                        && self.config.sandbox.enabled)
+                        .then(|| {
+                            Arc::new(crate::sandbox::SandboxManager::new(
+                                self.config.sandbox.to_sandbox_config(),
+                            ))
+                        }),
+                    Some(crate::sandbox::SandboxPolicy::WorkspaceWrite),
                     cost_tracker.clone(),
                 )
                 .await;
@@ -568,6 +626,7 @@ impl AppBuilder {
     pub async fn init_extensions(
         &self,
         tools: &Arc<ToolRegistry>,
+        safety: &Arc<SafetyLayer>,
         hooks: &Arc<HookRegistry>,
     ) -> Result<
         (
@@ -598,17 +657,26 @@ impl AppBuilder {
                 None
             };
 
+        let wasm_tool_invoker = Arc::new(crate::tools::execution::HostMediatedToolInvoker::new(
+            Arc::clone(tools),
+            Arc::clone(safety),
+            crate::tools::ToolExecutionLane::WorkerRuntime,
+            crate::tools::ToolProfile::ExplicitOnly,
+        ));
+
         // Load WASM tools and MCP servers concurrently
         let wasm_tools_future = {
             let wasm_tool_runtime = wasm_tool_runtime.clone();
             let secrets_store = self.secrets_store.clone();
             let tools = Arc::clone(tools);
+            let tool_invoker = Arc::clone(&wasm_tool_invoker);
             let wasm_config = self.config.wasm.clone();
             async move {
                 let mut dev_loaded_tool_names: Vec<String> = Vec::new();
 
                 if let Some(ref runtime) = wasm_tool_runtime {
                     let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
+                    loader = loader.with_tool_invoker(Arc::clone(&tool_invoker));
                     if let Some(ref secrets) = secrets_store {
                         loader = loader.with_secrets_store(Arc::clone(secrets));
                     }
@@ -661,113 +729,136 @@ impl AppBuilder {
             let tools = Arc::clone(tools);
             let mcp_sm = Arc::clone(&mcp_session_manager);
             async move {
-                if let Some(ref secrets) = secrets_store {
-                    let servers_result = if let Some(ref d) = db {
-                        load_mcp_servers_from_db(d.as_ref(), "default").await
+                let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+                    if let Some(ref secrets) = secrets_store {
+                        Arc::clone(secrets)
                     } else {
-                        crate::tools::mcp::config::load_mcp_servers().await
+                        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+                        let ephemeral_key = secrecy::SecretString::from(
+                            crate::platform::secure_store::generate_master_key_hex(),
+                        );
+                        let crypto =
+                            Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+                        tracing::debug!(
+                            "Using ephemeral in-memory secrets store for startup MCP loading"
+                        );
+                        Arc::new(InMemorySecretsStore::new(crypto))
                     };
-                    match servers_result {
-                        Ok(servers) => {
-                            let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
-                            if !enabled.is_empty() {
-                                tracing::info!(
-                                    "Loading {} configured MCP server(s)...",
-                                    enabled.len()
-                                );
-                            }
 
-                            let mut join_set = tokio::task::JoinSet::new();
-                            for server in enabled {
-                                let mcp_sm = Arc::clone(&mcp_sm);
-                                let secrets = Arc::clone(secrets);
-                                let tools = Arc::clone(&tools);
+                let servers_result = if let Some(ref d) = db {
+                    load_mcp_servers_from_db(d.as_ref(), "default").await
+                } else {
+                    crate::tools::mcp::config::load_mcp_servers().await
+                };
+                match servers_result {
+                    Ok(servers) => {
+                        let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
+                        if !enabled.is_empty() {
+                            tracing::info!("Loading {} configured MCP server(s)...", enabled.len());
+                        }
 
-                                join_set.spawn(async move {
-                                    let server_name = server.name.clone();
+                        let mut join_set = tokio::task::JoinSet::new();
+                        for server in enabled {
+                            let mcp_sm = Arc::clone(&mcp_sm);
+                            let secrets = Arc::clone(&secrets);
+                            let tools = Arc::clone(&tools);
+                            let config_store = crate::tools::mcp::config::McpConfigStore::new(
+                                db.clone(),
+                                "default",
+                            );
 
-                                    // Use from_config for automatic transport dispatch
-                                    // (handles both stdio and HTTP)
-                                    let client = if server.is_stdio() {
-                                        match McpClient::new_stdio(&server) {
-                                            Ok(c) => c,
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Failed to spawn stdio MCP server '{}': {}",
-                                                    server_name,
-                                                    e
-                                                );
-                                                return;
-                                            }
-                                        }
-                                    } else {
-                                        let has_tokens =
-                                            is_authenticated(&server, &secrets, "default").await;
+                            join_set.spawn(async move {
+                                let server_name = server.name.clone();
 
-                                        if has_tokens || server.requires_auth() {
-                                            McpClient::new_authenticated(
-                                                server, mcp_sm, secrets, "default",
-                                            )
-                                        } else {
-                                            McpClient::new_with_name(&server_name, &server.url)
-                                        }
-                                    };
-
-                                    match client.list_tools().await {
-                                        Ok(mcp_tools) => {
-                                            let tool_count = mcp_tools.len();
-                                            match client.create_tools().await {
-                                                Ok(tool_impls) => {
-                                                    for tool in tool_impls {
-                                                        tools.register(tool).await;
-                                                    }
-                                                    tracing::info!(
-                                                        "Loaded {} tools from MCP server '{}'",
-                                                        tool_count,
-                                                        server_name
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        "Failed to create tools from MCP server '{}': {}",
-                                                        server_name,
-                                                        e
-                                                    );
-                                                }
-                                            }
-                                        }
+                                let client = if server.is_stdio() {
+                                    match McpClient::new_stdio_with_store(
+                                        &server,
+                                        Some(config_store.clone()),
+                                    ) {
+                                        Ok(c) => c,
                                         Err(e) => {
-                                            let err_str = e.to_string();
-                                            if err_str.contains("401")
-                                                || err_str.contains("authentication")
-                                            {
-                                                tracing::warn!(
-                                                    "MCP server '{}' requires authentication. \
-                                                     Run: thinclaw mcp auth {}",
-                                                    server_name,
+                                            tracing::warn!(
+                                                "Failed to spawn stdio MCP server '{}': {}",
+                                                server_name,
+                                                e
+                                            );
+                                            return;
+                                        }
+                                    }
+                                } else {
+                                    let has_tokens =
+                                        is_authenticated(&server, &secrets, "default").await;
+
+                                    if has_tokens || server.requires_auth() {
+                                        McpClient::new_authenticated_with_store(
+                                            server,
+                                            mcp_sm,
+                                            secrets,
+                                            "default",
+                                            Some(config_store.clone()),
+                                        )
+                                    } else {
+                                        McpClient::new_configured_with_store(
+                                            server.clone(),
+                                            Some(config_store.clone()),
+                                        )
+                                    }
+                                };
+
+                                match client.list_tools().await {
+                                    Ok(mcp_tools) => {
+                                        let tool_count = mcp_tools.len();
+                                        match client.create_tools().await {
+                                            Ok(tool_impls) => {
+                                                for tool in tool_impls {
+                                                    tools.register(tool).await;
+                                                }
+                                                tracing::info!(
+                                                    "Loaded {} tools from MCP server '{}'",
+                                                    tool_count,
                                                     server_name
                                                 );
-                                            } else {
+                                            }
+                                            Err(e) => {
                                                 tracing::warn!(
-                                                    "Failed to connect to MCP server '{}': {}",
+                                                    "Failed to create tools from MCP server '{}': {}",
                                                     server_name,
                                                     e
                                                 );
                                             }
                                         }
                                     }
-                                });
-                            }
-
-                            while let Some(result) = join_set.join_next().await {
-                                if let Err(e) = result {
-                                    tracing::warn!("MCP server loading task panicked: {}", e);
+                                    Err(e) => {
+                                        let err_str = e.to_string();
+                                        if err_str.contains("401")
+                                            || err_str.contains("authentication")
+                                        {
+                                            tracing::warn!(
+                                                "MCP server '{}' requires authentication. \
+                                                 Run: thinclaw mcp auth {}",
+                                                server_name,
+                                                server_name
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                "Failed to connect to MCP server '{}': {}",
+                                                server_name,
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
+                            });
+                        }
+
+                        while let Some(result) = join_set.join_next().await {
+                            if let Err(e) = result {
+                                tracing::warn!("MCP server loading task panicked: {}", e);
                             }
                         }
-                        Err(e) => {
-                            tracing::debug!("No MCP servers configured ({})", e);
-                        }
+                    }
+                    Err(e) => {
+                        tracing::debug!("No MCP servers configured ({})", e);
                     }
                 }
             }
@@ -814,11 +905,11 @@ impl AppBuilder {
                 Arc::clone(&mcp_session_manager),
                 ext_secrets,
                 Arc::clone(tools),
+                Some(Arc::clone(&wasm_tool_invoker)),
                 Some(Arc::clone(hooks)),
                 wasm_tool_runtime.clone(),
                 self.config.wasm.tools_dir.clone(),
                 self.config.channels.wasm_channels_dir.clone(),
-                self.config.tunnel.public_url.clone(),
                 "default".to_string(),
                 self.db.clone(),
                 catalog_entries.clone(),
@@ -852,10 +943,14 @@ impl AppBuilder {
                     // Ensure directory exists
                     let _ = std::fs::create_dir_all(&dir);
                     tracing::info!("[app] Workspace mode: sandboxed → {}", dir.display());
-                    tools.register_dev_tools_with_safety(
+                    tools.register_dev_tools_with_runtime(
                         Some(dir.clone()),
                         Some(dir),
                         Some(&self.config.safety),
+                        Some(Arc::new(crate::sandbox::SandboxManager::new(
+                            self.config.sandbox.to_sandbox_config(),
+                        ))),
+                        Some(crate::sandbox::SandboxPolicy::WorkspaceWrite),
                     );
                 }
                 "project" => {
@@ -865,10 +960,12 @@ impl AppBuilder {
                     });
                     let _ = std::fs::create_dir_all(&dir);
                     tracing::info!("[app] Workspace mode: project → {}", dir.display());
-                    tools.register_dev_tools_with_safety(
+                    tools.register_dev_tools_with_runtime(
                         None,
                         Some(dir),
                         Some(&self.config.safety),
+                        None,
+                        None,
                     );
                 }
                 _ => {
@@ -876,20 +973,85 @@ impl AppBuilder {
                     // The agent can write to any absolute path the user/LLM specifies.
                     // (This mode is intended for remote/server deployments or power users.)
                     tracing::info!("[app] Workspace mode: unrestricted (full filesystem access)");
-                    tools.register_dev_tools_with_safety(None, None, Some(&self.config.safety));
+                    tools.register_dev_tools_with_runtime(
+                        None,
+                        None,
+                        Some(&self.config.safety),
+                        None,
+                        None,
+                    );
                 }
             }
         }
 
-        // Register screen capture tool (desktop-only — requires user opt-in via Scrappy UI toggle)
-        let screen_capture_enabled = std::env::var("SCREEN_CAPTURE_ENABLED")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-        if self.config.agent.allow_local_tools && screen_capture_enabled {
+        // Register host device tools only after explicit user opt-in.
+        let desktop_autonomy_blocker = desktop_autonomy_headless_blocker();
+        let screen_capture_enabled = crate::platform::env_flag_enabled("SCREEN_CAPTURE_ENABLED");
+        let reckless_desktop_capture = self.config.desktop_autonomy.is_reckless_enabled()
+            && self.config.desktop_autonomy.capture_evidence
+            && desktop_autonomy_blocker.is_none();
+        if self.config.agent.allow_local_tools
+            && desktop_autonomy_blocker.is_none()
+            && (screen_capture_enabled || reckless_desktop_capture)
+        {
             use crate::tools::builtin::ScreenCaptureTool;
             tools.register_sync(Arc::new(ScreenCaptureTool::new()));
             tracing::info!("Registered screen capture tool (enabled via user toggle)");
+        } else if self.config.agent.allow_local_tools
+            && screen_capture_enabled
+            && desktop_autonomy_blocker.is_some()
+        {
+            tracing::warn!(
+                runtime_profile = desktop_autonomy_blocker.unwrap_or("unknown"),
+                "Screen capture requested but blocked by headless runtime profile"
+            );
         }
+        if self.config.agent.allow_local_tools
+            && crate::platform::env_flag_enabled("CAMERA_CAPTURE_ENABLED")
+        {
+            use crate::tools::builtin::CameraCaptureTool;
+            tools.register_sync(Arc::new(CameraCaptureTool::new()));
+            tracing::info!("Registered camera capture tool (enabled via user toggle)");
+        }
+        if self.config.agent.allow_local_tools
+            && crate::platform::env_flag_enabled("TALK_MODE_ENABLED")
+        {
+            tools.register_sync(Arc::new(crate::talk_mode::TalkModeTool::new()));
+            tracing::info!("Registered talk mode tool (enabled via user toggle)");
+        }
+        if self.config.agent.allow_local_tools
+            && crate::platform::env_flag_enabled("LOCATION_ENABLED")
+        {
+            use crate::tools::builtin::LocationTool;
+            tools.register_sync(Arc::new(LocationTool::new()));
+            tracing::info!("Registered location tool (enabled via user toggle)");
+        }
+
+        let _desktop_autonomy_manager = if self.config.desktop_autonomy.is_reckless_enabled()
+            && desktop_autonomy_blocker.is_none()
+        {
+            let manager = Arc::new(crate::desktop_autonomy::DesktopAutonomyManager::new(
+                self.config.desktop_autonomy.clone(),
+                Some(self.config.database.clone()),
+                self.db.clone(),
+            ));
+            crate::desktop_autonomy::install_global_manager(Some(Arc::clone(&manager)));
+            tools.register_desktop_autonomy_tools(Arc::clone(&manager));
+            tracing::info!(
+                deployment_mode = manager.config().deployment_mode.as_str(),
+                "Reckless desktop autonomy manager initialized"
+            );
+            Some(manager)
+        } else {
+            if self.config.desktop_autonomy.is_reckless_enabled() {
+                tracing::warn!(
+                    runtime_profile = desktop_autonomy_blocker.unwrap_or("unknown"),
+                    "Desktop autonomy requested but blocked by headless runtime profile"
+                );
+            }
+            crate::desktop_autonomy::install_global_manager(None);
+            None
+        };
 
         // Hermes-parity runtime tools.
         tools.register_todo_tool(crate::tools::builtin::new_shared_todo_store());
@@ -897,11 +1059,30 @@ impl AppBuilder {
         if self.config.agent.allow_local_tools {
             let process_registry: crate::tools::builtin::SharedProcessRegistry =
                 Arc::new(tokio::sync::RwLock::new(Default::default()));
-            crate::tools::builtin::start_reaper(Arc::clone(&process_registry));
-            tools.register_process_tool(process_registry);
-
             let mode = self.config.agent.workspace_mode.as_str();
             let root = self.config.agent.workspace_root.clone();
+            let sandbox_backend = Arc::new(crate::sandbox::SandboxManager::new(
+                self.config.sandbox.to_sandbox_config(),
+            ));
+
+            match process_registration_mode(mode) {
+                RuntimeExecRegistrationMode::LocalHost => {
+                    crate::tools::builtin::start_reaper(Arc::clone(&process_registry));
+                    tools.register_process_tool(process_registry);
+                }
+                RuntimeExecRegistrationMode::Disabled => {
+                    tracing::info!(
+                        workspace_mode = mode,
+                        "Background process tool disabled in restricted workspace mode"
+                    );
+                }
+                RuntimeExecRegistrationMode::DockerSandbox => {
+                    tracing::warn!(
+                        workspace_mode = mode,
+                        "Background process tool is unavailable for Docker sandbox mode"
+                    );
+                }
+            }
 
             match mode {
                 "sandboxed" => {
@@ -914,7 +1095,30 @@ impl AppBuilder {
                             .join("agent_workspace")
                     });
                     let _ = std::fs::create_dir_all(&dir);
-                    tools.register_execute_code_tool(Some(dir.clone()), false);
+                    match execute_code_registration_mode(mode, self.config.sandbox.enabled) {
+                        RuntimeExecRegistrationMode::DockerSandbox => {
+                            let backend =
+                                crate::tools::execution_backend::DockerSandboxExecutionBackend::from_sandbox(
+                                    Arc::clone(&sandbox_backend),
+                                    crate::sandbox::SandboxPolicy::WorkspaceWrite,
+                                );
+                            tools.register_execute_code_tool_with_backend(
+                                Some(dir.clone()),
+                                false,
+                                Some(backend),
+                            );
+                        }
+                        RuntimeExecRegistrationMode::Disabled => {
+                            tracing::warn!(
+                                workspace_mode = mode,
+                                sandbox_enabled = self.config.sandbox.enabled,
+                                "execute_code disabled because no isolated execution backend is available"
+                            );
+                        }
+                        RuntimeExecRegistrationMode::LocalHost => {
+                            tools.register_execute_code_tool(Some(dir.clone()), false);
+                        }
+                    }
                     tools.register_search_files_tool(Some(dir));
                 }
                 "project" => {
@@ -922,7 +1126,29 @@ impl AppBuilder {
                         dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
                     });
                     let _ = std::fs::create_dir_all(&dir);
-                    tools.register_execute_code_tool(Some(dir.clone()), false);
+                    match execute_code_registration_mode(mode, self.config.sandbox.enabled) {
+                        RuntimeExecRegistrationMode::Disabled => {
+                            tracing::info!(
+                                workspace_mode = mode,
+                                "execute_code disabled in project mode because it has no hard execution isolation there"
+                            );
+                        }
+                        RuntimeExecRegistrationMode::DockerSandbox => {
+                            let backend =
+                                crate::tools::execution_backend::DockerSandboxExecutionBackend::from_sandbox(
+                                    Arc::clone(&sandbox_backend),
+                                    crate::sandbox::SandboxPolicy::WorkspaceWrite,
+                                );
+                            tools.register_execute_code_tool_with_backend(
+                                Some(dir.clone()),
+                                false,
+                                Some(backend),
+                            );
+                        }
+                        RuntimeExecRegistrationMode::LocalHost => {
+                            tools.register_execute_code_tool(Some(dir.clone()), false);
+                        }
+                    }
                     tools.register_search_files_tool(Some(dir));
                 }
                 _ => {
@@ -957,10 +1183,23 @@ impl AppBuilder {
 
     /// Run all init phases in order and return the assembled components.
     pub async fn build_all(mut self) -> Result<AppComponents, anyhow::Error> {
-        self.init_database().await?;
-        self.init_secrets().await?;
+        let build_all_start = std::time::Instant::now();
 
-        let providers_settings = self.providers_settings.clone().unwrap_or_default();
+        let phase_start = std::time::Instant::now();
+        self.init_database().await?;
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Startup phase: database"
+        );
+
+        let phase_start = std::time::Instant::now();
+        self.init_secrets().await?;
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Startup phase: secrets"
+        );
+
+        let mut providers_settings = self.providers_settings.clone().unwrap_or_default();
         let primed_oauth_credentials =
             crate::llm::prime_runtime_oauth_credentials(&providers_settings);
         if primed_oauth_credentials > 0 {
@@ -986,6 +1225,13 @@ impl AppBuilder {
                 }
             }
         }
+        crate::llm::hydrate_runtime_credentials_from_secrets(
+            &mut self.config,
+            &mut providers_settings,
+            self.secrets_store.as_ref(),
+            "default",
+        )
+        .await;
         let llm_runtime = LlmRuntimeManager::new(
             self.config.clone(),
             providers_settings.clone(),
@@ -1025,6 +1271,13 @@ impl AppBuilder {
 
             Arc::new(tokio::sync::Mutex::new(tracker))
         };
+
+        if let Err(err) = crate::timezone::set_user_timezone_override(
+            "default",
+            self.config.heartbeat.user_timezone.as_deref(),
+        ) {
+            tracing::warn!("Failed to initialize live timezone override: {}", err);
+        }
 
         let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
             crate::agent::cost_guard::CostGuardConfig {
@@ -1083,9 +1336,14 @@ impl AppBuilder {
             )) as Arc<dyn LlmProvider>
         });
 
+        let phase_start = std::time::Instant::now();
         let (safety, tools, embeddings, workspace) = self
             .init_tools(&llm, cheap_llm.as_ref(), Some(Arc::clone(&cost_tracker)))
             .await?;
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Startup phase: tools"
+        );
 
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
@@ -1094,13 +1352,100 @@ impl AppBuilder {
         // via ExtensionManager::set_lifecycle_audit_hook() wired below.
         let audit_hook = Arc::new(AuditLogHook::new());
 
+        let phase_start = std::time::Instant::now();
         let (
             mcp_session_manager,
             wasm_tool_runtime,
             extension_manager,
             catalog_entries,
             dev_loaded_tool_names,
-        ) = self.init_extensions(&tools, &hooks).await?;
+        ) = self.init_extensions(&tools, &safety, &hooks).await?;
+        tracing::info!(
+            elapsed_ms = phase_start.elapsed().as_millis(),
+            "Startup phase: extensions"
+        );
+
+        let mut user_tools_dir =
+            crate::platform::expand_home_dir(&self.config.extensions.user_tools_dir);
+        let legacy_user_tools_dir = crate::platform::resolve_data_dir("user_tools");
+        if !user_tools_dir.exists() && legacy_user_tools_dir.exists() {
+            if let Some(parent) = user_tools_dir.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::rename(&legacy_user_tools_dir, &user_tools_dir) {
+                Ok(()) => {
+                    tracing::info!(
+                        from = %legacy_user_tools_dir.display(),
+                        to = %user_tools_dir.display(),
+                        "Migrated legacy user tools directory to canonical hyphenated path"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        from = %legacy_user_tools_dir.display(),
+                        to = %user_tools_dir.display(),
+                        error = %error,
+                        "Could not migrate legacy user tools directory; using legacy path for this run"
+                    );
+                    user_tools_dir = legacy_user_tools_dir;
+                }
+            }
+        }
+        let (user_tool_base_dir, user_tool_working_dir) =
+            match self.config.agent.workspace_mode.as_str() {
+                "sandboxed" => {
+                    let dir = self.config.agent.workspace_root.clone().unwrap_or_else(|| {
+                        dirs::home_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("Library")
+                            .join("Application Support")
+                            .join("OpenClaw")
+                            .join("agent_workspace")
+                    });
+                    let _ = std::fs::create_dir_all(&dir);
+                    (Some(dir.clone()), Some(dir))
+                }
+                "project" => (
+                    None,
+                    Some(self.config.agent.workspace_root.clone().unwrap_or_else(|| {
+                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+                    })),
+                ),
+                _ => (None, None),
+            };
+        let user_tool_results = tools
+            .auto_discover_user_tools(
+                &user_tools_dir,
+                user_tool_base_dir,
+                user_tool_working_dir,
+                Some(&self.config.safety),
+                wasm_tool_runtime.clone(),
+                self.secrets_store.clone(),
+                Some(Arc::new(
+                    crate::tools::execution::HostMediatedToolInvoker::new(
+                        Arc::clone(&tools),
+                        Arc::clone(&safety),
+                        crate::tools::ToolExecutionLane::WorkerRuntime,
+                        crate::tools::ToolProfile::ExplicitOnly,
+                    ),
+                )),
+            )
+            .await;
+        if !user_tool_results.loaded.is_empty() {
+            tracing::info!(
+                dir = %user_tools_dir.display(),
+                count = user_tool_results.loaded.len(),
+                tools = ?user_tool_results.loaded,
+                "Loaded user-defined tools"
+            );
+        }
+        for (path, error) in &user_tool_results.errors {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "Failed to load user-defined tool"
+            );
+        }
 
         // Wire the lifecycle audit hook into the extension manager so
         // install/activate/remove events are recorded for the UI.
@@ -1137,7 +1482,7 @@ impl AppBuilder {
             match ws
                 .seed_if_empty(
                     Some(&self.config.agent.name),
-                    Some(&self.config.agent.persona_seed),
+                    Some(&self.config.agent.personality_pack),
                 )
                 .await
             {
@@ -1148,24 +1493,56 @@ impl AppBuilder {
             }
 
             // ── Timezone sync: Settings <-> USER.md ──────────────────────
-            // 1. If wizard set a timezone but USER.md is still empty, pre-fill it
-            //    so the bootstrap conversation doesn't need to ask again.
-            // 2. If the agent already captured a timezone in USER.md (via bootstrap),
-            //    sync it back to Settings so heartbeat/routines use the right TZ.
-            let wizard_tz = self.config.heartbeat.user_timezone.clone();
-            if let Some(user_md_tz) = ws.extract_user_timezone().await {
-                // Agent already captured timezone in USER.md — sync to Settings
-                if wizard_tz.as_deref() != Some(&user_md_tz) {
-                    tracing::info!("Syncing USER.md timezone '{}' back to Settings", user_md_tz);
-                    if let Some(ref db) = self.db {
-                        let _ = db
-                            .set_setting("default", "user_timezone", &serde_json::json!(user_md_tz))
-                            .await;
+            // Shared USER.md is the durable prompt-facing source, while the DB
+            // setting drives runtime config. On startup we reconcile them, then
+            // refresh future routine fire times in the effective timezone.
+            let configured_tz = self.config.heartbeat.user_timezone.clone();
+            let user_md_tz = ws.extract_user_timezone().await;
+            let effective_tz = user_md_tz.clone().or(configured_tz.clone());
+
+            if let Err(err) =
+                crate::timezone::set_user_timezone_override("default", effective_tz.as_deref())
+            {
+                tracing::warn!("Failed to refresh live timezone override: {}", err);
+            }
+
+            if let Err(err) = ws.sync_user_timezone(effective_tz.as_deref()).await {
+                tracing::warn!("Failed to sync workspace timezone documents: {}", err);
+            }
+
+            if let Some(ref db) = self.db {
+                if effective_tz != configured_tz {
+                    match effective_tz.as_deref() {
+                        Some(tz) => {
+                            if let Err(err) = db
+                                .set_setting("default", "user_timezone", &serde_json::json!(tz))
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to sync timezone setting from USER.md: {}",
+                                    err
+                                );
+                            }
+                        }
+                        None => {
+                            if let Err(err) = db.delete_setting("default", "user_timezone").await {
+                                tracing::warn!("Failed to clear timezone setting: {}", err);
+                            }
+                        }
                     }
                 }
-            } else if let Some(ref tz) = wizard_tz {
-                // Wizard detected timezone but USER.md is empty — pre-fill
-                let _ = ws.inject_user_timezone(tz).await;
+
+                let preserve_due = user_md_tz.as_deref() == configured_tz.as_deref();
+                if let Err(err) = crate::timezone::refresh_user_routine_timezones(
+                    db,
+                    "default",
+                    effective_tz.as_deref(),
+                    preserve_due,
+                )
+                .await
+                {
+                    tracing::warn!("Failed to refresh routine schedules for timezone: {}", err);
+                }
             }
 
             if embeddings.is_some() {
@@ -1185,92 +1562,71 @@ impl AppBuilder {
         }
 
         // Skills system
-        let (skill_registry, skill_catalog) = if self.config.skills.enabled {
-            let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
-                .with_installed_dir(self.config.skills.installed_dir.clone());
+        let (skill_registry, skill_catalog, skill_remote_hub, skill_quarantine) =
+            if self.config.skills.enabled {
+                let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
+                    .with_installed_dir(self.config.skills.installed_dir.clone());
 
-            // Wire workspace skills dir: <workspace_root>/skills/
-            //
-            // Workspace skills have highest priority (see discover_all ordering) and
-            // are loaded with Trusted trust level. They are intended for repo-scoped
-            // or project-scoped skills placed by developers alongside their code.
-            //
-            // Derivation priority:
-            //   1. SKILLS_WORKSPACE_DIR env var (explicit override)
-            //   2. <workspace_root>/skills/ when workspace_root is configured
-            //   3. No workspace skills directory (workspace skills disabled)
-            let workspace_skills_dir = if let Ok(explicit) = std::env::var("SKILLS_WORKSPACE_DIR") {
-                if !explicit.is_empty() {
-                    Some(std::path::PathBuf::from(explicit))
-                } else {
-                    None
+                // Wire workspace skills dir: <workspace_root>/skills/
+                //
+                // Workspace skills have highest priority (see discover_all ordering) and
+                // are loaded with Trusted trust level. They are intended for repo-scoped
+                // or project-scoped skills placed by developers alongside their code.
+                //
+                // Derivation priority:
+                //   1. SKILLS_WORKSPACE_DIR env var (explicit override)
+                //   2. <workspace_root>/skills/ when workspace_root is configured
+                //   3. No workspace skills directory (workspace skills disabled)
+                let workspace_skills_dir =
+                    if let Ok(explicit) = std::env::var("SKILLS_WORKSPACE_DIR") {
+                        if !explicit.is_empty() {
+                            Some(std::path::PathBuf::from(explicit))
+                        } else {
+                            None
+                        }
+                    } else {
+                        self.config
+                            .agent
+                            .workspace_root
+                            .as_ref()
+                            .map(|root| root.join("skills"))
+                    };
+
+                if let Some(ws_dir) = workspace_skills_dir {
+                    tracing::info!("Skills: workspace dir → {}", ws_dir.display());
+                    registry = registry.with_workspace_dir(ws_dir);
                 }
-            } else {
-                self.config
-                    .agent
-                    .workspace_root
-                    .as_ref()
-                    .map(|root| root.join("skills"))
-            };
 
-            if let Some(ws_dir) = workspace_skills_dir {
-                tracing::info!("Skills: workspace dir → {}", ws_dir.display());
-                registry = registry.with_workspace_dir(ws_dir);
-            }
-
-            let loaded = registry.discover_all().await;
-            if !loaded.is_empty() {
-                tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
-            }
-            let registry = Arc::new(tokio::sync::RwLock::new(registry));
-            let catalog = crate::skills::catalog::shared_catalog();
-            let mut remote_sources: Vec<Arc<dyn crate::skills::remote_source::RemoteSkillSource>> =
-                Vec::new();
-            if !self.config.skills.skill_taps.is_empty() {
-                match crate::skills::github_source::GitHubSkillSource::new(
+                let loaded = registry.discover_all().await;
+                if !loaded.is_empty() {
+                    tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
+                }
+                let registry = Arc::new(tokio::sync::RwLock::new(registry));
+                let catalog = crate::skills::catalog::shared_catalog();
+                let remote_hub = crate::skills::build_remote_skill_hub(
                     self.config.skills.skill_taps.clone(),
-                ) {
-                    Ok(source) if source.is_enabled() => remote_sources.push(Arc::new(source)),
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(error = %error, "Failed to initialize GitHub skill source");
-                    }
-                }
-            }
-            if !self.config.skills.well_known_skill_registries.is_empty() {
-                match crate::skills::well_known_source::WellKnownSkillSource::new(
                     self.config.skills.well_known_skill_registries.clone(),
-                ) {
-                    Ok(source) if source.is_enabled() => remote_sources.push(Arc::new(source)),
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "Failed to initialize well-known skill source"
-                        );
-                    }
-                }
-            }
-            let remote_hub = if remote_sources.is_empty() {
-                None
+                );
+                let shared_remote_hub = crate::skills::SharedRemoteSkillHub::new(remote_hub);
+                let quarantine = Arc::new(crate::skills::quarantine::QuarantineManager::new(
+                    self.config.skills.quarantine_dir.clone(),
+                ));
+                tools.register_skill_tools(
+                    Arc::clone(&registry),
+                    Arc::clone(&catalog),
+                    Some(shared_remote_hub.clone()),
+                    Arc::clone(&quarantine),
+                    self.db.as_ref().map(Arc::clone),
+                );
+                (
+                    Some(registry),
+                    Some(catalog),
+                    Some(shared_remote_hub),
+                    Some(quarantine),
+                )
             } else {
-                Some(Arc::new(crate::skills::remote_source::RemoteSkillHub::new(
-                    remote_sources,
-                )))
+                (None, None, None, None)
             };
-            let quarantine = Arc::new(crate::skills::quarantine::QuarantineManager::new(
-                self.config.skills.quarantine_dir.clone(),
-            ));
-            tools.register_skill_tools(
-                Arc::clone(&registry),
-                Arc::clone(&catalog),
-                remote_hub,
-                quarantine,
-            );
-            (Some(registry), Some(catalog))
-        } else {
-            (None, None)
-        };
 
         if let Some(db) = self.db.as_ref() {
             tools.register_learning_tools(
@@ -1318,6 +1674,11 @@ impl AppBuilder {
             tools.count()
         );
 
+        tracing::info!(
+            elapsed_ms = build_all_start.elapsed().as_millis(),
+            "Startup phase: build_all total"
+        );
+
         Ok(AppComponents {
             config: self.config,
             db: self.db,
@@ -1338,6 +1699,8 @@ impl AppBuilder {
             hooks,
             skill_registry,
             skill_catalog,
+            skill_remote_hub,
+            skill_quarantine,
             cost_guard,
             catalog_entries,
             dev_loaded_tool_names,
@@ -1350,5 +1713,63 @@ impl AppBuilder {
             ))),
             routing_policy: Arc::clone(&llm_runtime.routing_policy),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restricted_modes_disable_background_processes() {
+        assert_eq!(
+            process_registration_mode("sandboxed"),
+            RuntimeExecRegistrationMode::Disabled
+        );
+        assert_eq!(
+            process_registration_mode("project"),
+            RuntimeExecRegistrationMode::Disabled
+        );
+        assert_eq!(
+            process_registration_mode("unrestricted"),
+            RuntimeExecRegistrationMode::LocalHost
+        );
+    }
+
+    #[test]
+    fn execute_code_requires_real_isolation_in_restricted_modes() {
+        assert_eq!(
+            execute_code_registration_mode("sandboxed", true),
+            RuntimeExecRegistrationMode::DockerSandbox
+        );
+        assert_eq!(
+            execute_code_registration_mode("sandboxed", false),
+            RuntimeExecRegistrationMode::Disabled
+        );
+        assert_eq!(
+            execute_code_registration_mode("project", true),
+            RuntimeExecRegistrationMode::Disabled
+        );
+        assert_eq!(
+            execute_code_registration_mode("unrestricted", false),
+            RuntimeExecRegistrationMode::LocalHost
+        );
+    }
+
+    #[test]
+    fn pi_os_lite_runtime_blocks_desktop_autonomy_registration() {
+        assert_eq!(
+            desktop_autonomy_headless_blocker_for("pi-os-lite-64", false),
+            Some("pi-os-lite-64")
+        );
+        assert_eq!(
+            desktop_autonomy_headless_blocker_for("raspberry-pi-os-lite", false),
+            Some("pi-os-lite-64")
+        );
+        assert_eq!(
+            desktop_autonomy_headless_blocker_for("remote", true),
+            Some("headless")
+        );
+        assert_eq!(desktop_autonomy_headless_blocker_for("remote", false), None);
     }
 }

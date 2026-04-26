@@ -86,6 +86,7 @@ mod host;
 mod loader;
 pub mod router;
 mod runtime;
+mod runtime_config;
 mod schema;
 pub(crate) mod telegram_html;
 mod wrapper;
@@ -99,9 +100,15 @@ pub use loader::{
     DiscoveredChannel, LoadResults, LoadedChannel, WasmChannelLoader, default_channels_dir,
     discover_channels,
 };
-pub use router::{RegisteredEndpoint, WasmChannelRouter, create_wasm_channel_router};
+pub use router::{
+    RegisteredEndpoint, RegisteredWebhookAuth, WasmChannelRouter, create_wasm_channel_router,
+};
 pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig};
+pub use runtime_config::{
+    WasmChannelHostConfig, apply_channel_host_config, inject_channel_credentials_from_secrets,
+};
 pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
+    WebhookSecretValidation,
 };
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};

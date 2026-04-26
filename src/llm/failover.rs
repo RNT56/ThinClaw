@@ -19,8 +19,8 @@ use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamSupport,
+    TokenCaptureSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 use crate::llm::retry::is_retryable;
@@ -146,7 +146,7 @@ impl ProviderLeaseEntry {
 }
 
 struct LeaseTracker {
-    active: Vec<AtomicUsize>,
+    active: Vec<Arc<AtomicUsize>>,
     served: Vec<AtomicUsize>,
     round_robin_cursor: AtomicUsize,
     config: LeaseConfig,
@@ -163,7 +163,9 @@ fn mix64(mut value: u64) -> u64 {
 impl LeaseTracker {
     fn new(provider_count: usize, config: LeaseConfig) -> Self {
         Self {
-            active: (0..provider_count).map(|_| AtomicUsize::new(0)).collect(),
+            active: (0..provider_count)
+                .map(|_| Arc::new(AtomicUsize::new(0)))
+                .collect(),
             served: (0..provider_count).map(|_| AtomicUsize::new(0)).collect(),
             round_robin_cursor: AtomicUsize::new(0),
             config,
@@ -211,7 +213,7 @@ impl LeaseTracker {
         }
     }
 
-    fn try_acquire(&self, provider_idx: usize) -> Option<ProviderLease<'_>> {
+    fn try_acquire(&self, provider_idx: usize) -> Option<ProviderLease> {
         loop {
             let current = self.active[provider_idx].load(Ordering::Relaxed);
             if current >= self.config.max_concurrent.max(1) {
@@ -223,23 +225,65 @@ impl LeaseTracker {
             {
                 self.served[provider_idx].fetch_add(1, Ordering::Relaxed);
                 return Some(ProviderLease {
-                    tracker: self,
-                    provider_idx,
+                    active: Arc::clone(&self.active[provider_idx]),
                 });
             }
         }
     }
 }
 
-struct ProviderLease<'a> {
-    tracker: &'a LeaseTracker,
-    provider_idx: usize,
+struct ProviderLease {
+    active: Arc<AtomicUsize>,
 }
 
-impl Drop for ProviderLease<'_> {
+impl Drop for ProviderLease {
     fn drop(&mut self) {
-        self.tracker.active[self.provider_idx].fetch_sub(1, Ordering::Relaxed);
+        self.active.fetch_sub(1, Ordering::Relaxed);
     }
+}
+
+fn stream_with_lease(
+    mut stream: crate::llm::StreamChunkStream,
+    lease: ProviderLease,
+) -> crate::llm::StreamChunkStream {
+    Box::pin(async_stream::stream! {
+        use futures::StreamExt;
+        let _lease = lease;
+        while let Some(chunk) = stream.next().await {
+            yield chunk;
+        }
+    })
+}
+
+fn aggregate_stream_support(supports: impl IntoIterator<Item = StreamSupport>) -> StreamSupport {
+    let mut saw_simulated = false;
+    for support in supports {
+        match support {
+            StreamSupport::Native => return StreamSupport::Native,
+            StreamSupport::Simulated => saw_simulated = true,
+            StreamSupport::Unsupported => {}
+        }
+    }
+    if saw_simulated {
+        StreamSupport::Simulated
+    } else {
+        StreamSupport::Unsupported
+    }
+}
+
+fn aggregate_token_capture_support(
+    supports: impl IntoIterator<Item = TokenCaptureSupport>,
+) -> TokenCaptureSupport {
+    let mut aggregate = TokenCaptureSupport::UNSUPPORTED;
+    for support in supports {
+        aggregate.exact_tokens_supported |= support.exact_tokens_supported;
+        aggregate.logprobs_supported |= support.logprobs_supported;
+    }
+    aggregate
+}
+
+fn can_failover_stream_start(err: &LlmError) -> bool {
+    is_retryable(err) || matches!(err, LlmError::StreamingUnsupported { .. })
 }
 
 /// An LLM provider that wraps multiple providers and tries each in sequence
@@ -607,25 +651,212 @@ impl LlmProvider for FailoverProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<crate::llm::StreamChunkStream, LlmError> {
-        // For streaming, we don't attempt failover mid-stream.
-        // Use the last-used (or primary) provider directly.
-        let idx = self.last_used.load(Ordering::Relaxed);
-        self.providers[idx].complete_stream(request).await
+        // We cannot fail over mid-stream, but we can try alternate providers
+        // before the stream starts.
+        let now_nanos = self.now_nanos();
+        let cooldown_nanos = self.cooldown_config.cooldown_duration.as_nanos() as u64;
+        let (mut available, cooled_down): (Vec<usize>, Vec<usize>) = (0..self.providers.len())
+            .partition(|&i| !self.cooldowns[i].is_in_cooldown(now_nanos, cooldown_nanos));
+        for &idx in &cooled_down {
+            tracing::info!(
+                provider = %self.providers[idx].model_name(),
+                lease_key = %self.lease_keys[idx],
+                "Skipping streaming provider (in cooldown)"
+            );
+        }
+        if available.is_empty()
+            && let Some(oldest) = (0..self.providers.len()).min_by_key(|&i| {
+                self.cooldowns[i]
+                    .cooldown_activated_nanos
+                    .load(Ordering::Relaxed)
+            })
+        {
+            available.push(oldest);
+        }
+
+        let ordered = self.leases.order_candidates(&available);
+        let mut attempted_any = false;
+        let mut last_error: Option<LlmError> = None;
+        for &idx in &ordered {
+            let Some(lease) = self.leases.try_acquire(idx) else {
+                tracing::info!(
+                    provider = %self.providers[idx].model_name(),
+                    lease_key = %self.lease_keys[idx],
+                    max_concurrent = self.leases.config.max_concurrent,
+                    "Skipping streaming provider (lease capacity reached)"
+                );
+                continue;
+            };
+            attempted_any = true;
+            match self.providers[idx].complete_stream(request.clone()).await {
+                Ok(stream) => {
+                    self.last_used.store(idx, Ordering::Relaxed);
+                    self.cooldowns[idx].reset();
+                    self.bind_provider_to_current_task(idx);
+                    return Ok(stream_with_lease(stream, lease));
+                }
+                Err(err) => {
+                    drop(lease);
+                    tracing::warn!(
+                        provider = %self.providers[idx].model_name(),
+                        error = %err,
+                        "Streaming start failed, trying next failover provider"
+                    );
+                    if !can_failover_stream_start(&err) {
+                        return Err(err);
+                    }
+                    if is_retryable(&err)
+                        && self.cooldowns[idx]
+                            .record_failure(self.cooldown_config.failure_threshold)
+                    {
+                        let nanos = self.now_nanos();
+                        self.cooldowns[idx].activate_cooldown(nanos);
+                    }
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        if !attempted_any {
+            return Err(LlmError::RequestFailed {
+                provider: "failover".to_string(),
+                reason: format!(
+                    "All streaming providers are at lease capacity (max_concurrent={})",
+                    self.leases.config.max_concurrent
+                ),
+            });
+        }
+
+        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
+            provider: self.model_name().to_owned(),
+            reason: "All failover providers failed to start streaming".to_string(),
+        }))
     }
 
     async fn complete_stream_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<crate::llm::StreamChunkStream, LlmError> {
-        let idx = self.last_used.load(Ordering::Relaxed);
-        self.providers[idx]
-            .complete_stream_with_tools(request)
-            .await
+        let now_nanos = self.now_nanos();
+        let cooldown_nanos = self.cooldown_config.cooldown_duration.as_nanos() as u64;
+        let (mut available, cooled_down): (Vec<usize>, Vec<usize>) = (0..self.providers.len())
+            .partition(|&i| !self.cooldowns[i].is_in_cooldown(now_nanos, cooldown_nanos));
+        for &idx in &cooled_down {
+            tracing::info!(
+                provider = %self.providers[idx].model_name(),
+                lease_key = %self.lease_keys[idx],
+                "Skipping tool streaming provider (in cooldown)"
+            );
+        }
+        if available.is_empty()
+            && let Some(oldest) = (0..self.providers.len()).min_by_key(|&i| {
+                self.cooldowns[i]
+                    .cooldown_activated_nanos
+                    .load(Ordering::Relaxed)
+            })
+        {
+            available.push(oldest);
+        }
+
+        let ordered = self.leases.order_candidates(&available);
+        let mut attempted_any = false;
+        let mut last_error: Option<LlmError> = None;
+        for &idx in &ordered {
+            let Some(lease) = self.leases.try_acquire(idx) else {
+                tracing::info!(
+                    provider = %self.providers[idx].model_name(),
+                    lease_key = %self.lease_keys[idx],
+                    max_concurrent = self.leases.config.max_concurrent,
+                    "Skipping tool streaming provider (lease capacity reached)"
+                );
+                continue;
+            };
+            attempted_any = true;
+            match self.providers[idx]
+                .complete_stream_with_tools(request.clone())
+                .await
+            {
+                Ok(stream) => {
+                    self.last_used.store(idx, Ordering::Relaxed);
+                    self.cooldowns[idx].reset();
+                    self.bind_provider_to_current_task(idx);
+                    return Ok(stream_with_lease(stream, lease));
+                }
+                Err(err) => {
+                    drop(lease);
+                    tracing::warn!(
+                        provider = %self.providers[idx].model_name(),
+                        error = %err,
+                        "Tool streaming start failed, trying next failover provider"
+                    );
+                    if !can_failover_stream_start(&err) {
+                        return Err(err);
+                    }
+                    if is_retryable(&err)
+                        && self.cooldowns[idx]
+                            .record_failure(self.cooldown_config.failure_threshold)
+                    {
+                        let nanos = self.now_nanos();
+                        self.cooldowns[idx].activate_cooldown(nanos);
+                    }
+                    last_error = Some(err);
+                }
+            }
+        }
+
+        if !attempted_any {
+            return Err(LlmError::RequestFailed {
+                provider: "failover".to_string(),
+                reason: format!(
+                    "All tool streaming providers are at lease capacity (max_concurrent={})",
+                    self.leases.config.max_concurrent
+                ),
+            });
+        }
+
+        Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
+            provider: self.model_name().to_owned(),
+            reason: "All failover providers failed to start tool streaming".to_string(),
+        }))
     }
 
     fn supports_streaming(&self) -> bool {
-        let idx = self.last_used.load(Ordering::Relaxed);
-        self.providers[idx].supports_streaming()
+        self.stream_support().is_native()
+    }
+
+    fn stream_support(&self) -> StreamSupport {
+        aggregate_stream_support(
+            self.providers
+                .iter()
+                .map(|provider| provider.stream_support()),
+        )
+    }
+
+    fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
+        aggregate_stream_support(
+            self.providers
+                .iter()
+                .map(|provider| provider.stream_support_for_model(requested_model)),
+        )
+    }
+
+    fn token_capture_support(&self) -> TokenCaptureSupport {
+        aggregate_token_capture_support(
+            self.providers
+                .iter()
+                .map(|provider| provider.token_capture_support()),
+        )
+    }
+
+    fn token_capture_support_for_model(
+        &self,
+        requested_model: Option<&str>,
+    ) -> TokenCaptureSupport {
+        aggregate_token_capture_support(
+            self.providers
+                .iter()
+                .map(|provider| provider.token_capture_support_for_model(requested_model)),
+        )
     }
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
@@ -671,6 +902,7 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
+                    token_capture: None,
                 }))),
                 tool_complete_result: Mutex::new(Some(Ok(ToolCompletionResponse {
                     content: Some(content.to_string()),
@@ -681,6 +913,7 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
+                    token_capture: None,
                 }))),
             }
         }
@@ -812,6 +1045,32 @@ mod tests {
 
         let response = failover.complete(make_request()).await.unwrap();
         assert_eq!(response.content, "primary response");
+    }
+
+    #[tokio::test]
+    async fn streaming_lease_is_held_until_stream_drop() {
+        let primary = Arc::new(MockProvider::succeeding("primary", "stream response"));
+        let failover = FailoverProvider::with_configs(
+            vec![primary],
+            CooldownConfig::default(),
+            LeaseConfig {
+                max_concurrent: 1,
+                selection_strategy: LeaseSelectionStrategy::FillFirst,
+            },
+        )
+        .unwrap();
+
+        let stream = failover.complete_stream(make_request()).await.unwrap();
+
+        assert_eq!(
+            failover.leases.active[0].load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        drop(stream);
+        assert_eq!(
+            failover.leases.active[0].load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
     }
 
     // Test 2: Primary fails with retryable error, fallback succeeds.
@@ -1065,6 +1324,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
 
@@ -1093,6 +1353,7 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
 

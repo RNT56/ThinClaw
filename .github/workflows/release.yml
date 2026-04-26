@@ -16,6 +16,10 @@
 name: Release
 permissions:
   "contents": "write"
+  "packages": "write"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -55,7 +59,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
@@ -92,12 +96,12 @@ jobs:
     if: ${{ needs.plan.outputs.publishing == 'true' }}
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.92.0
       - uses: swatinem/rust-cache@v2
@@ -137,7 +141,7 @@ jobs:
       - name: enable windows longpaths
         run: |
           git config --global core.longpaths true
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
@@ -233,7 +237,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
@@ -278,14 +282,14 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
       - name: Install Rust toolchain + wasm target
         run: |
           rustup target add wasm32-wasip2
-          cargo install cargo-component --locked || true
+          cargo install cargo-component --locked
       - uses: swatinem/rust-cache@v2
         with:
           key: wasm-extensions
@@ -294,10 +298,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/wasm-bundles
+          : > target/wasm-bundles/checksums.txt
+          manifest_count=0
+          bundle_count=0
 
           # Process each manifest in registry/tools/ and registry/channels/
           for manifest in registry/tools/*.json registry/channels/*.json; do
             [ -f "$manifest" ] || continue
+            manifest_count=$((manifest_count + 1))
 
             name=$(jq -r '.name' "$manifest")
             source_dir=$(jq -r '.source.dir' "$manifest")
@@ -305,17 +313,22 @@ jobs:
             crate_name=$(jq -r '.source.crate_name' "$manifest")
 
             if [ ! -d "$source_dir" ]; then
-              echo "::warning::Source dir '$source_dir' not found for '$name', skipping"
-              continue
+              echo "::error::Source dir '$source_dir' not found for '$name'"
+              exit 1
+            fi
+            if [ ! -f "$source_dir/Cargo.toml" ]; then
+              echo "::error::Cargo manifest missing at '$source_dir/Cargo.toml' for '$name'"
+              exit 1
+            fi
+            if [ ! -f "$source_dir/$caps_file" ]; then
+              echo "::error::Capabilities file missing at '$source_dir/$caps_file' for '$name'"
+              exit 1
             fi
 
             echo "=== Building $name from $source_dir ==="
 
             # Build WASM component
-            cargo component build --release --manifest-path "$source_dir/Cargo.toml" || {
-              echo "::warning::Build failed for '$name', skipping"
-              continue
-            }
+            cargo component build --release --manifest-path "$source_dir/Cargo.toml"
 
             # Find the built WASM file (Cargo uses underscores in artifact names)
             wasm_artifact="${crate_name//-/_}"
@@ -329,33 +342,37 @@ jobs:
             done
 
             if [ -z "$wasm_path" ]; then
-              echo "::warning::No WASM output found for '$name', skipping"
-              continue
+              echo "::error::No WASM output found for '$name'"
+              exit 1
             fi
 
             # Copy files with standardized names for the archive
             cp "$wasm_path" "target/wasm-bundles/${name}.wasm"
-
-            caps_path="$source_dir/$caps_file"
-            if [ -f "$caps_path" ]; then
-              cp "$caps_path" "target/wasm-bundles/${name}.capabilities.json"
-            else
-              echo "::warning::No capabilities file at '$caps_path' for '$name'"
-            fi
+            cp "$source_dir/$caps_file" "target/wasm-bundles/${name}.capabilities.json"
 
             # Create tar.gz bundle
             bundle="target/wasm-bundles/${name}-wasm32-wasip2.tar.gz"
-            (cd target/wasm-bundles && if [ -f "${name}.capabilities.json" ]; then tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm" "${name}.capabilities.json"; else tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm"; fi)
+            (cd target/wasm-bundles && tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm" "${name}.capabilities.json")
 
             # Compute SHA256
             sha256=$(sha256sum "$bundle" | cut -d' ' -f1)
             echo "$sha256  ${name}-wasm32-wasip2.tar.gz" >> target/wasm-bundles/checksums.txt
+            bundle_count=$((bundle_count + 1))
 
             # Clean up intermediate files
             rm -f "target/wasm-bundles/${name}.wasm" "target/wasm-bundles/${name}.capabilities.json"
 
             echo "  -> $bundle ($sha256)"
           done
+
+          if [ "$manifest_count" -eq 0 ]; then
+            echo "::error::No WASM extension manifests found"
+            exit 1
+          fi
+          if [ "$bundle_count" -ne "$manifest_count" ]; then
+            echo "::error::Built $bundle_count WASM bundles for $manifest_count manifests"
+            exit 1
+          fi
 
           echo "=== WASM bundles built ==="
           ls -la target/wasm-bundles/
@@ -366,6 +383,45 @@ jobs:
           path: |
             target/wasm-bundles/*.tar.gz
             target/wasm-bundles/checksums.txt
+          if-no-files-found: error
+
+  publish-container-images:
+    needs:
+      - plan
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Set lowercase image ref
+        id: image
+        shell: bash
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BUILD_FEATURES=full
+          tags: |
+            ${{ steps.image.outputs.ref }}:${{ needs.plan.outputs.tag }}
+            ${{ steps.image.outputs.ref }}:latest
 
   # Determines if we should publish/announce
   host:
@@ -375,15 +431,16 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - build-wasm-extensions
+      - publish-container-images
     # Only run if we're "publishing", and only if plan, local, global, and wasm didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.windows-runtime-smoke.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.windows-runtime-smoke.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') && needs.publish-container-images.result == 'success' }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
     outputs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive
@@ -431,13 +488,30 @@ jobs:
           ANNOUNCEMENT_BODY: "${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}"
           RELEASE_COMMIT: "${{ github.sha }}"
         run: |
+          set -euo pipefail
+          TAG="${{ needs.plan.outputs.tag }}"
+
           # Write and read notes from a file to avoid quoting breaking things
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
-          gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+          shopt -s nullglob
+          artifacts=(artifacts/*)
+          if [ ${#artifacts[@]} -eq 0 ]; then
+            echo "::error::No release artifacts were found in ./artifacts"
+            exit 1
+          fi
 
-  # Commit patched manifest SHA256 checksums back to main so the repo
-  # stays in sync with the released artifacts.
+          # Make release publication idempotent so reruns don't fail when the tag already exists.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; updating metadata and replacing artifacts."
+            gh release upload "$TAG" "${artifacts[@]}" --clobber
+            gh release edit "$TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt"
+          else
+            gh release create "$TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" "${artifacts[@]}"
+          fi
+
+  # Prepare patched manifest SHA256 checksums as an artifact for follow-up PRs
+  # so release jobs don't fail on protected default branches.
   update-registry-checksums:
     needs:
       - plan
@@ -448,9 +522,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
+      - uses: actions/checkout@v6
       - name: Fetch WASM checksums
         uses: actions/download-artifact@v4
         with:
@@ -487,17 +559,28 @@ jobs:
               fi
             done
           done < "$CHECKSUMS"
-      - name: Commit updated manifests
+      - name: Package updated manifests
+        id: package-registry
+        shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
+          mkdir -p target/registry-checksum-updates
+
           git add registry/
           if git diff --cached --quiet; then
-            echo "No manifest changes to commit"
+            echo "No manifest changes to package"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
-            git commit -m "chore: update WASM artifact URLs and SHA256 checksums [skip ci]"
-            git push
+            git diff --cached --name-only > target/registry-checksum-updates/changed-files.txt
+            tar czf target/registry-checksum-updates/registry-updates.tar.gz registry/
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
           fi
+      - name: Upload registry checksum updates
+        if: ${{ steps.package-registry.outputs.has_changes == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-registry-checksum-updates
+          path: target/registry-checksum-updates/*
 
   announce:
     needs:
@@ -511,7 +594,7 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
           submodules: recursive

@@ -82,9 +82,9 @@ impl Tool for SlackActionsTool {
     }
 
     fn description(&self) -> &str {
-        "Perform Slack moderation actions: send/update/delete messages, \
-         manage channels (topic, purpose, invite, kick), pin messages, \
-         and get user/channel information."
+        "Perform live Slack actions such as posting or moderating messages, managing \
+         channels, and reading user or channel info. Use this for real Slack-side changes, \
+         not for searching prior Slack transcript history."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

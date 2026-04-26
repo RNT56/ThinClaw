@@ -1,12 +1,11 @@
 //! Observability subsystem: trait-based event and metric recording.
 //!
-//! Provides a pluggable [`Observer`] trait with multiple backends:
+//! Provides a pluggable [`Observer`] trait with runtime-selectable backends:
 //!
 //! | Backend | Description |
 //! |---------|-------------|
 //! | `noop`  | Zero overhead, discards everything (default) |
 //! | `log`   | Emits structured events via `tracing` |
-//! | `multi` | Fan-out to multiple backends simultaneously |
 //!
 //! The [`create_observer`] factory builds the right backend from
 //! [`ObservabilityConfig`]. Future backends (OpenTelemetry, Prometheus)
@@ -18,7 +17,6 @@ mod noop;
 pub mod traits;
 
 pub use self::log::LogObserver;
-pub use self::multi::MultiObserver;
 pub use self::noop::NoopObserver;
 pub use self::traits::{Observer, ObserverEvent, ObserverMetric};
 

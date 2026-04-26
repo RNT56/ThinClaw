@@ -5,6 +5,8 @@
 
 use std::io::Read;
 
+use regex::Regex;
+
 /// Extract text from document data based on MIME type.
 ///
 /// Supports PDF, DOCX, PPTX, XLSX, and plain text formats.
@@ -18,9 +20,7 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
         "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
             extract_pptx(data)
         }
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
-            extract_office_xml(data, "xl/sharedStrings.xml")
-        }
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => extract_xlsx(data),
         m if is_text_mime(m) => extract_plaintext(data),
         _ => {
             // Try to guess from filename extension
@@ -36,7 +36,7 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
                     return extract_pptx(data);
                 }
                 if lower.ends_with(".xlsx") {
-                    return extract_office_xml(data, "xl/sharedStrings.xml");
+                    return extract_xlsx(data);
                 }
                 if is_text_extension(&lower) {
                     return extract_plaintext(data);
@@ -45,6 +45,103 @@ pub fn extract_text(data: &[u8], mime: &str, filename: Option<&str>) -> Result<S
             Err(format!("Unsupported document type: {mime}"))
         }
     }
+}
+
+/// Extract text from XLSX by resolving shared strings, inline strings,
+/// and plain worksheet cell values.
+fn extract_xlsx(data: &[u8]) -> Result<String, String> {
+    let cursor = std::io::Cursor::new(data);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("Not a valid ZIP/XLSX file: {e}"))?;
+
+    let shared_strings = read_xlsx_shared_strings(&mut archive);
+
+    let mut sheet_names = Vec::new();
+    for i in 0..archive.len() {
+        if let Ok(file) = archive.by_index(i) {
+            let name = file.name().to_string();
+            if name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml") {
+                sheet_names.push(name);
+            }
+        }
+    }
+    sheet_names.sort();
+
+    let cell_re = Regex::new(r#"(?s)<c\b([^>]*)>(.*?)</c>"#)
+        .map_err(|e| format!("Invalid cell regex: {e}"))?;
+    let value_re =
+        Regex::new(r#"(?s)<v[^>]*>(.*?)</v>"#).map_err(|e| format!("Invalid value regex: {e}"))?;
+    let inline_re = Regex::new(r#"(?s)<is[^>]*>(.*?)</is>"#)
+        .map_err(|e| format!("Invalid inline regex: {e}"))?;
+
+    let mut all_values = Vec::new();
+    for sheet_name in sheet_names {
+        let mut xml = String::new();
+        if let Ok(mut file) = archive.by_name(&sheet_name)
+            && file.read_to_string(&mut xml).is_ok()
+        {
+            for cell in cell_re.captures_iter(&xml) {
+                let attrs = cell.get(1).map(|m| m.as_str()).unwrap_or_default();
+                let body = cell.get(2).map(|m| m.as_str()).unwrap_or_default();
+                let cell_type = attrs
+                    .split_whitespace()
+                    .find_map(|part| part.strip_prefix(r#"t=""#))
+                    .map(|value| value.trim_end_matches('"'));
+
+                let value = match cell_type {
+                    Some("s") => value_re
+                        .captures(body)
+                        .and_then(|caps| caps.get(1))
+                        .and_then(|m| m.as_str().trim().parse::<usize>().ok())
+                        .and_then(|index| shared_strings.get(index).cloned())
+                        .unwrap_or_default(),
+                    Some("inlineStr") => inline_re
+                        .captures(body)
+                        .and_then(|caps| caps.get(1))
+                        .map(|m| strip_xml_tags(m.as_str()))
+                        .unwrap_or_default(),
+                    _ => value_re
+                        .captures(body)
+                        .and_then(|caps| caps.get(1))
+                        .map(|m| strip_xml_tags(m.as_str()))
+                        .unwrap_or_default(),
+                };
+
+                if !value.trim().is_empty() {
+                    all_values.push(value);
+                }
+            }
+        }
+    }
+
+    if all_values.is_empty() {
+        return Err("No text content found in XLSX worksheets".to_string());
+    }
+
+    Ok(all_values.join("\n"))
+}
+
+fn read_xlsx_shared_strings<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Vec<String> {
+    let mut xml = String::new();
+    let Ok(mut file) = archive.by_name("xl/sharedStrings.xml") else {
+        return Vec::new();
+    };
+    if file.read_to_string(&mut xml).is_err() {
+        return Vec::new();
+    }
+
+    let Ok(shared_re) = Regex::new(r#"(?s)<si[^>]*>(.*?)</si>"#) else {
+        return Vec::new();
+    };
+
+    shared_re
+        .captures_iter(&xml)
+        .filter_map(|caps| caps.get(1))
+        .map(|m| strip_xml_tags(m.as_str()))
+        .filter(|value| !value.trim().is_empty())
+        .collect()
 }
 
 /// Extract text from a PDF using `pdf-extract` (full parser with CMap support).
@@ -207,6 +304,8 @@ fn is_text_extension(filename: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     #[test]
@@ -236,6 +335,35 @@ mod tests {
         let result = strip_xml_tags(xml);
         assert!(result.contains("Hello"));
         assert!(result.contains("World"));
+    }
+
+    #[test]
+    fn test_extract_xlsx_reads_shared_and_inline_strings() {
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("xl/sharedStrings.xml", options).unwrap();
+            zip.write_all(
+                br#"<sst><si><t>Shared Value</t></si><si><r><t>Rich Text</t></r></si></sst>"#,
+            )
+            .unwrap();
+            zip.start_file("xl/worksheets/sheet1.xml", options).unwrap();
+            zip.write_all(
+                br#"<worksheet><sheetData><row>
+                    <c r="A1" t="s"><v>0</v></c>
+                    <c r="A2" t="inlineStr"><is><t>Inline Value</t></is></c>
+                    <c r="A3"><v>42</v></c>
+                </row></sheetData></worksheet>"#,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+
+        let text = extract_xlsx(cursor.get_ref()).unwrap();
+        assert!(text.contains("Shared Value"));
+        assert!(text.contains("Inline Value"));
+        assert!(text.contains("42"));
     }
 
     #[test]

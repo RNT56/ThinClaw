@@ -81,6 +81,7 @@ mod error;
 mod host;
 mod limits;
 mod loader;
+mod oauth;
 mod rate_limiter;
 mod runtime;
 mod storage;
@@ -126,6 +127,13 @@ pub use storage::{
 pub use loader::{
     DiscoveredTool, LoadResults, WasmLoadError, WasmToolLoader, discover_dev_tools, discover_tools,
     load_dev_tools, resolve_wasm_target_dir, wasm_artifact_path,
+};
+pub use oauth::{
+    GOOGLE_OAUTH_TOKEN, LEGACY_GMAIL_OAUTH_TOKEN, OAuthPkcePair, ResolvedOAuthConfig,
+    WasmOAuthTokenExchange, WasmToolAuthCheck, WasmToolAuthMode, WasmToolAuthStatus,
+    WasmToolAuthorizationRequest, WasmToolOAuthError, WasmToolOAuthFlow, build_authorization_url,
+    canonical_secret_name, is_google_secret_name, refresh_secret_name,
+    resolve_oauth_refresh_config, scopes_secret_name, shared_auth_provider,
 };
 pub use watcher::{ToolWatcher, ToolWatcherConfig};
 

@@ -1,5 +1,5 @@
 [workspace]
-members = ["."]
+members = [".", "crates/*"]
 exclude = [
     "channels-src/discord",
     "channels-src/telegram",
@@ -20,10 +20,10 @@ exclude = [
 
 [package]
 name = "thinclaw"
-version = "0.13.6"
+version = "0.13.7"
 edition = "2024"
 rust-version = "1.92"
-description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
+description = "Secure personal agent that protects your data and expands its capabilities on the fly"
 authors = ["RNT56 (ThinClaw)"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/RNT56/ThinClaw"
@@ -40,6 +40,15 @@ eula = false
 dist = true
 
 [dependencies]
+thinclaw-types = { version = "0.1.0", path = "crates/thinclaw-types", default-features = false }
+thinclaw-db = { version = "0.1.0", path = "crates/thinclaw-db" }
+thinclaw-channels-core = { version = "0.1.0", path = "crates/thinclaw-channels-core" }
+thinclaw-identity = { version = "0.1.0", path = "crates/thinclaw-identity" }
+thinclaw-llm-core = { version = "0.1.0", path = "crates/thinclaw-llm-core" }
+thinclaw-safety = { version = "0.1.0", path = "crates/thinclaw-safety" }
+thinclaw-tools-core = { version = "0.1.0", path = "crates/thinclaw-tools-core" }
+thinclaw-workspace = { version = "0.1.0", path = "crates/thinclaw-workspace" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -47,7 +56,7 @@ futures = "0.3"
 async-stream = "0.3"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -103,6 +112,7 @@ cron = "0.13"
 regex = "1"
 aho-corasick = "1"
 unicode-normalization = "0.1"
+jsonschema = "0.18"
 
 # YAML parsing for SKILL.md frontmatter
 serde_yaml_ng = "0.10"
@@ -126,7 +136,7 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "36", features = ["component-model"] }
+wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"] }
 wasmtime-wasi = "36"  # WASI support for component model
 wasmparser = "0.220"  # WASM binary parsing for validation
 
@@ -160,17 +170,20 @@ base64 = "0.22.1"
 mime_guess = "2.0.5"
 clap_complete = "4.5.0"
 lru = "0.16.3"
+libloading = "0.8"
 
 # HTML to Markdown conversion (feature gated)
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 sysinfo = "0.38.2"
-nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04"] }
-chromiumoxide = "0.9.1"
+nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }
+chromiumoxide = { version = "0.9.1", optional = true }
 ratatui = "0.30.0"
+ratatui-textarea = { version = "0.9", default-features = false, features = ["crossterm"] }
 unicode-width = "0.2.2"
 textwrap = "0.16.2"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+tempfile = "3"
 
 # Document extraction (feature gated)
 pdf-extract = { version = "0.7", optional = true }
@@ -187,6 +200,11 @@ rustls-native-certs = { version = "0.8", optional = true }
 
 # QR code rendering for terminal pairing
 qrcode = "0.14"
+
+# AWS Bedrock (native InvokeModel API for embeddings, opt-in via --features bedrock)
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+aws-smithy-types = { version = "1", optional = true }
 
 # Audio capture for voice wake word detection (headless mode only)
 cpal = { version = "0.15", optional = true }
@@ -212,7 +230,6 @@ windows-sys = { version = "0.52", features = [
 [dev-dependencies]
 tokio-test = "0.4"
 pretty_assertions = "1"
-tempfile = "3"
 criterion = "0.5"
 insta = { version = "1", features = ["json", "yaml"] }
 
@@ -220,32 +237,44 @@ insta = { version = "1", features = ["json", "yaml"] }
 serde_json = "1"
 
 [features]
-# Default: lightweight build — core agent + databases + HTML/doc tools.
+# Default: lightweight build — core agent + databases + gateway + HTML/doc tools.
 # Use --features full for everything. See docs/BUILD_PROFILES.md
 default = ["light"]
-# Lightweight build — no web gateway, no tunnel, no Docker, no voice.
+# Lightweight build — includes the local gateway; no tunnel, no Docker, no voice,
+# no local browser, no nostr. Saves ~65 MB of binary size vs full.
 light = [
     "postgres",
     "libsql",
     "html-to-markdown",
     "document-extraction",
+    "timezones",
 ]
 # Desktop embedding (Tauri/Scrappy) — minimal footprint
-desktop = ["libsql", "html-to-markdown", "document-extraction", "repl"]
+desktop = ["libsql", "html-to-markdown", "document-extraction", "repl", "timezones"]
 # Individual runtime modules (can be combined with light)
 web-gateway = []
+acp = []
 repl = []
 tunnel = []
 docker-sandbox = []
+browser = ["dep:chromiumoxide"]
+nostr = ["dep:nostr-sdk"]
+# Core scheduling/workspace APIs always use chrono-tz; keep this as a
+# compatibility feature for existing build profiles and docs.
+timezones = []
 # Everything — full-featured agent with all capabilities
 full = [
     "light",
+    "acp",
     "web-gateway",
     "repl",
     "tunnel",
     "docker-sandbox",
+    "browser",
+    "nostr",
 ]
 postgres = [
+    "thinclaw-types/postgres",
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
     "dep:tokio-postgres-rustls",
@@ -256,7 +285,7 @@ postgres = [
     "dep:pgvector",
     "rust_decimal/db-tokio-postgres",
 ]
-libsql = ["dep:libsql"]
+libsql = ["thinclaw-types/libsql", "dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 # Document text extraction — PDF (pdf-extract), DOCX/PPTX/XLSX (zip crate)
@@ -268,10 +297,17 @@ bundled-wasm = []
 # Voice wake word detection — adds cpal for audio capture.
 # Only enable for headless/remote mode; in desktop mode Scrappy owns the mic.
 voice = ["dep:cpal"]
+# AWS Bedrock embeddings — adds aws-config + aws-sdk-bedrockruntime.
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 
 [[test]]
 name = "html_to_markdown"
 required-features = ["html-to-markdown"]
+
+[[bin]]
+name = "thinclaw-acp"
+path = "src/bin/thinclaw-acp.rs"
+required-features = ["acp"]
 
 [[bench]]
 name = "safety_sanitize"
@@ -285,6 +321,7 @@ harness = false
 [profile.dist]
 inherits = "release"
 lto = "thin"
+strip = "symbols"
 
 # Config for 'dist'
 [workspace.metadata.dist]
@@ -298,6 +335,10 @@ ci = "github"
 installers = ["shell", "powershell", "npm", "msi"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Production release artifacts include the full non-desktop/headless runtime
+# used by Pi OS Lite native installs: gateway, channels, tunnels, Docker
+# sandbox/browser fallback, ACP, Nostr, libSQL, and Postgres.
+features = ["full"]
 # The archive format to use for windows builds (defaults .zip)
 windows-archive = ".tar.gz"
 # The archive format to use for non-windows builds (defaults .tar.xz)
@@ -327,6 +368,11 @@ too_many_arguments    = "allow"  # Builder/config functions legitimately need ma
 should_implement_trait = "allow"  # from_str() helpers aren't always FromStr
 module_name_repetitions = "allow"  # e.g. WorkspaceStorage in workspace module
 
+# Panic prevention — unwrap() in production code is a crash waiting to happen.
+# Use expect("reason") for invariants, or propagate errors with ? / unwrap_or.
+# Test code can opt out: #[allow(clippy::unwrap_used)]
+unwrap_used = "warn"
+
 # Documentation nits — allow (don't block PRs on doc formatting):
 doc_overindented_list_items = "allow"
 doc_lazy_continuation      = "allow"
@@ -335,3 +381,9 @@ doc_lazy_continuation      = "allow"
 # Treat unused imports as warnings (default), not errors.
 # CI will still catch them via `-D warnings`.
 unused_imports = "warn"
+
+# Patch libsql to handle sqlite3_config SQLITE_MISUSE gracefully.
+# sqlx-sqlite (used by Scrappy) calls sqlite3_config() first; the stock libsql
+# asserts on the duplicate call. Our patch checks sqlite3_threadsafe() instead.
+[patch.crates-io]
+libsql = { path = "patches/libsql-0.6.0" }

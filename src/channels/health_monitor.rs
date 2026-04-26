@@ -43,8 +43,8 @@ struct ChannelState {
     consecutive_failures: u32,
     /// Number of restart attempts so far.
     restart_attempts: u32,
-    /// Whether the channel is in cooldown after a restart.
-    in_cooldown: bool,
+    /// Next instant when the channel is eligible for health checks again.
+    cooldown_until: Option<std::time::Instant>,
 }
 
 /// Monitors channel health and restarts failed channels.
@@ -95,11 +95,16 @@ impl ChannelHealthMonitor {
                 for name in &channel_names {
                     let state = states_lock.entry(name.clone()).or_default();
 
-                    // Skip channels in cooldown
-                    if state.in_cooldown {
-                        state.in_cooldown = false;
-                        tracing::debug!(channel = %name, "Channel in cooldown, skipping health check");
-                        continue;
+                    // Skip channels in cooldown.
+                    if let Some(until) = state.cooldown_until {
+                        if std::time::Instant::now() < until {
+                            tracing::debug!(
+                                channel = %name,
+                                "Channel in cooldown, skipping health check"
+                            );
+                            continue;
+                        }
+                        state.cooldown_until = None;
                     }
 
                     if let Some(result) = results.get(name) {
@@ -117,22 +122,48 @@ impl ChannelHealthMonitor {
                             }
                             Err(e) => {
                                 state.consecutive_failures += 1;
+                                let consecutive_failures = state.consecutive_failures;
+                                let restart_attempts = state.restart_attempts;
                                 tracing::warn!(
                                     channel = %name,
                                     error = %e,
-                                    consecutive = state.consecutive_failures,
-                                    restarts = state.restart_attempts,
+                                    consecutive = consecutive_failures,
+                                    restarts = restart_attempts,
                                     max_restarts = config.max_restart_attempts,
                                     "Channel health check failed"
                                 );
 
+                                let mut restart_threshold = 2;
+                                if name == "telegram" {
+                                    drop(states_lock);
+                                    if let Some(diagnostics) =
+                                        manager.channel_diagnostics(name).await
+                                    {
+                                        let transport_mode = diagnostics
+                                            .get("transport_mode")
+                                            .and_then(|value| value.as_str());
+                                        let transport_override = diagnostics
+                                            .get("transport_override")
+                                            .and_then(|value| value.as_str());
+                                        if transport_mode == Some("webhook")
+                                            && transport_override == Some("polling")
+                                        {
+                                            restart_threshold = 1;
+                                        }
+                                    }
+                                    states_lock = states.write().await;
+                                }
+
+                                let state = states_lock.entry(name.clone()).or_default();
+
                                 // Auto-restart if enabled and within limits
                                 if config.auto_restart
                                     && state.restart_attempts < config.max_restart_attempts
-                                    && state.consecutive_failures >= 2
+                                    && state.consecutive_failures >= restart_threshold
                                 {
                                     state.restart_attempts += 1;
-                                    state.in_cooldown = true;
+                                    state.cooldown_until =
+                                        Some(std::time::Instant::now() + config.restart_cooldown);
 
                                     tracing::info!(
                                         channel = %name,
@@ -168,9 +199,8 @@ impl ChannelHealthMonitor {
                                     }
 
                                     // Re-enter the loop — states_lock was dropped.
-                                    // Skip remaining channels this cycle; next tick
-                                    // will process them.
-                                    break;
+                                    states_lock = states.write().await;
+                                    continue;
                                 } else if state.restart_attempts >= config.max_restart_attempts {
                                     tracing::error!(
                                         channel = %name,
@@ -243,7 +273,7 @@ mod tests {
         let state = ChannelState::default();
         assert_eq!(state.consecutive_failures, 0);
         assert_eq!(state.restart_attempts, 0);
-        assert!(!state.in_cooldown);
+        assert!(state.cooldown_until.is_none());
     }
 
     #[tokio::test]

@@ -174,7 +174,12 @@ pub async fn get_history(
             .iter()
             .map(|t| TurnInfo {
                 turn_number: t.turn_number,
-                user_input: t.user_input.clone(),
+                user_input: if t.hide_user_input_from_ui {
+                    String::new()
+                } else {
+                    t.user_input.clone()
+                },
+                hide_user_input: t.hide_user_input_from_ui,
                 response: t.response.clone(),
                 state: format!("{:?}", t.state),
                 started_at: t.started_at.to_rfc3339(),
@@ -234,8 +239,8 @@ pub async fn create_thread(
     user_id: &str,
 ) -> ApiResult<ThreadInfo> {
     let session = session_manager.get_or_create_session(user_id).await;
-    let mut sess = session.lock().await;
-    let thread = sess.create_thread();
+    let session_id = session.lock().await.id;
+    let thread = crate::agent::session::Thread::new(session_id);
     let thread_id = thread.id;
     let info = ThreadInfo {
         id: thread.id,
@@ -249,40 +254,54 @@ pub async fn create_thread(
 
     // Persist to DB
     if let Some(store) = store {
-        let store = Arc::clone(store);
-        let user_id = user_id.to_string();
-        tokio::spawn(async move {
-            if let Err(e) = store
-                .ensure_conversation(thread_id, "tauri", &user_id, None)
-                .await
-            {
-                tracing::warn!("Failed to persist new thread: {}", e);
-            }
-            let stable_external_conversation_key =
-                format!("tauri://direct/{user_id}/actor/{user_id}/thread/{thread_id}");
-            if let Err(e) = store
-                .update_conversation_identity(
-                    thread_id,
-                    Some(&user_id),
-                    Some(scope_id_from_key(&stable_external_conversation_key)),
-                    ConversationKind::Direct,
-                    Some(&stable_external_conversation_key),
-                )
-                .await
-            {
-                tracing::warn!("Failed to set thread identity metadata: {}", e);
-            }
-            let metadata_val = serde_json::json!("thread");
-            if let Err(e) = store
-                .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
-                .await
-            {
-                tracing::warn!("Failed to set thread_type metadata: {}", e);
-            }
-        });
+        persist_direct_side_thread(store.as_ref(), thread_id, "tauri", user_id, user_id)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
 
+    let mut sess = session.lock().await;
+    sess.insert_thread(thread);
+
     Ok(info)
+}
+
+async fn persist_direct_side_thread(
+    store: &dyn Database,
+    thread_id: Uuid,
+    channel: &str,
+    principal_id: &str,
+    actor_id: &str,
+) -> Result<(), crate::error::DatabaseError> {
+    store
+        .ensure_conversation(thread_id, channel, principal_id, None)
+        .await?;
+
+    let stable_external_conversation_key =
+        format!("{channel}://direct/{principal_id}/actor/{actor_id}/thread/{thread_id}");
+    store
+        .update_conversation_identity(
+            thread_id,
+            Some(principal_id),
+            Some(actor_id),
+            Some(scope_id_from_key(&format!("principal:{principal_id}"))),
+            ConversationKind::Direct,
+            Some(&stable_external_conversation_key),
+        )
+        .await?;
+
+    for (key, value) in [
+        ("thread_type", serde_json::json!("thread")),
+        ("direct_thread_role", serde_json::json!("side")),
+        ("origin_channel", serde_json::json!(channel)),
+        ("last_active_channel", serde_json::json!(channel)),
+        ("seen_channels", serde_json::json!([channel])),
+    ] {
+        store
+            .update_conversation_metadata_field(thread_id, key, &value)
+            .await?;
+    }
+
+    Ok(())
 }
 
 /// Delete a thread/session.

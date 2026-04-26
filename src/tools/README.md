@@ -44,8 +44,15 @@ Typical workflow:
 MCP servers are a different path.
 
 - They are not installed with `thinclaw tool install`.
-- They are managed with `thinclaw mcp ...`.
+- They are managed with `thinclaw mcp ...`, especially:
+- `thinclaw mcp server ...` for server lifecycle and auth
+- `thinclaw mcp resource ...` for live resource inspection
+- `thinclaw mcp prompt ...` for prompt browsing and retrieval
+- `thinclaw mcp root ...` for roots grants
+- `thinclaw mcp log ...` for MCP logging level control
 - They are operator-trusted external processes or remote services, not sandboxed guest code.
+
+ThinClaw's MCP client now supports live approval flows for server-initiated `sampling/createMessage` and `elicitation/create` requests across the CLI/runtime/WebUI surfaces, and long-lived clients reload persisted roots grants when answering `roots/list`.
 
 Use MCP when ecosystem leverage is more important than the stronger isolation ThinClaw provides for WASM tools.
 

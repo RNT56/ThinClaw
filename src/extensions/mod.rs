@@ -21,15 +21,16 @@ pub mod discovery;
 pub mod ext_health_monitor;
 pub mod lifecycle_hooks;
 pub mod manager;
+pub mod manifest;
 pub mod manifest_validator;
-pub mod plugin_interfaces;
-pub mod plugin_manifest;
-pub mod plugin_routes;
+pub mod native;
 pub mod registry;
 pub mod signing;
 
 pub use discovery::OnlineDiscovery;
 pub use manager::ExtensionManager;
+pub use manifest::{PluginManifest, validate_plugin_manifest};
+pub use native::NativePluginRuntime;
 pub use registry::ExtensionRegistry;
 
 use serde::{Deserialize, Serialize};
@@ -157,6 +158,10 @@ pub struct InstallResult {
 pub struct AuthResult {
     pub name: String,
     pub kind: ExtensionKind,
+    /// Auth mode for the current flow (`oauth`, `manual_token`, `secrets`, `none`).
+    pub auth_mode: String,
+    /// Detailed auth status (`authenticated`, `awaiting_authorization`, etc.).
+    pub auth_status: String,
     /// OAuth URL to open (for OAuth flows).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_url: Option<String>,
@@ -169,6 +174,12 @@ pub struct AuthResult {
     /// URL for manual token setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup_url: Option<String>,
+    /// Shared auth provider name (for shared credentials like Google).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_auth_provider: Option<String>,
+    /// Missing OAuth scopes, if the stored credential needs reauth.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_scopes: Vec<String>,
     /// Whether the tool is waiting for a token from the user.
     #[serde(default)]
     pub awaiting_token: bool,
@@ -201,6 +212,8 @@ pub struct InstalledExtension {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     pub authenticated: bool,
+    pub auth_mode: String,
+    pub auth_status: String,
     pub active: bool,
     /// Tool names if active.
     #[serde(default)]
@@ -208,6 +221,10 @@ pub struct InstalledExtension {
     /// Whether this extension has a setup schema (required_secrets) that can be configured.
     #[serde(default)]
     pub needs_setup: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_auth_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_scopes: Vec<String>,
     /// Whether this extension is installed locally (false = available in registry but not installed).
     #[serde(default = "default_true")]
     pub installed: bool,

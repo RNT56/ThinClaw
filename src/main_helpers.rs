@@ -4,6 +4,7 @@
 //! and agent startup orchestration.
 
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -13,14 +14,16 @@ use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
 use thinclaw::channels::wasm::{
-    RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
+    RegisteredWebhookAuth, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
     WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
 };
 use thinclaw::config::Config;
 use thinclaw::pairing::PairingStore;
+#[cfg(all(feature = "docker-sandbox", target_os = "macos"))]
+use thinclaw::secrets::CreateSecretParams;
 use thinclaw::secrets::SecretsStore;
 
-const STARTUP_SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
+const STARTUP_SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Minimal terminal spinner shown during quiet interactive startup.
 pub(crate) struct QuietStartupSpinner {
@@ -39,10 +42,10 @@ impl QuietStartupSpinner {
 
             while running_for_thread.load(Ordering::Relaxed) {
                 let frame = STARTUP_SPINNER_FRAMES[frame_idx % STARTUP_SPINNER_FRAMES.len()];
-                let _ = write!(stdout, "\r\x1b[2K  Starting ThinClaw... {frame}");
+                let _ = write!(stdout, "\r\x1b[2K  {frame} Starting ThinClaw...");
                 let _ = stdout.flush();
                 frame_idx += 1;
-                std::thread::sleep(Duration::from_millis(120));
+                std::thread::sleep(Duration::from_millis(80));
             }
 
             let _ = write!(stdout, "\r\x1b[2K");
@@ -105,7 +108,7 @@ pub(crate) async fn run_memory_command(
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let embeddings = config.embeddings.create_provider();
+    let embeddings = config.embeddings.create_provider().await;
 
     // Warn if libSQL backend is used with non-1536 embedding dimension.
     if config.database.backend == thinclaw::config::DatabaseBackend::LibSql
@@ -220,6 +223,75 @@ pub(crate) async fn run_codex_bridge(
         .map_err(|e| anyhow::anyhow!("Codex bridge failed: {}", e))
 }
 
+#[cfg(feature = "docker-sandbox")]
+pub(crate) async fn resolve_container_provider_api_key(
+    user_id: &str,
+    env_key: &str,
+    provider_secret_name: &str,
+    provider_slug: &str,
+    legacy_keychain_account: &str,
+    secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
+) -> Option<String> {
+    if let Ok(value) = std::env::var(env_key)
+        && !value.trim().is_empty()
+    {
+        return Some(value);
+    }
+
+    if let Some(store) = secrets_store
+        && let Ok(secret) = store
+            .get_for_injection(
+                user_id,
+                provider_secret_name,
+                thinclaw::secrets::SecretAccessContext::new(
+                    "main_helpers",
+                    "provider_credential_resolution",
+                ),
+            )
+            .await
+    {
+        let value = secret.expose().trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = provider_slug;
+
+    if let Some(value) = thinclaw::platform::secure_store::get_api_key(legacy_keychain_account)
+        .await
+        .filter(|value| !value.trim().is_empty())
+    {
+        #[cfg(target_os = "macos")]
+        if let Some(store) = secrets_store {
+            let params = CreateSecretParams::new(provider_secret_name, value.clone())
+                .with_provider(provider_slug.to_string());
+            match store.create(user_id, params).await {
+                Ok(_) => {
+                    tracing::info!(
+                        legacy_keychain_account,
+                        provider_secret_name,
+                        "Migrated legacy macOS sandbox API key into the encrypted secrets store"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        legacy_keychain_account,
+                        provider_secret_name,
+                        error = %error,
+                        "Failed to migrate legacy macOS sandbox API key into the encrypted secrets store"
+                    );
+                }
+            }
+        }
+
+        return Some(value);
+    }
+
+    None
+}
+
 /// Start managed tunnel if configured and no static URL is already set.
 #[cfg(feature = "tunnel")]
 pub(crate) async fn start_tunnel(
@@ -331,17 +403,29 @@ pub(crate) async fn setup_wasm_channels(
     let wasm_router = Arc::new(WasmChannelRouter::new());
     let mut channels: Vec<(String, Box<dyn thinclaw::channels::Channel>)> = Vec::new();
     let mut channel_names: Vec<String> = Vec::new();
+    let host_config = thinclaw::channels::wasm::WasmChannelHostConfig::from_config(config);
 
     for loaded in results.loaded {
         let channel_name = loaded.name().to_string();
         channel_names.push(channel_name.clone());
         tracing::info!("Loaded WASM channel: {}", channel_name);
 
-        let secret_name = loaded.webhook_secret_name();
+        let signature_secret_name = loaded.webhook_secret_name();
+        let verify_token_secret_name = loaded.webhook_verify_token_secret_name();
+        let secret_header = loaded.webhook_secret_header().map(str::to_string);
+        let secret_validation = loaded.webhook_secret_validation();
+        let verify_token_param = loaded.webhook_verify_token_param().map(str::to_string);
 
-        let webhook_secret = if let Some(secrets) = secrets_store {
+        let signature_secret = if let Some(secrets) = secrets_store {
             secrets
-                .get_decrypted("default", &secret_name)
+                .get_for_injection(
+                    "default",
+                    &signature_secret_name,
+                    thinclaw::secrets::SecretAccessContext::new(
+                        "main_helpers",
+                        "webhook_signature_validation",
+                    ),
+                )
                 .await
                 .ok()
                 .map(|s| s.expose().to_string())
@@ -349,90 +433,63 @@ pub(crate) async fn setup_wasm_channels(
             None
         };
 
-        let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+        let verify_token_secret = if let Some(secret_name) = verify_token_secret_name.as_ref() {
+            if signature_secret_name == *secret_name {
+                signature_secret.clone()
+            } else if let Some(secrets) = secrets_store {
+                secrets
+                    .get_for_injection(
+                        "default",
+                        secret_name,
+                        thinclaw::secrets::SecretAccessContext::new(
+                            "main_helpers",
+                            "webhook_verify_token",
+                        ),
+                    )
+                    .await
+                    .ok()
+                    .map(|s| s.expose().to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
-        let webhook_path = format!("/webhook/{}", channel_name);
-        let endpoints = vec![RegisteredEndpoint {
-            channel_name: channel_name.clone(),
-            path: webhook_path,
-            methods: vec!["POST".to_string()],
-            require_secret: webhook_secret.is_some(),
-        }];
+        let webhook_auth = RegisteredWebhookAuth {
+            secret_header: secret_header.clone(),
+            secret_validation,
+            signature_secret: signature_secret.clone(),
+            verify_token_param,
+            verify_token_secret,
+        };
 
         let channel_arc = Arc::new(loaded.channel);
 
-        {
-            let mut config_updates = std::collections::HashMap::new();
-
-            if let Some(ref tunnel_url) = config.tunnel.public_url {
-                config_updates.insert(
-                    "tunnel_url".to_string(),
-                    serde_json::Value::String(tunnel_url.clone()),
-                );
-            }
-
-            if let Some(ref secret) = webhook_secret {
-                config_updates.insert(
-                    "webhook_secret".to_string(),
-                    serde_json::Value::String(secret.clone()),
-                );
-            }
-
-            // Inject owner_id and stream_mode for Telegram so the bot only responds to the bound user.
-            if channel_name == "telegram" {
-                if let Some(owner_id) = config.channels.telegram_owner_id {
-                    config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
-                }
-
-                let stream_mode = std::env::var("TELEGRAM_STREAM_MODE")
-                    .ok()
-                    .or(config.channels.telegram_stream_mode.clone())
-                    .unwrap_or_default();
-
-                if !stream_mode.is_empty() {
-                    config_updates
-                        .insert("stream_mode".to_string(), serde_json::json!(stream_mode));
-                }
-            } else if channel_name == "discord" {
-                let stream_mode = std::env::var("DISCORD_STREAM_MODE")
-                    .ok()
-                    .or(config.channels.discord_stream_mode.clone())
-                    .unwrap_or_default();
-
-                if !stream_mode.is_empty() {
-                    config_updates
-                        .insert("stream_mode".to_string(), serde_json::json!(stream_mode));
-                }
-            }
-
-            if !config_updates.is_empty() {
-                channel_arc.update_config(config_updates).await;
-                tracing::info!(
-                    channel = %channel_name,
-                    has_tunnel = config.tunnel.public_url.is_some(),
-                    has_webhook_secret = webhook_secret.is_some(),
-                    "Injected runtime config into channel"
-                );
-            }
+        let runtime_update_count = thinclaw::channels::wasm::apply_channel_host_config(
+            &channel_arc,
+            &channel_name,
+            &host_config,
+            signature_secret.as_deref(),
+        )
+        .await;
+        if runtime_update_count > 0 {
+            tracing::info!(
+                channel = %channel_name,
+                runtime_updates = runtime_update_count,
+                "Injected runtime config into channel"
+            );
         }
 
-        tracing::info!(
-            channel = %channel_name,
-            has_webhook_secret = webhook_secret.is_some(),
-            secret_header = ?secret_header,
-            "Registering channel with router"
-        );
-
-        wasm_router
-            .register(
-                Arc::clone(&channel_arc),
-                endpoints,
-                webhook_secret.clone(),
-                secret_header,
-            )
-            .await;
         if let Some(secrets) = secrets_store {
-            match inject_channel_credentials(&channel_arc, secrets.as_ref(), &channel_name).await {
+            match thinclaw::channels::wasm::inject_channel_credentials_from_secrets(
+                &channel_arc,
+                secrets.as_ref(),
+                &channel_name,
+                "default",
+            )
+            .await
+            {
                 Ok(count) => {
                     if count > 0 {
                         tracing::info!(
@@ -451,6 +508,30 @@ pub(crate) async fn setup_wasm_channels(
                 }
             }
         }
+
+        if let Err(error) = channel_arc.prime_on_start_config().await {
+            tracing::warn!(
+                channel = %channel_name,
+                error = %error,
+                "Failed to prime channel on_start config before router registration"
+            );
+        }
+
+        tracing::info!(
+            channel = %channel_name,
+            has_signature_secret = webhook_auth.signature_secret.is_some(),
+            has_verify_token_secret = webhook_auth.verify_token_secret.is_some(),
+            secret_header = ?secret_header,
+            "Registering channel with router"
+        );
+
+        wasm_router
+            .register(
+                Arc::clone(&channel_arc),
+                channel_arc.endpoints().await,
+                webhook_auth,
+            )
+            .await;
 
         channels.push((channel_name, Box::new(SharedWasmChannel::new(channel_arc))));
     }
@@ -513,75 +594,10 @@ mod tests {
 }
 
 /// Check if onboarding is needed and return the reason.
-#[cfg(any(feature = "postgres", feature = "libsql"))]
-pub(crate) fn check_onboard_needed() -> Option<&'static str> {
-    let has_db = std::env::var("DATABASE_URL").is_ok()
-        || std::env::var("LIBSQL_PATH").is_ok()
-        || thinclaw::config::default_libsql_path().exists();
-
-    if !has_db {
-        return Some("Database not configured");
-    }
-
-    if std::env::var("ONBOARD_COMPLETED")
-        .map(|v| v == "true")
-        .unwrap_or(false)
-    {
-        return None;
-    }
-
-    // No explicit completion marker — treat as first run
-    Some("First run")
-}
-
-/// Inject credentials for a channel based on naming convention.
 ///
-/// Looks for secrets matching the pattern `{channel_name}_*` and injects them
-/// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
-pub(crate) async fn inject_channel_credentials(
-    channel: &Arc<thinclaw::channels::wasm::WasmChannel>,
-    secrets: &dyn SecretsStore,
-    channel_name: &str,
-) -> anyhow::Result<usize> {
-    let all_secrets = secrets
-        .list("default")
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
-
-    let prefix = format!("{}_", channel_name);
-    let mut count = 0;
-
-    for secret_meta in all_secrets {
-        if !secret_meta.name.starts_with(&prefix) {
-            continue;
-        }
-
-        let decrypted = match secrets.get_decrypted("default", &secret_meta.name).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(
-                    secret = %secret_meta.name,
-                    error = %e,
-                    "Failed to decrypt secret for channel credential injection"
-                );
-                continue;
-            }
-        };
-
-        let placeholder = secret_meta.name.to_uppercase();
-
-        tracing::debug!(
-            channel = %channel_name,
-            secret = %secret_meta.name,
-            placeholder = %placeholder,
-            "Injecting credential"
-        );
-
-        channel
-            .set_credential(&placeholder, decrypted.expose().to_string())
-            .await;
-        count += 1;
-    }
-
-    Ok(count)
+/// Delegates to the canonical implementation in [`thinclaw::setup`] so that
+/// both the binary entry point and the library crate share the same logic.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn check_onboard_needed(toml_path: Option<&Path>, no_db: bool) -> Option<String> {
+    thinclaw::setup::check_onboard_needed(toml_path, no_db)
 }

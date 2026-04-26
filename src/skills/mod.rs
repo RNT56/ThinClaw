@@ -18,20 +18,26 @@ pub mod attenuation;
 pub mod catalog;
 pub mod gating;
 pub mod github_source;
+pub mod lobe_source;
 pub mod parser;
 pub mod quarantine;
 pub mod registry;
 pub mod remote_source;
 pub mod selector;
+pub mod skills_sh_source;
 pub mod watcher;
 pub mod well_known_source;
 
 pub use attenuation::{AttenuationResult, attenuate_tools};
 pub use github_source::GitHubSkillSource;
+pub use lobe_source::LobeHubSkillSource;
 pub use quarantine::QuarantineManager;
 pub use registry::SkillRegistry;
-pub use remote_source::{RemoteSkill, RemoteSkillHub, RemoteSkillSource};
+pub use remote_source::{
+    RemoteSkill, RemoteSkillHub, RemoteSkillSource, SharedRemoteSkillHub, build_remote_skill_hub,
+};
 pub use selector::prefilter_skills;
+pub use skills_sh_source::SkillsShSource;
 pub use watcher::{SkillWatcher, SkillWatcherConfig};
 pub use well_known_source::WellKnownSkillSource;
 
@@ -100,6 +106,35 @@ pub enum SkillSource {
     User(PathBuf),
     /// Bundled with the application.
     Bundled(PathBuf),
+    /// External read-only directory merged into discovery.
+    External(PathBuf),
+}
+
+/// Provenance tier for ecosystem/display purposes.
+///
+/// This is intentionally separate from [`SkillTrust`], which remains the hard
+/// authority ceiling used by the safety model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSourceTier {
+    #[default]
+    Community,
+    Builtin,
+    Official,
+    Trusted,
+    Unvetted,
+}
+
+impl std::fmt::Display for SkillSourceTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Builtin => write!(f, "builtin"),
+            Self::Official => write!(f, "official"),
+            Self::Trusted => write!(f, "trusted"),
+            Self::Community => write!(f, "community"),
+            Self::Unvetted => write!(f, "unvetted"),
+        }
+    }
 }
 
 /// Activation criteria parsed from SKILL.md frontmatter `activation` section.
@@ -210,6 +245,21 @@ pub struct OpenClawMeta {
     /// Gating requirements that must be met for the skill to load.
     #[serde(default)]
     pub requires: GatingRequirements,
+    /// Skill provenance classification.
+    #[serde(default)]
+    pub provenance: Option<String>,
+    /// Lifecycle state for generated or learned skills.
+    #[serde(default)]
+    pub lifecycle_status: Option<String>,
+    /// Rolling outcome score for a learned skill.
+    #[serde(default)]
+    pub outcome_score: Option<f64>,
+    /// Number of successful reuse matches observed for this skill.
+    #[serde(default)]
+    pub reuse_count: Option<u32>,
+    /// Explanation for how/why the skill became active.
+    #[serde(default)]
+    pub activation_reason: Option<String>,
 }
 
 /// Requirements that must be satisfied for a skill to load.
@@ -237,6 +287,8 @@ pub struct LoadedSkill {
     pub trust: SkillTrust,
     /// Where this skill was loaded from.
     pub source: SkillSource,
+    /// Display/provenance tier. This must not be used for authority checks.
+    pub source_tier: SkillSourceTier,
     /// SHA-256 hash of the prompt content (computed at load time).
     pub content_hash: String,
     /// Pre-compiled regex patterns from activation criteria (compiled at load time).
@@ -490,6 +542,7 @@ metadata:
             prompt_content: "test prompt".to_string(),
             trust: SkillTrust::Trusted,
             source: SkillSource::User(PathBuf::from("/tmp/test")),
+            source_tier: SkillSourceTier::Trusted,
             content_hash: "sha256:000".to_string(),
             compiled_patterns: vec![],
             lowercased_keywords: vec![],

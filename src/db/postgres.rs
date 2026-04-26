@@ -12,7 +12,10 @@ use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use crate::agent::BrokenTool;
-use crate::agent::routine::{Routine, RoutineRun, RunStatus};
+use crate::agent::routine::{
+    Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
+    RoutineTriggerDecision, RunStatus,
+};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
@@ -29,8 +32,9 @@ use crate::experiments::{
 use crate::history::{
     ConversationMessage, ConversationSummary, JobEventRecord, LearningArtifactVersion,
     LearningCandidate, LearningCodeProposal, LearningEvaluation, LearningEvent,
-    LearningFeedbackRecord, LearningRollbackRecord, LlmCallRecord, SandboxJobRecord,
-    SandboxJobSummary, SessionSearchHit, SettingRow, Store,
+    LearningFeedbackRecord, LearningRollbackRecord, LlmCallRecord, OutcomeContract,
+    OutcomeContractQuery, OutcomeEvaluatorHealth, OutcomeObservation, OutcomePendingUser,
+    OutcomeSummaryStats, SandboxJobRecord, SandboxJobSummary, SessionSearchHit, SettingRow, Store,
 };
 use crate::identity::{
     ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, EndpointApprovalStatus,
@@ -193,6 +197,7 @@ impl ConversationStore for PgBackend {
     async fn update_conversation_identity(
         &self,
         id: Uuid,
+        principal_id: Option<&str>,
         actor_id: Option<&str>,
         conversation_scope_id: Option<Uuid>,
         conversation_kind: crate::history::ConversationKind,
@@ -201,6 +206,7 @@ impl ConversationStore for PgBackend {
         self.store
             .update_conversation_identity(
                 id,
+                principal_id,
                 actor_id,
                 conversation_scope_id,
                 conversation_kind,
@@ -353,6 +359,16 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn update_learning_candidate_proposal(
+        &self,
+        candidate_id: Uuid,
+        proposal: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .update_learning_candidate_proposal(candidate_id, proposal)
+            .await
+    }
+
     async fn insert_learning_artifact_version(
         &self,
         version: &LearningArtifactVersion,
@@ -451,6 +467,90 @@ impl ConversationStore for PgBackend {
             .await
     }
 
+    async fn insert_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store.insert_outcome_contract(contract).await
+    }
+
+    async fn get_outcome_contract(
+        &self,
+        user_id: &str,
+        contract_id: Uuid,
+    ) -> Result<Option<OutcomeContract>, DatabaseError> {
+        self.store.get_outcome_contract(user_id, contract_id).await
+    }
+
+    async fn list_outcome_contracts(
+        &self,
+        query: &OutcomeContractQuery,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.store.list_outcome_contracts(query).await
+    }
+
+    async fn claim_due_outcome_contracts(
+        &self,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.store.claim_due_outcome_contracts(limit, now).await
+    }
+
+    async fn claim_due_outcome_contracts_for_user(
+        &self,
+        user_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.store
+            .claim_due_outcome_contracts_for_user(Some(user_id), limit, now)
+            .await
+    }
+
+    async fn update_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<(), DatabaseError> {
+        self.store.update_outcome_contract(contract).await
+    }
+
+    async fn outcome_summary_stats(
+        &self,
+        user_id: &str,
+    ) -> Result<OutcomeSummaryStats, DatabaseError> {
+        self.store.outcome_summary_stats(user_id).await
+    }
+
+    async fn list_users_with_pending_outcome_work(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomePendingUser>, DatabaseError> {
+        self.store.list_users_with_pending_outcome_work(now).await
+    }
+
+    async fn outcome_evaluator_health(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<OutcomeEvaluatorHealth, DatabaseError> {
+        self.store.outcome_evaluator_health(user_id, now).await
+    }
+
+    async fn insert_outcome_observation(
+        &self,
+        observation: &OutcomeObservation,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store.insert_outcome_observation(observation).await
+    }
+
+    async fn list_outcome_observations(
+        &self,
+        contract_id: Uuid,
+    ) -> Result<Vec<OutcomeObservation>, DatabaseError> {
+        self.store.list_outcome_observations(contract_id).await
+    }
+
     async fn conversation_belongs_to_user(
         &self,
         conversation_id: Uuid,
@@ -498,6 +598,10 @@ impl JobStore for PgBackend {
         self.store.get_job(id).await
     }
 
+    async fn list_jobs_for_user(&self, user_id: &str) -> Result<Vec<JobContext>, DatabaseError> {
+        self.store.list_jobs_for_user(user_id).await
+    }
+
     async fn update_job_status(
         &self,
         id: Uuid,
@@ -507,6 +611,10 @@ impl JobStore for PgBackend {
         self.store
             .update_job_status(id, status, failure_reason)
             .await
+    }
+
+    async fn abandon_active_direct_jobs(&self, reason: &str) -> Result<u64, DatabaseError> {
+        self.store.abandon_active_direct_jobs(reason).await
     }
 
     async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError> {
@@ -679,6 +787,10 @@ impl RoutineStore for PgBackend {
         self.store.list_event_routines().await
     }
 
+    async fn get_routine_event_cache_version(&self) -> Result<i64, DatabaseError> {
+        self.store.get_routine_event_cache_version().await
+    }
+
     async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         self.store.list_due_cron_routines().await
     }
@@ -740,6 +852,10 @@ impl RoutineStore for PgBackend {
         self.store.count_running_routine_runs(routine_id).await
     }
 
+    async fn count_all_running_routine_runs(&self) -> Result<i64, DatabaseError> {
+        self.store.count_all_running_routine_runs().await
+    }
+
     async fn link_routine_run_to_job(
         &self,
         run_id: Uuid,
@@ -758,6 +874,173 @@ impl RoutineStore for PgBackend {
 
     async fn delete_all_routine_runs(&self) -> Result<u64, DatabaseError> {
         self.store.delete_all_routine_runs().await
+    }
+
+    async fn create_routine_event(
+        &self,
+        event: &RoutineEvent,
+    ) -> Result<RoutineEvent, DatabaseError> {
+        self.store.create_routine_event(event).await
+    }
+
+    async fn claim_routine_event(
+        &self,
+        id: Uuid,
+        worker_id: &str,
+        stale_before: DateTime<Utc>,
+    ) -> Result<Option<RoutineEvent>, DatabaseError> {
+        self.store
+            .claim_routine_event(id, worker_id, stale_before)
+            .await
+    }
+
+    async fn release_routine_event(
+        &self,
+        id: Uuid,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store.release_routine_event(id, diagnostics).await
+    }
+
+    async fn list_pending_routine_events(
+        &self,
+        stale_before: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<RoutineEvent>, DatabaseError> {
+        self.store
+            .list_pending_routine_events(stale_before, limit)
+            .await
+    }
+
+    async fn complete_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        matched_routines: u32,
+        fired_routines: u32,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .complete_routine_event(
+                id,
+                processed_at,
+                matched_routines,
+                fired_routines,
+                diagnostics,
+            )
+            .await
+    }
+
+    async fn fail_routine_event(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .fail_routine_event(id, processed_at, error_message)
+            .await
+    }
+
+    async fn list_routine_events_for_actor(
+        &self,
+        user_id: &str,
+        actor_id: &str,
+        limit: i64,
+    ) -> Result<Vec<RoutineEvent>, DatabaseError> {
+        self.store
+            .list_routine_events_for_actor(user_id, actor_id, limit)
+            .await
+    }
+
+    async fn upsert_routine_event_evaluation(
+        &self,
+        evaluation: &RoutineEventEvaluation,
+    ) -> Result<(), DatabaseError> {
+        self.store.upsert_routine_event_evaluation(evaluation).await
+    }
+
+    async fn list_routine_event_evaluations_for_event(
+        &self,
+        event_id: Uuid,
+    ) -> Result<Vec<RoutineEventEvaluation>, DatabaseError> {
+        self.store
+            .list_routine_event_evaluations_for_event(event_id)
+            .await
+    }
+
+    async fn list_routine_event_evaluations(
+        &self,
+        routine_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<RoutineEventEvaluation>, DatabaseError> {
+        self.store
+            .list_routine_event_evaluations(routine_id, limit)
+            .await
+    }
+
+    async fn routine_run_exists_for_trigger_key(
+        &self,
+        routine_id: Uuid,
+        trigger_key: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .routine_run_exists_for_trigger_key(routine_id, trigger_key)
+            .await
+    }
+
+    async fn enqueue_routine_trigger(&self, trigger: &RoutineTrigger) -> Result<(), DatabaseError> {
+        self.store.enqueue_routine_trigger(trigger).await
+    }
+
+    async fn claim_routine_triggers(
+        &self,
+        worker_id: &str,
+        stale_before: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<RoutineTrigger>, DatabaseError> {
+        self.store
+            .claim_routine_triggers(worker_id, stale_before, limit)
+            .await
+    }
+
+    async fn release_routine_trigger(
+        &self,
+        id: Uuid,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store.release_routine_trigger(id, diagnostics).await
+    }
+
+    async fn complete_routine_trigger(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        decision: RoutineTriggerDecision,
+        diagnostics: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .complete_routine_trigger(id, processed_at, decision, diagnostics)
+            .await
+    }
+
+    async fn fail_routine_trigger(
+        &self,
+        id: Uuid,
+        processed_at: DateTime<Utc>,
+        error_message: &str,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .fail_routine_trigger(id, processed_at, error_message)
+            .await
+    }
+
+    async fn list_routine_triggers(
+        &self,
+        routine_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<RoutineTrigger>, DatabaseError> {
+        self.store.list_routine_triggers(routine_id, limit).await
     }
 }
 
@@ -839,8 +1122,27 @@ impl ExperimentStore for PgBackend {
         self.store.get_experiment_campaign(id).await
     }
 
+    async fn get_experiment_campaign_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentCampaign>, DatabaseError> {
+        self.store
+            .get_experiment_campaign_for_owner(id, owner_user_id)
+            .await
+    }
+
     async fn list_experiment_campaigns(&self) -> Result<Vec<ExperimentCampaign>, DatabaseError> {
         self.store.list_experiment_campaigns().await
+    }
+
+    async fn list_experiment_campaigns_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentCampaign>, DatabaseError> {
+        self.store
+            .list_experiment_campaigns_for_owner(owner_user_id)
+            .await
     }
 
     async fn update_experiment_campaign(
@@ -861,11 +1163,31 @@ impl ExperimentStore for PgBackend {
         self.store.get_experiment_trial(id).await
     }
 
+    async fn get_experiment_trial_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentTrial>, DatabaseError> {
+        self.store
+            .get_experiment_trial_for_owner(id, owner_user_id)
+            .await
+    }
+
     async fn list_experiment_trials(
         &self,
         campaign_id: Uuid,
     ) -> Result<Vec<ExperimentTrial>, DatabaseError> {
         self.store.list_experiment_trials(campaign_id).await
+    }
+
+    async fn list_experiment_trials_for_owner(
+        &self,
+        campaign_id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentTrial>, DatabaseError> {
+        self.store
+            .list_experiment_trials_for_owner(campaign_id, owner_user_id)
+            .await
     }
 
     async fn update_experiment_trial(&self, trial: &ExperimentTrial) -> Result<(), DatabaseError> {
@@ -887,6 +1209,16 @@ impl ExperimentStore for PgBackend {
         trial_id: Uuid,
     ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError> {
         self.store.list_experiment_artifacts(trial_id).await
+    }
+
+    async fn list_experiment_artifacts_for_owner(
+        &self,
+        trial_id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError> {
+        self.store
+            .list_experiment_artifacts_for_owner(trial_id, owner_user_id)
+            .await
     }
 
     async fn create_experiment_target(
@@ -1714,6 +2046,7 @@ impl AgentRegistryStore for PgBackend {
                         trigger_keywords JSONB NOT NULL DEFAULT '[]',
                         allowed_tools JSONB,
                         allowed_skills JSONB,
+                        tool_profile TEXT,
                         is_default BOOLEAN NOT NULL DEFAULT FALSE,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -1723,6 +2056,17 @@ impl AgentRegistryStore for PgBackend {
                 .await
                 .map_err(|e| {
                     DatabaseError::Query(format!("Failed to ensure agent_workspaces table: {e}"))
+                })?;
+            client
+                .execute(
+                    "ALTER TABLE agent_workspaces ADD COLUMN IF NOT EXISTS tool_profile TEXT",
+                    &[],
+                )
+                .await
+                .map_err(|e| {
+                    DatabaseError::Query(format!(
+                        "Failed to ensure agent_workspaces.tool_profile column: {e}"
+                    ))
                 })?;
             TABLE_CREATED.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -1739,14 +2083,15 @@ impl AgentRegistryStore for PgBackend {
             .allowed_skills
             .as_ref()
             .map(|skills| serde_json::to_value(skills).unwrap_or(serde_json::Value::Null));
+        let tool_profile = ws.tool_profile.map(|profile| profile.as_str().to_string());
 
         client
             .execute(
                 "INSERT INTO agent_workspaces \
                  (id, agent_id, display_name, system_prompt, model, \
-                  bound_channels, trigger_keywords, allowed_tools, allowed_skills, \
+                  bound_channels, trigger_keywords, allowed_tools, allowed_skills, tool_profile, \
                   is_default, created_at, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
                 &[
                     &ws.id,
                     &ws.agent_id,
@@ -1757,6 +2102,7 @@ impl AgentRegistryStore for PgBackend {
                     &trigger_keywords,
                     &allowed_tools,
                     &allowed_skills,
+                    &tool_profile,
                     &ws.is_default,
                     &ws.created_at,
                     &ws.updated_at,
@@ -1782,7 +2128,7 @@ impl AgentRegistryStore for PgBackend {
         let row = client
             .query_opt(
                 "SELECT id, agent_id, display_name, system_prompt, model, \
-                 bound_channels, trigger_keywords, allowed_tools, allowed_skills, \
+                 bound_channels, trigger_keywords, allowed_tools, allowed_skills, tool_profile, \
                  is_default, created_at, updated_at \
                  FROM agent_workspaces WHERE agent_id = $1",
                 &[&agent_id],
@@ -1804,7 +2150,7 @@ impl AgentRegistryStore for PgBackend {
         let rows = client
             .query(
                 "SELECT id, agent_id, display_name, system_prompt, model, \
-                 bound_channels, trigger_keywords, allowed_tools, allowed_skills, \
+                 bound_channels, trigger_keywords, allowed_tools, allowed_skills, tool_profile, \
                  is_default, created_at, updated_at \
                  FROM agent_workspaces ORDER BY created_at ASC",
                 &[],
@@ -1854,14 +2200,15 @@ impl AgentRegistryStore for PgBackend {
             .allowed_skills
             .as_ref()
             .map(|skills| serde_json::to_value(skills).unwrap_or(serde_json::Value::Null));
+        let tool_profile = ws.tool_profile.map(|profile| profile.as_str().to_string());
 
         let affected = client
             .execute(
                 "UPDATE agent_workspaces SET \
                  display_name = $1, system_prompt = $2, model = $3, \
                  bound_channels = $4, trigger_keywords = $5, allowed_tools = $6, \
-                 allowed_skills = $7, is_default = $8, updated_at = NOW() \
-                 WHERE agent_id = $9",
+                 allowed_skills = $7, tool_profile = $8, is_default = $9, updated_at = NOW() \
+                 WHERE agent_id = $10",
                 &[
                     &ws.display_name,
                     &ws.system_prompt,
@@ -1870,6 +2217,7 @@ impl AgentRegistryStore for PgBackend {
                     &trigger_keywords,
                     &allowed_tools,
                     &allowed_skills,
+                    &tool_profile,
                     &ws.is_default,
                     &ws.agent_id,
                 ],
@@ -1894,6 +2242,7 @@ fn pg_row_to_agent_workspace(row: &tokio_postgres::Row) -> AgentWorkspaceRecord 
     let trigger_keywords: serde_json::Value = row.get("trigger_keywords");
     let allowed_tools: Option<serde_json::Value> = row.get("allowed_tools");
     let allowed_skills: Option<serde_json::Value> = row.get("allowed_skills");
+    let tool_profile: Option<String> = row.get("tool_profile");
 
     AgentWorkspaceRecord {
         id: row.get("id"),
@@ -1905,6 +2254,12 @@ fn pg_row_to_agent_workspace(row: &tokio_postgres::Row) -> AgentWorkspaceRecord 
         trigger_keywords: serde_json::from_value(trigger_keywords).unwrap_or_default(),
         allowed_tools: allowed_tools.and_then(|value| serde_json::from_value(value).ok()),
         allowed_skills: allowed_skills.and_then(|value| serde_json::from_value(value).ok()),
+        tool_profile: tool_profile.and_then(|value| match value.as_str() {
+            "standard" => Some(crate::tools::ToolProfile::Standard),
+            "restricted" => Some(crate::tools::ToolProfile::Restricted),
+            "explicit_only" => Some(crate::tools::ToolProfile::ExplicitOnly),
+            _ => None,
+        }),
         is_default: row.get("is_default"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),

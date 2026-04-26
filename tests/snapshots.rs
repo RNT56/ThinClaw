@@ -14,7 +14,8 @@ mod tests {
 
     #[test]
     fn test_settings_default_snapshot() {
-        let settings = thinclaw::settings::Settings::default();
+        let mut settings = thinclaw::settings::Settings::default();
+        settings.extensions.user_tools_dir = "[home]/.thinclaw/user-tools".to_string();
         assert_json_snapshot!("settings_default", settings);
     }
 

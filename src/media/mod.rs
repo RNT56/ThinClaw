@@ -17,7 +17,6 @@ pub mod cache;
 mod document;
 mod image;
 pub mod limits;
-pub mod media_cache_config;
 mod pdf;
 pub mod sticker;
 pub mod tts;

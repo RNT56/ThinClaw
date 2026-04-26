@@ -96,6 +96,17 @@ pub use crate::config::tunnel::{
     TunnelProviderConfig,
 };
 
+// ── Binary resolution ────────────────────────────────────────────
+
+/// Resolve the path to a tunnel CLI binary.
+///
+/// Delegates to [`crate::util::resolve_binary`] which checks `$PATH` first,
+/// then falls back to known macOS Homebrew paths for tunnel CLIs (cloudflared,
+/// ngrok, tailscale).
+pub fn resolve_binary(name: &str) -> String {
+    crate::util::resolve_binary(name)
+}
+
 // ── Factory ──────────────────────────────────────────────────────
 
 /// Create a tunnel from config. Returns `None` for provider "none" or empty.

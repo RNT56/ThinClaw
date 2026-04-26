@@ -34,9 +34,10 @@
       "scopes": [
         "https://www.googleapis.com/auth/calendar.events"
       ],
-      "use_pkce": false,
+      "use_pkce": true,
       "extra_params": {
         "access_type": "offline",
+        "include_granted_scopes": "true",
         "prompt": "consent"
       }
     },

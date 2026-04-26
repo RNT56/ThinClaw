@@ -13,6 +13,8 @@ let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 let pairingPollInterval = null;
+let mcpInteractionPollInterval = null;
+let lastMcpInteractionCount = 0;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 const SUBAGENT_EVENTS_CAP = 120;
@@ -20,6 +22,16 @@ const SUBAGENT_SESSION_STORAGE_KEY = 'thinclaw_subagent_sessions_v1';
 const SUBAGENT_SESSION_STORAGE_LIMIT = 96;
 let experimentsFeatureEnabled = false;
 let experimentsRefreshTimer = null;
+let autonomyFeatureAvailable = false;
+let currentSettingsSubtab = 'General';
+let settingsSearchQuery = '';
+const autonomyState = {
+  status: null,
+  rollouts: null,
+  checks: null,
+  evidence: null,
+  permissions: null,
+};
 const experimentsState = {
   projects: [],
   runners: [],
@@ -38,8 +50,18 @@ const experimentsState = {
   lastLeaseCampaignId: null,
 };
 let currentResearchSubtab = 'overview';
+let currentExtensionsSubtab = 'overview';
+const mcpBrowserState = {
+  servers: [],
+  selectedServer: '',
+  interactions: [],
+  resources: [],
+  resourceTemplates: [],
+  prompts: [],
+};
 
 const RESEARCH_SUBTABS = ['overview', 'opportunities', 'projects', 'runners', 'campaigns', 'gpu-clouds'];
+const EXTENSIONS_SUBTABS = ['overview', 'mcp', 'tools'];
 const PRESENTATION_SETTING_KEYS = new Set([
   'agent.cli_skin',
   'webchat_skin',
@@ -48,9 +70,79 @@ const PRESENTATION_SETTING_KEYS = new Set([
 ]);
 const SKINNED_TOOL_NAMES = ['shell', 'browser', 'memory', 'search_files', 'todo', 'subagent'];
 const WEBCHAT_BOOTSTRAP = readWebchatBootstrap();
-let currentResolvedSkin = WEBCHAT_BOOTSTRAP.resolvedSkin;
-let currentAgentName = WEBCHAT_BOOTSTRAP.agentName || 'thinclaw';
-const AVAILABLE_SKINS = Array.isArray(WEBCHAT_BOOTSTRAP.availableSkins) ? WEBCHAT_BOOTSTRAP.availableSkins : [];
+let currentPresentationBootstrap = WEBCHAT_BOOTSTRAP;
+let currentResolvedSkin = normalizeSkinMeta(WEBCHAT_BOOTSTRAP.resolvedSkin);
+let currentAgentName = WEBCHAT_BOOTSTRAP.agentName || 'Agent';
+let currentAvailableSkins = Array.isArray(WEBCHAT_BOOTSTRAP.availableSkins) ? WEBCHAT_BOOTSTRAP.availableSkins.slice() : [];
+let currentSkinCatalog = [];
+let shellMobileNavOpen = false;
+let configureModalFocusReturn = null;
+let mcpConnectionModalFocusReturn = null;
+
+const HASH_KEY_TAB = 'tab';
+const HASH_KEY_SETTINGS_SUBTAB = 'settingsSubtab';
+const HASH_KEY_SETTINGS_SEARCH = 'settingsSearch';
+const EXTENSIONS_PANEL_STORAGE_KEY = 'thinclaw_extensions_panel_state_v1';
+const PROVIDERS_UI_PREFS_STORAGE_KEY = 'thinclaw_providers_ui_prefs_v1';
+const PROVIDERS_UI_FILTER_SETTING_KEY = 'web.providers_filter';
+const PROVIDERS_UI_HIDDEN_SETTING_KEY = 'web.providers_hidden_slugs';
+
+const SHELL_SECTIONS = [
+  { id: 'chat', label: 'Chat', tabs: ['chat'], blurb: 'Active conversations and agent transcripts.' },
+  { id: 'workspace', label: 'Workspace', tabs: ['memory', 'jobs', 'routines', 'learning'], blurb: 'Memory, jobs, routines, and learning loops.' },
+  { id: 'studio', label: 'Studio', tabs: ['extensions', 'skills', 'research'], blurb: 'Extensions, skills, and research tooling.' },
+  { id: 'operations', label: 'Operations', tabs: ['providers', 'costs', 'logs', 'autonomy'], blurb: 'Runtime controls, costs, logs, and autonomy.' },
+  { id: 'settings', label: 'Settings', tabs: ['settings'], blurb: 'Presentation, agent, safety, and channel settings.' },
+];
+
+const SHELL_TAB_META = {
+  chat: { label: 'Chat' },
+  memory: { label: 'Memory' },
+  jobs: { label: 'Jobs' },
+  routines: { label: 'Routines' },
+  learning: { label: 'Learning' },
+  extensions: { label: 'Extensions' },
+  skills: { label: 'Skills' },
+  research: { label: 'Research', feature: 'research' },
+  providers: { label: 'Providers' },
+  costs: { label: 'Costs' },
+  logs: { label: 'Logs' },
+  autonomy: { label: 'Autonomy', feature: 'autonomy' },
+  settings: { label: 'Settings' },
+};
+
+function readJsonStorage(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : fallback;
+  } catch (_err) {
+    return fallback;
+  }
+}
+
+function writeJsonStorage(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (_err) {
+    // Ignore persistence failures and continue with in-memory state.
+  }
+}
+
+function normalizeProvidersUiPrefs(raw) {
+  const value = raw && typeof raw === 'object' ? raw : {};
+  const allowedFilters = new Set(['all', 'enabled', 'ready', 'attention', 'local', 'hidden']);
+  return {
+    filter: allowedFilters.has(value.filter) ? value.filter : 'all',
+    hiddenSlugs: Array.isArray(value.hiddenSlugs)
+      ? value.hiddenSlugs.map((slug) => String(slug || '').trim()).filter(Boolean)
+      : [],
+  };
+}
+
+let extensionsPanelState = readJsonStorage(EXTENSIONS_PANEL_STORAGE_KEY, {});
+let providersUiPrefs = normalizeProvidersUiPrefs(readJsonStorage(PROVIDERS_UI_PREFS_STORAGE_KEY, {}));
 
 function readWebchatBootstrap() {
   const el = document.getElementById('webchat-bootstrap');
@@ -60,10 +152,10 @@ function readWebchatBootstrap() {
     if (!parsed || typeof parsed !== 'object') return fallbackWebchatBootstrap();
     return {
       theme: parsed.theme || 'system',
-      agentName: parsed.agentName || 'thinclaw',
+      agentName: parsed.agentName || 'Agent',
       showBranding: parsed.showBranding !== false,
       availableSkins: Array.isArray(parsed.availableSkins) ? parsed.availableSkins : [],
-      resolvedSkin: parsed.resolvedSkin || fallbackWebchatBootstrap().resolvedSkin,
+      resolvedSkin: normalizeSkinMeta(parsed.resolvedSkin || fallbackWebchatBootstrap().resolvedSkin),
     };
   } catch (_err) {
     return fallbackWebchatBootstrap();
@@ -73,12 +165,15 @@ function readWebchatBootstrap() {
 function fallbackWebchatBootstrap() {
   return {
     theme: 'system',
-    agentName: 'thinclaw',
+    agentName: 'Agent',
     showBranding: true,
     availableSkins: [],
-    resolvedSkin: {
+    resolvedSkin: normalizeSkinMeta({
       name: 'cockpit',
+      source: 'cli',
       tagline: 'Humanist Cockpit for operators who like a calm command deck.',
+      logoArt: [],
+      heroArt: [],
       promptSymbol: '›',
       toolEmojis: {},
       chromeStyle: 'avionics',
@@ -86,17 +181,71 @@ function fallbackWebchatBootstrap() {
       messageShape: 'rounded',
       elevation: 'medium',
       cssVars: {},
-    },
+    }),
+  };
+}
+
+function normalizeSkinMeta(skin) {
+  const raw = skin && typeof skin === 'object' ? skin : {};
+  return {
+    name: raw.name || 'cockpit',
+    source: raw.source || 'cli',
+    tagline: raw.tagline || 'Humanist Cockpit for operators who like a calm command deck.',
+    logoArt: Array.isArray(raw.logoArt) ? raw.logoArt.slice() : [],
+    heroArt: Array.isArray(raw.heroArt) ? raw.heroArt.slice() : [],
+    promptSymbol: raw.promptSymbol || '›',
+    toolEmojis: raw.toolEmojis || {},
+    chromeStyle: raw.chromeStyle || 'avionics',
+    surfacePattern: raw.surfacePattern || 'grid',
+    messageShape: raw.messageShape || 'rounded',
+    elevation: raw.elevation || 'medium',
+    cssVars: raw.cssVars || {},
   };
 }
 
 function resolvedSkinMeta() {
-  return currentResolvedSkin || fallbackWebchatBootstrap().resolvedSkin;
+  return normalizeSkinMeta(currentResolvedSkin || fallbackWebchatBootstrap().resolvedSkin);
 }
 
-function currentToolEmoji(name) {
-  const toolEmojis = resolvedSkinMeta().toolEmojis || {};
-  return toolEmojis[name] || '';
+function ensureRuntimeThemeStyle() {
+  let style = document.getElementById('webchat-runtime-theme');
+  if (!style) {
+    style = document.createElement('style');
+    style.id = 'webchat-runtime-theme';
+    document.head.appendChild(style);
+  }
+  return style;
+}
+
+function applyPresentationPayload(presentation) {
+  if (!presentation || typeof presentation !== 'object') return;
+  const bootstrap = presentation.bootstrap || presentation;
+  currentPresentationBootstrap = bootstrap;
+  currentResolvedSkin = normalizeSkinMeta(bootstrap.resolvedSkin);
+  currentAgentName = bootstrap.agentName || currentAgentName || 'Agent';
+  currentAvailableSkins = Array.isArray(bootstrap.availableSkins) ? bootstrap.availableSkins.slice() : [];
+  currentSkinCatalog = Array.isArray(presentation.skinCatalog)
+    ? presentation.skinCatalog.map(normalizeSkinMeta)
+    : [];
+  if (typeof presentation.runtimeCss === 'string') {
+    ensureRuntimeThemeStyle().textContent = presentation.runtimeCss;
+  }
+  document.documentElement.setAttribute('data-webchat-theme', bootstrap.theme || 'system');
+  document.documentElement.setAttribute('data-show-branding', bootstrap.showBranding === false ? 'false' : 'true');
+  applySkinPresentation();
+  applyAgentPresentation();
+}
+
+function refreshPresentationState() {
+  return apiFetch('/api/webchat/presentation').then((presentation) => {
+    applyPresentationPayload(presentation);
+    if (currentTab === 'settings' && document.getElementById('settings-sections')) {
+      renderSettings();
+    }
+    renderShellNavigation();
+    updateResponsiveTableLabels();
+    return presentation;
+  });
 }
 
 function toolKindForName(name) {
@@ -104,23 +253,87 @@ function toolKindForName(name) {
 }
 
 function toolDisplayName(name) {
-  const label = String(name || 'tool');
-  const emoji = currentToolEmoji(label);
-  return emoji ? (emoji + ' ' + label) : label;
+  return String(name || 'tool');
+}
+
+function skinToolGlyphShape(toolName) {
+  switch (toolKindForName(toolName)) {
+    case 'shell':
+      return '<path d="M6 8l4 4-4 4"/><path d="M12 16h6"/>';
+    case 'browser':
+      return '<circle cx="12" cy="12" r="4"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2"/>';
+    case 'memory':
+      return '<path d="M7 6h10v12H7z"/><path d="M9 9h6M9 12h6M9 15h4"/>';
+    case 'search_files':
+      return '<path d="M8 6h6l3 3v9H8z"/><path d="M14 6v3h3"/><circle cx="10.5" cy="14.5" r="1.8"/><path d="m12 16 1.8 1.8"/>';
+    case 'todo':
+      return '<path d="M8 7h8M8 12h8M8 17h5"/><path d="m5 7 1 1 2-2"/><path d="m5 12 1 1 2-2"/>';
+    case 'subagent':
+      return '<path d="M12 4 18 7v5c0 3.5-2.4 6.1-6 8-3.6-1.9-6-4.5-6-8V7l6-3z"/><path d="M10 12h4M12 10v4"/>';
+    default:
+      return '<circle cx="12" cy="12" r="3.5"/><path d="M12 4v2M12 18v2M4 12h2M18 12h2"/>';
+  }
+}
+
+function skinToolGlyphFrame(chromeStyle) {
+  switch (chromeStyle) {
+    case 'observatory':
+      return '<circle class="skin-tool-glyph-frame" cx="12" cy="12" r="8.5"/><circle class="skin-tool-glyph-detail" cx="12" cy="12" r="10.5"/>';
+    case 'archive':
+      return '<path class="skin-tool-glyph-frame" d="M7 4.5h7l3 3V19.5H7z"/><path class="skin-tool-glyph-detail" d="M14 4.5v3h3"/>';
+    case 'marble':
+      return '<path class="skin-tool-glyph-frame" d="M8 4.5h8l2 4V18.5H6V8.5z"/><path class="skin-tool-glyph-detail" d="M9 7.5h6"/>';
+    case 'oracle':
+      return '<path class="skin-tool-glyph-frame" d="M12 4 19 12 12 20 5 12Z"/><path class="skin-tool-glyph-detail" d="M12 6.5 17.5 12 12 17.5 6.5 12Z"/>';
+    case 'aerial':
+      return '<rect class="skin-tool-glyph-frame" x="4.5" y="6" width="15" height="12" rx="6"/><path class="skin-tool-glyph-detail" d="M8 9.5h8"/>';
+    case 'avionics':
+    default:
+      return '<rect class="skin-tool-glyph-frame" x="4.5" y="4.5" width="15" height="15" rx="3"/><path class="skin-tool-glyph-detail" d="M8 4.5v3M16 4.5v3M4.5 8h3M16.5 8h3"/>';
+  }
+}
+
+function renderSkinToolGlyph(toolName, options) {
+  const opts = options || {};
+  const chromeStyle = opts.chromeStyle || resolvedSkinMeta().chromeStyle || 'avionics';
+  const extraClass = opts.className ? ' ' + opts.className : '';
+  return '<svg class="skin-tool-glyph skin-tool-glyph--' + escapeHtml(chromeStyle) + extraClass + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    + skinToolGlyphFrame(chromeStyle)
+    + '<g class="skin-tool-glyph-symbol">' + skinToolGlyphShape(toolName) + '</g>'
+    + '</svg>';
 }
 
 function toolIconMarkup(name, state) {
-  const emoji = currentToolEmoji(name);
-  if (emoji) {
-    return '<span class="activity-tool-emoji">' + escapeHtml(emoji) + '</span>';
-  }
   if (state === 'success') {
     return '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><polyline points="20 6 9 17 4 12"/></svg>';
   }
   if (state === 'fail') {
     return '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
   }
-  return '<div class="spinner"></div>';
+  if (state === 'running') {
+    return '<div class="spinner"></div>';
+  }
+  return renderSkinToolGlyph(name);
+}
+
+function renderPresentationToolChips(skin, options) {
+  const opts = options || {};
+  const chromeStyle = skin?.chromeStyle || resolvedSkinMeta().chromeStyle || 'avionics';
+  const tools = Object.keys(skin?.toolEmojis || {})
+    .filter((toolName) => SKINNED_TOOL_NAMES.includes(toolName));
+  const orderedTools = (tools.length ? tools : SKINNED_TOOL_NAMES).slice(0, opts.limit || 6);
+  if (!orderedTools.length) {
+    return '<span class="presentation-tool-chip presentation-tool-chip--empty">No custom tool accents yet</span>';
+  }
+  return orderedTools.map((toolName) =>
+    '<span class="presentation-tool-chip">'
+      + renderSkinToolGlyph(toolName, {
+        chromeStyle: chromeStyle,
+        className: 'skin-tool-glyph--compact',
+      })
+      + '<span>' + escapeHtml(toolDisplayName(toolName)) + '</span>'
+    + '</span>'
+  ).join('');
 }
 
 function personalityCopy(key, data) {
@@ -138,7 +351,7 @@ function personalityCopy(key, data) {
 
 function applySkinPresentation() {
   const skin = resolvedSkinMeta();
-  const tagline = skin.tagline || 'Secure AI Assistant';
+  const tagline = skin.tagline || 'Secure personal agent';
   const authTagline = document.querySelector('.auth-tagline');
   if (authTagline) authTagline.textContent = tagline;
   const brandMeta = document.getElementById('web-brand-chip-meta');
@@ -147,6 +360,8 @@ function applySkinPresentation() {
   if (promptChip) promptChip.textContent = skin.promptSymbol || '›';
   const branding = document.getElementById('webchat-branding');
   if (branding) branding.textContent = 'Powered by ThinClaw · ' + skin.name;
+  const body = document.body;
+  if (body) body.setAttribute('data-shell-section', sectionForTab(currentTab));
   document.documentElement.setAttribute('data-skin-name', skin.name || 'cockpit');
   document.documentElement.setAttribute('data-chrome-style', skin.chromeStyle || 'avionics');
   document.documentElement.setAttribute('data-surface-pattern', skin.surfacePattern || 'grid');
@@ -154,7 +369,18 @@ function applySkinPresentation() {
   document.documentElement.setAttribute('data-elevation', skin.elevation || 'medium');
 }
 
+function applyAgentPresentation() {
+  const name = (currentAgentName || 'Agent').trim() || 'Agent';
+  const authTitle = document.querySelector('.auth-brand h1');
+  if (authTitle) authTitle.textContent = name;
+  const brandTitle = document.querySelector('.web-brand-chip-title');
+  if (brandTitle) brandTitle.textContent = name;
+  const assistantLabel = document.querySelector('.assistant-label');
+  if (assistantLabel) assistantLabel.textContent = name;
+}
+
 applySkinPresentation();
+applyAgentPresentation();
 
 const RESEARCH_GPU_CLOUDS = [
   {
@@ -228,6 +454,37 @@ const RESEARCH_GPU_CLOUDS = [
   },
 ];
 
+const RESEARCH_AGENT_ENV_TEMPLATES = {
+  terminal_bench: {
+    name: 'AgentEnv Terminal Bench',
+    backendConfig: {
+      benchmark: 'terminal_bench',
+      cases: [
+        {
+          name: 'smoke',
+          command: 'printf bench-ok',
+          expectedStdoutContains: ['bench-ok'],
+          expectedExitCode: 0,
+          timeoutSecs: 30,
+        },
+      ],
+    },
+  },
+  skill_bench: {
+    name: 'AgentEnv Skill Bench',
+    backendConfig: {
+      benchmark: 'skill_bench',
+      cases: [
+        {
+          name: 'skill-readiness',
+          skillContent: '# Skill Name\\n\\nDescribe when to use this skill and the concrete workflow.',
+          requiredSubstrings: ['when to use', 'workflow'],
+        },
+      ],
+    },
+  },
+};
+
 // --- Tool Activity State ---
 let _activeGroup = null;
 let _activeToolCards = {};
@@ -281,6 +538,12 @@ function normalizeStoredSubagentSession(entry) {
     summary: firstDefined(entry.summary, null),
     iterations: firstDefined(entry.iterations, null),
     durationMs: firstDefined(entry.durationMs, entry.duration_ms, null),
+    taskPacket: normalizeTaskPacket(firstDefined(entry.taskPacket, entry.task_packet), firstDefined(entry.task, null)),
+    allowedTools: Array.isArray(entry.allowedTools) ? entry.allowedTools.slice() : (Array.isArray(entry.allowed_tools) ? entry.allowed_tools.slice() : []),
+    allowedSkills: Array.isArray(entry.allowedSkills) ? entry.allowedSkills.slice() : (Array.isArray(entry.allowed_skills) ? entry.allowed_skills.slice() : []),
+    memoryMode: firstDefined(entry.memoryMode, entry.memory_mode, 'provided_context_only'),
+    toolMode: firstDefined(entry.toolMode, entry.tool_mode, 'explicit_only'),
+    skillMode: firstDefined(entry.skillMode, entry.skill_mode, 'explicit_only'),
     startedAt: toIsoTimestamp(firstDefined(entry.startedAt, entry.started_at, entry.updatedAt, entry.updated_at, Date.now())),
     updatedAt: toIsoTimestamp(firstDefined(entry.updatedAt, entry.updated_at, Date.now())),
     completedAt: firstDefined(entry.completedAt, entry.completed_at) ? toIsoTimestamp(firstDefined(entry.completedAt, entry.completed_at)) : null,
@@ -326,6 +589,12 @@ function persistSubagentSessionsToStorage() {
       summary: session.summary,
       iterations: session.iterations,
       durationMs: session.durationMs,
+      taskPacket: session.taskPacket,
+      allowedTools: session.allowedTools,
+      allowedSkills: session.allowedSkills,
+      memoryMode: session.memoryMode,
+      toolMode: session.toolMode,
+      skillMode: session.skillMode,
       startedAt: session.startedAt,
       updatedAt: session.updatedAt,
       completedAt: session.completedAt,
@@ -358,33 +627,19 @@ function authenticate() {
   apiFetch('/api/chat/threads')
     .then(() => {
       sessionStorage.setItem('thinclaw_token', token);
-      document.getElementById('auth-screen').style.display = 'none';
-      document.getElementById('app').style.display = 'flex';
-      // Strip token and log_level from URL so they're not visible in the address bar
       const cleaned = new URL(window.location);
       const urlLogLevel = cleaned.searchParams.get('log_level');
       cleaned.searchParams.delete('token');
       cleaned.searchParams.delete('log_level');
-      window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
-      connectSSE();
-      connectLogSSE();
-      startGatewayStatusPolling();
-      checkTeeStatus();
-      loadOptionalFeatureFlags();
-      loadThreads();
-      loadMemoryTree();
-      loadJobs();
-      // Apply URL log_level param if present, otherwise just sync the dropdown
-      if (urlLogLevel) {
-        setServerLogLevel(urlLogLevel);
-      } else {
-        loadServerLogLevel();
-      }
+      return refreshPresentationState()
+        .catch(() => null)
+        .then(() => startAuthenticatedSession(urlLogLevel, cleaned));
     })
     .catch(() => {
       btn.disabled = false;
       btn.textContent = origText;
       sessionStorage.removeItem('thinclaw_token');
+      if (mcpInteractionPollInterval) clearInterval(mcpInteractionPollInterval);
       document.getElementById('auth-screen').style.display = '';
       document.getElementById('app').style.display = 'none';
       document.getElementById('auth-error').textContent = 'Invalid token';
@@ -394,6 +649,32 @@ function authenticate() {
 document.getElementById('token-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') authenticate();
 });
+
+function startAuthenticatedSession(urlLogLevel, cleanedUrl) {
+  restoreHashState();
+  document.getElementById('auth-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  const cleaned = cleanedUrl instanceof URL ? cleanedUrl : new URL(window.location);
+  window.history.replaceState({}, '', cleaned.pathname + cleaned.search + cleaned.hash);
+  renderShellNavigation();
+  connectSSE();
+  connectLogSSE();
+  startGatewayStatusPolling();
+  checkTeeStatus();
+  loadThreads();
+  startMcpInteractionPolling();
+  Promise.all([
+    loadOptionalFeatureFlags(),
+    loadAutonomyAvailability(),
+  ]).catch(() => null).finally(() => {
+    switchTab(currentTab || 'chat', { updateHash: false });
+    if (urlLogLevel) {
+      setServerLogLevel(urlLogLevel);
+    } else {
+      loadServerLogLevel();
+    }
+  });
+}
 
 // Auto-authenticate from URL param or saved session
 (function autoAuth() {
@@ -407,10 +688,6 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
   const saved = sessionStorage.getItem('thinclaw_token');
   if (saved) {
     document.getElementById('token-input').value = saved;
-    // Hide auth screen immediately to prevent flash, authenticate() will
-    // restore it if the token turns out to be invalid.
-    document.getElementById('auth-screen').style.display = 'none';
-    document.getElementById('app').style.display = 'flex';
     authenticate();
   }
 })();
@@ -438,6 +715,27 @@ function apiFetch(path, options) {
   });
 }
 
+function startMcpInteractionPolling() {
+  if (mcpInteractionPollInterval) clearInterval(mcpInteractionPollInterval);
+  var poll = function() {
+    apiFetch('/api/mcp/interactions')
+      .then(function(data) {
+        var interactions = (data && data.interactions) || [];
+        mcpBrowserState.interactions = interactions;
+        if (interactions.length > lastMcpInteractionCount && interactions.length > 0) {
+          showToast('New MCP request waiting for review.', 'info');
+        }
+        lastMcpInteractionCount = interactions.length;
+        if (currentTab === 'extensions') {
+          renderMcpInteractions();
+        }
+      })
+      .catch(function() {});
+  };
+  poll();
+  mcpInteractionPollInterval = setInterval(poll, 8000);
+}
+
 function boolSettingValue(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
   if (typeof value === 'boolean') return value;
@@ -447,15 +745,38 @@ function boolSettingValue(value, fallback) {
 
 function applyResearchVisibility(enabled) {
   experimentsFeatureEnabled = !!enabled;
-  const button = document.getElementById('research-tab-button');
   const panel = document.getElementById('tab-research');
   const note = document.getElementById('research-disabled-note');
-  if (button) button.style.display = experimentsFeatureEnabled ? '' : 'none';
   if (panel) panel.dataset.enabled = experimentsFeatureEnabled ? 'true' : 'false';
   if (note) note.style.display = experimentsFeatureEnabled ? 'none' : 'block';
   if (!experimentsFeatureEnabled && currentTab === 'research') {
     switchTab('chat');
   }
+  renderShellNavigation();
+}
+
+function setAutonomyVisibility(enabled) {
+  autonomyFeatureAvailable = !!enabled;
+  const panel = document.getElementById('tab-autonomy');
+  if (panel) panel.dataset.enabled = autonomyFeatureAvailable ? 'true' : 'false';
+  if (!autonomyFeatureAvailable && currentTab === 'autonomy') {
+    switchTab('chat');
+  }
+  renderShellNavigation();
+}
+
+function loadAutonomyAvailability() {
+  return apiFetch('/api/autonomy/status')
+    .then((status) => {
+      autonomyState.status = status;
+      setAutonomyVisibility(true);
+      return status;
+    })
+    .catch(() => {
+      autonomyState.status = null;
+      setAutonomyVisibility(false);
+      return null;
+    });
 }
 
 function applyOptionalFeatureFlagsFromRows(rows) {
@@ -475,7 +796,7 @@ function applyOptionalFeatureFlagsFromCache() {
 }
 
 function loadOptionalFeatureFlags() {
-  apiFetch('/api/settings')
+  return apiFetch('/api/settings')
     .then((data) => applyOptionalFeatureFlagsFromRows(data.settings || []))
     .catch(() => applyResearchVisibility(false));
 }
@@ -514,14 +835,16 @@ function connectSSE() {
 
   eventSource.addEventListener('response', (e) => {
     const data = JSON.parse(e.data);
+    // Always refresh thread metadata. This prevents startup/background
+    // assistant replies from getting "stuck" until a manual reload if the
+    // event lands before the assistant thread has been selected locally.
+    loadThreads();
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
     upsertAssistantMessage(data.content, { timestamp: new Date().toISOString() });
     settleLiveTurnCard();
     setStatus('');
     enableChatInput();
-    // Refresh thread list so new titles appear after first message
-    loadThreads();
   });
 
   eventSource.addEventListener('thinking', (e) => {
@@ -585,6 +908,16 @@ function connectSSE() {
     }
   });
 
+  eventSource.addEventListener('conversation_updated', (e) => {
+    const data = JSON.parse(e.data);
+    handleConversationSyncEvent(data, 'conversation_updated');
+  });
+
+  eventSource.addEventListener('conversation_deleted', (e) => {
+    const data = JSON.parse(e.data);
+    handleConversationSyncEvent(data, 'conversation_deleted');
+  });
+
   eventSource.addEventListener('job_started', (e) => {
     const data = JSON.parse(e.data);
     showJobCard(data);
@@ -598,13 +931,15 @@ function connectSSE() {
 
   eventSource.addEventListener('auth_required', (e) => {
     const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
     showAuthCard(data);
   });
 
   eventSource.addEventListener('auth_completed', (e) => {
     const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
     removeAuthCard(data.extension_name);
-    showToast(data.message, 'success');
+    showToast(data.message, data.success === false ? 'error' : 'success');
     enableChatInput();
   });
 
@@ -649,7 +984,7 @@ function connectSSE() {
   // Job event listeners (activity stream for all sandbox jobs)
   const jobEventTypes = [
     'job_message', 'job_tool_use', 'job_tool_result',
-    'job_status', 'job_result'
+    'job_status', 'job_session_result', 'job_result'
   ];
   for (const evtType of jobEventTypes) {
     eventSource.addEventListener(evtType, (e) => {
@@ -682,6 +1017,24 @@ function isCurrentThread(threadId) {
   if (!threadId) return true;
   if (!currentThreadId) return true;
   return threadId === currentThreadId;
+}
+
+function shouldReloadHistoryForConversationSync(data, eventType) {
+  if (!data || !data.thread_id) return false;
+  if (currentThreadId !== data.thread_id) return false;
+  if (eventType === 'conversation_deleted') return false;
+  if (data.reason === 'assistant_response') return data.channel !== 'gateway';
+  if (data.reason === 'user_message') return data.channel !== 'gateway' || !_liveTurnCard;
+  return false;
+}
+
+function handleConversationSyncEvent(data, eventType) {
+  const shouldReloadHistory = shouldReloadHistoryForConversationSync(data, eventType);
+  loadThreads();
+  if (shouldReloadHistory) {
+    finalizeActivityGroup();
+    loadHistory();
+  }
 }
 
 // --- Temporal Subagent Subsessions ---
@@ -750,6 +1103,32 @@ function getSubsessionStatusLabel(status) {
   return 'Running';
 }
 
+function normalizeTaskPacket(packet, fallbackTask) {
+  const value = packet && typeof packet === 'object' ? packet : {};
+  return {
+    objective: firstDefined(value.objective, fallbackTask, '') || '',
+    todos: Array.isArray(value.todos) ? value.todos.filter(Boolean) : [],
+    acceptance_criteria: Array.isArray(value.acceptance_criteria) ? value.acceptance_criteria.filter(Boolean) : [],
+    constraints: Array.isArray(value.constraints) ? value.constraints.filter(Boolean) : [],
+    provided_context: Array.isArray(value.provided_context) ? value.provided_context.filter(Boolean) : [],
+    parent_summary: typeof value.parent_summary === 'string' ? value.parent_summary : '',
+  };
+}
+
+function renderSubsessionList(items) {
+  if (!Array.isArray(items) || items.length === 0) return '<span class="subsession-inline-muted">none</span>';
+  return '<ul class="subsession-inline-list">' + items.map((item) => '<li>' + escapeHtml(String(item)) + '</li>').join('') + '</ul>';
+}
+
+function renderProvidedContext(items) {
+  if (!Array.isArray(items) || items.length === 0) return '<span class="subsession-inline-muted">none</span>';
+  return items.map((item) => {
+    const title = escapeHtml(String(firstDefined(item.title, 'Context')));
+    const content = escapeHtml(String(firstDefined(item.content, ''))).replace(/\n/g, '<br>');
+    return '<div class="subsession-context-card"><div class="subsession-context-title">' + title + '</div><div class="subsession-context-body">' + content + '</div></div>';
+  }).join('');
+}
+
 function buildSubagentEventRecord(eventType, payload) {
   const status = normalizeSubagentStatus(payload, eventType);
   const timestamp = toIsoTimestamp(
@@ -801,6 +1180,12 @@ function ensureSubsession(threadId, agentId, seed) {
       summary: null,
       iterations: null,
       durationMs: null,
+      taskPacket: normalizeTaskPacket(null, null),
+      allowedTools: [],
+      allowedSkills: [],
+      memoryMode: 'provided_context_only',
+      toolMode: 'explicit_only',
+      skillMode: 'explicit_only',
       startedAt: null,
       updatedAt: null,
       completedAt: null,
@@ -826,6 +1211,12 @@ function ensureSubsession(threadId, agentId, seed) {
   session.summary = firstDefined(seed?.summary, seed?.message, session.summary);
   session.iterations = firstDefined(seed?.iterations, session.iterations);
   session.durationMs = firstDefined(seed?.duration_ms, seed?.durationMs, session.durationMs);
+  session.taskPacket = normalizeTaskPacket(firstDefined(seed?.task_packet, seed?.taskPacket), firstDefined(seed?.task, session.task));
+  session.allowedTools = Array.isArray(seed?.allowed_tools) ? seed.allowed_tools.slice() : (Array.isArray(seed?.allowedTools) ? seed.allowedTools.slice() : session.allowedTools);
+  session.allowedSkills = Array.isArray(seed?.allowed_skills) ? seed.allowed_skills.slice() : (Array.isArray(seed?.allowedSkills) ? seed.allowedSkills.slice() : session.allowedSkills);
+  session.memoryMode = firstDefined(seed?.memory_mode, seed?.memoryMode, session.memoryMode);
+  session.toolMode = firstDefined(seed?.tool_mode, seed?.toolMode, session.toolMode);
+  session.skillMode = firstDefined(seed?.skill_mode, seed?.skillMode, session.skillMode);
   session.status = normalizeSubagentStatus(seed || {}, seed?.type);
   session.updatedAt = timestamp;
   session.startedAt = session.startedAt || toIsoTimestamp(seed?.started_at, timestamp);
@@ -922,13 +1313,32 @@ function renderSubsessionInlineDetail(session) {
     );
   }).join('');
   const iterationsValue = firstDefined(session.iterations, '-');
+  const packet = normalizeTaskPacket(session.taskPacket, session.task);
   return (
     '<div class="subsession-row-detail">' +
       '<div class="subsession-inline-grid">' +
-        '<div class="subsession-inline-item"><span class="subsession-inline-label">Task</span><span class="subsession-inline-value">' + escapeHtml(session.task || 'Delegated task') + '</span></div>' +
+        '<div class="subsession-inline-item"><span class="subsession-inline-label">Objective</span><span class="subsession-inline-value">' + escapeHtml(packet.objective || session.task || 'Delegated task') + '</span></div>' +
         '<div class="subsession-inline-item"><span class="subsession-inline-label">Status</span><span class="subsession-inline-value">' + escapeHtml(getSubsessionStatusLabel(session.status)) + '</span></div>' +
         '<div class="subsession-inline-item"><span class="subsession-inline-label">Iterations</span><span class="subsession-inline-value">' + escapeHtml(String(iterationsValue === null ? '-' : iterationsValue)) + '</span></div>' +
         '<div class="subsession-inline-item"><span class="subsession-inline-label">Duration</span><span class="subsession-inline-value">' + escapeHtml(formatDurationMs(session.durationMs)) + '</span></div>' +
+      '</div>' +
+      '<div class="subsession-inline-section"><div class="subsession-inline-kicker">Task Packet</div>' +
+        '<div class="subsession-inline-stack">' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Todos</span><div class="subsession-inline-value">' + renderSubsessionList(packet.todos) + '</div></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Acceptance</span><div class="subsession-inline-value">' + renderSubsessionList(packet.acceptance_criteria) + '</div></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Constraints</span><div class="subsession-inline-value">' + renderSubsessionList(packet.constraints) + '</div></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Parent Summary</span><div class="subsession-inline-value">' + (packet.parent_summary ? escapeHtml(packet.parent_summary) : '<span class="subsession-inline-muted">none</span>') + '</div></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Provided Context</span><div class="subsession-inline-value">' + renderProvidedContext(packet.provided_context) + '</div></div>' +
+        '</div>' +
+      '</div>' +
+      '<div class="subsession-inline-section"><div class="subsession-inline-kicker">Capability Policy</div>' +
+        '<div class="subsession-inline-grid">' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Memory Mode</span><span class="subsession-inline-value">' + escapeHtml(session.memoryMode || 'provided_context_only') + '</span></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Tool Mode</span><span class="subsession-inline-value">' + escapeHtml(session.toolMode || 'explicit_only') + '</span></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Skill Mode</span><span class="subsession-inline-value">' + escapeHtml(session.skillMode || 'explicit_only') + '</span></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Granted Tools</span><div class="subsession-inline-value">' + renderSubsessionList(session.allowedTools) + '</div></div>' +
+          '<div class="subsession-inline-item"><span class="subsession-inline-label">Granted Skills</span><div class="subsession-inline-value">' + renderSubsessionList(session.allowedSkills) + '</div></div>' +
+        '</div>' +
       '</div>' +
       (session.response
         ? '<div class="subsession-response"><span class="subsession-response-label">Final handoff</span>' + renderMarkdown(session.response) + '</div>'
@@ -979,6 +1389,7 @@ function createSubsessionRow(session) {
 function renderThreadSidebar() {
   const assistantEl = document.getElementById('assistant-thread');
   const assistantMetaEl = document.getElementById('assistant-meta');
+  applyAgentPresentation();
   if (threadsCache.assistantThread) {
     assistantThreadId = threadsCache.assistantThread.id;
     const isActive = currentThreadId === assistantThreadId;
@@ -1089,6 +1500,12 @@ function handleSubagentLifecycleEvent(eventType, payload) {
   session.category = firstDefined(payload.category, session.category);
   session.iterations = firstDefined(payload.iterations, session.iterations);
   session.durationMs = firstDefined(payload.duration_ms, session.durationMs);
+  session.taskPacket = normalizeTaskPacket(firstDefined(payload.task_packet, payload.taskPacket), session.task);
+  session.allowedTools = Array.isArray(payload.allowed_tools) ? payload.allowed_tools.slice() : session.allowedTools;
+  session.allowedSkills = Array.isArray(payload.allowed_skills) ? payload.allowed_skills.slice() : session.allowedSkills;
+  session.memoryMode = firstDefined(payload.memory_mode, session.memoryMode);
+  session.toolMode = firstDefined(payload.tool_mode, session.toolMode);
+  session.skillMode = firstDefined(payload.skill_mode, session.skillMode);
   if (eventType === 'subagent_spawned' && threadId === currentThreadId) {
     selectedSubsessionKey = session.key;
   } else if (eventType === 'subagent_completed' && threadId === currentThreadId && !selectedSubsessionKey) {
@@ -1133,6 +1550,77 @@ function chatMessagesContainer() {
   return document.getElementById('chat-messages');
 }
 
+function chatJumpLatestButton() {
+  return document.getElementById('chat-jump-latest');
+}
+
+function syncChatComposerMetrics() {
+  const stage = document.getElementById('chat-stage');
+  const composer = document.querySelector('.chat-input');
+  if (!stage || !composer) return;
+  if (composer.offsetHeight > 0) {
+    stage.style.setProperty('--chat-composer-height', composer.offsetHeight + 'px');
+  }
+}
+
+function chatDistanceFromLatest() {
+  const container = chatMessagesContainer();
+  if (!container) return 0;
+  return Math.max(0, container.scrollHeight - container.clientHeight - container.scrollTop);
+}
+
+function isChatNearLatest() {
+  return chatDistanceFromLatest() <= 80;
+}
+
+function updateChatJumpLatestButton() {
+  const button = chatJumpLatestButton();
+  const container = chatMessagesContainer();
+  if (!button || !container) return;
+  const shouldShow = currentTab === 'chat'
+    && container.childElementCount > 0
+    && !isChatNearLatest();
+  button.classList.toggle('visible', shouldShow);
+  button.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+}
+
+function scrollChatToLatest(options) {
+  const container = chatMessagesContainer();
+  if (!container) return;
+
+  const behavior = options && options.behavior ? options.behavior : 'auto';
+  const performScroll = () => {
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({ top: container.scrollHeight, behavior: behavior });
+    } else {
+      container.scrollTop = container.scrollHeight;
+    }
+    updateChatJumpLatestButton();
+  };
+
+  if (options && options.defer) {
+    requestAnimationFrame(performScroll);
+  } else {
+    performScroll();
+  }
+}
+
+function shouldPinChatToLatest(force) {
+  return !!force || isChatNearLatest();
+}
+
+function finishChatMutation(stickToLatest, options) {
+  syncChatComposerMetrics();
+  if (stickToLatest) {
+    scrollChatToLatest({
+      behavior: options && options.behavior ? options.behavior : 'auto',
+      defer: true,
+    });
+  } else {
+    updateChatJumpLatestButton();
+  }
+}
+
 function clearChatEmptyState() {
   chatMessagesContainer().querySelectorAll('.chat-empty-state').forEach((node) => node.remove());
 }
@@ -1146,7 +1634,7 @@ function formatMessageTimestamp(timestamp) {
 
 function messageRoleLabel(role) {
   if (role === 'user') return 'You';
-  if (role === 'assistant') return currentAgentName || 'Assistant';
+  if (role === 'assistant') return currentAgentName || 'Agent';
   return 'Status';
 }
 
@@ -1175,9 +1663,11 @@ function appendTurnCard(card, options) {
   const container = chatMessagesContainer();
   if (options && options.prepend) {
     container.insertBefore(card, container.firstChild);
+    updateChatJumpLatestButton();
   } else {
+    const stickToLatest = shouldPinChatToLatest(options && options.forceScroll);
     container.appendChild(card);
-    container.scrollTop = container.scrollHeight;
+    finishChatMutation(stickToLatest, options);
   }
   return card;
 }
@@ -1202,7 +1692,7 @@ function startLiveTurn(userContent, timestamp) {
   settleLiveTurnCard();
   const card = createTurnCard({ live: true });
   appendMessageToTurn(card, 'user', userContent, { timestamp: timestamp });
-  appendTurnCard(card);
+  appendTurnCard(card, { forceScroll: true });
   _liveTurnCard = card;
   return card;
 }
@@ -1308,15 +1798,17 @@ function appendMessageToTurn(card, role, content, options) {
 function addStandaloneMessage(role, content, options) {
   clearChatEmptyState();
   const container = chatMessagesContainer();
+  const stickToLatest = shouldPinChatToLatest(options && options.forceScroll);
   const message = createMessageElement(role, content, options || {});
   container.appendChild(message);
-  container.scrollTop = container.scrollHeight;
+  finishChatMutation(stickToLatest, options);
   return message;
 }
 
 function upsertAssistantMessage(content, options) {
   const card = ensureLiveTurnCard();
   const stack = turnCardStack(card);
+  const stickToLatest = shouldPinChatToLatest(options && options.forceScroll);
   let message = stack.querySelector('.message.assistant');
   if (!message) {
     message = createMessageElement('assistant', content, options || {});
@@ -1324,13 +1816,14 @@ function upsertAssistantMessage(content, options) {
   } else {
     updateMessageElement(message, content, options || {});
   }
-  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
+  finishChatMutation(stickToLatest, options);
   return message;
 }
 
 function appendToLastAssistant(chunk, timestamp) {
   const card = ensureLiveTurnCard();
   const stack = turnCardStack(card);
+  const stickToLatest = shouldPinChatToLatest();
   let message = stack.querySelector('.message.assistant');
   if (!message) {
     message = createMessageElement('assistant', chunk, { timestamp: timestamp });
@@ -1339,15 +1832,21 @@ function appendToLastAssistant(chunk, timestamp) {
     const raw = (message.getAttribute('data-raw') || '') + chunk;
     updateMessageElement(message, raw, { timestamp: message.getAttribute('data-timestamp') || timestamp });
   }
-  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
+  finishChatMutation(stickToLatest);
 }
 
 function createTurnCardFromHistory(turn) {
+  const hasVisibleUserInput = !turn.hide_user_input && !!turn.user_input;
+  const hasAssistantResponse = !!turn.response;
+  if (!hasVisibleUserInput && !hasAssistantResponse) return null;
+
   const card = createTurnCard({ live: false });
-  appendMessageToTurn(card, 'user', turn.user_input, { timestamp: turn.started_at });
-  if (turn.response) {
+  if (hasVisibleUserInput) {
+    appendMessageToTurn(card, 'user', turn.user_input, { timestamp: turn.started_at });
+  }
+  if (hasAssistantResponse) {
     appendMessageToTurn(card, 'assistant', turn.response, { timestamp: turn.completed_at || turn.started_at });
-  } else {
+  } else if (hasVisibleUserInput) {
     card.classList.add('incomplete');
   }
   return card;
@@ -1485,7 +1984,7 @@ function getOrCreateActivityGroup() {
   const group = document.createElement('div');
   group.className = 'activity-group';
   stack.appendChild(group);
-  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
+  finishChatMutation(shouldPinChatToLatest());
   _activeGroup = group;
   _activeToolCards = {};
   return group;
@@ -1493,6 +1992,7 @@ function getOrCreateActivityGroup() {
 
 function showActivityThinking(message) {
   const group = getOrCreateActivityGroup();
+  const stickToLatest = shouldPinChatToLatest();
   if (_activityThinking) {
     // Already exists — just update text and un-hide
     _activityThinking.style.display = '';
@@ -1510,7 +2010,7 @@ function showActivityThinking(message) {
     group.appendChild(_activityThinking);
     _activityThinking.querySelector('.activity-thinking-text').textContent = message || personalityCopy('thinkingFallback');
   }
-  chatMessagesContainer().scrollTop = chatMessagesContainer().scrollHeight;
+  finishChatMutation(stickToLatest);
 }
 
 function removeActivityThinking() {
@@ -1583,8 +2083,7 @@ function addToolCard(name) {
   if (!_activeToolCards[name]) _activeToolCards[name] = [];
   _activeToolCards[name].push({ card, startTime, timer: timerInterval, duration, icon, finalDuration: null });
 
-  const container = document.getElementById('chat-messages');
-  container.scrollTop = container.scrollHeight;
+  finishChatMutation(shouldPinChatToLatest());
 }
 
 function completeToolCard(name, success) {
@@ -1763,7 +2262,7 @@ function showApproval(data) {
   card.appendChild(actions);
 
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  finishChatMutation(shouldPinChatToLatest());
 }
 
 function showJobCard(data) {
@@ -1810,7 +2309,7 @@ function showJobCard(data) {
   }
 
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  finishChatMutation(shouldPinChatToLatest());
 }
 
 // --- Auth card ---
@@ -1836,13 +2335,23 @@ function showAuthCard(data) {
     card.appendChild(instr);
   }
 
+  if (data.missing_scopes && data.missing_scopes.length) {
+    const scopes = document.createElement('div');
+    scopes.className = 'auth-instructions';
+    scopes.textContent = 'Additional access needed: ' + data.missing_scopes.join(', ');
+    card.appendChild(scopes);
+  }
+
   const links = document.createElement('div');
   links.className = 'auth-links';
+  let oauthBtn = null;
 
   if (data.auth_url) {
-    const oauthBtn = document.createElement('button');
+    oauthBtn = document.createElement('button');
     oauthBtn.className = 'auth-oauth';
-    oauthBtn.textContent = 'Authenticate with ' + data.extension_name;
+    oauthBtn.textContent = (data.auth_status === 'needs_reauth' || data.auth_status === 'insufficient_scope')
+      ? 'Reconnect ' + (data.shared_auth_provider || data.extension_name)
+      : 'Connect ' + (data.shared_auth_provider || data.extension_name);
     oauthBtn.addEventListener('click', () => {
       window.open(data.auth_url, '_blank', 'width=600,height=700');
     });
@@ -1861,18 +2370,20 @@ function showAuthCard(data) {
     card.appendChild(links);
   }
 
-  // Token input
-  const tokenRow = document.createElement('div');
-  tokenRow.className = 'auth-token-input';
+  let tokenInput = null;
+  if (data.auth_mode === 'manual_token' || (!data.auth_mode && !data.auth_url)) {
+    const tokenRow = document.createElement('div');
+    tokenRow.className = 'auth-token-input';
 
-  const tokenInput = document.createElement('input');
-  tokenInput.type = 'password';
-  tokenInput.placeholder = 'Paste your API key or token';
-  tokenInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
-  });
-  tokenRow.appendChild(tokenInput);
-  card.appendChild(tokenRow);
+    tokenInput = document.createElement('input');
+    tokenInput.type = 'password';
+    tokenInput.placeholder = 'Paste your API key or token';
+    tokenInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitAuthToken(data.extension_name, tokenInput.value);
+    });
+    tokenRow.appendChild(tokenInput);
+    card.appendChild(tokenRow);
+  }
 
   // Error display (hidden initially)
   const errorEl = document.createElement('div');
@@ -1887,20 +2398,28 @@ function showAuthCard(data) {
   const submitBtn = document.createElement('button');
   submitBtn.className = 'auth-submit';
   submitBtn.textContent = 'Submit';
-  submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput.value));
+  submitBtn.addEventListener('click', () => submitAuthToken(data.extension_name, tokenInput ? tokenInput.value : ''));
 
   const cancelBtn = document.createElement('button');
   cancelBtn.className = 'auth-cancel';
   cancelBtn.textContent = 'Cancel';
   cancelBtn.addEventListener('click', () => cancelAuth(data.extension_name));
 
-  actions.appendChild(submitBtn);
+  if (tokenInput) {
+    actions.appendChild(submitBtn);
+  }
   actions.appendChild(cancelBtn);
   card.appendChild(actions);
 
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
-  tokenInput.focus();
+  finishChatMutation(shouldPinChatToLatest(), { forceScroll: true });
+  if (tokenInput) {
+    tokenInput.focus();
+  } else if (oauthBtn) {
+    oauthBtn.focus();
+  } else {
+    cancelBtn.focus();
+  }
 }
 
 function removeAuthCard(extensionName) {
@@ -1985,19 +2504,24 @@ function loadHistory(before) {
         showChatEmptyState(emptyMessage);
       } else {
         for (const turn of data.turns) {
-          container.appendChild(createTurnCardFromHistory(turn));
+          const card = createTurnCardFromHistory(turn);
+          if (card) container.appendChild(card);
         }
       }
+      syncChatComposerMetrics();
+      scrollChatToLatest({ force: true, defer: true });
     } else {
       // Pagination: prepend older messages
       const savedHeight = container.scrollHeight;
       const fragment = document.createDocumentFragment();
       for (const turn of data.turns) {
-        fragment.appendChild(createTurnCardFromHistory(turn));
+        const card = createTurnCardFromHistory(turn);
+        if (card) fragment.appendChild(card);
       }
       container.insertBefore(fragment, container.firstChild);
       // Restore scroll position so the user doesn't jump
       container.scrollTop = container.scrollHeight - savedHeight;
+      updateChatJumpLatestButton();
     }
 
     hasMore = data.has_more || false;
@@ -2007,6 +2531,7 @@ function loadHistory(before) {
   }).finally(() => {
     loadingOlder = false;
     removeScrollSpinner();
+    updateChatJumpLatestButton();
   });
 }
 
@@ -2023,6 +2548,8 @@ function showChatEmptyState(message) {
   empty.innerHTML = '<div class="chat-empty-state-glyph">' + escapeHtml(resolvedSkinMeta().promptSymbol || '›') + '</div>'
     + '<div class="chat-empty-state-copy">' + escapeHtml(message) + '</div>';
   container.appendChild(empty);
+  syncChatComposerMetrics();
+  updateChatJumpLatestButton();
 }
 
 // --- Threads ---
@@ -2112,6 +2639,8 @@ function createNewThread() {
     syncSelectedSubsessionForCurrentThread();
     renderThreadSidebar();
     renderSubsessionPanel();
+    syncChatComposerMetrics();
+    updateChatJumpLatestButton();
     loadThreads();
   }).catch((err) => {
     showToast('Failed to create thread: ' + err.message, 'error');
@@ -2144,8 +2673,30 @@ function deleteThread(threadId, threadName) {
 
 function toggleThreadSidebar() {
   const sidebar = document.getElementById('thread-sidebar');
-  sidebar.classList.toggle('collapsed');
+  const mobile = window.matchMedia('(max-width: 768px)').matches;
   const btn = document.getElementById('thread-toggle-btn');
+  if (mobile) {
+    const expanded = !sidebar.classList.contains('expanded-mobile');
+    sidebar.classList.toggle('expanded-mobile', expanded);
+    sidebar.classList.toggle('collapsed', !expanded);
+    if (btn) btn.innerHTML = expanded ? '&times;' : '&raquo;';
+    return;
+  }
+  sidebar.classList.remove('expanded-mobile');
+  sidebar.classList.toggle('collapsed');
+  if (btn) btn.innerHTML = sidebar.classList.contains('collapsed') ? '&raquo;' : '&laquo;';
+}
+
+function syncThreadSidebarToggleState() {
+  const sidebar = document.getElementById('thread-sidebar');
+  const btn = document.getElementById('thread-toggle-btn');
+  if (!sidebar || !btn) return;
+  if (window.matchMedia('(max-width: 768px)').matches) {
+    if (!sidebar.classList.contains('expanded-mobile')) sidebar.classList.add('collapsed');
+    btn.innerHTML = sidebar.classList.contains('expanded-mobile') ? '&times;' : '&raquo;';
+    return;
+  }
+  sidebar.classList.remove('expanded-mobile');
   btn.innerHTML = sidebar.classList.contains('collapsed') ? '&raquo;' : '&laquo;';
 }
 
@@ -2158,13 +2709,25 @@ chatInput.addEventListener('keydown', (e) => {
   }
 });
 chatInput.addEventListener('input', () => autoResizeTextarea(chatInput));
+window.addEventListener('resize', () => {
+  syncChatComposerMetrics();
+  syncThreadSidebarToggleState();
+  closeShellMobileNav({ keepFocus: true });
+});
 
 // Disable send until a thread is selected (loadThreads will enable it)
 chatInput.disabled = true;
 document.getElementById('send-btn').disabled = true;
+document.getElementById('chat-jump-latest').addEventListener('click', () => {
+  scrollChatToLatest({ force: true, behavior: 'smooth' });
+});
+syncChatComposerMetrics();
+updateChatJumpLatestButton();
+syncThreadSidebarToggleState();
 
 // Infinite scroll: load older messages when scrolled near the top
 document.getElementById('chat-messages').addEventListener('scroll', function () {
+  updateChatJumpLatestButton();
   if (this.scrollTop < 100 && hasMore && !loadingOlder) {
     loadingOlder = true;
     // Show spinner at top
@@ -2180,49 +2743,231 @@ document.getElementById('chat-messages').addEventListener('scroll', function () 
 function autoResizeTextarea(el) {
   el.style.height = 'auto';
   el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+  syncChatComposerMetrics();
 }
+
+function updateResponsiveTableLabels(root) {
+  const scope = root && typeof root.querySelectorAll === 'function' ? root : document;
+  scope.querySelectorAll('table').forEach((table) => {
+    const headerCells = Array.from(table.querySelectorAll('thead th'));
+    if (!headerCells.length) return;
+    const labels = headerCells.map((cell) => (cell.textContent || '').trim());
+    table.querySelectorAll('tbody tr').forEach((row) => {
+      Array.from(row.children).forEach((cell, index) => {
+        if (cell && cell.nodeType === 1) {
+          cell.setAttribute('data-label', labels[index] || '');
+        }
+      });
+    });
+  });
+}
+
+const responsiveTableObserver = new MutationObserver(() => {
+  updateResponsiveTableLabels();
+});
+responsiveTableObserver.observe(document.body, { childList: true, subtree: true });
+updateResponsiveTableLabels();
 
 // --- Tabs ---
 
-document.querySelectorAll('.tab-bar button[data-tab]').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    const tab = btn.getAttribute('data-tab');
-    switchTab(tab);
-  });
+function readHashState() {
+  const raw = (window.location.hash || '').replace(/^#/, '');
+  const params = new URLSearchParams(raw);
+  return {
+    tab: params.get(HASH_KEY_TAB) || '',
+    settingsSubtab: params.get(HASH_KEY_SETTINGS_SUBTAB) || '',
+    settingsSearch: params.get(HASH_KEY_SETTINGS_SEARCH) || '',
+  };
+}
+
+function writeHashState(nextState) {
+  const current = readHashState();
+  const merged = Object.assign({}, current, nextState || {});
+  const params = new URLSearchParams();
+  if (merged.tab) params.set(HASH_KEY_TAB, merged.tab);
+  if (merged.settingsSubtab) params.set(HASH_KEY_SETTINGS_SUBTAB, merged.settingsSubtab);
+  if (merged.settingsSearch) params.set(HASH_KEY_SETTINGS_SEARCH, merged.settingsSearch);
+  const nextHash = params.toString();
+  const url = window.location.pathname + window.location.search + (nextHash ? '#' + nextHash : '');
+  window.history.replaceState({}, '', url);
+}
+
+function restoreHashState() {
+  const state = readHashState();
+  currentTab = state.tab || 'chat';
+  currentSettingsSubtab = state.settingsSubtab || 'General';
+  settingsSearchQuery = state.settingsSearch || '';
+}
+
+function sectionForTab(tab) {
+  const found = SHELL_SECTIONS.find((section) => section.tabs.indexOf(tab) !== -1);
+  return found ? found.id : 'chat';
+}
+
+function sectionMeta(sectionId) {
+  return SHELL_SECTIONS.find((section) => section.id === sectionId) || SHELL_SECTIONS[0];
+}
+
+function isTabAvailable(tab) {
+  const meta = SHELL_TAB_META[tab] || {};
+  if (meta.feature === 'research' && !experimentsFeatureEnabled) return false;
+  if (meta.feature === 'autonomy' && !autonomyFeatureAvailable) return false;
+  return !!document.getElementById('tab-' + tab);
+}
+
+function availableTabsForSection(sectionId) {
+  return (sectionMeta(sectionId).tabs || []).filter(isTabAvailable);
+}
+
+function resolveTabForSection(sectionId) {
+  const tabs = availableTabsForSection(sectionId);
+  if (!tabs.length) return 'chat';
+  if (sectionForTab(currentTab) === sectionId && tabs.indexOf(currentTab) !== -1) return currentTab;
+  return tabs[0];
+}
+
+function resolveAvailableTab(tab) {
+  if (tab && isTabAvailable(tab)) return tab;
+  return resolveTabForSection(sectionForTab(tab || 'chat'));
+}
+
+function renderShellNavigation() {
+  const primaryNav = document.getElementById('shell-primary-nav');
+  const mobileNav = document.getElementById('shell-mobile-primary-nav');
+  const contextNav = document.getElementById('shell-context-nav');
+  const contextBar = document.getElementById('shell-context-bar');
+  const contextLabel = document.getElementById('shell-context-label');
+  const mobileLabel = document.getElementById('shell-mobile-nav-label');
+  const activeSectionId = sectionForTab(currentTab);
+  const activeSection = sectionMeta(activeSectionId);
+  const contextTabs = availableTabsForSection(activeSectionId);
+  const renderPrimaryButtons = function(container, mobile) {
+    if (!container) return;
+    container.innerHTML = '';
+    SHELL_SECTIONS.forEach((section) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = mobile ? 'shell-mobile-primary-item' : 'shell-primary-tab';
+      if (section.id === activeSectionId) button.classList.add('active');
+      button.innerHTML = mobile
+        ? '<span class="shell-mobile-primary-label">' + escapeHtml(section.label) + '</span><span class="shell-mobile-primary-blurb">' + escapeHtml(section.blurb) + '</span>'
+        : escapeHtml(section.label);
+      button.addEventListener('click', () => {
+        switchTab(resolveTabForSection(section.id));
+        closeShellMobileNav({ keepFocus: false });
+      });
+      container.appendChild(button);
+    });
+  };
+
+  renderPrimaryButtons(primaryNav, false);
+  renderPrimaryButtons(mobileNav, true);
+
+  if (mobileLabel) mobileLabel.textContent = activeSection.label;
+  if (contextLabel) contextLabel.textContent = activeSection.label;
+
+  if (contextBar) contextBar.hidden = contextTabs.length <= 1 || activeSectionId === 'chat' || activeSectionId === 'settings';
+  if (contextNav) {
+    contextNav.innerHTML = '';
+    contextTabs.forEach((tab) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'shell-context-tab' + (tab === currentTab ? ' active' : '');
+      button.textContent = (SHELL_TAB_META[tab] && SHELL_TAB_META[tab].label) || tab;
+      button.addEventListener('click', () => switchTab(tab));
+      contextNav.appendChild(button);
+    });
+  }
+  document.body.setAttribute('data-shell-section', activeSectionId);
+}
+
+function toggleShellMobileNav() {
+  if (shellMobileNavOpen) {
+    closeShellMobileNav({ keepFocus: false });
+  } else {
+    openShellMobileNav();
+  }
+}
+
+function openShellMobileNav() {
+  const sheet = document.getElementById('shell-mobile-sheet');
+  const trigger = document.getElementById('shell-mobile-nav-btn');
+  if (!sheet || shellMobileNavOpen) return;
+  shellMobileNavOpen = true;
+  sheet.hidden = false;
+  if (trigger) trigger.setAttribute('aria-expanded', 'true');
+}
+
+function closeShellMobileNav(options) {
+  const opts = options || {};
+  const sheet = document.getElementById('shell-mobile-sheet');
+  const trigger = document.getElementById('shell-mobile-nav-btn');
+  if (!sheet) return;
+  shellMobileNavOpen = false;
+  sheet.hidden = true;
+  if (trigger) {
+    trigger.setAttribute('aria-expanded', 'false');
+    if (!opts.keepFocus) trigger.focus();
+  }
+}
+
+window.addEventListener('hashchange', () => {
+  const state = readHashState();
+  const nextTab = resolveAvailableTab(state.tab || 'chat');
+  currentSettingsSubtab = state.settingsSubtab || currentSettingsSubtab || 'General';
+  settingsSearchQuery = state.settingsSearch || '';
+  if (nextTab !== currentTab) {
+    switchTab(nextTab, { updateHash: false });
+  } else if (currentTab === 'settings') {
+    renderSettings();
+  }
 });
 
-function switchTab(tab) {
+function switchTab(tab, options) {
+  const opts = options || {};
   if (tab === 'research' && !experimentsFeatureEnabled) {
     showToast('Enable experiments in Settings → Advanced → Experiments to use Research.', 'error');
     tab = 'chat';
   }
-  currentTab = tab;
-  document.querySelectorAll('.tab-bar button[data-tab]').forEach((b) => {
-    b.classList.toggle('active', b.getAttribute('data-tab') === tab);
-  });
+  if (tab === 'autonomy' && !autonomyFeatureAvailable) {
+    tab = 'chat';
+  }
+  currentTab = resolveAvailableTab(tab);
   document.querySelectorAll('.tab-panel').forEach((p) => {
-    p.classList.toggle('active', p.id === 'tab-' + tab);
+    p.classList.toggle('active', p.id === 'tab-' + currentTab);
   });
+  renderShellNavigation();
+  if (opts.updateHash !== false) writeHashState({ tab: currentTab });
+  closeShellMobileNav({ keepFocus: true });
 
-  if (tab === 'memory') loadMemoryTree();
-  if (tab === 'jobs') loadJobs();
-  if (tab === 'routines') loadRoutines();
-  if (tab === 'research') {
+  if (currentTab === 'memory') loadMemoryTree();
+  if (currentTab === 'jobs') loadJobs();
+  if (currentTab === 'routines') loadRoutines();
+  if (currentTab === 'autonomy') loadAutonomyDashboard();
+  if (currentTab === 'research') {
     loadExperiments();
     switchResearchSubtab(currentResearchSubtab || 'overview', { render: false });
   }
-  if (tab === 'learning') loadLearning();
-  if (tab === 'logs') applyLogFilters();
-  if (tab === 'extensions') {
+  if (currentTab === 'learning') loadLearning();
+  if (currentTab === 'logs') applyLogFilters();
+  if (currentTab === 'extensions') {
     loadExtensions();
     startPairingPoll();
   } else {
     stopPairingPoll();
   }
-  if (tab === 'skills') loadSkills();
-  if (tab === 'providers') loadProviders();
-  if (tab === 'costs') { loadCostDashboard(); startCostAutoRefresh(); } else { stopCostAutoRefresh(); }
-  if (tab === 'settings') loadSettings();
+  if (currentTab === 'skills') loadSkills();
+  if (currentTab === 'providers') loadProviders();
+  if (currentTab === 'costs') { loadCostDashboard(); startCostAutoRefresh(); } else { stopCostAutoRefresh(); }
+  if (currentTab === 'settings') loadSettings();
+  if (currentTab === 'chat') {
+    requestAnimationFrame(() => {
+      syncChatComposerMetrics();
+      scrollChatToLatest({ force: true });
+    });
+  }
+  updateChatJumpLatestButton();
+  updateResponsiveTableLabels();
 }
 
 // --- Memory (filesystem tree) ---
@@ -2600,20 +3345,254 @@ function loadServerLogLevel() {
 
 // --- Extensions ---
 
+function syncExtensionsSubtabButtons() {
+  const active = currentExtensionsSubtab || 'overview';
+  document.querySelectorAll('[data-extensions-subtab]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.extensionsSubtab === active);
+    button.setAttribute('aria-selected', button.dataset.extensionsSubtab === active ? 'true' : 'false');
+  });
+  document.querySelectorAll('[data-extensions-pane]').forEach((pane) => {
+    pane.classList.toggle('active', pane.dataset.extensionsPane === active);
+  });
+}
+
+function switchExtensionsSubtab(subtab) {
+  currentExtensionsSubtab = EXTENSIONS_SUBTABS.includes(subtab) ? subtab : 'overview';
+  syncExtensionsSubtabButtons();
+}
+
+function extensionsPanelIsOpen(panelId) {
+  return extensionsPanelState[panelId] !== false;
+}
+
+function setExtensionsPanelOpen(panelId, open) {
+  extensionsPanelState[panelId] = !!open;
+  writeJsonStorage(EXTENSIONS_PANEL_STORAGE_KEY, extensionsPanelState);
+}
+
+function applyCollapsiblePanelState(panel, open) {
+  if (!panel) return;
+  panel.classList.toggle('ui-panel-collapsed', !open);
+  const trigger = panel.querySelector('.ui-collapsible-trigger');
+  if (trigger) {
+    trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    trigger.innerHTML = open ? '&#8722;' : '&#43;';
+  }
+}
+
+function initializeExtensionsPanels() {
+  document.querySelectorAll('#tab-extensions [data-collapsible-panel]').forEach((panel) => {
+    const panelId = panel.getAttribute('data-collapsible-panel');
+    const header = panel.querySelector(':scope > .ui-panel-header');
+    if (!panelId || !header) return;
+    let actions = header.querySelector('.ui-panel-actions');
+    if (!actions) {
+      actions = document.createElement('div');
+      actions.className = 'ui-panel-actions';
+      header.appendChild(actions);
+    }
+    let trigger = header.querySelector('.ui-collapsible-trigger');
+    if (!trigger) {
+      trigger = document.createElement('button');
+      trigger.type = 'button';
+      trigger.className = 'ui-collapsible-trigger';
+      trigger.title = 'Collapse section';
+      trigger.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const nextOpen = panel.classList.contains('ui-panel-collapsed');
+        setExtensionsPanelOpen(panelId, nextOpen);
+        applyCollapsiblePanelState(panel, nextOpen);
+      });
+      actions.appendChild(trigger);
+    }
+    applyCollapsiblePanelState(panel, extensionsPanelIsOpen(panelId));
+  });
+}
+
+function renderExtensionsOverview(extData, registryData, mcpServerData, interactionData, toolData) {
+  const container = document.getElementById('extensions-overview-cards');
+  if (!container) return;
+  const installedExtensions = extData.extensions || [];
+  const installedCount = installedExtensions.length;
+  const activeCount = installedExtensions.filter((ext) => !!ext.active).length;
+  const mcpServers = mcpServerData.servers || [];
+  const activeMcpCount = mcpServers.filter((server) => !!server.active).length;
+  const pendingInteractions = (interactionData.interactions || []).length;
+  const toolCount = (toolData.tools || []).length;
+  const discoverCount = (registryData.entries || []).filter((entry) => entry.kind !== 'mcp_server' && !entry.installed).length;
+
+  const cards = [
+    {
+      title: 'Installed',
+      value: String(installedCount),
+      meta: activeCount ? (activeCount + ' active now') : 'No active integrations yet',
+    },
+    {
+      title: 'Discover',
+      value: String(discoverCount),
+      meta: discoverCount ? 'Additional registry entries ready' : 'Registry is already fully installed',
+    },
+    {
+      title: 'MCP',
+      value: String(activeMcpCount),
+      meta: pendingInteractions ? (pendingInteractions + ' pending interaction' + (pendingInteractions === 1 ? '' : 's')) : 'No pending MCP requests',
+    },
+    {
+      title: 'Tools',
+      value: String(toolCount),
+      meta: 'Current tool surface available to the agent',
+    },
+  ];
+
+  container.innerHTML = cards.map((card) =>
+    '<section class="ui-panel ui-panel--compact ui-panel--feature extensions-overview-card">'
+      + '<div class="extensions-overview-kicker">' + escapeHtml(card.title) + '</div>'
+      + '<div class="extensions-overview-value">' + escapeHtml(card.value) + '</div>'
+      + '<div class="extensions-overview-meta">' + escapeHtml(card.meta) + '</div>'
+    + '</section>'
+  ).join('');
+}
+
+function renderMcpEmptyState() {
+  const mcpList = document.getElementById('mcp-servers-list');
+  if (!mcpList) return;
+  mcpList.innerHTML =
+    '<div class="ui-panel ui-panel--feature ui-panel--compact extensions-empty-card">'
+      + '<div class="ui-panel-copy">'
+        + '<h4 class="ui-panel-title ui-panel-title--section">No MCP servers connected</h4>'
+        + '<p class="ui-panel-desc">Connect a remote MCP endpoint to browse resources, prompts, and custom tool namespaces from the Extensions workspace.</p>'
+      + '</div>'
+      + '<div class="ui-resource-actions"><button class="btn-ext" type="button" onclick="openMcpConnectionModal()"><span aria-hidden="true">+</span> Connect MCP</button></div>'
+    + '</div>';
+}
+
+function inferRegisteredToolSource(toolName, extensions, servers) {
+  const installedExtensions = Array.isArray(extensions) ? extensions : [];
+  const mcpServers = Array.isArray(servers) ? servers : [];
+
+  for (const extension of installedExtensions) {
+    if (Array.isArray(extension.tools) && extension.tools.includes(toolName)) {
+      return {
+        origin: 'extension',
+        groupKey: 'extension:' + extension.name,
+        groupLabel: extension.name,
+        badge: extension.kind || 'extension',
+        note: extension.active ? 'Installed extension' : 'Installed but inactive',
+      };
+    }
+  }
+
+  for (const server of mcpServers) {
+    const namespace = String(server.tool_namespace || '').trim();
+    if (namespace && toolName.indexOf(namespace + '__') === 0) {
+      return {
+        origin: 'mcp',
+        groupKey: 'mcp:' + server.name,
+        groupLabel: server.display_name || server.name,
+        badge: 'mcp',
+        note: (server.transport || 'mcp') + (server.active ? ' · active' : ''),
+      };
+    }
+  }
+
+  return {
+    origin: 'core',
+    groupKey: 'builtin',
+    groupLabel: 'ThinClaw core',
+    badge: 'core',
+    note: 'Built-in runtime tool',
+  };
+}
+
+function renderRegisteredTools(tools, extensions, servers) {
+  const container = document.getElementById('extensions-tools-groups');
+  const empty = document.getElementById('tools-empty');
+  if (!container || !empty) return;
+  const entries = Array.isArray(tools) ? tools : [];
+  if (!entries.length) {
+    container.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  const groups = new Map();
+  entries.forEach((tool) => {
+    const source = inferRegisteredToolSource(tool.name, extensions, servers);
+    if (source.origin === 'extension') return;
+    if (!groups.has(source.groupKey)) {
+      groups.set(source.groupKey, {
+        label: source.groupLabel,
+        badge: source.badge,
+        note: source.note,
+        tools: [],
+      });
+    }
+    groups.get(source.groupKey).tools.push(tool);
+  });
+
+  const orderedGroups = Array.from(groups.values()).sort((a, b) => {
+    if (a.badge === 'core') return -1;
+    if (b.badge === 'core') return 1;
+    return a.label.localeCompare(b.label);
+  });
+
+  if (!orderedGroups.length) {
+    container.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+
+  container.innerHTML = orderedGroups.map((group) => {
+    const toolCards = group.tools
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((tool) =>
+        '<article class="ui-panel ui-panel--subtle ui-panel--compact extensions-tool-card">'
+          + '<div class="extensions-tool-card-head">'
+            + '<span class="extensions-tool-card-icon">' + renderSkinToolGlyph(tool.name, { className: 'skin-tool-glyph--compact' }) + '</span>'
+            + '<div class="extensions-tool-card-copy">'
+              + '<strong>' + escapeHtml(toolDisplayName(tool.name)) + '</strong>'
+              + '<span class="extensions-tool-card-note">' + escapeHtml(group.note) + '</span>'
+            + '</div>'
+          + '</div>'
+          + '<p class="extensions-tool-card-desc">' + escapeHtml(tool.description || 'No tool description provided.') + '</p>'
+        + '</article>'
+      ).join('');
+    return '<section class="extensions-tool-group">'
+      + '<div class="extensions-tool-group-head">'
+        + '<div>'
+          + '<h4 class="ui-panel-title ui-panel-title--section">' + escapeHtml(group.label) + '</h4>'
+          + '<p class="ui-panel-desc">' + escapeHtml(group.note) + '</p>'
+        + '</div>'
+        + '<span class="ext-kind kind-' + escapeHtml(group.badge) + '">' + escapeHtml(group.badge) + '</span>'
+      + '</div>'
+      + '<div class="extensions-tool-grid">' + toolCards + '</div>'
+    + '</section>';
+  }).join('');
+  empty.style.display = 'none';
+}
+
 function loadExtensions() {
   const extList = document.getElementById('extensions-list');
   const wasmList = document.getElementById('available-wasm-list');
   const mcpList = document.getElementById('mcp-servers-list');
-  const toolsTbody = document.getElementById('tools-tbody');
-  const toolsEmpty = document.getElementById('tools-empty');
 
-  // Fetch all three in parallel
+  initializeExtensionsPanels();
+  syncExtensionsSubtabButtons();
+
   Promise.all([
     apiFetch('/api/extensions').catch(() => ({ extensions: [] })),
     apiFetch('/api/extensions/tools').catch(() => ({ tools: [] })),
     apiFetch('/api/extensions/registry').catch(function(err) { console.warn('registry fetch failed:', err); return { entries: [] }; }),
-  ]).then(([extData, toolData, registryData]) => {
-    // Render installed extensions
+    apiFetch('/api/mcp/servers').catch(() => ({ servers: [] })),
+    apiFetch('/api/mcp/interactions').catch(() => ({ interactions: [] })),
+  ]).then(([extData, toolData, registryData, mcpServerData, interactionData]) => {
+    var serverMap = new Map((mcpServerData.servers || []).map(function(server) {
+      return [server.name, server];
+    }));
+
+    renderExtensionsOverview(extData, registryData, mcpServerData, interactionData, toolData);
+
     if (extData.extensions.length === 0) {
       extList.innerHTML = '<div class="empty-state">No extensions installed</div>';
     } else {
@@ -2623,11 +3602,9 @@ function loadExtensions() {
       }
     }
 
-    // Split registry entries by kind
     var wasmEntries = registryData.entries.filter(function(e) { return e.kind !== 'mcp_server' && !e.installed; });
     var mcpEntries = registryData.entries.filter(function(e) { return e.kind === 'mcp_server'; });
 
-    // Available WASM extensions
     if (wasmEntries.length === 0) {
       wasmList.innerHTML = '<div class="empty-state">No additional WASM extensions available</div>';
     } else {
@@ -2637,28 +3614,108 @@ function loadExtensions() {
       }
     }
 
-    // MCP servers (show both installed and uninstalled)
-    if (mcpEntries.length === 0) {
-      mcpList.innerHTML = '<div class="empty-state">No MCP servers available</div>';
+    var mcpCardNames = new Set();
+    var mcpCards = [];
+    mcpEntries.forEach(function(entry) {
+      var installedExt = extData.extensions.find(function(e) { return e.name === entry.name; });
+      mcpCards.push(renderMcpServerCard(entry, installedExt, serverMap.get(entry.name) || null));
+      mcpCardNames.add(entry.name);
+    });
+    (mcpServerData.servers || []).forEach(function(server) {
+      if (mcpCardNames.has(server.name)) return;
+      var installedExt = extData.extensions.find(function(e) { return e.name === server.name; });
+      mcpCards.push(renderMcpServerCard(null, installedExt, server));
+      mcpCardNames.add(server.name);
+    });
+
+    if (mcpCards.length === 0) {
+      renderMcpEmptyState();
     } else {
       mcpList.innerHTML = '';
-      for (const entry of mcpEntries) {
-        var installedExt = extData.extensions.find(function(e) { return e.name === entry.name; });
-        mcpList.appendChild(renderMcpServerCard(entry, installedExt));
-      }
+      mcpCards.forEach(function(card) { mcpList.appendChild(card); });
     }
 
-    // Render tools
-    if (toolData.tools.length === 0) {
-      toolsTbody.innerHTML = '';
-      toolsEmpty.style.display = 'block';
+    renderRegisteredTools(toolData.tools || [], extData.extensions || [], mcpServerData.servers || []);
+
+    mcpBrowserState.servers = mcpServerData.servers || [];
+    mcpBrowserState.interactions = interactionData.interactions || [];
+    syncMcpBrowserServerSelection();
+    renderMcpInteractions();
+    renderMcpBrowserServerPicker();
+    if (mcpBrowserState.selectedServer) {
+      loadMcpBrowserServer(mcpBrowserState.selectedServer);
     } else {
-      toolsEmpty.style.display = 'none';
-      toolsTbody.innerHTML = toolData.tools.map((t) =>
-        '<tr><td>' + escapeHtml(t.name) + '</td><td>' + escapeHtml(t.description) + '</td></tr>'
-      ).join('');
+      renderMcpBrowserSummary(null);
+      renderMcpResourceCards([]);
+      renderMcpTemplateCards([]);
+      renderMcpPromptCards([]);
+      renderMcpDetailEmpty();
     }
   });
+}
+
+function openMcpConnectionModal() {
+  closeMcpConnectionModal();
+  mcpConnectionModalFocusReturn = document.activeElement;
+
+  const dialog = document.createElement('dialog');
+  dialog.className = 'configure-dialog mcp-connect-dialog';
+  dialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    closeMcpConnectionModal();
+  });
+  dialog.addEventListener('click', (event) => {
+    const rect = dialog.getBoundingClientRect();
+    const clickedBackdrop = event.clientY < rect.top || event.clientY > rect.bottom || event.clientX < rect.left || event.clientX > rect.right;
+    if (clickedBackdrop) closeMcpConnectionModal();
+  });
+
+  const modal = document.createElement('div');
+  modal.className = 'configure-modal';
+  modal.innerHTML =
+    '<h3 id="mcp-connect-title">Connect MCP Server</h3>'
+    + '<div class="configure-form">'
+      + '<label class="configure-field"><span>Server name</span><input type="text" id="mcp-connect-name" placeholder="internal-mcp"></label>'
+      + '<label class="configure-field"><span>Server URL</span><input type="text" id="mcp-connect-url" placeholder="https://mcp.example.com/"></label>'
+    + '</div>'
+    + '<div class="configure-actions">'
+      + '<button class="btn-ext activate" type="button" id="mcp-connect-submit">Connect</button>'
+      + '<button class="btn-ext remove" type="button" id="mcp-connect-cancel">Cancel</button>'
+    + '</div>';
+
+  dialog.setAttribute('aria-labelledby', 'mcp-connect-title');
+  dialog.appendChild(modal);
+  document.body.appendChild(dialog);
+
+  modal.querySelector('#mcp-connect-submit').addEventListener('click', () => {
+    addMcpServer({
+      name: modal.querySelector('#mcp-connect-name').value,
+      url: modal.querySelector('#mcp-connect-url').value,
+      closeOnSuccess: true,
+    });
+  });
+  modal.querySelector('#mcp-connect-cancel').addEventListener('click', closeMcpConnectionModal);
+
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute('open', 'open');
+  }
+
+  const nameInput = modal.querySelector('#mcp-connect-name');
+  if (nameInput) nameInput.focus();
+}
+
+function closeMcpConnectionModal() {
+  const existing = document.querySelector('.mcp-connect-dialog');
+  if (existing) {
+    if (typeof existing.close === 'function' && existing.open) existing.close();
+    existing.remove();
+  }
+  if (mcpConnectionModalFocusReturn && typeof mcpConnectionModalFocusReturn.focus === 'function') {
+    mcpConnectionModalFocusReturn.focus();
+  }
+  mcpConnectionModalFocusReturn = null;
 }
 
 function renderAvailableExtensionCard(entry) {
@@ -2727,7 +3784,58 @@ function renderAvailableExtensionCard(entry) {
   return card;
 }
 
-function renderMcpServerCard(entry, installedExt) {
+function syncMcpBrowserServerSelection() {
+  if (!Array.isArray(mcpBrowserState.servers) || mcpBrowserState.servers.length === 0) {
+    mcpBrowserState.selectedServer = '';
+    return;
+  }
+  if (mcpBrowserState.selectedServer
+      && mcpBrowserState.servers.some(function(server) { return server.name === mcpBrowserState.selectedServer; })) {
+    return;
+  }
+  var preferred = mcpBrowserState.servers.find(function(server) { return server.active; })
+    || mcpBrowserState.servers[0];
+  mcpBrowserState.selectedServer = preferred ? preferred.name : '';
+}
+
+function renderMcpBrowserServerPicker() {
+  var select = document.getElementById('mcp-browser-server');
+  if (!select) return;
+  var selected = mcpBrowserState.selectedServer || '';
+  var options = ['<option value="">Select an MCP server</option>'];
+  (mcpBrowserState.servers || []).forEach(function(server) {
+    var label = escapeHtml(server.display_name || server.name);
+    if (server.active) label += ' · active';
+    options.push('<option value="' + escapeHtml(server.name) + '"' + (server.name === selected ? ' selected' : '') + '>' + label + '</option>');
+  });
+  select.innerHTML = options.join('');
+}
+
+function onMcpBrowserServerChange() {
+  var select = document.getElementById('mcp-browser-server');
+  mcpBrowserState.selectedServer = select ? select.value : '';
+  if (mcpBrowserState.selectedServer) {
+    loadMcpBrowserServer(mcpBrowserState.selectedServer);
+  } else {
+    renderMcpBrowserSummary(null);
+    renderMcpResourceCards([]);
+    renderMcpTemplateCards([]);
+    renderMcpPromptCards([]);
+    renderMcpDetailEmpty();
+  }
+}
+
+function refreshMcpBrowser() {
+  loadExtensions();
+}
+
+function selectMcpBrowserServer(name) {
+  mcpBrowserState.selectedServer = name;
+  renderMcpBrowserServerPicker();
+  if (name) loadMcpBrowserServer(name);
+}
+
+function renderMcpServerCard(entry, installedExt, serverInfo) {
   var card = document.createElement('div');
   card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card'
     + (installedExt ? '' : ' ui-panel--feature ext-available');
@@ -2737,7 +3845,11 @@ function renderMcpServerCard(entry, installedExt) {
 
   var name = document.createElement('span');
   name.className = 'ext-name ui-resource-name';
-  name.textContent = entry.display_name;
+  name.textContent = (serverInfo && serverInfo.display_name)
+    || (entry && entry.display_name)
+    || (serverInfo && serverInfo.name)
+    || (installedExt && installedExt.name)
+    || 'mcp_server';
   header.appendChild(name);
 
   var kind = document.createElement('span');
@@ -2756,8 +3868,23 @@ function renderMcpServerCard(entry, installedExt) {
 
   var desc = document.createElement('div');
   desc.className = 'ext-desc ui-resource-meta';
-  desc.textContent = entry.description;
+  desc.textContent = (entry && entry.description)
+    || (serverInfo && serverInfo.description)
+    || 'Model Context Protocol server';
   card.appendChild(desc);
+
+  if (serverInfo) {
+    var meta = document.createElement('div');
+    meta.className = 'ext-note ui-resource-note';
+    var metaParts = [];
+    if (serverInfo.transport) metaParts.push(serverInfo.transport);
+    if (serverInfo.url) metaParts.push(serverInfo.url);
+    if (serverInfo.command) metaParts.push(serverInfo.command);
+    if (serverInfo.protocol_version) metaParts.push('protocol ' + serverInfo.protocol_version);
+    if (serverInfo.server_version) metaParts.push('server ' + serverInfo.server_version);
+    meta.textContent = metaParts.join(' · ');
+    card.appendChild(meta);
+  }
 
   var actions = document.createElement('div');
   actions.className = 'ext-actions ui-resource-actions';
@@ -2789,10 +3916,10 @@ function renderMcpServerCard(entry, installedExt) {
       installBtn.textContent = 'Installing...';
       apiFetch('/api/extensions/install', {
         method: 'POST',
-        body: { name: entry.name, kind: entry.kind },
+        body: { name: (entry && entry.name) || serverInfo.name, kind: 'mcp_server' },
       }).then(function(res) {
         if (res.success) {
-          showToast('Installed ' + entry.display_name, 'success');
+          showToast('Installed ' + ((entry && entry.display_name) || serverInfo.display_name || serverInfo.name), 'success');
         } else {
           showToast('Install: ' + (res.message || 'unknown error'), 'error');
         }
@@ -2805,8 +3932,508 @@ function renderMcpServerCard(entry, installedExt) {
     actions.appendChild(installBtn);
   }
 
+  if (serverInfo) {
+    var browseBtn = document.createElement('button');
+    browseBtn.className = 'btn-ext configure';
+    browseBtn.textContent = 'Browse';
+    browseBtn.addEventListener('click', function() {
+      selectMcpBrowserServer(serverInfo.name);
+    });
+    actions.appendChild(browseBtn);
+  }
+
   card.appendChild(actions);
   return card;
+}
+
+function renderMcpInteractions() {
+  var container = document.getElementById('mcp-interactions-list');
+  if (!container) return;
+  var interactions = mcpBrowserState.interactions || [];
+  if (interactions.length === 0) {
+    container.innerHTML = '<div class="empty-state">No pending MCP requests</div>';
+    return;
+  }
+  container.innerHTML = '';
+  interactions.forEach(function(interaction) {
+    var card = document.createElement('div');
+    card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card';
+    card.innerHTML =
+      '<div class="ext-header ui-resource-header">'
+        + '<span class="ext-name ui-resource-name">' + escapeHtml(interaction.title || interaction.method) + '</span>'
+        + '<span class="ext-kind kind-mcp_server">' + escapeHtml(interaction.kind || 'interaction') + '</span>'
+      + '</div>'
+      + '<div class="ext-desc ui-resource-meta">' + escapeHtml(interaction.description || 'Pending MCP interaction') + '</div>'
+      + '<div class="ext-note ui-resource-note">Server: ' + escapeHtml(interaction.server_name || '') + ' · Method: ' + escapeHtml(interaction.method || '') + '</div>';
+
+    var body = document.createElement('div');
+    body.className = 'ext-actions ui-resource-actions';
+
+    if (interaction.kind === 'sampling') {
+      var textarea = document.createElement('textarea');
+      textarea.className = 'mcp-inline-textarea';
+      textarea.placeholder = 'Write the assistant response to return to the MCP server';
+      body.appendChild(textarea);
+
+      var submitBtn = document.createElement('button');
+      submitBtn.className = 'btn-ext activate';
+      submitBtn.textContent = 'Submit';
+      submitBtn.addEventListener('click', function() {
+        var text = textarea.value.trim();
+        if (!text) {
+          showToast('Sampling responses need text before submitting.', 'warning');
+          return;
+        }
+        respondToMcpInteraction(interaction.id, {
+          action: 'approve',
+          response: {
+            role: 'assistant',
+            content: [{ type: 'text', text: text }],
+            stopReason: 'end_turn',
+          },
+        });
+      });
+      body.appendChild(submitBtn);
+    } else {
+      var form = renderMcpElicitationForm(interaction);
+      body.appendChild(form);
+    }
+
+    var denyBtn = document.createElement('button');
+    denyBtn.className = 'btn-ext remove';
+    denyBtn.textContent = 'Deny';
+    denyBtn.addEventListener('click', function() {
+      respondToMcpInteraction(interaction.id, {
+        action: 'deny',
+        message: 'User denied the MCP interaction from the web UI.',
+      });
+    });
+    body.appendChild(denyBtn);
+
+    card.appendChild(body);
+    container.appendChild(card);
+  });
+}
+
+function mcpSchemaFieldType(field) {
+  if (!field || !field.type) return null;
+  if (Array.isArray(field.type)) {
+    for (var i = 0; i < field.type.length; i += 1) {
+      if (field.type[i] && field.type[i] !== 'null') return field.type[i];
+    }
+    return field.type[0] || null;
+  }
+  return field.type;
+}
+
+function buildMcpElicitationInput(field, propName) {
+  var fieldType = mcpSchemaFieldType(field);
+
+  if (Array.isArray(field && field.enum) && field.enum.length > 0) {
+    var select = document.createElement('select');
+    select.setAttribute('data-field-name', propName);
+    select.setAttribute('data-field-kind', 'enum');
+    select.setAttribute('data-field-enum', JSON.stringify(field.enum));
+    var emptyOption = document.createElement('option');
+    emptyOption.value = '';
+    emptyOption.textContent = 'Select a value';
+    select.appendChild(emptyOption);
+    field.enum.forEach(function(optionValue, index) {
+      var option = document.createElement('option');
+      option.value = String(index);
+      option.textContent = typeof optionValue === 'string' ? optionValue : JSON.stringify(optionValue);
+      select.appendChild(option);
+    });
+    return select;
+  }
+
+  if (fieldType === 'boolean') {
+    var boolSelect = document.createElement('select');
+    boolSelect.setAttribute('data-field-name', propName);
+    boolSelect.setAttribute('data-field-kind', 'boolean');
+    [
+      { value: '', label: 'Select true or false' },
+      { value: 'true', label: 'true' },
+      { value: 'false', label: 'false' },
+    ].forEach(function(optionDef) {
+      var option = document.createElement('option');
+      option.value = optionDef.value;
+      option.textContent = optionDef.label;
+      boolSelect.appendChild(option);
+    });
+    return boolSelect;
+  }
+
+  if (fieldType === 'array' || fieldType === 'object') {
+    var jsonInput = document.createElement('textarea');
+    jsonInput.setAttribute('data-field-name', propName);
+    jsonInput.setAttribute('data-field-kind', fieldType);
+    jsonInput.placeholder = fieldType === 'array' ? '[...]' : '{...}';
+    return jsonInput;
+  }
+
+  var input = document.createElement(fieldType === 'string' && (field.format === 'multiline' || field.maxLength > 120) ? 'textarea' : 'input');
+  input.setAttribute('data-field-name', propName);
+  input.setAttribute('data-field-kind', fieldType || 'string');
+  if (input.tagName === 'INPUT') {
+    input.type = fieldType === 'number' || fieldType === 'integer' ? 'number' : 'text';
+    if (fieldType === 'integer') input.step = '1';
+    if (fieldType === 'number') input.step = 'any';
+  }
+  return input;
+}
+
+function hasMcpElicitationValue(input) {
+  var kind = input.getAttribute('data-field-kind');
+  if (kind === 'boolean' || kind === 'enum') return input.value !== '';
+  return String(input.value || '').trim() !== '';
+}
+
+function parseMcpElicitationValue(input) {
+  var kind = input.getAttribute('data-field-kind') || 'string';
+  var rawValue = String(input.value || '').trim();
+  if (kind === 'boolean') {
+    if (input.value === 'true') return true;
+    if (input.value === 'false') return false;
+    throw new Error('Choose true or false');
+  }
+  if (kind === 'integer') {
+    if (!rawValue) throw new Error('Enter an integer');
+    var intValue = Number(rawValue);
+    if (!Number.isInteger(intValue)) throw new Error('Enter a valid integer');
+    return intValue;
+  }
+  if (kind === 'number') {
+    if (!rawValue) throw new Error('Enter a number');
+    var numberValue = Number(rawValue);
+    if (!Number.isFinite(numberValue)) throw new Error('Enter a valid number');
+    return numberValue;
+  }
+  if (kind === 'array' || kind === 'object') {
+    if (!rawValue) throw new Error('Enter valid JSON');
+    var parsed = JSON.parse(rawValue);
+    if (kind === 'array' && !Array.isArray(parsed)) throw new Error('Enter a JSON array');
+    if (kind === 'object' && (!parsed || Array.isArray(parsed) || typeof parsed !== 'object')) {
+      throw new Error('Enter a JSON object');
+    }
+    return parsed;
+  }
+  if (kind === 'enum') {
+    var options = JSON.parse(input.getAttribute('data-field-enum') || '[]');
+    var optionIndex = Number(input.value);
+    if (!Number.isInteger(optionIndex) || optionIndex < 0 || optionIndex >= options.length) {
+      throw new Error('Select a valid option');
+    }
+    return options[optionIndex];
+  }
+  return rawValue;
+}
+
+function renderMcpElicitationForm(interaction) {
+  var shell = document.createElement('div');
+  shell.className = 'mcp-elicitation-form';
+  var schema = interaction && interaction.schema && typeof interaction.schema === 'object'
+    ? interaction.schema
+    : null;
+  var props = schema && schema.properties && typeof schema.properties === 'object'
+    ? schema.properties
+    : {};
+  var required = Array.isArray(schema && schema.required) ? schema.required : [];
+  var propNames = Object.keys(props);
+
+  if (propNames.length === 0) {
+    var textarea = document.createElement('textarea');
+    textarea.className = 'mcp-inline-textarea';
+    textarea.placeholder = 'Enter JSON to return to the MCP server';
+    shell.appendChild(textarea);
+
+    var submitBtn = document.createElement('button');
+    submitBtn.className = 'btn-ext activate';
+    submitBtn.textContent = 'Submit';
+    submitBtn.addEventListener('click', function() {
+      var raw = textarea.value.trim();
+      if (!raw) {
+        showToast('Enter a JSON response before submitting.', 'warning');
+        return;
+      }
+      try {
+        respondToMcpInteraction(interaction.id, {
+          action: 'approve',
+          response: JSON.parse(raw),
+        });
+      } catch (err) {
+        showToast('Invalid JSON: ' + err.message, 'error');
+      }
+    });
+    shell.appendChild(submitBtn);
+    return shell;
+  }
+
+  propNames.forEach(function(propName) {
+    var field = props[propName] || {};
+    var label = document.createElement('label');
+    label.className = 'mcp-inline-field';
+    label.textContent = propName + (required.indexOf(propName) !== -1 ? ' *' : '');
+    var input = buildMcpElicitationInput(field, propName);
+    input.placeholder = field.description || propName;
+    label.appendChild(input);
+    shell.appendChild(label);
+  });
+
+  var submitBtn = document.createElement('button');
+  submitBtn.className = 'btn-ext activate';
+  submitBtn.textContent = 'Submit';
+  submitBtn.addEventListener('click', function() {
+    var values = {};
+    var invalid = null;
+    shell.querySelectorAll('[data-field-name]').forEach(function(input) {
+      var name = input.getAttribute('data-field-name');
+      if (invalid || !hasMcpElicitationValue(input)) return;
+      try {
+        values[name] = parseMcpElicitationValue(input);
+      } catch (err) {
+        invalid = name + ': ' + err.message;
+      }
+    });
+    required.forEach(function(name) {
+      if (!invalid && !Object.prototype.hasOwnProperty.call(values, name)) invalid = 'Missing required field: ' + name;
+    });
+    if (invalid) {
+      showToast(invalid, 'warning');
+      return;
+    }
+    respondToMcpInteraction(interaction.id, {
+      action: 'approve',
+      response: { values: values },
+    });
+  });
+  shell.appendChild(submitBtn);
+
+  return shell;
+}
+
+function respondToMcpInteraction(interactionId, body) {
+  apiFetch('/api/mcp/interactions/' + encodeURIComponent(interactionId) + '/respond', {
+    method: 'POST',
+    body: body,
+  }).then(function() {
+    showToast('Submitted MCP interaction response.', 'success');
+    loadExtensions();
+  }).catch(function(err) {
+    showToast('Failed to submit MCP interaction: ' + err.message, 'error');
+  });
+}
+
+function loadMcpBrowserServer(name) {
+  if (!name) return;
+  Promise.all([
+    apiFetch('/api/mcp/servers/' + encodeURIComponent(name)).catch(function() { return null; }),
+    apiFetch('/api/mcp/servers/' + encodeURIComponent(name) + '/resources').catch(function() { return { resources: [] }; }),
+    apiFetch('/api/mcp/servers/' + encodeURIComponent(name) + '/resource-templates').catch(function() { return { resource_templates: [] }; }),
+    apiFetch('/api/mcp/servers/' + encodeURIComponent(name) + '/prompts').catch(function() { return { prompts: [] }; }),
+  ]).then(function(results) {
+    var server = results[0];
+    mcpBrowserState.selectedServer = name;
+    mcpBrowserState.resources = (results[1] && results[1].resources) || [];
+    mcpBrowserState.resourceTemplates = (results[2] && results[2].resource_templates) || [];
+    mcpBrowserState.prompts = (results[3] && results[3].prompts) || [];
+    renderMcpBrowserSummary(server);
+    renderMcpResourceCards(mcpBrowserState.resources);
+    renderMcpTemplateCards(mcpBrowserState.resourceTemplates);
+    renderMcpPromptCards(mcpBrowserState.prompts);
+  }).catch(function(err) {
+    showToast('Failed to load MCP browser data: ' + err.message, 'error');
+  });
+}
+
+function renderMcpBrowserSummary(server) {
+  var container = document.getElementById('mcp-browser-summary');
+  if (!container) return;
+  if (!server) {
+    container.innerHTML = '<div class="empty-state">Select an MCP server to inspect its live surface.</div>';
+    return;
+  }
+  container.innerHTML =
+    '<div class="ui-panel ui-panel--compact ui-resource-card ext-card">'
+      + '<div class="ext-header ui-resource-header">'
+        + '<span class="ext-name ui-resource-name">' + escapeHtml(server.display_name || server.name) + '</span>'
+        + '<span class="ext-kind kind-mcp_server">' + escapeHtml(server.transport || 'mcp') + '</span>'
+      + '</div>'
+      + '<div class="ext-note ui-resource-note">Namespace: ' + escapeHtml(server.tool_namespace || '') + '</div>'
+      + '<div class="ext-note ui-resource-note">Auth: ' + escapeHtml(server.authenticated ? 'authenticated' : 'not authenticated') + ' · Active: ' + escapeHtml(server.active ? 'yes' : 'no') + '</div>'
+      + (server.protocol_version ? '<div class="ext-note ui-resource-note">Protocol: ' + escapeHtml(server.protocol_version) + '</div>' : '')
+      + (server.server_version ? '<div class="ext-note ui-resource-note">Version: ' + escapeHtml(server.server_version) + '</div>' : '')
+    + '</div>';
+}
+
+function renderMcpResourceCards(resources) {
+  var container = document.getElementById('mcp-resources-list');
+  if (!container) return;
+  if (!Array.isArray(resources) || resources.length === 0) {
+    container.innerHTML = '<div class="empty-state">No MCP resources published by this server</div>';
+    return;
+  }
+  container.innerHTML = '';
+  resources.forEach(function(resource) {
+    var card = document.createElement('div');
+    card.className = 'ui-panel ui-panel--compact ui-resource-card ext-card';
+    card.innerHTML =
+      '<div class="ext-header ui-resource-header">'
+        + '<span class="ext-name ui-resource-name">' + escapeHtml(resource.title || resource.name || resource.uri) + '</span>'
+      + '</div>'
+      + '<div class="ext-desc ui-resource-meta">' + escapeHtml(resource.description || resource.uri) + '</div>'
+      + '<div class="ext-note ui-resource-note">' + escapeHtml(resource.mime_type || resource.mimeType || 'unknown') + '</div>';
+    var actions = document.createElement('div');
+    actions.className = 'ext-actions ui-resource-actions';
+    var button = document.createElement('button');
+    button.className = 'btn-ext configure';
+    button.textContent = 'Read';
+    button.addEventListener('click', function() {
+      showMcpResourceDetail(resource);
+    });
+    actions.appendChild(button);
+    card.appendChild(actions);
+    container.appendChild(card);
+  });
+}
+
+function renderMcpTemplateCards(templates) {
+  var container = document.getElementById('mcp-resource-templates-list');
+  if (!container) return;
+  if (!Array.isArray(templates) || templates.length === 0) {
+    container.innerHTML = '<div class="empty-state">No MCP resource templates published by this server</div>';
+    return;
+  }
+  container.innerHTML = '';
+  templates.forEach(function(template) {
+    var card = document.createElement('div');
+    card.className = 'ui-panel ui-panel--compact ui-resource-card ext-card';
+    card.innerHTML =
+      '<div class="ext-header ui-resource-header">'
+        + '<span class="ext-name ui-resource-name">' + escapeHtml(template.title || template.name || template.uri_template) + '</span>'
+      + '</div>'
+      + '<div class="ext-desc ui-resource-meta">' + escapeHtml(template.description || template.uri_template) + '</div>'
+      + '<div class="ext-note ui-resource-note">' + escapeHtml(template.uri_template || '') + '</div>';
+    container.appendChild(card);
+  });
+}
+
+function renderMcpPromptCards(prompts) {
+  var container = document.getElementById('mcp-prompts-list');
+  if (!container) return;
+  if (!Array.isArray(prompts) || prompts.length === 0) {
+    container.innerHTML = '<div class="empty-state">No MCP prompts published by this server</div>';
+    return;
+  }
+  container.innerHTML = '';
+  prompts.forEach(function(promptDef) {
+    var card = document.createElement('div');
+    card.className = 'ui-panel ui-panel--compact ui-resource-card ext-card';
+    card.innerHTML =
+      '<div class="ext-header ui-resource-header">'
+        + '<span class="ext-name ui-resource-name">' + escapeHtml(promptDef.title || promptDef.name) + '</span>'
+      + '</div>'
+      + '<div class="ext-desc ui-resource-meta">' + escapeHtml(promptDef.description || promptDef.name) + '</div>'
+      + '<div class="ext-note ui-resource-note">' + escapeHtml((promptDef.arguments || []).map(function(arg) { return arg.name + (arg.required ? '*' : ''); }).join(', ') || 'No arguments') + '</div>';
+    var actions = document.createElement('div');
+    actions.className = 'ext-actions ui-resource-actions';
+    var button = document.createElement('button');
+    button.className = 'btn-ext configure';
+    button.textContent = 'Open';
+    button.addEventListener('click', function() {
+      showMcpPromptDetail(promptDef);
+    });
+    actions.appendChild(button);
+    card.appendChild(actions);
+    container.appendChild(card);
+  });
+}
+
+function renderMcpDetailEmpty() {
+  var panel = document.getElementById('mcp-detail-panel');
+  if (!panel) return;
+  panel.innerHTML = '<div class="empty-state">Select an MCP resource or prompt to inspect its contents.</div>';
+}
+
+function showMcpResourceDetail(resource) {
+  apiFetch('/api/mcp/servers/' + encodeURIComponent(mcpBrowserState.selectedServer) + '/resources/read?uri=' + encodeURIComponent(resource.uri))
+    .then(function(data) {
+      var panel = document.getElementById('mcp-detail-panel');
+      if (!panel) return;
+      var contentHtml = (data.contents || []).map(function(item) {
+        if (item.type === 'text') {
+          return '<pre class="mcp-detail-pre">' + escapeHtml(item.text || '') + '</pre>';
+        }
+        return '<pre class="mcp-detail-pre">' + escapeHtml(JSON.stringify(item, null, 2)) + '</pre>';
+      }).join('');
+      panel.innerHTML =
+        '<div class="ui-panel-copy">'
+          + '<h4 class="ui-panel-title ui-panel-title--section">' + escapeHtml(resource.title || resource.name || resource.uri) + '</h4>'
+          + '<p class="ui-panel-desc">' + escapeHtml(resource.description || resource.uri) + '</p>'
+        + '</div>'
+        + contentHtml;
+    })
+    .catch(function(err) {
+      showToast('Failed to read MCP resource: ' + err.message, 'error');
+    });
+}
+
+function showMcpPromptDetail(promptDef) {
+  var panel = document.getElementById('mcp-detail-panel');
+  if (!panel) return;
+  var args = Array.isArray(promptDef.arguments) ? promptDef.arguments : [];
+  var fields = args.map(function(arg) {
+    return '<label class="mcp-inline-field">' + escapeHtml(arg.name + (arg.required ? ' *' : ''))
+      + '<input type="text" data-prompt-arg="' + escapeHtml(arg.name) + '" placeholder="' + escapeHtml(arg.description || arg.name) + '"></label>';
+  }).join('');
+  panel.innerHTML =
+    '<div class="ui-panel-copy">'
+      + '<h4 class="ui-panel-title ui-panel-title--section">' + escapeHtml(promptDef.title || promptDef.name) + '</h4>'
+      + '<p class="ui-panel-desc">' + escapeHtml(promptDef.description || 'Request this MCP prompt with optional arguments.') + '</p>'
+    + '</div>'
+    + '<div class="mcp-prompt-form">' + fields + '<button class="btn-ext configure" id="mcp-prompt-submit">Fetch Prompt</button></div>';
+  var submit = document.getElementById('mcp-prompt-submit');
+  if (submit) {
+    submit.addEventListener('click', function() {
+      submitMcpPrompt(promptDef.name);
+    });
+  }
+}
+
+function submitMcpPrompt(promptName) {
+  var panel = document.getElementById('mcp-detail-panel');
+  if (!panel) return;
+  var argumentsPayload = {};
+  panel.querySelectorAll('[data-prompt-arg]').forEach(function(input) {
+    var value = String(input.value || '').trim();
+    if (!value) return;
+    argumentsPayload[input.getAttribute('data-prompt-arg')] = value;
+  });
+  apiFetch('/api/mcp/servers/' + encodeURIComponent(mcpBrowserState.selectedServer) + '/prompts/' + encodeURIComponent(promptName), {
+    method: 'POST',
+    body: { arguments: Object.keys(argumentsPayload).length ? argumentsPayload : null },
+  }).then(function(data) {
+    var messages = (data.messages || []).map(function(message) {
+      var content = message.content;
+      if (typeof content === 'string') return renderMarkdown(content);
+      if (Array.isArray(content)) {
+        return content.map(function(block) {
+          if (block.type === 'text') return renderMarkdown(block.text || '');
+          return '<pre class="mcp-detail-pre">' + escapeHtml(JSON.stringify(block, null, 2)) + '</pre>';
+        }).join('');
+      }
+      if (content && content.type === 'text') return renderMarkdown(content.text || '');
+      return '<pre class="mcp-detail-pre">' + escapeHtml(JSON.stringify(content, null, 2)) + '</pre>';
+    }).join('');
+    panel.innerHTML =
+      '<div class="ui-panel-copy">'
+        + '<h4 class="ui-panel-title ui-panel-title--section">' + escapeHtml(promptName) + '</h4>'
+        + (data.description ? '<p class="ui-panel-desc">' + escapeHtml(data.description) + '</p>' : '')
+      + '</div>'
+      + messages;
+  }).catch(function(err) {
+    showToast('Failed to fetch MCP prompt: ' + err.message, 'error');
+  });
 }
 
 function createReconfigureButton(extName) {
@@ -2879,6 +4506,11 @@ function renderExtensionCard(ext) {
     card.appendChild(errorDiv);
   }
 
+  const diagnosticsDiv = renderChannelDiagnostics(ext);
+  if (diagnosticsDiv) {
+    card.appendChild(diagnosticsDiv);
+  }
+
   // Show "coming soon" note for non-Telegram channels that are configured but not fully supported yet
   if (ext.kind === 'wasm_channel' && ext.name !== 'telegram'
       && (ext.activation_status === 'configured' || ext.active)) {
@@ -2899,19 +4531,41 @@ function renderExtensionCard(ext) {
       activeLabel.className = 'ext-active-label';
       activeLabel.textContent = 'Active';
       actions.appendChild(activeLabel);
+      if (ext.reconnect_supported) {
+        var reconnectBtn = document.createElement('button');
+        reconnectBtn.className = 'btn-ext activate';
+        reconnectBtn.textContent = 'Reconnect';
+        reconnectBtn.addEventListener('click', function() { reconnectExtension(ext.name); });
+        actions.appendChild(reconnectBtn);
+      }
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'pairing') {
       var pairingLabel = document.createElement('span');
       pairingLabel.className = 'ext-pairing-label';
       pairingLabel.textContent = 'Awaiting Pairing';
       actions.appendChild(pairingLabel);
+      if (ext.reconnect_supported) {
+        var reconnectPairingBtn = document.createElement('button');
+        reconnectPairingBtn.className = 'btn-ext activate';
+        reconnectPairingBtn.textContent = 'Reconnect';
+        reconnectPairingBtn.addEventListener('click', function() { reconnectExtension(ext.name); });
+        actions.appendChild(reconnectPairingBtn);
+      }
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'failed') {
-      var restartBtn = document.createElement('button');
-      restartBtn.className = 'btn-ext activate';
-      restartBtn.textContent = 'Restart';
-      restartBtn.addEventListener('click', restartGateway);
-      actions.appendChild(restartBtn);
+      if (ext.reconnect_supported) {
+        var failedReconnectBtn = document.createElement('button');
+        failedReconnectBtn.className = 'btn-ext activate';
+        failedReconnectBtn.textContent = 'Reconnect';
+        failedReconnectBtn.addEventListener('click', function() { reconnectExtension(ext.name); });
+        actions.appendChild(failedReconnectBtn);
+      } else {
+        var restartBtn = document.createElement('button');
+        restartBtn.className = 'btn-ext activate';
+        restartBtn.textContent = 'Restart';
+        restartBtn.addEventListener('click', restartGateway);
+        actions.appendChild(restartBtn);
+      }
       actions.appendChild(createReconfigureButton(ext.name));
     } else {
       // installed or configured: show Setup button
@@ -2926,7 +4580,13 @@ function renderExtensionCard(ext) {
     if (!ext.active) {
       const activateBtn = document.createElement('button');
       activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
+      if (ext.auth_mode === 'oauth' && (ext.auth_status === 'needs_reauth' || ext.auth_status === 'insufficient_scope')) {
+        activateBtn.textContent = 'Reconnect';
+      } else if (ext.auth_mode === 'oauth' && ext.auth_status !== 'authenticated' && ext.auth_status !== 'no_auth_required') {
+        activateBtn.textContent = 'Connect';
+      } else {
+        activateBtn.textContent = 'Activate';
+      }
       activateBtn.addEventListener('click', () => activateExtension(ext.name));
       actions.appendChild(activateBtn);
     } else {
@@ -2936,7 +4596,7 @@ function renderExtensionCard(ext) {
       actions.appendChild(activeLabel);
     }
 
-    if (ext.needs_setup) {
+    if (ext.auth_mode !== 'oauth' && ext.needs_setup) {
       const configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
       configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
@@ -2976,14 +4636,85 @@ function activateExtension(name) {
       if (res.auth_url) {
         showToast('Opening authentication for ' + name, 'info');
         window.open(res.auth_url, '_blank');
-      } else if (res.awaiting_token) {
+      } else if (res.auth_mode === 'manual_token' || res.awaiting_token) {
         showConfigureModal(name);
+      } else if (res.instructions) {
+        showToast(res.instructions, 'info');
       } else {
         showToast('Activate failed: ' + res.message, 'error');
       }
       loadExtensions();
     })
     .catch((err) => showToast('Activate failed: ' + err.message, 'error'));
+}
+
+function reconnectExtension(name) {
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/reconnect', { method: 'POST' })
+    .then((res) => {
+      if (!res.success) {
+        showToast('Reconnect failed: ' + res.message, 'error');
+      } else {
+        showToast(res.message || ('Reconnected ' + name), 'success');
+      }
+      loadExtensions();
+    })
+    .catch((err) => showToast('Reconnect failed: ' + err.message, 'error'));
+}
+
+function renderChannelDiagnostics(ext) {
+  const diag = ext && ext.channel_diagnostics;
+  if (!diag || typeof diag !== 'object') return null;
+
+  const parts = [];
+  if (diag.transport_mode) parts.push('Mode: ' + diag.transport_mode);
+  if (diag.transport_preference) parts.push('Preference: ' + diag.transport_preference);
+  if (diag.transport_override) parts.push('Override: ' + diag.transport_override);
+  if (diag.last_inbound_at) {
+    parts.push('Last inbound: ' + formatRelativeTime(diag.last_inbound_at));
+  } else if (diag.transport_mode === 'polling' && diag.last_poll_success_at) {
+    parts.push('Last poll: ' + formatRelativeTime(diag.last_poll_success_at));
+  }
+  if (diag.unhealthy_reason) {
+    parts.push('Health: ' + diag.unhealthy_reason);
+  } else if (diag.transport_reason) {
+    parts.push('Reason: ' + diag.transport_reason);
+  } else if (diag.last_transport_error) {
+    parts.push('Last error: ' + diag.last_transport_error);
+  }
+
+  if (!parts.length) return null;
+
+  const note = document.createElement('div');
+  note.className = 'ext-note ui-resource-note';
+  note.textContent = parts.join(' · ');
+
+  const detail = [];
+  if (diag.expected_webhook_url && diag.transport_mode === 'webhook') {
+    detail.push('Expected webhook: ' + diag.expected_webhook_url);
+  }
+  if (diag.host_tunnel_url) {
+    detail.push('Host tunnel URL: ' + diag.host_tunnel_url);
+  }
+  if (diag.host_transport_reason) {
+    detail.push('Webhook policy: ' + diag.host_transport_reason);
+  }
+  if (diag.registered_webhook_url) {
+    detail.push('Registered webhook: ' + diag.registered_webhook_url);
+  }
+  if (diag.registered_webhook_error) {
+    detail.push('Telegram webhook error: ' + diag.registered_webhook_error);
+  }
+  if (diag.last_poll_error) {
+    detail.push('Poll error: ' + diag.last_poll_error);
+  }
+  if (diag.last_transport_error) {
+    detail.push('Last transport error: ' + diag.last_transport_error);
+  }
+  if (detail.length) {
+    note.title = detail.join('\n');
+  }
+
+  return note;
 }
 
 function removeExtension(name) {
@@ -3003,29 +4734,48 @@ function removeExtension(name) {
 function showConfigureModal(name) {
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
     .then((setup) => {
-      if (!setup.secrets || setup.secrets.length === 0) {
-        showToast('No configuration needed for ' + name, 'info');
+      if (setup.mode === 'oauth') {
+        if (setup.auth_url) {
+          showToast('Opening authentication for ' + name, 'info');
+          window.open(setup.auth_url, '_blank');
+        } else {
+          showToast(setup.instructions || ('Browser authentication is not available for ' + name), 'info');
+        }
         return;
       }
-      renderConfigureModal(name, setup.secrets);
+      if (!setup.fields || setup.fields.length === 0) {
+        showToast(setup.instructions || ('No configuration needed for ' + name), 'info');
+        return;
+      }
+      renderConfigureModal(name, setup.fields);
     })
     .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
 }
 
 function renderConfigureModal(name, secrets) {
   closeConfigureModal();
-  const overlay = document.createElement('div');
-  overlay.className = 'configure-overlay';
-  overlay.addEventListener('click', (e) => {
-    if (e.target === overlay) closeConfigureModal();
+  configureModalFocusReturn = document.activeElement;
+  const dialog = document.createElement('dialog');
+  dialog.className = 'configure-dialog';
+  dialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    closeConfigureModal();
+  });
+  dialog.addEventListener('click', (event) => {
+    const rect = dialog.getBoundingClientRect();
+    const clickedBackdrop = event.clientY < rect.top || event.clientY > rect.bottom || event.clientX < rect.left || event.clientX > rect.right;
+    if (clickedBackdrop) closeConfigureModal();
   });
 
   const modal = document.createElement('div');
   modal.className = 'configure-modal';
+  modal.setAttribute('role', 'document');
 
   const header = document.createElement('h3');
+  header.id = 'configure-modal-title';
   header.textContent = 'Configure ' + name;
   modal.appendChild(header);
+  dialog.setAttribute('aria-labelledby', header.id);
 
   const form = document.createElement('div');
   form.className = 'configure-form';
@@ -3093,8 +4843,14 @@ function renderConfigureModal(name, secrets) {
   actions.appendChild(cancelBtn);
 
   modal.appendChild(actions);
-  overlay.appendChild(modal);
-  document.body.appendChild(overlay);
+  dialog.appendChild(modal);
+  document.body.appendChild(dialog);
+
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute('open', 'open');
+  }
 
   if (fields.length > 0) fields[0].input.focus();
 }
@@ -3139,8 +4895,15 @@ function submitConfigureModal(name, fields) {
 }
 
 function closeConfigureModal() {
-  const existing = document.querySelector('.configure-overlay');
-  if (existing) existing.remove();
+  const existing = document.querySelector('.configure-dialog, .configure-overlay');
+  if (existing) {
+    if (typeof existing.close === 'function' && existing.open) existing.close();
+    existing.remove();
+  }
+  if (configureModalFocusReturn && typeof configureModalFocusReturn.focus === 'function') {
+    configureModalFocusReturn.focus();
+  }
+  configureModalFocusReturn = null;
 }
 
 // --- Pairing ---
@@ -3385,6 +5148,8 @@ function renderJobsSummary(s) {
     + summaryCard('Total', s.total, '')
     + summaryCard('In Progress', s.in_progress, 'active')
     + summaryCard('Completed', s.completed, 'completed')
+    + summaryCard('Cancelled', s.cancelled || 0, 'pending')
+    + summaryCard('Interrupted', s.interrupted || 0, 'stuck')
     + summaryCard('Failed', s.failed, 'failed')
     + summaryCard('Stuck', s.stuck, 'stuck');
 }
@@ -3423,7 +5188,9 @@ function renderJobsList(jobs) {
 
     return '<tr class="job-row" onclick="openJobDetail(\'' + job.id + '\')">'
       + '<td title="' + escapeHtml(job.id) + '">' + shortId + '</td>'
-      + '<td>' + escapeHtml(job.title) + '</td>'
+      + '<td>' + escapeHtml(job.title)
+      + (job.runtime_mode ? '<div class="meta-inline">' + escapeHtml(job.runtime_mode) + '</div>' : '')
+      + '</td>'
       + '<td><span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span></td>'
       + '<td>' + formatDate(job.created_at) + '</td>'
       + '<td>' + actionBtns + '</td>'
@@ -3550,12 +5317,24 @@ function renderJobOverview(container, job) {
   grid.className = 'job-meta-grid';
   grid.innerHTML = metaItem('Job ID', job.id)
     + metaItem('State', job.state)
+    + metaItem('Backend', job.execution_backend || '-')
+    + metaItem('Runtime family', job.runtime_family || '-')
+    + metaItem('Runtime mode', job.runtime_mode || job.job_mode || '-')
+    + metaItem('Network isolation', job.network_isolation || '-')
     + metaItem('Created', formatDate(job.created_at))
     + metaItem('Started', formatDate(job.started_at))
     + metaItem('Completed', formatDate(job.completed_at))
-    + metaItem('Duration', formatDuration(job.elapsed_secs))
-    + (job.job_mode ? metaItem('Mode', job.job_mode) : '');
+    + metaItem('Duration', formatDuration(job.elapsed_secs));
   container.appendChild(grid);
+
+  if (job.runtime_capabilities && job.runtime_capabilities.length) {
+    const caps = document.createElement('div');
+    caps.className = 'ui-panel ui-panel--subtle';
+    caps.innerHTML = '<h3>Runtime capabilities</h3><div class="meta-inline">'
+      + escapeHtml(job.runtime_capabilities.join(', '))
+      + '</div>';
+    container.appendChild(caps);
+  }
 
   // Description
   if (job.description) {
@@ -3744,15 +5523,18 @@ function renderJobActivity(container, job) {
     + '<option value="message">Messages</option>'
     + '<option value="tool_use">Tool Calls</option>'
     + '<option value="tool_result">Results</option>'
+    + '<option value="status">Status</option>'
+    + '<option value="session_result">Session Results</option>'
+    + '<option value="result">Final Result</option>'
     + '</select>'
     + '<label class="logs-checkbox"><input type="checkbox" id="activity-autoscroll" checked> Auto-scroll</label>'
     + '</div>'
     + '<div class="activity-terminal" id="activity-terminal"></div>'
-    + '<div class="activity-input-bar" id="activity-input-bar">'
-    + '<input type="text" id="activity-prompt-input" placeholder="Send follow-up prompt..." />'
-    + '<button id="activity-send-btn">Send</button>'
-    + '<button id="activity-done-btn" title="Signal done">Done</button>'
-    + '</div>';
+    + (job && job.interactive ? '<div class="activity-input-bar" id="activity-input-bar">'
+      + '<input type="text" id="activity-prompt-input" placeholder="Send follow-up prompt..." />'
+      + '<button id="activity-send-btn">Send</button>'
+      + '<button id="activity-done-btn" title="Signal done">Done</button>'
+      + '</div>' : '<div class="activity-input-bar" id="activity-input-bar"><span class="activity-status">This job is not accepting follow-up prompts.</span></div>');
 
   document.getElementById('activity-type-filter').addEventListener('change', applyActivityFilter);
 
@@ -3761,11 +5543,13 @@ function renderJobActivity(container, job) {
   const sendBtn = document.getElementById('activity-send-btn');
   const doneBtn = document.getElementById('activity-done-btn');
 
-  sendBtn.addEventListener('click', () => sendJobPrompt(job.id, false));
-  doneBtn.addEventListener('click', () => sendJobPrompt(job.id, true));
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') sendJobPrompt(job.id, false);
-  });
+  if (sendBtn && doneBtn && input) {
+    sendBtn.addEventListener('click', () => sendJobPrompt(job.id, false));
+    doneBtn.addEventListener('click', () => sendJobPrompt(job.id, true));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendJobPrompt(job.id, false);
+    });
+  }
 
   // Load persisted events from DB, then catch up with any live SSE events
   apiFetch('/api/jobs/' + job.id + '/events').then((data) => {
@@ -3846,6 +5630,12 @@ function appendActivityEvent(terminal, eventType, data) {
     case 'status':
       el.innerHTML = '<span class="activity-status">' + escapeHtml(data.message || '') + '</span>';
       break;
+    case 'session_result':
+      el.innerHTML = '<span class="activity-status">' + escapeHtml(data.message || data.status || 'session finished') + '</span>';
+      if (data.session_id) {
+        el.innerHTML += ' <span class="activity-session-id">session: ' + escapeHtml(data.session_id) + '</span>';
+      }
+      break;
     case 'result':
       el.className += ' activity-final';
       const success = data.success !== false;
@@ -3877,7 +5667,7 @@ function sendJobPrompt(jobId, done) {
 
   apiFetch('/api/jobs/' + jobId + '/prompt', {
     method: 'POST',
-    body: { content: content || '(done)', done: done },
+    body: done && !content ? { done: true } : { content: content, done: done },
   }).then(() => {
     if (input) input.value = '';
     if (done) {
@@ -3895,6 +5685,8 @@ function sendJobPrompt(jobId, done) {
 // --- Routines ---
 
 let currentRoutineId = null;
+let pendingRoutineRunHighlightId = null;
+let learningOutcomesById = {};
 
 function loadRoutines() {
   currentRoutineId = null;
@@ -3945,7 +5737,7 @@ function renderRoutinesList(routines) {
     const toggleLabel = r.enabled ? 'Disable' : 'Enable';
     const toggleClass = r.enabled ? 'btn-cancel' : 'btn-restart';
 
-    return '<tr class="routine-row" onclick="openRoutineDetail(\'' + r.id + '\')">'
+    return '<tr class="routine-row" data-record-id="routine:' + escapeHtml(r.id) + '" onclick="openRoutineDetail(\'' + r.id + '\')">'
       + '<td>' + escapeHtml(r.name) + '</td>'
       + '<td>' + escapeHtml(r.trigger_summary) + '</td>'
       + '<td>' + escapeHtml(r.action_type) + '</td>'
@@ -4019,6 +5811,11 @@ function renderRoutineDetail(routine) {
   html += '<div class="ui-panel ui-panel--subtle job-description"><h3>Trigger</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.trigger, null, 2)) + '</pre></div>';
 
+  if (routine.policy) {
+    html += '<div class="ui-panel ui-panel--subtle job-description"><h3>Policy</h3>'
+      + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.policy, null, 2)) + '</pre></div>';
+  }
+
   // Action config
   html += '<div class="ui-panel ui-panel--subtle job-description"><h3>Action</h3>'
     + '<pre class="action-json">' + escapeHtml(JSON.stringify(routine.action, null, 2)) + '</pre></div>';
@@ -4034,7 +5831,7 @@ function renderRoutineDetail(routine) {
         : run.status === 'Failed' ? 'failed'
         : run.status === 'Attention' ? 'stuck'
         : 'in_progress';
-      html += '<tr>'
+      html += '<tr data-record-id="routine-run:' + escapeHtml(run.id) + '">'
         + '<td>' + escapeHtml(run.trigger_type) + '</td>'
         + '<td>' + formatDate(run.started_at) + '</td>'
         + '<td>' + formatDate(run.completed_at) + '</td>'
@@ -4048,8 +5845,72 @@ function renderRoutineDetail(routine) {
     html += '</tbody></table></div></div>';
   }
 
+  if (routine.recent_event_checks && routine.recent_event_checks.length > 0) {
+    html += '<div class="ui-panel ui-panel--subtle job-timeline-section"><h3>Recent Event Checks</h3>'
+      + '<div class="ui-panel-table-wrap"><table class="routines-table ui-panel-table"><thead><tr>'
+      + '<th>Decision</th><th>Channel</th><th>Reason</th><th>Message</th><th>When</th>'
+      + '</tr></thead><tbody>';
+    for (const check of routine.recent_event_checks) {
+      const checkStatusClass = check.decision === 'fired' ? 'completed'
+        : check.decision.startsWith('skipped_') ? 'stuck'
+        : 'pending';
+      html += '<tr data-record-id="routine-event:' + escapeHtml(check.id) + '">'
+        + '<td><span class="badge ' + checkStatusClass + '">' + escapeHtml(check.decision) + '</span></td>'
+        + '<td>' + escapeHtml(check.channel) + '</td>'
+        + '<td>' + escapeHtml(check.reason || '-') + '</td>'
+        + '<td>' + escapeHtml(check.content_preview || '-') + '</td>'
+        + '<td>' + formatDate(check.created_at) + '</td>'
+        + '</tr>';
+      if (check.details && Object.keys(check.details).length > 0) {
+        html += '<tr class="job-log-row"><td colspan="5"><pre class="action-json">'
+          + escapeHtml(JSON.stringify(check.details, null, 2))
+          + '</pre></td></tr>';
+      }
+    }
+    html += '</tbody></table></div></div>';
+  }
+
+  if (routine.recent_trigger_checks && routine.recent_trigger_checks.length > 0) {
+    html += '<div class="ui-panel ui-panel--subtle job-timeline-section"><h3>Recent Scheduled Trigger Checks</h3>'
+      + '<div class="ui-panel-table-wrap"><table class="routines-table ui-panel-table"><thead><tr>'
+      + '<th>Kind</th><th>Due</th><th>Status</th><th>Decision</th><th>Claimed By</th><th>Collapsed</th>'
+      + '</tr></thead><tbody>';
+    for (const check of routine.recent_trigger_checks) {
+      const checkStatusClass = check.decision === 'fired' ? 'completed'
+        : (check.decision || '').startsWith('deferred_') ? 'pending'
+        : (check.decision || '').startsWith('skipped_') ? 'stuck'
+        : check.status === 'processed' ? 'completed'
+        : 'pending';
+      html += '<tr data-record-id="routine-trigger:' + escapeHtml(check.id) + '">'
+        + '<td>' + escapeHtml(check.trigger_kind) + '</td>'
+        + '<td>' + formatDate(check.due_at) + '</td>'
+        + '<td>' + escapeHtml(check.status) + '</td>'
+        + '<td><span class="badge ' + checkStatusClass + '">' + escapeHtml(check.decision || '-') + '</span></td>'
+        + '<td>' + escapeHtml(check.claimed_by || '-') + '</td>'
+        + '<td>' + (check.backlog_collapsed ? 'yes' : 'no')
+          + (check.coalesced_count ? ' (' + check.coalesced_count + ')' : '')
+          + '</td>'
+        + '</tr>';
+      if (check.diagnostics && Object.keys(check.diagnostics).length > 0) {
+        html += '<tr class="job-log-row"><td colspan="6"><pre class="action-json">'
+          + escapeHtml(JSON.stringify(check.diagnostics, null, 2))
+          + '</pre></td></tr>';
+      }
+    }
+    html += '</tbody></table></div></div>';
+  }
+
   html += '</section>';
   detail.innerHTML = html;
+  if (pendingRoutineRunHighlightId) {
+    window.setTimeout(() => {
+      const highlighted = highlightRecordRow(pendingRoutineRunHighlightId);
+      if (!highlighted) {
+        showToast('Routine run source is not available in the current detail view.', 'warning');
+      }
+      pendingRoutineRunHighlightId = null;
+    }, 60);
+  }
 }
 
 function triggerRoutine(id) {
@@ -4077,6 +5938,203 @@ function deleteRoutine(id, name) {
       else loadRoutines();
     })
     .catch((err) => showToast('Delete failed: ' + err.message, 'error'));
+}
+
+function autonomyBadgeClass(value) {
+  return value ? 'completed' : 'failed';
+}
+
+function autonomyStatusValue(value) {
+  if (value === null || value === undefined || value === '') return '-';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value);
+}
+
+function renderAutonomySummaryCard(label, value, statusClass, detail) {
+  return '<section class="ui-panel">'
+    + '<div class="autonomy-summary-label">' + escapeHtml(label) + '</div>'
+    + '<div class="autonomy-summary-value">' + escapeHtml(autonomyStatusValue(value)) + '</div>'
+    + (detail ? '<div class="autonomy-summary-detail">' + escapeHtml(detail) + '</div>' : '')
+    + (statusClass ? '<span class="badge ' + escapeHtml(statusClass) + '">' + escapeHtml(statusClass.replace('_', ' ')) + '</span>' : '')
+    + '</section>';
+}
+
+function renderAutonomyCheckList(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return '<div class="ui-panel-empty">No checks recorded yet.</div>';
+  }
+  return '<div class="autonomy-check-list">' + items.map((item) => {
+    const passed = !!item.passed;
+    return '<div class="autonomy-check-item">'
+      + '<div class="autonomy-check-head">'
+      + '<span class="autonomy-check-title">' + escapeHtml(item.name || 'check') + '</span>'
+      + '<span class="badge ' + autonomyBadgeClass(passed) + '">' + (passed ? 'passed' : 'failed') + '</span>'
+      + '</div>'
+      + (item.detail ? '<div class="autonomy-check-detail">' + escapeHtml(item.detail) + '</div>' : '')
+      + '</div>';
+  }).join('') + '</div>';
+}
+
+function renderAutonomyKv(rows) {
+  return '<div class="autonomy-kv">' + rows.map((row) => {
+    return '<div class="autonomy-kv-row"><span class="autonomy-kv-key">' + escapeHtml(row.label)
+      + '</span><span class="autonomy-kv-value">' + escapeHtml(autonomyStatusValue(row.value)) + '</span></div>';
+  }).join('') + '</div>';
+}
+
+function loadAutonomyDashboard() {
+  if (!autonomyFeatureAvailable) {
+    setAutonomyVisibility(false);
+    return;
+  }
+  Promise.all([
+    apiFetch('/api/autonomy/status'),
+    apiFetch('/api/autonomy/rollouts'),
+    apiFetch('/api/autonomy/checks'),
+    apiFetch('/api/autonomy/evidence'),
+  ]).then(([status, rollouts, checks, evidence]) => {
+    autonomyState.status = status;
+    autonomyState.rollouts = rollouts;
+    autonomyState.checks = checks;
+    autonomyState.evidence = evidence;
+    renderAutonomyDashboard();
+  }).catch((err) => {
+    setAutonomyVisibility(false);
+    showToast('Failed to load autonomy console: ' + err.message, 'error');
+  });
+}
+
+function renderAutonomyDashboard() {
+  const status = autonomyState.status || {};
+  const rollouts = autonomyState.rollouts || {};
+  const checks = autonomyState.checks || {};
+  const evidence = autonomyState.evidence || {};
+
+  document.getElementById('autonomy-summary').innerHTML = ''
+    + renderAutonomySummaryCard('Actions Ready', status.action_ready, status.action_ready ? 'completed' : 'failed', status.blocking_reason || 'Ready to run desktop actions')
+    + renderAutonomySummaryCard('Bootstrap', status.bootstrap_passed, status.bootstrap_passed ? 'completed' : 'failed', status.last_bootstrap_at ? formatDate(status.last_bootstrap_at) : 'Not bootstrapped')
+    + renderAutonomySummaryCard('Session Ready', status.session_ready, status.session_ready ? 'completed' : 'failed', status.target_username || status.deployment_mode || '-')
+    + renderAutonomySummaryCard('Current Build', status.current_build_id || '-', status.current_build_id ? 'completed' : 'pending', status.profile || '-');
+
+  const pauseDisabled = !!status.emergency_stop_active;
+  document.getElementById('autonomy-action-bar').innerHTML =
+    '<button onclick="bootstrapAutonomy()">Bootstrap</button>' +
+    '<button onclick="pauseAutonomy()" ' + (status.paused ? 'disabled' : '') + '>Pause</button>' +
+    '<button onclick="resumeAutonomy()" ' + ((status.paused && !pauseDisabled) ? '' : 'disabled') + '>Resume</button>' +
+    '<button onclick="checkAutonomyPermissions()">Check Permissions</button>' +
+    '<button onclick="rollbackAutonomy()" ' + (rollouts.rollback_target_build_id ? '' : 'disabled') + '>Rollback</button>' +
+    '<button onclick="loadAutonomyDashboard()">Refresh</button>';
+
+  document.getElementById('autonomy-readiness-panel').innerHTML =
+    '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">Readiness</h3><p class="ui-panel-desc">Exact operator-facing reasons for why desktop work is or is not runnable.</p></div></div>'
+    + '<div class="autonomy-readiness-banner ' + (status.action_ready ? 'ready' : 'blocked') + '">' + escapeHtml(status.blocking_reason || 'Desktop action path is ready.') + '</div>'
+    + renderAutonomyKv([
+      { label: 'Enabled', value: status.enabled },
+      { label: 'Profile', value: status.profile },
+      { label: 'Deployment', value: status.deployment_mode },
+      { label: 'Target User', value: status.target_username || '-' },
+      { label: 'Paused', value: status.paused },
+      { label: 'Pause Reason', value: status.pause_reason || '-' },
+      { label: 'Emergency Stop', value: status.emergency_stop_active },
+      { label: 'Code Auto Apply Paused', value: status.code_auto_apply_paused },
+    ])
+    + '<div class="autonomy-json-block"><div class="autonomy-json-title">Permissions</div><pre>' + escapeHtml(JSON.stringify(status.permission_summary || {}, null, 2)) + '</pre></div>'
+    + '<div class="autonomy-json-block"><div class="autonomy-json-title">Prerequisites</div><pre>' + escapeHtml(JSON.stringify(status.prerequisite_summary || {}, null, 2)) + '</pre></div>';
+
+  document.getElementById('autonomy-rollouts-panel').innerHTML =
+    '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">Rollouts</h3><p class="ui-panel-desc">Promotion health, rollback target, and recent promoted or candidate builds.</p></div></div>'
+    + renderAutonomyKv([
+      { label: 'Current Build', value: rollouts.current_build_id || '-' },
+      { label: 'Last Successful', value: rollouts.last_successful_build_id || '-' },
+      { label: 'Rollback Target', value: rollouts.rollback_target_build_id || '-' },
+      { label: 'Failed Promotions', value: rollouts.consecutive_failed_promotions || 0 },
+      { label: 'Failed Canaries (24h)', value: rollouts.failed_canary_count || 0 },
+      { label: 'Rollout Pause', value: rollouts.pause_reason || '-' },
+    ])
+    + '<div class="autonomy-build-list">' + ((rollouts.recent_builds || []).map((build) => {
+      return '<div class="autonomy-build-item">'
+        + '<div class="autonomy-build-head"><span class="autonomy-build-title">' + escapeHtml(build.title || build.build_id) + '</span><span class="badge ' + (build.promoted ? 'completed' : 'pending') + '">' + (build.promoted ? 'promoted' : 'candidate') + '</span></div>'
+        + '<div class="autonomy-build-meta">' + escapeHtml(build.build_id) + ' · ' + escapeHtml(formatDate(build.created_at)) + '</div>'
+        + '</div>';
+    }).join('') || '<div class="ui-panel-empty">No rollout history yet.</div>') + '</div>';
+
+  document.getElementById('autonomy-checks-panel').innerHTML =
+    '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">Checks</h3><p class="ui-panel-desc">Latest bootstrap and canary checks, rendered without raw log hunting.</p></div></div>'
+    + '<div class="autonomy-section-label">Bootstrap Checks</div>'
+    + renderAutonomyCheckList(checks.bootstrap_checks || [])
+    + '<div class="autonomy-section-label">Latest Canary Checks</div>'
+    + renderAutonomyCheckList(checks.latest_canary_checks || []);
+
+  document.getElementById('autonomy-evidence-panel').innerHTML =
+    '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">Evidence</h3><p class="ui-panel-desc">Bootstrap notes, recent autonomy events, and latest canary evidence.</p></div></div>'
+    + '<div class="autonomy-event-list">' + ((evidence.recent_events || []).map((event) => {
+      return '<div class="autonomy-event-item"><div class="autonomy-event-kind">' + escapeHtml(event.kind || 'event') + '</div><div class="autonomy-event-message">' + escapeHtml(event.message || '') + '</div><div class="autonomy-event-time">' + escapeHtml(formatDate(event.timestamp)) + '</div></div>';
+    }).join('') || '<div class="ui-panel-empty">No autonomy evidence recorded yet.</div>') + '</div>'
+    + (evidence.latest_bootstrap_report
+      ? '<div class="autonomy-json-block"><div class="autonomy-json-title">Latest Bootstrap Report</div><pre>' + escapeHtml(JSON.stringify(evidence.latest_bootstrap_report, null, 2)) + '</pre></div>'
+      : '')
+    + (evidence.latest_canary_report
+      ? '<div class="autonomy-json-block"><div class="autonomy-json-title">Latest Canary Report</div><pre>' + escapeHtml(JSON.stringify(evidence.latest_canary_report, null, 2)) + '</pre></div>'
+      : '');
+
+  document.getElementById('autonomy-seeded-panel').innerHTML =
+    '<div class="ui-panel-header ui-panel-header--divider"><div class="ui-panel-copy"><h3 class="ui-panel-title">Seeded Routines & Skills</h3><p class="ui-panel-desc">Visibility into the routines and skill templates that bootstrap created.</p></div></div>'
+    + '<div class="autonomy-seeded-grid">'
+    + '<div><div class="autonomy-section-label">Routines</div><div class="autonomy-routine-list">'
+    + ((evidence.seeded_routines || []).map((name) => '<button class="autonomy-routine-link" onclick="switchTab(\'routines\')">' + escapeHtml(name) + '</button>').join('') || '<div class="ui-panel-empty">No seeded routines recorded.</div>')
+    + '</div></div>'
+    + '<div><div class="autonomy-section-label">Skill Templates</div><div class="autonomy-routine-list">'
+    + ((evidence.seeded_skills || []).map((path) => '<div class="autonomy-skill-path">' + escapeHtml(String(path)) + '</div>').join('') || '<div class="ui-panel-empty">No seeded skill templates recorded.</div>')
+    + '</div></div>'
+    + '</div>';
+}
+
+function bootstrapAutonomy() {
+  apiFetch('/api/autonomy/bootstrap', { method: 'POST' })
+    .then(() => {
+      showToast('Desktop autonomy bootstrapped', 'success');
+      return loadAutonomyDashboard();
+    })
+    .catch((err) => showToast('Bootstrap failed: ' + err.message, 'error'));
+}
+
+function pauseAutonomy() {
+  const reason = window.prompt('Pause reason (optional):', '') || '';
+  apiFetch('/api/autonomy/pause', { method: 'POST', body: { reason: reason || null } })
+    .then(() => {
+      showToast('Desktop autonomy paused', 'success');
+      return loadAutonomyDashboard();
+    })
+    .catch((err) => showToast('Pause failed: ' + err.message, 'error'));
+}
+
+function resumeAutonomy() {
+  apiFetch('/api/autonomy/resume', { method: 'POST' })
+    .then(() => {
+      showToast('Desktop autonomy resumed', 'success');
+      return loadAutonomyDashboard();
+    })
+    .catch((err) => showToast('Resume failed: ' + err.message, 'error'));
+}
+
+function checkAutonomyPermissions() {
+  apiFetch('/api/autonomy/permissions')
+    .then((permissions) => {
+      autonomyState.permissions = permissions;
+      showToast('Permission check complete', 'success');
+      return loadAutonomyDashboard();
+    })
+    .catch((err) => showToast('Permission check failed: ' + err.message, 'error'));
+}
+
+function rollbackAutonomy() {
+  if (!confirm('Roll back to the previous promoted desktop build?')) return;
+  apiFetch('/api/autonomy/rollback', { method: 'POST' })
+    .then(() => {
+      showToast('Desktop autonomy rolled back', 'success');
+      return loadAutonomyDashboard();
+    })
+    .catch((err) => showToast('Rollback failed: ' + err.message, 'error'));
 }
 
 // --- Research / Experiments ---
@@ -4463,7 +6521,10 @@ function renderResearchOpportunityCard(opportunity) {
   const linkButton = opportunity.linked_target_id
     ? '<button class="btn-cancel" onclick="switchResearchSubtab(\'projects\')">Linked target</button>'
     : '<button class="btn-cancel" onclick="linkResearchOpportunity(\'' + escapeJsString(opportunity.id) + '\')">Link target</button>';
-  return '<article class="ui-panel ui-panel--subtle ui-panel-stack research-opportunity-card">' +
+  return '<article class="ui-panel ui-panel--subtle ui-panel-stack research-opportunity-card"'
+    + ' data-opportunity-id="' + escapeHtml(opportunity.id) + '"'
+    + ' data-research-source="' + escapeHtml(opportunity.source || 'inferred') + '"'
+    + ' data-research-kind="' + escapeHtml(opportunity.kind) + '">' +
     '<div class="research-opportunity-head">' +
       '<div>' +
         '<div class="research-opportunity-kicker">' + escapeHtml(opportunity.kind) + '</div>' +
@@ -4475,7 +6536,7 @@ function renderResearchOpportunityCard(opportunity) {
     '<div class="research-opportunity-summary">' + escapeHtml(opportunity.summary || 'No summary provided.') + '</div>' +
     '<div class="research-opportunity-signals">' + signalHtml + '</div>' +
     '<div class="research-opportunity-actions">' +
-      '<button class="btn-restart" onclick="primeResearchProjectFormFromOpportunity(\'' + escapeJsString(opportunity.id) + '\')">Create Project</button>' +
+      '<button class="btn-restart" data-action="create-project" onclick="primeResearchProjectFormFromOpportunity(\'' + escapeJsString(opportunity.id) + '\')">Create Project</button>' +
       linkButton +
       '<button class="btn-cancel" onclick="switchResearchSubtab(\'' + escapeJsString(selectSubtab) + '\')">Open ' + escapeHtml(getResearchSubtabLabel(selectSubtab)) + '</button>' +
       (needsGpuClouds
@@ -4530,6 +6591,12 @@ function researchLaunchModeForBackend(backend, backendConfig) {
   const normalized = String(backend || '').toLowerCase();
   const config = parseResearchObject(backendConfig);
   switch (normalized) {
+    case 'agent_env':
+      return {
+        label: 'AgentEnv benchmark',
+        detail: config.benchmark ? 'Runs through EnvRunner with durable trajectory artifacts.' : 'Add backend_config.benchmark to select terminal_bench or skill_bench.',
+        className: config.benchmark ? 'completed' : 'pending',
+      };
     case 'local_docker':
       return {
         label: 'Local container',
@@ -4604,10 +6671,10 @@ function researchRunnerProviderState(runner) {
   }
   const backend = String(runner.backend || '').toLowerCase();
   if (!isResearchGpuCloudBackend(backend)) {
-    if (backend === 'local_docker') {
+    if (backend === 'local_docker' || backend === 'agent_env') {
       return {
         label: 'No cloud secret needed',
-        detail: 'Local runner; no external provider account required.',
+        detail: backend === 'agent_env' ? 'EnvRunner benchmark; no external provider account required.' : 'Local runner; no external provider account required.',
         className: 'completed',
       };
     }
@@ -5166,6 +7233,29 @@ function applyResearchGpuCloudTemplate(slug) {
   });
 }
 
+function applyResearchAgentEnvTemplate(kind) {
+  const template = RESEARCH_AGENT_ENV_TEMPLATES[kind];
+  if (!template) {
+    showToast('Unknown AgentEnv benchmark: ' + kind, 'error');
+    return;
+  }
+  const runnerName = document.getElementById('research-runner-name');
+  const runnerBackend = document.getElementById('research-runner-backend');
+  const runnerImage = document.getElementById('research-runner-image');
+  const runnerBackendConfig = document.getElementById('research-runner-backend-config');
+  const runnerGpu = document.getElementById('research-runner-gpu');
+  const runnerEnv = document.getElementById('research-runner-env');
+  const runnerSecrets = document.getElementById('research-runner-secrets');
+  if (runnerName) runnerName.value = template.name;
+  if (runnerBackend) runnerBackend.value = 'agent_env';
+  if (runnerImage) runnerImage.value = '';
+  if (runnerBackendConfig) runnerBackendConfig.value = JSON.stringify(template.backendConfig, null, 2);
+  if (runnerGpu) runnerGpu.value = '{}';
+  if (runnerEnv) runnerEnv.value = '{}';
+  if (runnerSecrets) runnerSecrets.value = '';
+  showToast(template.name + ' template applied', 'success');
+}
+
 function launchResearchGpuCloudTestJob(slug) {
   const config = getResearchGpuCloudConfig(slug);
   if (!config) {
@@ -5359,7 +7449,7 @@ function renderResearchProjects() {
   empty.style.display = 'none';
   tbody.innerHTML = projects.map((project) => {
     const runnerLabel = project.default_runner_profile_id ? runnerNameById(project.default_runner_profile_id) : '-';
-    return '<tr>'
+    return '<tr data-record-id="research-project:' + escapeHtml(project.id) + '">'
       + '<td>' + escapeHtml(project.name) + '</td>'
       + '<td><span class="badge ' + researchBadgeClass(project.status) + '">' + escapeHtml(project.status) + '</span></td>'
       + '<td>' + escapeHtml(project.primary_metric.name + ' (' + project.primary_metric.comparator + ')') + '</td>'
@@ -5394,7 +7484,8 @@ function renderResearchRunners() {
       : '-';
     const launchMode = researchLaunchModeForBackend(runner.backend, runner.backend_config);
     const providerState = researchRunnerProviderState(runner);
-    return '<tr>'
+    const benchmark = researchRunnerBenchmarkLabel(runner);
+    return '<tr data-record-id="research-runner:' + escapeHtml(runner.id) + '">'
       + '<td>' + escapeHtml(runner.name) + '</td>'
       + '<td>' + escapeHtml(runner.backend) + '</td>'
       + '<td><span class="badge ' + launchMode.className + '">' + escapeHtml(launchMode.label) + '</span><div class="research-table-note">' + escapeHtml(launchMode.detail) + '</div></td>'
@@ -5402,12 +7493,26 @@ function renderResearchRunners() {
       + '<td title="' + escapeHtml(runner.image_or_runtime || '-') + '">' + escapeHtml(trimResearchText(runner.image_or_runtime || '-', 40)) + '</td>'
       + '<td title="' + escapeHtml(gpu) + '">' + escapeHtml(gpu) + '</td>'
       + '<td><span class="badge ' + providerState.className + '">' + escapeHtml(providerState.label) + '</span><div class="research-table-note">' + escapeHtml(providerState.detail) + '</div></td>'
+      + '<td title="' + escapeHtml(benchmark.detail) + '">' + escapeHtml(benchmark.label) + '</td>'
       + '<td><div class="research-actions-cell">'
       + '<button class="btn-restart" onclick="validateResearchRunner(\'' + escapeJsString(runner.id) + '\')">Validate</button>'
       + '<button class="btn-cancel" onclick="deleteResearchRunner(\'' + escapeJsString(runner.id) + '\', \'' + escapeJsString(runner.name) + '\')">Delete</button>'
       + '</div></td>'
       + '</tr>';
   }).join('');
+}
+
+function researchRunnerBenchmarkLabel(runner) {
+  const config = parseResearchObject(runner ? runner.backend_config : null);
+  const benchmark = String(config.benchmark || '').trim();
+  if (!benchmark) {
+    return { label: '-', detail: '-' };
+  }
+  const cases = Array.isArray(config.cases) ? config.cases.length : 0;
+  return {
+    label: benchmark + (cases ? ' (' + cases + ')' : ''),
+    detail: cases ? cases + ' benchmark case(s) configured.' : 'Benchmark configured without explicit cases.',
+  };
 }
 
 function renderResearchCampaigns() {
@@ -6015,16 +8120,18 @@ function loadLearning() {
     apiFetch('/api/learning/provider-health'),
     apiFetch('/api/learning/history?limit=50'),
     apiFetch('/api/learning/candidates?limit=50'),
+    apiFetch('/api/learning/outcomes?limit=50'),
     apiFetch('/api/learning/code-proposals?limit=50'),
     apiFetch('/api/learning/feedback?limit=50'),
     apiFetch('/api/learning/artifact-versions?limit=50'),
     apiFetch('/api/learning/rollbacks?limit=50'),
   ]).then((results) => {
-    const [statusRes, healthRes, historyRes, candidatesRes, proposalsRes, feedbackRes, artifactsRes, rollbacksRes] = results;
+    const [statusRes, healthRes, historyRes, candidatesRes, outcomesRes, proposalsRes, feedbackRes, artifactsRes, rollbacksRes] = results;
     const status = statusRes.status === 'fulfilled' ? statusRes.value : null;
     const health = healthRes.status === 'fulfilled' ? healthRes.value : null;
     const history = historyRes.status === 'fulfilled' ? historyRes.value : null;
     const candidates = candidatesRes.status === 'fulfilled' ? candidatesRes.value : null;
+    const outcomes = outcomesRes.status === 'fulfilled' ? outcomesRes.value : null;
     const proposals = proposalsRes.status === 'fulfilled' ? proposalsRes.value : null;
     const feedback = feedbackRes.status === 'fulfilled' ? feedbackRes.value : null;
     const artifacts = artifactsRes.status === 'fulfilled' ? artifactsRes.value : null;
@@ -6041,6 +8148,7 @@ function loadLearning() {
 
     renderLearningHistory(history);
     renderLearningCandidates(candidates);
+    renderLearningOutcomes(outcomes);
     renderLearningProposals(proposals);
     renderLearningFeedback(feedback);
     renderLearningArtifacts(artifacts);
@@ -6050,13 +8158,13 @@ function loadLearning() {
 
 function learningBadgeClass(value) {
   const normalized = String(value || '').toLowerCase();
-  if (['healthy', 'enabled', 'active', 'approved', 'applied', 'recorded', 'helpful'].includes(normalized)) {
+  if (['healthy', 'enabled', 'active', 'approved', 'applied', 'recorded', 'helpful', 'positive', 'evaluated'].includes(normalized)) {
     return 'completed';
   }
-  if (['failed', 'unhealthy', 'rejected', 'harmful'].includes(normalized)) {
+  if (['failed', 'unhealthy', 'rejected', 'harmful', 'negative', 'dismissed', 'expired'].includes(normalized)) {
     return 'failed';
   }
-  if (['warning', 'stuck', 'needs_review', 'review', 'pending', 'proposed', 'degraded'].includes(normalized)) {
+  if (['warning', 'stuck', 'needs_review', 'review', 'pending', 'proposed', 'degraded', 'open', 'evaluating', 'neutral'].includes(normalized)) {
     return 'stuck';
   }
   return 'pending';
@@ -6069,6 +8177,52 @@ function formatLearningConfidence(value) {
   return (num <= 1 ? Math.round(num * 100) : Math.round(num)) + '%';
 }
 
+function highlightRecordRow(recordId) {
+  if (!recordId) return false;
+  const row = document.querySelector('[data-record-id="' + escapeHtml(String(recordId)) + '"]');
+  if (!row) return false;
+  document.querySelectorAll('.record-highlight').forEach((el) => el.classList.remove('record-highlight'));
+  row.classList.add('record-highlight');
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  window.setTimeout(() => row.classList.remove('record-highlight'), 2200);
+  return true;
+}
+
+function viewLearningSource(contract) {
+  if (!contract || !contract.source_ref) return;
+  const source = contract.source_ref;
+  if (source.kind === 'routine_run') {
+    if (!source.routine_id) {
+      showToast('Routine source context is missing for this outcome.', 'warning');
+      return;
+    }
+    pendingRoutineRunHighlightId = 'routine-run:' + source.id;
+    switchTab('routines');
+    openRoutineDetail(source.routine_id);
+    return;
+  }
+
+  switchTab('learning');
+  let recordId = null;
+  if (source.kind === 'learning_event') recordId = 'learning-event:' + source.id;
+  if (source.kind === 'artifact_version') recordId = 'learning-artifact:' + source.id;
+  if (source.kind === 'learning_code_proposal') recordId = 'learning-proposal:' + source.id;
+  if (!recordId) {
+    showToast('No in-app source navigation is available for ' + source.kind + '.', 'warning');
+    return;
+  }
+
+  window.setTimeout(() => {
+    if (!highlightRecordRow(recordId)) {
+      showToast('Source record is not currently visible in the loaded table (' + source.id + ').', 'warning');
+    }
+  }, 120);
+}
+
+function viewLearningOutcomeSourceById(contractId) {
+  viewLearningSource(learningOutcomesById[contractId] || null);
+}
+
 function renderLearningSummary(status) {
   const summary = document.getElementById('learning-summary');
   if (!summary) return;
@@ -6076,9 +8230,13 @@ function renderLearningSummary(status) {
   summary.innerHTML = ''
     + summaryCard('Events', status.recent?.events || 0, 'active')
     + summaryCard('Candidates', status.recent?.candidates || 0, 'completed')
+    + summaryCard('Outcome Open', status.outcomes_open || 0, status.outcomes_due ? 'stuck' : '')
+    + summaryCard('Outcome Due', status.outcomes_due || 0, status.outcomes_due ? 'stuck' : '')
     + summaryCard('Proposals', status.recent?.code_proposals || 0, 'stuck')
     + summaryCard('Feedback', status.recent?.feedback || 0, '')
     + summaryCard('Rollbacks', status.recent?.rollbacks || 0, 'failed')
+    + summaryCard('Outcome Neg Ratio', Math.round((status.outcomes_negative_ratio_last_7d || 0) * 100) + '%', (status.outcomes_negative_ratio_last_7d || 0) > 0.2 ? 'failed' : 'completed')
+    + summaryCard('Outcome Evaluator', status.outcomes_evaluator_healthy ? 'healthy' : 'stale', status.outcomes_evaluator_healthy ? 'completed' : 'failed')
     + summaryCard('Healthy Providers', (status.provider_health?.healthy || 0) + ' / ' + (status.provider_health?.total || 0), 'completed');
 }
 
@@ -6126,7 +8284,7 @@ function renderLearningHistory(data) {
     const actionLabel = event.id
       ? '<button class="btn-restart" onclick="setLearningFeedbackTarget(\'learning_event\', \'' + escapeJsString(event.id) + '\')">Feedback</button>'
       : '';
-    return '<tr>'
+    return '<tr data-record-id="learning-event:' + escapeHtml(event.id) + '">'
       + '<td>' + formatDate(event.created_at) + '</td>'
       + '<td>' + escapeHtml(event.source) + '</td>'
       + '<td><span class="badge ' + learningBadgeClass(event.class) + '">' + escapeHtml(event.class) + '</span></td>'
@@ -6164,6 +8322,122 @@ function renderLearningCandidates(data) {
   }).join('');
 }
 
+function renderLearningOutcomes(data) {
+  const tbody = document.getElementById('learning-outcomes-tbody');
+  const empty = document.getElementById('learning-outcomes-empty');
+  if (!tbody || !empty) return;
+  const outcomes = data?.outcomes || [];
+  learningOutcomesById = {};
+
+  if (!outcomes.length) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    renderLearningOutcomeDetail(null);
+    return;
+  }
+
+  empty.style.display = 'none';
+  tbody.innerHTML = outcomes.map((contract) => {
+    learningOutcomesById[contract.id] = contract;
+    const sourceNavigable = contract.source_ref
+      && (
+        contract.source_ref.kind === 'learning_event'
+        || contract.source_ref.kind === 'artifact_version'
+        || contract.source_ref.kind === 'learning_code_proposal'
+        || (contract.source_ref.kind === 'routine_run' && !!contract.source_ref.routine_id)
+      );
+    const source = contract.source_ref?.kind
+      ? contract.source_ref.kind + ' / ' + String(contract.source_ref.id || contract.source_id).slice(0, 8)
+      : contract.source_kind + ' / ' + contract.source_id.slice(0, 8);
+    const viewBtn = '<button class="btn-restart" data-action="view-outcome" onclick="viewLearningOutcome(\'' + escapeJsString(contract.id) + '\')">View</button>';
+    const sourceBtn = sourceNavigable
+      ? '<button class="btn-restart" data-action="open-source" onclick="viewLearningOutcomeSourceById(\'' + escapeJsString(contract.id) + '\')">Source</button>'
+      : '<button class="btn-restart" disabled title="Source record context unavailable">Source</button>';
+    const reviewBtns = contract.status === 'open' || contract.status === 'evaluating'
+      ? [
+          '<button class="btn-restart" onclick="reviewLearningOutcome(\'' + escapeJsString(contract.id) + '\', \'confirm\', \'positive\')">Positive</button>',
+          '<button class="btn-restart" onclick="reviewLearningOutcome(\'' + escapeJsString(contract.id) + '\', \'confirm\', \'neutral\')">Neutral</button>',
+          '<button class="btn-cancel" onclick="reviewLearningOutcome(\'' + escapeJsString(contract.id) + '\', \'confirm\', \'negative\')">Negative</button>',
+          '<button class="btn-cancel" onclick="reviewLearningOutcome(\'' + escapeJsString(contract.id) + '\', \'dismiss\')">Dismiss</button>',
+        ].join(' ')
+      : '<button class="btn-restart" onclick="reviewLearningOutcome(\'' + escapeJsString(contract.id) + '\', \'requeue\')">Requeue</button>';
+    return '<tr data-outcome-id="' + escapeHtml(contract.id) + '">'
+      + '<td>' + formatDate(contract.created_at) + '</td>'
+      + '<td>' + escapeHtml(contract.contract_type) + '</td>'
+      + '<td><span class="badge ' + learningBadgeClass(contract.status) + '">' + escapeHtml(contract.status) + '</span></td>'
+      + '<td>' + escapeHtml(source) + '</td>'
+      + '<td title="' + escapeHtml(contract.summary || '') + '">' + escapeHtml(contract.summary || '-') + '</td>'
+      + '<td>' + escapeHtml(contract.final_verdict || '-') + '</td>'
+      + '<td>' + viewBtn + ' ' + sourceBtn + ' ' + reviewBtns + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+function renderLearningOutcomeDetail(data) {
+  const container = document.getElementById('learning-outcome-detail');
+  if (!container) return;
+  if (!data || !data.contract) {
+    container.innerHTML = '<div class="empty-state ui-panel-empty">Select an outcome contract to inspect its observations.</div>';
+    return;
+  }
+  const contract = data.contract;
+  const observations = data.observations || [];
+  const source = contract.source_ref || { kind: contract.source_kind, id: contract.source_id };
+  const sourceNavigable = source.kind === 'learning_event'
+    || source.kind === 'artifact_version'
+    || source.kind === 'learning_code_proposal'
+    || (source.kind === 'routine_run' && !!source.routine_id);
+  const sourceButton = sourceNavigable
+    ? '<button class="btn-restart" onclick="viewLearningOutcomeSourceById(\'' + escapeJsString(contract.id) + '\')">Open Source</button>'
+    : '<button class="btn-restart" disabled title="Source record context unavailable">Source unavailable</button>';
+  const observationMarkup = observations.length
+    ? observations.map((obs) => '<li><strong>' + escapeHtml(obs.observation_kind) + '</strong> (' + escapeHtml(obs.polarity) + ', ' + escapeHtml(String(obs.weight)) + ')'
+        + (obs.summary ? ': ' + escapeHtml(obs.summary) : '')
+        + '</li>').join('')
+    : '<li>No observations recorded.</li>';
+  container.innerHTML = ''
+    + '<div class="ui-resource-header" data-outcome-detail-id="' + escapeHtml(contract.id) + '">'
+    + '<div class="ui-resource-name"><strong>' + escapeHtml(contract.contract_type) + '</strong></div>'
+    + '<span class="badge ' + learningBadgeClass(contract.status) + '">' + escapeHtml(contract.status) + '</span>'
+    + '</div>'
+    + '<div class="ui-panel-actions" style="margin-bottom:0.75rem">' + sourceButton + '</div>'
+    + '<div class="ui-resource-meta">Source: ' + escapeHtml(source.kind + ' / ' + source.id) + '</div>'
+    + '<div class="ui-resource-meta">Ledger Event: ' + escapeHtml(contract.ledger_learning_event_id || '-') + '</div>'
+    + '<div class="ui-resource-meta">Last Evaluator: ' + escapeHtml(contract.last_evaluator || '-') + '</div>'
+    + '<div class="ui-resource-meta">Due: ' + escapeHtml(formatDate(contract.due_at)) + '</div>'
+    + '<div class="ui-resource-meta">Verdict: ' + escapeHtml(contract.final_verdict || '-') + '</div>'
+    + '<div class="ui-resource-note">' + escapeHtml(contract.summary || 'No summary provided.') + '</div>'
+    + '<ul class="ui-panel-stack" style="margin:0;padding-left:1rem">' + observationMarkup + '</ul>';
+}
+
+function viewLearningOutcome(contractId) {
+  apiFetch('/api/learning/outcomes/' + encodeURIComponent(contractId))
+    .then((data) => renderLearningOutcomeDetail(data))
+    .catch((err) => showToast('Failed to load outcome detail: ' + err.message, 'error'));
+}
+
+function reviewLearningOutcome(contractId, decision, verdict) {
+  const body = { decision: decision };
+  if (verdict) body.verdict = verdict;
+  apiFetch('/api/learning/outcomes/' + encodeURIComponent(contractId) + '/review', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(() => {
+    loadLearning();
+    viewLearningOutcome(contractId);
+  }).catch((err) => showToast('Failed to review outcome: ' + err.message, 'error'));
+}
+
+function evaluateLearningOutcomesNow() {
+  apiFetch('/api/learning/outcomes/evaluate-now', { method: 'POST' })
+    .then((data) => {
+      showToast('Processed ' + (data.processed || 0) + ' outcome contract(s).', 'success');
+      loadLearning();
+    })
+    .catch((err) => showToast('Failed to evaluate outcomes: ' + err.message, 'error'));
+}
+
 function renderLearningProposals(data) {
   const tbody = document.getElementById('learning-proposals-tbody');
   const empty = document.getElementById('learning-proposals-empty');
@@ -6183,7 +8457,7 @@ function renderLearningProposals(data) {
     const feedbackBtn = '<button class="btn-restart" onclick="setLearningFeedbackTarget(\'code_proposal\', \'' + escapeJsString(proposal.id) + '\')">Feedback</button>';
     const approveBtn = isPending ? '<button class="btn-restart" onclick="reviewLearningProposal(\'' + escapeJsString(proposal.id) + '\', \'approve\')">Approve</button>' : '';
     const rejectBtn = isPending ? '<button class="btn-cancel" onclick="reviewLearningProposal(\'' + escapeJsString(proposal.id) + '\', \'reject\')">Reject</button>' : '';
-    return '<tr>'
+    return '<tr data-record-id="learning-proposal:' + escapeHtml(proposal.id) + '">'
       + '<td>' + formatDate(proposal.created_at) + '</td>'
       + '<td><span class="badge ' + learningBadgeClass(proposal.status) + '">' + escapeHtml(proposal.status) + '</span></td>'
       + '<td title="' + escapeHtml(proposal.rationale) + '">' + escapeHtml(proposal.title) + '</td>'
@@ -6235,7 +8509,7 @@ function renderLearningArtifacts(data) {
     const label = version.version_label || version.id;
     const rollbackBtn = '<button class="btn-cancel" onclick="recordLearningRollback(\'' + escapeJsString(version.id) + '\', \'' + escapeJsString(version.artifact_type) + '\', \'' + escapeJsString(version.artifact_name) + '\')">Rollback</button>';
     const feedbackBtn = '<button class="btn-restart" onclick="setLearningFeedbackTarget(\'artifact_version\', \'' + escapeJsString(version.id) + '\')">Feedback</button>';
-    return '<tr>'
+    return '<tr data-record-id="learning-artifact:' + escapeHtml(version.id) + '">'
       + '<td>' + formatDate(version.created_at) + '</td>'
       + '<td>' + escapeHtml(version.artifact_type + ' / ' + version.artifact_name) + '</td>'
       + '<td><span class="badge ' + learningBadgeClass(version.status) + '">' + escapeHtml(version.status) + '</span></td>'
@@ -6396,6 +8670,7 @@ function shortModelName(model) {
 
 function fetchGatewayStatus() {
   apiFetch('/api/gateway/status').then(function(data) {
+    gatewayStatusCache = data;
     var popover = document.getElementById('gateway-popover');
     var html = '';
 
@@ -6434,6 +8709,25 @@ function fetchGatewayStatus() {
           + '<span>out: ' + formatTokenCount(m.output_tokens) + '</span>'
           + '</div>';
       }
+    }
+
+    var nostr = data.channel_setup && data.channel_setup.nostr ? data.channel_setup.nostr : null;
+    if (nostr && (nostr.enabled || nostr.configured || nostr.needs_private_key || nostr.public_key_npub)) {
+      var relaySummary = '-';
+      if (nostr.relay_count != null && nostr.connected_relay_count != null) {
+        relaySummary = nostr.connected_relay_count + '/' + nostr.relay_count;
+      } else if (nostr.relay_count != null) {
+        relaySummary = String(nostr.relay_count);
+      }
+      var nostrState = nostr.control_ready
+        ? 'Owner DM control ready'
+        : (nostr.tool_ready ? 'Social actions ready; owner pubkey still needed for control' : (nostr.needs_private_key ? 'Private key required' : 'Configured'));
+      html += '<div class="gw-divider"></div>';
+      html += '<div class="gw-section-label">Nostr</div>';
+      html += '<div class="gw-stat"><span>Status</span><span>' + escapeHtml(nostrState) + '</span></div>';
+      html += '<div class="gw-stat"><span>Identity</span><span>' + escapeHtml(nostr.public_key_npub || nostr.public_key_hex || '-') + '</span></div>';
+      html += '<div class="gw-stat"><span>Owner</span><span>' + escapeHtml(nostr.owner_pubkey_npub || nostr.owner_pubkey_hex || '-') + '</span></div>';
+      html += '<div class="gw-stat"><span>Relays</span><span>' + escapeHtml(relaySummary) + '</span></div>';
     }
 
     popover.innerHTML = html;
@@ -6501,17 +8795,41 @@ function summarizeCostModels(models) {
   var totalOutput = 0;
   var totalCost = 0;
   var totalRequests = 0;
+  var capturedOutput = 0;
+  var capturedTokenIds = 0;
+  var capturedLogprobs = 0;
+  var tokenCaptureRequests = 0;
+  var providerUsageRequests = 0;
+  var unknownTokenCountRequests = 0;
+  var providerCostRequests = 0;
+  var localPricingFallbackRequests = 0;
   for (var i = 0; i < models.length; i++) {
     totalInput += models[i].input_tokens || 0;
     totalOutput += models[i].output_tokens || 0;
     totalCost += models[i].cost_usd || 0;
     totalRequests += models[i].requests || 0;
+    capturedOutput += models[i].captured_output_tokens || 0;
+    capturedTokenIds += models[i].captured_token_ids || 0;
+    capturedLogprobs += models[i].captured_logprobs || 0;
+    tokenCaptureRequests += models[i].token_capture_requests || 0;
+    providerUsageRequests += models[i].provider_usage_requests || 0;
+    unknownTokenCountRequests += models[i].unknown_token_count_requests || 0;
+    providerCostRequests += models[i].provider_cost_requests || 0;
+    localPricingFallbackRequests += models[i].local_pricing_fallback_requests || 0;
   }
   return {
     totalInput: totalInput,
     totalOutput: totalOutput,
     totalCost: totalCost,
     totalRequests: totalRequests,
+    capturedOutput: capturedOutput,
+    capturedTokenIds: capturedTokenIds,
+    capturedLogprobs: capturedLogprobs,
+    tokenCaptureRequests: tokenCaptureRequests,
+    providerUsageRequests: providerUsageRequests,
+    unknownTokenCountRequests: unknownTokenCountRequests,
+    providerCostRequests: providerCostRequests,
+    localPricingFallbackRequests: localPricingFallbackRequests,
   };
 }
 
@@ -6524,6 +8842,14 @@ function getCostRangeSnapshot(data, range) {
     totalOutput: totals.totalOutput,
     totalCost: totals.totalCost,
     totalRequests: totals.totalRequests,
+    capturedOutput: totals.capturedOutput,
+    capturedTokenIds: totals.capturedTokenIds,
+    capturedLogprobs: totals.capturedLogprobs,
+    tokenCaptureRequests: totals.tokenCaptureRequests,
+    providerUsageRequests: totals.providerUsageRequests,
+    unknownTokenCountRequests: totals.unknownTokenCountRequests,
+    providerCostRequests: totals.providerCostRequests,
+    localPricingFallbackRequests: totals.localPricingFallbackRequests,
   };
 }
 
@@ -6603,6 +8929,10 @@ function renderCostSummary(data) {
   var totalOut = rangeSnapshot.totalOutput;
   var totalReq = rangeSnapshot.totalRequests;
   var rangeLabel = getCostRangeLabel(costRange);
+  var providerUsageReq = rangeSnapshot.providerUsageRequests || 0;
+  var providerCostReq = rangeSnapshot.providerCostRequests || 0;
+  var fallbackCostReq = rangeSnapshot.localPricingFallbackRequests || 0;
+  var capturedOutput = rangeSnapshot.capturedOutput || 0;
 
   // Spend card with optional budget progress
   var spendHtml = '<div class="ui-panel ui-panel--feature ui-panel--compact ui-panel--interactive cost-card accent">'
@@ -6626,6 +8956,7 @@ function renderCostSummary(data) {
     + '<div class="cost-card-label">Total Tokens</div>'
     + '<div class="cost-card-value">' + formatTokenCount(totalIn + totalOut) + '</div>'
     + '<div class="cost-card-sub">' + formatTokenCount(totalIn) + ' input · ' + formatTokenCount(totalOut) + ' output</div>'
+    + '<div class="cost-card-sub">' + providerUsageReq + ' provider-usage requests' + (capturedOutput ? ' · ' + formatTokenCount(capturedOutput) + ' captured output' : '') + '</div>'
     + '</div>';
 
   // Active models
@@ -6645,6 +8976,7 @@ function renderCostSummary(data) {
     + '<div class="cost-card-label">Actions / Hour</div>'
     + '<div class="cost-card-value">' + actionsHr + '</div>'
     + '<div class="cost-card-sub">' + actionsSubText + '</div>'
+    + '<div class="cost-card-sub">' + providerCostReq + ' provider-cost · ' + fallbackCostReq + ' priced locally</div>'
     + '</div>';
 
   var capacityHtml = '';
@@ -6732,6 +9064,7 @@ function renderCostChart(data) {
     var inp = m.input_tokens || 0;
     var out = m.output_tokens || 0;
     var total = inp + out;
+    var captured = m.captured_output_tokens || 0;
     var pct = (total / maxTokens) * 100;
     var color = MODEL_COLORS[i % MODEL_COLORS.length];
     var colorDark = color + '99';
@@ -6744,7 +9077,7 @@ function renderCostChart(data) {
       + '<div class="chart-bar-output" style="width:' + (total > 0 ? (out/total*100).toFixed(1) : 0) + '%;background:' + colorDark + '"></div>'
       + '</div>'
       + '</div>'
-      + '<div class="chart-bar-value">' + formatTokenCount(total) + ' · ' + formatCost(String(m.cost_usd)) + '</div>'
+      + '<div class="chart-bar-value">' + formatTokenCount(total) + ' · ' + formatCost(String(m.cost_usd)) + (captured ? ' · cap ' + formatTokenCount(captured) : '') + '</div>'
       + '</div>';
   }
 
@@ -6784,12 +9117,13 @@ function renderCostTable(data) {
   if (table) table.style.display = '';
   if (empty) empty.style.display = 'none';
 
-  var totalInput = 0, totalOutput = 0, totalCost = 0, totalReq = 0;
+  var totalInput = 0, totalOutput = 0, totalCost = 0, totalReq = 0, totalCaptured = 0;
   for (var i = 0; i < models.length; i++) {
     totalInput += models[i].input_tokens || 0;
     totalOutput += models[i].output_tokens || 0;
     totalCost += models[i].cost_usd || 0;
     totalReq += models[i].requests || 0;
+    totalCaptured += models[i].captured_output_tokens || 0;
   }
 
   var html = '';
@@ -6799,11 +9133,15 @@ function renderCostTable(data) {
     var out = m.output_tokens || 0;
     var cost = m.cost_usd || 0;
     var req = m.requests || 0;
+    var captured = m.captured_output_tokens || 0;
     var share = totalCost > 0 ? (cost / totalCost * 100) : 0;
     var color = MODEL_COLORS[i % MODEL_COLORS.length];
+    var provenance = (m.provider_usage_requests || 0) + ' usage src';
+    if (m.local_pricing_fallback_requests) provenance += ' · ' + m.local_pricing_fallback_requests + ' priced locally';
+    if (captured) provenance += ' · ' + formatTokenCount(captured) + ' captured';
 
     html += '<tr>'
-      + '<td><span class="cost-model-dot" style="background:' + color + '"></span><span class="cost-model-name" title="' + escapeHtml(m.model) + '">' + escapeHtml(displayCostModelLabel(m.model, shortLabelCounts)) + '</span></td>'
+      + '<td><span class="cost-model-dot" style="background:' + color + '"></span><span class="cost-model-name" title="' + escapeHtml(m.model) + '">' + escapeHtml(displayCostModelLabel(m.model, shortLabelCounts)) + '</span><div class="cost-card-sub">' + escapeHtml(provenance) + '</div></td>'
       + '<td>' + formatTokenCount(inp) + '</td>'
       + '<td>' + formatTokenCount(out) + '</td>'
       + '<td>' + formatTokenCount(inp + out) + '</td>'
@@ -6821,7 +9159,7 @@ function renderCostTable(data) {
       + '<td>' + formatTokenCount(totalInput + totalOutput) + '</td>'
       + '<td>' + formatCost(String(totalCost)) + '</td>'
       + '<td>' + totalReq + '</td>'
-      + '<td>100%</td>'
+      + '<td>100%' + (totalCaptured ? '<div class="cost-card-sub">' + formatTokenCount(totalCaptured) + ' captured output</div>' : '') + '</td>'
       + '</tr>';
   }
 }
@@ -6986,13 +9324,22 @@ function installWasmExtension() {
   });
 }
 
-function addMcpServer() {
-  var name = document.getElementById('mcp-install-name').value.trim();
+function addMcpServer(options) {
+  var opts = options || {};
+  var name = String(opts.name != null ? opts.name : '').trim();
+  if (!name) {
+    var nameInput = document.getElementById('mcp-install-name');
+    name = nameInput ? nameInput.value.trim() : '';
+  }
   if (!name) {
     showToast('Server name is required', 'error');
     return;
   }
-  var url = document.getElementById('mcp-install-url').value.trim();
+  var url = String(opts.url != null ? opts.url : '').trim();
+  if (!url) {
+    var urlInput = document.getElementById('mcp-install-url');
+    url = urlInput ? urlInput.value.trim() : '';
+  }
   if (!url) {
     showToast('MCP server URL is required', 'error');
     return;
@@ -7004,8 +9351,11 @@ function addMcpServer() {
   }).then(function(res) {
     if (res.success) {
       showToast('Added MCP server ' + name, 'success');
-      document.getElementById('mcp-install-name').value = '';
-      document.getElementById('mcp-install-url').value = '';
+      var inlineNameInput = document.getElementById('mcp-install-name');
+      var inlineUrlInput = document.getElementById('mcp-install-url');
+      if (inlineNameInput) inlineNameInput.value = '';
+      if (inlineUrlInput) inlineUrlInput.value = '';
+      if (opts.closeOnSuccess) closeMcpConnectionModal();
       loadExtensions();
     } else {
       showToast('Failed to add MCP server: ' + (res.message || 'unknown error'), 'error');
@@ -7017,8 +9367,11 @@ function addMcpServer() {
 
 // --- Skills ---
 
+var skillTaps = [];
+
 function loadSkills() {
   var skillsList = document.getElementById('skills-list');
+  loadSkillTaps();
   apiFetch('/api/skills').then(function(data) {
     if (!data.skills || data.skills.length === 0) {
       skillsList.innerHTML = '<div class="empty-state">No skills installed</div>';
@@ -7076,6 +9429,18 @@ function renderSkillCard(skill) {
   var isWorkspace = skill.source && skill.source.indexOf('Workspace') === 0;
   var isInstalled = skill.trust.toLowerCase() === 'installed';
   var isTrusted = skill.trust.toLowerCase() === 'trusted';
+
+  var inspectBtn = document.createElement('button');
+  inspectBtn.className = 'btn-ext';
+  inspectBtn.textContent = 'Inspect';
+  inspectBtn.addEventListener('click', function() { openSkillInspectModal(skill.name); });
+  actions.appendChild(inspectBtn);
+
+  var publishBtn = document.createElement('button');
+  publishBtn.className = 'btn-ext';
+  publishBtn.textContent = 'Publish';
+  publishBtn.addEventListener('click', function() { openSkillPublishModal(skill.name); });
+  actions.appendChild(publishBtn);
 
   if (!isWorkspace) {
     // Trust/Untrust toggle for non-workspace skills
@@ -7427,6 +9792,196 @@ function reloadAllSkills() {
   });
 }
 
+function loadSkillTaps() {
+  var list = document.getElementById('skill-taps-list');
+  if (!list) return;
+  apiFetch('/api/skills/taps').then(function(data) {
+    skillTaps = data.taps || [];
+    renderSkillTaps(skillTaps, data.hub_enabled);
+  }).catch(function(err) {
+    list.innerHTML = '<div class="empty-state">Failed to load taps: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderSkillTaps(taps, hubEnabled) {
+  var list = document.getElementById('skill-taps-list');
+  if (!list) return;
+  if (!taps || taps.length === 0) {
+    list.innerHTML = '<div class="empty-state">No GitHub taps configured</div>';
+    return;
+  }
+  list.innerHTML = '';
+  taps.forEach(function(tap) {
+    var card = document.createElement('div');
+    card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card skill-card';
+    var path = tap.path || '';
+    var branch = tap.branch || '';
+    card.innerHTML =
+      '<div class="ext-header ui-resource-header">'
+      + '<span class="ext-name ui-resource-name">' + escapeHtml(tap.repo) + '</span>'
+      + '<span class="skill-trust trust-installed">' + escapeHtml(tap.trust_level || 'community') + '</span>'
+      + '</div>'
+      + '<div class="ext-desc ui-resource-meta">' + escapeHtml(path || '(repo root)') + (branch ? ' @ ' + escapeHtml(branch) : '') + '</div>'
+      + '<div class="ext-keywords ui-resource-note">Remote hub: ' + (hubEnabled ? 'enabled' : 'not ready') + '</div>';
+    var actions = document.createElement('div');
+    actions.className = 'ext-actions ui-resource-actions';
+    var remove = document.createElement('button');
+    remove.className = 'btn-ext remove';
+    remove.textContent = 'Remove';
+    remove.addEventListener('click', function() {
+      removeSkillTap(tap.repo, path, branch || null);
+    });
+    actions.appendChild(remove);
+    card.appendChild(actions);
+    list.appendChild(card);
+  });
+}
+
+function addSkillTapFromForm() {
+  var repo = document.getElementById('skill-tap-repo').value.trim();
+  var path = document.getElementById('skill-tap-path').value.trim();
+  var branch = document.getElementById('skill-tap-branch').value.trim();
+  var trust = document.getElementById('skill-tap-trust').value;
+  if (!repo) {
+    showToast('Tap repo is required', 'error');
+    return;
+  }
+  apiFetch('/api/skills/taps', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: { repo: repo, path: path, branch: branch || null, trust_level: trust },
+  }).then(function() {
+    showToast('Added skill tap ' + repo, 'success');
+    document.getElementById('skill-tap-repo').value = '';
+    document.getElementById('skill-tap-path').value = '';
+    document.getElementById('skill-tap-branch').value = '';
+    loadSkillTaps();
+  }).catch(function(err) {
+    showToast('Tap add failed: ' + err.message, 'error');
+  });
+}
+
+function removeSkillTap(repo, path, branch) {
+  if (!confirm('Remove skill tap "' + repo + '"?')) return;
+  apiFetch('/api/skills/taps/remove', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: { repo: repo, path: path || '', branch: branch || null },
+  }).then(function() {
+    showToast('Removed skill tap ' + repo, 'success');
+    loadSkillTaps();
+  }).catch(function(err) {
+    showToast('Tap remove failed: ' + err.message, 'error');
+  });
+}
+
+function refreshSkillTaps() {
+  apiFetch('/api/skills/taps/refresh', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: {},
+  }).then(function(res) {
+    showToast('Refreshed ' + (res.tap_count || 0) + ' tap(s)', 'success');
+    loadSkillTaps();
+  }).catch(function(err) {
+    showToast('Tap refresh failed: ' + err.message, 'error');
+  });
+}
+
+function openSkillInspectModal(name) {
+  apiFetch('/api/skills/' + encodeURIComponent(name) + '/inspect', {
+    method: 'POST',
+    body: { include_files: true, audit: true },
+  }).then(function(data) {
+    closeConfigureModal();
+    var dialog = document.createElement('dialog');
+    dialog.className = 'configure-dialog skill-inspect-dialog';
+    dialog.addEventListener('cancel', function(event) {
+      event.preventDefault();
+      closeConfigureModal();
+    });
+    var modal = document.createElement('div');
+    modal.className = 'configure-modal';
+    modal.innerHTML =
+      '<h3 class="ui-panel-title" id="skill-inspect-title">' + escapeHtml(data.name) + '</h3>'
+      + '<p class="ui-panel-desc">' + escapeHtml(data.description || '') + '</p>'
+      + '<div class="ui-panel ui-panel--subtle"><pre style="white-space:pre-wrap;max-height:420px;overflow:auto;">'
+      + escapeHtml(JSON.stringify(data, null, 2))
+      + '</pre></div>'
+      + '<div class="configure-actions"><button class="btn-ext" id="skill-inspect-close">Close</button></div>';
+    dialog.setAttribute('aria-labelledby', 'skill-inspect-title');
+    dialog.appendChild(modal);
+    document.body.appendChild(dialog);
+    modal.querySelector('#skill-inspect-close').addEventListener('click', closeConfigureModal);
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', 'open');
+  }).catch(function(err) {
+    showToast('Inspect failed: ' + err.message, 'error');
+  });
+}
+
+function openSkillPublishModal(name) {
+  closeConfigureModal();
+  var taps = skillTaps || [];
+  var options = taps.map(function(tap) {
+    return '<option value="' + escapeHtml(tap.repo) + '">' + escapeHtml(tap.repo + (tap.path ? '/' + tap.path : '')) + '</option>';
+  }).join('');
+  var dialog = document.createElement('dialog');
+  dialog.className = 'configure-dialog skill-publish-dialog';
+  dialog.addEventListener('cancel', function(event) {
+    event.preventDefault();
+    closeConfigureModal();
+  });
+  var modal = document.createElement('div');
+  modal.className = 'configure-modal';
+  modal.innerHTML =
+    '<h3 class="ui-panel-title" id="skill-publish-title">Publish ' + escapeHtml(name) + '</h3>'
+    + '<p class="ui-panel-desc">Dry-run first, then publish a draft PR to a configured GitHub tap.</p>'
+    + '<label class="admin-field admin-field--wide"><span class="admin-field-label">Target tap</span><select id="skill-publish-target">' + options + '</select></label>'
+    + '<div class="ui-panel ui-panel--subtle"><pre id="skill-publish-preview" style="white-space:pre-wrap;max-height:360px;overflow:auto;">Run a dry-run to preview the publish plan.</pre></div>'
+    + '<div class="configure-actions"><button class="btn-ext" id="skill-publish-dry-run">Dry Run</button><button class="btn-ext install" id="skill-publish-confirm">Publish PR</button><button class="btn-ext" id="skill-publish-cancel">Close</button></div>';
+  dialog.setAttribute('aria-labelledby', 'skill-publish-title');
+  dialog.appendChild(modal);
+  document.body.appendChild(dialog);
+  var preview = modal.querySelector('#skill-publish-preview');
+  var target = modal.querySelector('#skill-publish-target');
+  if (!taps.length) {
+    preview.textContent = 'No GitHub taps configured. Add a tap before publishing.';
+  }
+  modal.querySelector('#skill-publish-dry-run').addEventListener('click', function() {
+    if (!target.value) return;
+    runSkillPublish(name, target.value, true, preview);
+  });
+  modal.querySelector('#skill-publish-confirm').addEventListener('click', function() {
+    if (!target.value) return;
+    if (!confirm('Publish "' + name + '" to ' + target.value + ' as a draft PR?')) return;
+    runSkillPublish(name, target.value, false, preview);
+  });
+  modal.querySelector('#skill-publish-cancel').addEventListener('click', closeConfigureModal);
+  if (typeof dialog.showModal === 'function') dialog.showModal();
+  else dialog.setAttribute('open', 'open');
+}
+
+function runSkillPublish(name, targetRepo, dryRun, preview) {
+  preview.textContent = dryRun ? 'Building dry-run plan...' : 'Publishing draft PR...';
+  apiFetch('/api/skills/' + encodeURIComponent(name) + '/publish', {
+    method: 'POST',
+    headers: dryRun ? {} : { 'X-Confirm-Action': 'true' },
+    body: {
+      target_repo: targetRepo,
+      dry_run: dryRun,
+      remote_write: !dryRun,
+      confirm_remote_write: !dryRun,
+    },
+  }).then(function(res) {
+    preview.textContent = JSON.stringify(res, null, 2);
+    showToast(dryRun ? 'Publish dry-run complete' : 'Draft PR created', 'success');
+  }).catch(function(err) {
+    preview.textContent = err.message;
+    showToast('Publish failed: ' + err.message, 'error');
+  });
+}
+
 function installSkillFromForm() {
   var name = document.getElementById('skill-install-name').value.trim();
   if (!name) { showToast('Skill name is required', 'error'); return; }
@@ -7482,7 +10037,11 @@ document.addEventListener('keydown', (e) => {
 
   // Escape: close job detail or blur input
   if (e.key === 'Escape') {
-    if (currentJobId) {
+    if (shellMobileNavOpen) {
+      closeShellMobileNav({ keepFocus: false });
+    } else if (document.querySelector('.configure-dialog')) {
+      closeConfigureModal();
+    } else if (currentJobId) {
       closeJobDetail();
     } else if (inInput) {
       e.target.blur();
@@ -7546,7 +10105,7 @@ function showCanvasPanel(panelId, content) {
     '</div>';
 
   container.appendChild(card);
-  container.scrollTop = container.scrollHeight;
+  finishChatMutation(shouldPinChatToLatest());
   _canvasPanels.set(panelId, card);
 }
 
@@ -7622,10 +10181,10 @@ const SETTINGS_SCHEMA = {
   'Presentation': {
     icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M4 5h16"/><path d="M4 12h16"/><path d="M4 19h16"/><path d="M8 5v14"/></svg>',
     fields: [
-      { key: 'agent.cli_skin', label: 'CLI skin', type: 'select', dynamicOptions: 'skins', desc: 'Shared ThinClaw skin used by the CLI and, by default, the WebUI.' },
+      { key: 'agent.cli_skin', label: 'CLI skin', type: 'select', dynamicOptions: 'skins', desc: 'Shared agent skin used by the CLI and, by default, the WebUI.' },
       { key: 'webchat_skin', label: 'WebUI skin', type: 'select', dynamicOptions: 'skins', desc: 'Override the WebUI skin, or leave it following the active CLI skin.', nullable: true, followLabel: 'Follow agent skin' },
       { key: 'webchat_theme', label: 'WebUI theme', type: 'select', options: [{ value: 'system', label: 'System' }, { value: 'dark', label: 'Dark' }, { value: 'light', label: 'Light' }], desc: 'Overall light/dark polarity for the WebUI.' },
-      { key: 'webchat_show_branding', label: 'Bottom branding pill', type: 'bool', desc: 'Show the ThinClaw branding pill in the lower-right corner.' },
+      { key: 'webchat_show_branding', label: 'Bottom branding pill', type: 'bool', desc: 'Show the runtime branding pill in the lower-right corner.' },
     ],
   },
   'Notifications': {
@@ -7654,6 +10213,8 @@ const SETTINGS_SCHEMA = {
     icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="18" height="14" x="3" y="7" rx="2"/><path d="M12 7V3"/><path d="M15 3h-6"/><circle cx="9" cy="13" r="2"/><circle cx="15" cy="13" r="2"/><path d="M9 18h6"/></svg>',
     fields: [
       { key: 'agent.name', label: 'Agent name', type: 'text', desc: 'How the agent identifies itself' },
+      { key: 'user_timezone', label: 'User timezone', type: 'text', desc: 'IANA timezone used for schedules and daily context (for example Europe/Berlin or America/New_York)', nullable: true },
+      { key: 'agent.personality_pack', label: 'Personality pack', type: 'select', options: [{value: 'balanced', label: 'balanced'}, {value: 'professional', label: 'professional'}, {value: 'creative_partner', label: 'creative_partner'}, {value: 'research_assistant', label: 'research_assistant'}, {value: 'mentor', label: 'mentor'}, {value: 'minimal', label: 'minimal'}], desc: 'Initial seed pack for the canonical home soul and cross-surface copy' },
       { key: 'agent.max_parallel_jobs', label: 'Max parallel jobs', type: 'number', desc: 'Concurrent job limit', min: 1, max: 20 },
       { key: 'agent.job_timeout_secs', label: 'Job timeout (seconds)', type: 'number', desc: 'Max time before a job is killed', min: 60 },
       { key: 'agent.max_tool_iterations', label: 'Max tool iterations', type: 'number', desc: 'Agentic loop iteration cap', min: 1, max: 200 },
@@ -7662,6 +10223,9 @@ const SETTINGS_SCHEMA = {
       { key: 'agent.thinking_enabled', label: 'Extended thinking', type: 'bool', desc: 'Enable chain-of-thought reasoning' },
       { key: 'agent.thinking_budget_tokens', label: 'Thinking budget', type: 'number', desc: 'Token budget for reasoning', min: 1000, max: 100000 },
       { key: 'agent.auto_approve_tools', label: 'Auto-approve tools', type: 'bool', desc: 'Skip approval checks (use with caution)' },
+      { key: 'agent.main_tool_profile', label: 'Main tool profile', type: 'select', options: [{value: 'standard', label: 'Standard'}, {value: 'restricted', label: 'Restricted'}, {value: 'explicit_only', label: 'Explicit only'}, {value: 'acp', label: 'ACP editor'}], desc: 'Default implicit tool access for the main agent lane' },
+      { key: 'agent.worker_tool_profile', label: 'Worker tool profile', type: 'select', options: [{value: 'restricted', label: 'Restricted'}, {value: 'standard', label: 'Standard'}, {value: 'explicit_only', label: 'Explicit only'}, {value: 'acp', label: 'ACP editor'}], desc: 'Default implicit tool access for worker and scheduled job lanes' },
+      { key: 'agent.subagent_tool_profile', label: 'Subagent tool profile', type: 'select', options: [{value: 'explicit_only', label: 'Explicit only'}, {value: 'restricted', label: 'Restricted'}, {value: 'standard', label: 'Standard'}, {value: 'acp', label: 'ACP editor'}], desc: 'Default implicit tool access for delegated subagents unless a request overrides it' },
       { key: 'agent.subagent_transparency_level', label: 'Subagent transparency', type: 'select', options: [{value: 'balanced', label: 'Balanced'}, {value: 'detailed', label: 'Detailed'}], desc: 'How much subagent progress detail to surface in temporal transcript views' },
     ]
   },
@@ -7679,6 +10243,7 @@ const SETTINGS_SCHEMA = {
     fields: [
       { key: 'channels.telegram_owner_id', label: 'Owner ID', type: 'number', desc: 'Telegram user ID — bot only responds to this user', nullable: true },
       { key: 'channels.telegram_stream_mode', label: 'Stream Mode', type: 'select', options: [{value: '', label: 'Disabled (Wait for full context)'}, {value: 'edit', label: 'Full Edit (Live updates)'}, {value: 'status', label: 'Typing Indicator/Status Bar'}], desc: 'Progressive partial message rendering', nullable: true },
+      { key: 'channels.telegram_transport_mode', label: 'Transport mode', type: 'select', options: [{value: 'auto', label: 'Auto (Prefer webhook)'}, {value: 'polling', label: 'Polling only'}], desc: 'Webhook when public ingress is truly usable; otherwise polling. Polling only disables webhook registration.' },
       { key: 'channels.telegram_subagent_session_mode', label: 'Subagent session mode', type: 'select', options: [{value: 'temp_topic', label: 'Temporary topic'}, {value: 'reply_chain', label: 'Reply chain fallback'}, {value: 'compact_off', label: 'Compact off'}], desc: 'How Telegram should surface temporary subagent sessions when available' },
     ]
   },
@@ -7712,9 +10277,10 @@ const SETTINGS_SCHEMA = {
   'Channels — Nostr': {
     icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/></svg>',
     fields: [
-      { key: 'channels.nostr_enabled', label: 'Enabled', type: 'bool', desc: 'Enable Nostr channel' },
+      { key: 'channels.nostr_enabled', label: 'Enabled', type: 'bool', desc: 'Enable the Nostr runtime for owner DMs and social actions' },
       { key: 'channels.nostr_relays', label: 'Relays', type: 'text', desc: 'Comma-separated relay URLs (wss://...)', nullable: true },
-      { key: 'channels.nostr_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated pubkeys (hex/npub) or * (empty = all)', nullable: true },
+      { key: 'channels.nostr_owner_pubkey', label: 'Owner pubkey', type: 'text', desc: 'Only this pubkey may control the agent over encrypted Nostr DMs', nullable: true },
+      { key: 'channels.nostr_social_dm_enabled', label: 'Social DM reads', type: 'bool', desc: 'Allow non-owner DMs to be readable via nostr_actions only' },
     ]
   },
   'Channels — iMessage': {
@@ -7733,6 +10299,19 @@ const SETTINGS_SCHEMA = {
       { key: 'channels.apple_mail_poll_interval', label: 'Poll interval (s)', type: 'number', desc: 'Seconds between Envelope Index checks', min: 5, max: 120, nullable: true },
       { key: 'channels.apple_mail_unread_only', label: 'Unread only', type: 'bool', desc: 'Only process unread messages' },
       { key: 'channels.apple_mail_mark_as_read', label: 'Mark as read', type: 'bool', desc: 'Mark messages as read after processing' },
+    ]
+  },
+  'Channels — BlueBubbles': {
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="9" cy="7" r="4"/><circle cx="17" cy="9" r="3"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/></svg>',
+    fields: [
+      { key: 'channels.bluebubbles_enabled', label: 'Enabled', type: 'bool', desc: 'Enable BlueBubbles iMessage bridge (cross-platform)' },
+      { key: 'channels.bluebubbles_server_url', label: 'Server URL', type: 'text', desc: 'BlueBubbles server (e.g. http://192.168.1.50:1234)', nullable: true },
+      { key: 'channels.bluebubbles_password', label: 'Password', type: 'password', desc: 'BlueBubbles server password', nullable: true },
+      { key: 'channels.bluebubbles_webhook_host', label: 'Webhook host', type: 'text', desc: 'Webhook listen address (default: 127.0.0.1)', nullable: true },
+      { key: 'channels.bluebubbles_webhook_port', label: 'Webhook port', type: 'number', desc: 'Webhook listen port (default: 8645)', min: 1, max: 65535, nullable: true },
+      { key: 'channels.bluebubbles_webhook_path', label: 'Webhook path', type: 'text', desc: 'Webhook URL path (default: /bluebubbles-webhook)', nullable: true },
+      { key: 'channels.bluebubbles_allow_from', label: 'Allow from', type: 'text', desc: 'Comma-separated phone/email (empty = all)', nullable: true },
+      { key: 'channels.bluebubbles_send_read_receipts', label: 'Send read receipts', type: 'bool', desc: 'Send read receipts (requires Private API on server)', nullable: true },
     ]
   },
   'Channels — Gmail': {
@@ -7764,7 +10343,7 @@ const SETTINGS_SCHEMA = {
       { key: 'routines_enabled', label: 'Routines enabled', type: 'bool', desc: 'Enable the cron-based routine system' },
       { key: 'skills_enabled', label: 'Skills enabled', type: 'bool', desc: 'Enable the skills system' },
       { key: 'claude_code_enabled', label: 'Claude Code sandbox', type: 'bool', desc: 'Enable Claude Code as a tool' },
-      { key: 'claude_code_model', label: 'Claude Code model', type: 'text', desc: 'Model for Claude Code containers (e.g. "sonnet", "opus", "claude-sonnet-4-20250514")', nullable: true },
+      { key: 'claude_code_model', label: 'Claude Code model', type: 'text', desc: 'Model for Claude Code containers (e.g. "claude-sonnet-4-6", "claude-opus-4-5")', nullable: true },
       { key: 'claude_code_max_turns', label: 'Claude Code max turns', type: 'number', desc: 'Maximum agentic turns per Claude Code job', min: 1, nullable: true },
       { key: 'codex_code_enabled', label: 'Codex sandbox', type: 'bool', desc: 'Enable Codex CLI as a container coding agent' },
       { key: 'codex_code_model', label: 'Codex model', type: 'text', desc: 'Model for Codex containers (e.g. "gpt-5.3-codex")', nullable: true },
@@ -7779,6 +10358,17 @@ const SETTINGS_SCHEMA = {
       { key: 'experiments.allow_remote_runners', label: 'Allow remote runners', type: 'bool', desc: 'Permit SSH, Slurm, Kubernetes, RunPod, and generic remote lease runners.' },
       { key: 'experiments.ui_visibility', label: 'UI visibility', type: 'select', options: [{ value: 'hidden_until_enabled', label: 'Hidden until enabled' }], desc: 'Advanced-only visibility policy for the Research tab.' },
       { key: 'experiments.default_promotion_mode', label: 'Default promotion mode', type: 'select', options: [{ value: 'branch_pr_draft', label: 'Branch + draft PR' }], desc: 'Default promotion target when a campaign finishes with a best candidate.' },
+    ]
+  },
+  'Extensions': {
+    icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12 2v20"/><path d="M2 12h20"/><path d="m4.93 4.93 14.14 14.14"/><path d="m19.07 4.93-14.14 14.14"/></svg>',
+    fields: [
+      { key: 'extensions.user_tools_dir', label: 'User tools dir', type: 'text', desc: 'Canonical operator-trusted user tool directory.' },
+      { key: 'extensions.allow_native_plugins', label: 'Native plugins', type: 'bool', desc: 'Allow unsafe .so/.dylib plugin loading after manifest and allowlist checks.' },
+      { key: 'extensions.require_plugin_signatures', label: 'Require signatures', type: 'bool', desc: 'Require ed25519 signatures for broad plugin manifests.' },
+      { key: 'extensions.native_plugin_allowlist_dirs', label: 'Native allowlist dirs', type: 'json', desc: 'JSON array of directories that may contain native plugin libraries.' },
+      { key: 'extensions.trusted_manifest_keys', label: 'Trusted key IDs', type: 'json', desc: 'JSON array of trusted plugin manifest key IDs.' },
+      { key: 'extensions.trusted_manifest_public_keys', label: 'Trusted public keys', type: 'json', desc: 'JSON object mapping key IDs to hex ed25519 public keys.' },
     ]
   },
 };
@@ -7798,6 +10388,14 @@ const SENSITIVE_KEYS = new Set([
   'channels.slack_bot_token',
   'channels.slack_app_token',
   'channels.gateway_auth_token',
+  'channels.nostr_private_key',
+  'channels.bluebubbles_password',
+]);
+
+const HIDDEN_SETTINGS_KEYS = new Set([
+  PROVIDERS_UI_FILTER_SETTING_KEY,
+  PROVIDERS_UI_HIDDEN_SETTING_KEY,
+  'channels.nostr_allow_from',
 ]);
 
 // --- Provider Vault ---
@@ -7810,6 +10408,125 @@ let modelChoiceDismissListenerBound = false;
 let providerRoutingSaveInFlight = null;
 let providerRoutingSavePendingRequest = null;
 let activeRoutingPoolDrag = null;
+let providerVaultEntries = [];
+const PROVIDER_INFRASTRUCTURE_SLUGS = ['llama_cpp', 'openai_compatible'];
+
+function persistProvidersUiPrefs() {
+  providersUiPrefs = normalizeProvidersUiPrefs(providersUiPrefs);
+  writeJsonStorage(PROVIDERS_UI_PREFS_STORAGE_KEY, providersUiPrefs);
+  persistProvidersUiPrefsToServer().catch((err) => {
+    console.warn('Failed to persist provider UI preferences:', err);
+  });
+}
+
+function writeSettingValueSilently(key, value) {
+  if (!token) return Promise.resolve();
+  const headers = { 'Authorization': 'Bearer ' + token };
+  if (value === null) {
+    return fetch('/api/settings/' + encodeURIComponent(key), { method: 'DELETE', headers })
+      .then((res) => {
+        if (!res.ok && res.status !== 404) throw new Error(res.status + ' ' + res.statusText);
+      });
+  }
+  headers['Content-Type'] = 'application/json';
+  return fetch('/api/settings/' + encodeURIComponent(key), {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ value: value }),
+  }).then((res) => {
+    if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+  });
+}
+
+function persistProvidersUiPrefsToServer() {
+  const normalized = normalizeProvidersUiPrefs(providersUiPrefs);
+  const updatedAt = new Date().toISOString();
+  const filterValue = normalized.filter === 'all' ? null : normalized.filter;
+  const hiddenValue = normalized.hiddenSlugs.length ? normalized.hiddenSlugs : null;
+  return Promise.all([
+    writeSettingValueSilently(PROVIDERS_UI_FILTER_SETTING_KEY, filterValue),
+    writeSettingValueSilently(PROVIDERS_UI_HIDDEN_SETTING_KEY, hiddenValue),
+  ]).then(() => {
+    if (filterValue === null) delete settingsCache[PROVIDERS_UI_FILTER_SETTING_KEY];
+    else settingsCache[PROVIDERS_UI_FILTER_SETTING_KEY] = { value: filterValue, updated_at: updatedAt };
+    if (hiddenValue === null) delete settingsCache[PROVIDERS_UI_HIDDEN_SETTING_KEY];
+    else settingsCache[PROVIDERS_UI_HIDDEN_SETTING_KEY] = { value: hiddenValue.slice(), updated_at: updatedAt };
+  });
+}
+
+function fetchOptionalSettingValue(key) {
+  if (!token) return Promise.resolve(undefined);
+  return fetch('/api/settings/' + encodeURIComponent(key), {
+    headers: { 'Authorization': 'Bearer ' + token },
+  }).then((res) => {
+    if (res.status === 404) return undefined;
+    if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+    return res.json().then((payload) => payload.value);
+  });
+}
+
+function loadProvidersUiPrefs() {
+  const fallback = normalizeProvidersUiPrefs(readJsonStorage(PROVIDERS_UI_PREFS_STORAGE_KEY, providersUiPrefs));
+  if (!token) {
+    providersUiPrefs = fallback;
+    return Promise.resolve(providersUiPrefs);
+  }
+  return Promise.all([
+    fetchOptionalSettingValue(PROVIDERS_UI_FILTER_SETTING_KEY),
+    fetchOptionalSettingValue(PROVIDERS_UI_HIDDEN_SETTING_KEY),
+  ]).then(([filterValue, hiddenValue]) => {
+    const hasServerValues = filterValue !== undefined || hiddenValue !== undefined;
+    providersUiPrefs = hasServerValues
+      ? normalizeProvidersUiPrefs({ filter: filterValue, hiddenSlugs: hiddenValue })
+      : fallback;
+    if (filterValue !== undefined) {
+      settingsCache[PROVIDERS_UI_FILTER_SETTING_KEY] = { value: filterValue, updated_at: new Date().toISOString() };
+    }
+    if (hiddenValue !== undefined) {
+      settingsCache[PROVIDERS_UI_HIDDEN_SETTING_KEY] = { value: hiddenValue, updated_at: new Date().toISOString() };
+    }
+    writeJsonStorage(PROVIDERS_UI_PREFS_STORAGE_KEY, providersUiPrefs);
+    return providersUiPrefs;
+  }).catch((err) => {
+    console.warn('Failed to load provider UI preferences:', err);
+    providersUiPrefs = fallback;
+    return providersUiPrefs;
+  });
+}
+
+function isProviderInfrastructureSlug(slug) {
+  return PROVIDER_INFRASTRUCTURE_SLUGS.includes(String(slug || ''));
+}
+
+function providerHiddenByUser(slug) {
+  return providersUiPrefs.hiddenSlugs.includes(String(slug || ''));
+}
+
+function providerMatchesFastFilter(provider, filterName) {
+  const filter = filterName || providersUiPrefs.filter || 'all';
+  if (filter === 'hidden') return providerHiddenByUser(provider.slug);
+  if (providerHiddenByUser(provider.slug)) return false;
+  if (filter === 'enabled') return !!provider.enabled;
+  if (filter === 'ready') return providerCredentialReady(provider);
+  if (filter === 'attention') return !providerCredentialReady(provider);
+  if (filter === 'local') return provider.auth_kind === 'local';
+  return true;
+}
+
+function setProvidersFastFilter(filterName) {
+  providersUiPrefs.filter = filterName;
+  persistProvidersUiPrefs();
+  if (currentTab === 'providers') loadProviders();
+}
+
+function setProviderVisibility(slug, visible) {
+  const target = String(slug || '');
+  const hidden = new Set(providersUiPrefs.hiddenSlugs);
+  if (visible) hidden.delete(target);
+  else hidden.add(target);
+  providersUiPrefs.hiddenSlugs = Array.from(hidden).sort();
+  persistProvidersUiPrefs();
+}
 
 function waitForProviderRoutingSaves() {
   if (!providerRoutingSaveInFlight) return Promise.resolve();
@@ -7834,7 +10551,8 @@ function applyPersistedProvidersConfig(configData) {
     cheap_pool_order: Array.isArray(persisted.cheap_pool_order) ? persisted.cheap_pool_order : [],
     fallback_chain: Array.isArray(persisted.fallback_chain) ? persisted.fallback_chain : [],
     policy_rules: Array.isArray(persisted.policy_rules) ? persisted.policy_rules : [],
-    advisor_max_calls: persisted.advisor_max_calls || configData.advisor_max_calls || 3,
+    advisor_max_calls: persisted.advisor_max_calls || configData.advisor_max_calls || 4,
+    advisor_auto_escalation_mode: persisted.advisor_auto_escalation_mode || configData.advisor_auto_escalation_mode || 'risk_and_complex_final',
     advisor_escalation_prompt: persisted.advisor_escalation_prompt || null,
   };
 }
@@ -7844,9 +10562,10 @@ function loadProviders() {
   container.innerHTML = '<div class="settings-loading">Loading providers...</div>';
   const runLoad = () => {
     Promise.all([
+      loadProvidersUiPrefs(),
       apiFetch('/api/providers'),
       apiFetch('/api/providers/config'),
-    ]).then(([providersData, configData]) => {
+    ]).then(([_prefs, providersData, configData]) => {
       providerRoutingConfig = applyPersistedProvidersConfig(configData);
       providerModelsCache.clear();
       providerModelsInflight.clear();
@@ -7866,9 +10585,117 @@ function loadProviderVault() {
   loadProviders();
 }
 
+function renderProvidersFilterToolbar(providers) {
+  const providerList = (providers || []).filter((provider) => !isProviderInfrastructureSlug(provider.slug));
+  const hiddenCount = providerList.filter((provider) => providerHiddenByUser(provider.slug)).length;
+  const filters = [
+    { id: 'all', label: 'All', count: providerList.filter((provider) => !providerHiddenByUser(provider.slug)).length },
+    { id: 'enabled', label: 'Enabled', count: providerList.filter((provider) => !providerHiddenByUser(provider.slug) && provider.enabled).length },
+    { id: 'ready', label: 'Ready', count: providerList.filter((provider) => !providerHiddenByUser(provider.slug) && providerCredentialReady(provider)).length },
+    { id: 'attention', label: 'Attention', count: providerList.filter((provider) => !providerHiddenByUser(provider.slug) && !providerCredentialReady(provider)).length },
+    { id: 'local', label: 'Local', count: providerList.filter((provider) => !providerHiddenByUser(provider.slug) && provider.auth_kind === 'local').length },
+    { id: 'hidden', label: 'Hidden', count: hiddenCount },
+  ];
+
+  let html = '<section class="ui-panel ui-panel--subtle ui-panel--compact providers-filter-toolbar">';
+  html += '<div class="providers-filter-copy"><div class="providers-filter-kicker">View</div><p class="providers-filter-desc">Keep the vault focused on the providers you actively compare, while preserving quick access to the rest.</p></div>';
+  html += '<div class="providers-filter-controls">';
+  html += '<div class="providers-filter-chip-row">';
+  filters.forEach((filter) => {
+    html += '<button type="button" class="providers-filter-chip' + (providersUiPrefs.filter === filter.id ? ' active' : '') + '" onclick="setProvidersFastFilter(\'' + escapeHtml(filter.id) + '\')">'
+      + escapeHtml(filter.label) + ' <span>' + escapeHtml(String(filter.count)) + '</span></button>';
+  });
+  html += '</div>';
+  html += '<div class="providers-filter-actions">';
+  html += '<button type="button" class="btn-ext" onclick="openProviderVisibilityModal()">Customize visible providers</button>';
+  if (providersUiPrefs.filter !== 'all' || hiddenCount > 0) {
+    html += '<button type="button" class="btn-ext" onclick="resetProviderVisibilityPreferences()">Reset filters</button>';
+  }
+  html += '</div></div></section>';
+  return html;
+}
+
+function openProviderVisibilityModal() {
+  closeProviderVisibilityModal();
+  const providers = providerVaultEntries.filter((provider) => !isProviderInfrastructureSlug(provider.slug));
+  const dialog = document.createElement('dialog');
+  dialog.className = 'configure-dialog providers-visibility-dialog';
+  dialog.addEventListener('cancel', (event) => {
+    event.preventDefault();
+    closeProviderVisibilityModal();
+  });
+  dialog.addEventListener('click', (event) => {
+    const rect = dialog.getBoundingClientRect();
+    const clickedBackdrop = event.clientY < rect.top || event.clientY > rect.bottom || event.clientX < rect.left || event.clientX > rect.right;
+    if (clickedBackdrop) closeProviderVisibilityModal();
+  });
+
+  const modal = document.createElement('div');
+  modal.className = 'configure-modal providers-visibility-modal';
+  modal.innerHTML =
+    '<h3 id="providers-visibility-title">Visible providers</h3>'
+    + '<p class="ui-panel-desc">Hide providers you do not actively compare. Hidden providers remain recoverable through the Hidden filter and this dialog.</p>'
+    + '<div class="providers-visibility-list">'
+    + providers.map((provider) =>
+      '<label class="providers-visibility-item"><input type="checkbox" data-provider-visibility="' + escapeHtml(provider.slug) + '"' + (providerHiddenByUser(provider.slug) ? '' : ' checked') + '><span>' + escapeHtml(provider.display_name) + '</span></label>'
+    ).join('')
+    + '</div>'
+    + '<div class="configure-actions">'
+      + '<button class="btn-ext activate" type="button" id="providers-visibility-save">Save</button>'
+      + '<button class="btn-ext" type="button" id="providers-visibility-show-all">Show all</button>'
+      + '<button class="btn-ext remove" type="button" id="providers-visibility-cancel">Cancel</button>'
+    + '</div>';
+  dialog.setAttribute('aria-labelledby', 'providers-visibility-title');
+  dialog.appendChild(modal);
+  document.body.appendChild(dialog);
+
+  modal.querySelector('#providers-visibility-save').addEventListener('click', () => {
+    const hiddenSlugs = [];
+    modal.querySelectorAll('[data-provider-visibility]').forEach((input) => {
+      if (!input.checked) hiddenSlugs.push(input.getAttribute('data-provider-visibility'));
+    });
+    providersUiPrefs.hiddenSlugs = hiddenSlugs.sort();
+    persistProvidersUiPrefs();
+    closeProviderVisibilityModal();
+    if (currentTab === 'providers') loadProviders();
+  });
+  modal.querySelector('#providers-visibility-show-all').addEventListener('click', () => {
+    providersUiPrefs.hiddenSlugs = [];
+    providersUiPrefs.filter = providersUiPrefs.filter === 'hidden' ? 'all' : providersUiPrefs.filter;
+    persistProvidersUiPrefs();
+    closeProviderVisibilityModal();
+    if (currentTab === 'providers') loadProviders();
+  });
+  modal.querySelector('#providers-visibility-cancel').addEventListener('click', closeProviderVisibilityModal);
+
+  if (typeof dialog.showModal === 'function') {
+    dialog.showModal();
+  } else {
+    dialog.setAttribute('open', 'open');
+  }
+
+  const firstInput = modal.querySelector('[data-provider-visibility]');
+  if (firstInput) firstInput.focus();
+}
+
+function closeProviderVisibilityModal() {
+  const existing = document.querySelector('.providers-visibility-dialog');
+  if (existing) {
+    if (typeof existing.close === 'function' && existing.open) existing.close();
+    existing.remove();
+  }
+}
+
+function resetProviderVisibilityPreferences() {
+  providersUiPrefs = normalizeProvidersUiPrefs({ filter: 'all', hiddenSlugs: [] });
+  persistProvidersUiPrefs();
+  if (currentTab === 'providers') loadProviders();
+}
+
 function renderProvidersWorkspace(providers, config) {
   const container = document.getElementById('providers-content');
   const mergedProviders = mergeProviderEntries(providers, config.providers || []);
+  providerVaultEntries = mergedProviders.slice();
 
   let html = '<section class="ui-panel ui-panel-stack providers-workspace-shell">';
   html += '<div class="ui-panel-header ui-panel-header--divider providers-shell-header"><div class="ui-panel-copy"><h3 class="ui-panel-title ui-panel-title--lg">Providers & Routing</h3><p class="ui-panel-desc">Add provider credentials and models, then choose a routing strategy to distribute work across providers.</p></div><div class="ui-panel-actions"><button id="providers-open-research" class="btn-vault-save providers-shell-save providers-shell-secondary">Research GPU Clouds</button><button id="providers-routing-save" class="btn-vault-save providers-shell-save">Save Changes</button></div></div>';
@@ -7877,6 +10704,7 @@ function renderProvidersWorkspace(providers, config) {
   } else if (config.runtime_revision) {
     html += '<div class="ui-inline-alert">Live runtime revision ' + escapeHtml(String(config.runtime_revision)) + ' is active.</div>';
   }
+  html += renderProvidersFilterToolbar(mergedProviders);
   html += renderProvidersSection(mergedProviders, config);
   html += renderRoutingSection(config, mergedProviders);
   html += '</section>';
@@ -7908,17 +10736,39 @@ function mergeProviderEntries(vaultProviders, configProviders) {
 }
 
 function renderProvidersSection(providers, config) {
-  // Filter out infrastructure providers — they are configured in Connection Settings
-  const HIDDEN_SLUGS = ['llama_cpp', 'openai_compatible'];
-  const visibleProviders = providers.filter(p => !HIDDEN_SLUGS.includes(p.slug));
+  const providerList = providers.filter((provider) => !isProviderInfrastructureSlug(provider.slug));
+  const visibleProviders = providerList.filter((provider) => providerMatchesFastFilter(provider, providersUiPrefs.filter));
+  const hiddenCount = providerList.filter((provider) => providerHiddenByUser(provider.slug)).length;
 
   let html = '<div class="routing-section-block ui-panel-stack">';
   html += '<div class="ui-panel-header routing-subheader"><div class="ui-panel-copy"><h4 class="ui-panel-title ui-panel-title--section">Providers</h4><p class="ui-panel-desc">Enable providers, save API credentials, and pick models for each slot.</p></div></div>';
-  html += '<div class="providers-editor-grid ui-panel-grid ui-panel-grid--cards">';
-  for (const provider of visibleProviders) {
-    html += renderProviderEditorCard(provider);
+  if (!visibleProviders.length) {
+    html += '<div class="empty-state ui-panel-empty providers-empty-state">';
+    if (providersUiPrefs.filter === 'hidden') {
+      html += 'No hidden providers right now.';
+    } else if (hiddenCount > 0) {
+      html += 'No providers match this filter. Try another view or restore hidden providers.';
+    } else {
+      html += 'No providers match this filter yet.';
+    }
+    if (providersUiPrefs.filter !== 'all' || hiddenCount > 0) {
+      html += '<div class="providers-empty-actions">';
+      if (providersUiPrefs.filter !== 'all') {
+        html += '<button type="button" class="btn-ext" onclick="setProvidersFastFilter(\'all\')">Show all providers</button>';
+      }
+      if (hiddenCount > 0) {
+        html += '<button type="button" class="btn-ext" onclick="openProviderVisibilityModal()">Restore hidden providers</button>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  } else {
+    html += '<div class="providers-editor-grid ui-panel-grid ui-panel-grid--cards">';
+    for (const provider of visibleProviders) {
+      html += renderProviderEditorCard(provider);
+    }
+    html += '</div>';
   }
-  html += '</div>';
 
   // Connection settings — collapsible, lives under Providers where it belongs
   html += '<details class="connection-settings-details">';
@@ -8317,7 +11167,7 @@ function renderRoutingSection(config, providers) {
   const modes = [
     { value: 'primary_only', name: 'Primary only', desc: 'All requests use your primary model' },
     { value: 'cheap_split', name: 'Cheap split', desc: 'Route simple work to the cheap model' },
-    { value: 'advisor_executor', name: 'Advisor + Executor', desc: 'Fast model executes, consults advisor when needed' },
+    { value: 'advisor_executor', name: 'Advisor + Executor', desc: 'Executor runs the turn and auto-escalates risky or complex work' },
     { value: 'policy', name: 'Policy rules', desc: 'Custom rules control routing decisions' },
   ];
 
@@ -8363,10 +11213,32 @@ function renderRoutingSection(config, providers) {
   // --- Advisor settings panel (only for advisor_executor mode) ---
   html += '<div id="routing-advisor-settings" class="advisor-settings-panel' + (mode !== 'advisor_executor' ? ' is-hidden' : '') + '">';
   html += '<div class="advisor-settings-title">Advisor Configuration</div>';
+  if (mode === 'advisor_executor' && config.advisor_ready === false && config.advisor_disabled_reason) {
+    const laneDetails = [
+      config.executor_target ? ('executor: ' + config.executor_target) : '',
+      config.advisor_target ? ('advisor: ' + config.advisor_target) : '',
+    ].filter(Boolean).join(' • ');
+    const warning = laneDetails
+      ? (config.advisor_disabled_reason + ' (' + laneDetails + ')')
+      : config.advisor_disabled_reason;
+    html += '<div class="ui-inline-alert ui-inline-alert--error">' + escapeHtml(warning) + '</div>';
+  } else if (mode === 'advisor_executor' && config.advisor_ready) {
+    const executorTarget = config.executor_target || 'cheap';
+    const advisorTarget = config.advisor_target || 'primary';
+    html += '<div class="ui-inline-alert">Executor target: ' + escapeHtml(executorTarget) + ' • Advisor target: ' + escapeHtml(advisorTarget) + '</div>';
+  }
   html += '<div class="advisor-settings-grid">';
   html += '<div>';
   html += '<label class="advisor-field-label">Max advisor calls per turn</label>';
-  html += '<input id="routing-advisor-max-calls" class="advisor-input" type="number" min="1" max="10" value="' + (config.advisor_max_calls || 3) + '" placeholder="3">';
+  html += '<input id="routing-advisor-max-calls" class="advisor-input" type="number" min="1" max="10" value="' + (config.advisor_max_calls || 4) + '" placeholder="4">';
+  html += '</div>';
+  html += '<div>';
+  html += '<label class="advisor-field-label">Auto escalation mode</label>';
+  html += '<select id="routing-advisor-auto-mode" class="advisor-input">';
+  html += '<option value="manual_only"' + (config.advisor_auto_escalation_mode === 'manual_only' ? ' selected' : '') + '>Manual only</option>';
+  html += '<option value="risk_only"' + (config.advisor_auto_escalation_mode === 'risk_only' ? ' selected' : '') + '>Risk only</option>';
+  html += '<option value="risk_and_complex_final"' + ((config.advisor_auto_escalation_mode || 'risk_and_complex_final') === 'risk_and_complex_final' ? ' selected' : '') + '>Risk + complex final pass</option>';
+  html += '</select>';
   html += '</div>';
   html += '<div style="grid-column: 1 / -1">';
   html += '<label class="advisor-field-label">Escalation prompt (optional)</label>';
@@ -8927,7 +11799,8 @@ function collectProvidersRoutingConfig() {
     ),
     policy_rules: policyRules,
     providers,
-    advisor_max_calls: Number(document.getElementById('routing-advisor-max-calls')?.value || '3'),
+    advisor_max_calls: Number(document.getElementById('routing-advisor-max-calls')?.value || '4'),
+    advisor_auto_escalation_mode: document.getElementById('routing-advisor-auto-mode')?.value || 'risk_and_complex_final',
     advisor_escalation_prompt: document.getElementById('routing-advisor-prompt')?.value?.trim() || null,
   };
 }
@@ -8968,7 +11841,7 @@ function updateRoutingModePresentation() {
     } else if (mode === 'cheap_split') {
       note.textContent = 'Simple work uses the cheap slot pool, while complex or tool-heavy work stays on the primary slot pool.';
     } else if (mode === 'advisor_executor') {
-      note.textContent = 'The executor (cheap model) handles all requests and can call the advisor (primary model) via the consult_advisor tool when it needs strategic guidance.';
+      note.textContent = 'The executor handles the turn, auto-consults the advisor on risky or complex turns, and still keeps manual consult_advisor available when the advisor lane is ready.';
     } else {
       note.textContent = 'Ordered policy rules below decide which alias, provider slot, or specific model handles each request.';
     }
@@ -10136,17 +13009,22 @@ function htmlToElement(html) {
 }
 
 let settingsCache = {}; // key -> { value, updated_at }
+let gatewayStatusCache = null;
 
 function loadSettings() {
   const container = document.getElementById('settings-sections');
   container.innerHTML = '<div class="settings-loading">Loading settings...</div>';
 
-  apiFetch('/api/settings').then((data) => {
+  Promise.all([
+    apiFetch('/api/settings'),
+    apiFetch('/api/gateway/status').catch(() => null),
+  ]).then(([data, gatewayStatus]) => {
     settingsCache = {};
     for (const s of (data.settings || [])) {
-      if (SENSITIVE_KEYS.has(s.key)) continue;
+      if (SENSITIVE_KEYS.has(s.key) || HIDDEN_SETTINGS_KEYS.has(s.key)) continue;
       settingsCache[s.key] = { value: s.value, updated_at: s.updated_at };
     }
+    gatewayStatusCache = gatewayStatus;
     applyOptionalFeatureFlagsFromCache();
     renderSettings();
   }).catch((err) => {
@@ -10166,6 +13044,7 @@ function renderSettings() {
   searchInput.id = 'settings-search';
   searchInput.className = 'settings-search-input';
   searchInput.placeholder = 'Search settings...';
+  searchInput.value = settingsSearchQuery;
   searchInput.addEventListener('input', () => filterSettings(searchInput.value));
   searchWrap.appendChild(searchInput);
   container.appendChild(searchWrap);
@@ -10173,28 +13052,27 @@ function renderSettings() {
   // --- Subtabs ---
   const subtabGroups = {
     'General': ['Presentation', 'Notifications', 'Heartbeat', 'Agent', 'Smart Routing', 'Safety', 'Features'],
-    'Channels': ['Channels — Telegram', 'Channels — Signal', 'Channels — Discord', 'Channels — Slack', 'Channels — Nostr', 'Channels — iMessage', 'Channels — Apple Mail', 'Channels — Gmail', 'Channels — Web Gateway'],
+    'Channels': ['Channels — Telegram', 'Channels — Signal', 'Channels — Discord', 'Channels — Slack', 'Channels — Nostr', 'Channels — iMessage', 'Channels — BlueBubbles', 'Channels — Apple Mail', 'Channels — Gmail', 'Channels — Web Gateway'],
     'Advanced': [],
   };
 
   const subtabBar = document.createElement('div');
   subtabBar.className = 'settings-subtab-bar';
-  let firstTab = true;
+  if (!subtabGroups[currentSettingsSubtab]) currentSettingsSubtab = 'General';
   for (const tabName of Object.keys(subtabGroups)) {
     const btn = document.createElement('button');
-    btn.className = 'settings-subtab' + (firstTab ? ' active' : '');
+    btn.className = 'settings-subtab' + (currentSettingsSubtab === tabName ? ' active' : '');
     btn.textContent = tabName;
     btn.dataset.tab = tabName;
     btn.addEventListener('click', () => switchSettingsSubtab(tabName));
     subtabBar.appendChild(btn);
-    firstTab = false;
   }
   container.appendChild(subtabBar);
 
   // --- Render sections into panes ---
   for (const [tabName, sectionNames] of Object.entries(subtabGroups)) {
     const pane = document.createElement('div');
-    pane.className = 'settings-pane' + (tabName === 'General' ? ' active' : '');
+    pane.className = 'settings-pane' + (tabName === currentSettingsSubtab ? ' active' : '');
     pane.dataset.tab = tabName;
 
     const sectionsToRender = tabName === 'Advanced'
@@ -10211,7 +13089,7 @@ function renderSettings() {
 
     // "Other" settings go into Advanced tab
     if (tabName === 'Advanced') {
-      const otherKeys = Object.keys(settingsCache).filter(k => !SCHEMA_KEYS.has(k) && !SENSITIVE_KEYS.has(k)).sort();
+      const otherKeys = Object.keys(settingsCache).filter(k => !SCHEMA_KEYS.has(k) && !SENSITIVE_KEYS.has(k) && !HIDDEN_SETTINGS_KEYS.has(k)).sort();
       if (otherKeys.length > 0) {
         const otherSection = {
           icon: '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg>',
@@ -10227,6 +13105,12 @@ function renderSettings() {
     }
 
     container.appendChild(pane);
+  }
+
+  if (settingsSearchQuery) {
+    filterSettings(settingsSearchQuery);
+  } else {
+    switchSettingsSubtab(currentSettingsSubtab, { updateHash: false });
   }
 }
 
@@ -10266,47 +13150,309 @@ function renderSettingsSection(sectionName, section, startOpen) {
   const body = document.createElement('div');
   body.className = 'settings-section-body';
 
-  const grid = document.createElement('div');
-  grid.className = 'settings-grid';
+  if (sectionName === 'Presentation') {
+    body.appendChild(renderPresentationStudio(section));
+  } else {
+    const grid = document.createElement('div');
+    grid.className = 'settings-grid';
 
-  for (const field of section.fields) {
-    grid.appendChild(renderSettingField(field));
+    for (const field of section.fields) {
+      grid.appendChild(renderSettingField(field));
+    }
+
+    body.appendChild(grid);
+    if (sectionName === 'Channels — Nostr') {
+      body.appendChild(renderNostrSettingsPanel());
+    }
   }
-
-  body.appendChild(grid);
   sectionEl.appendChild(body);
 
   return sectionEl;
 }
 
-function switchSettingsSubtab(tabName) {
+function currentNostrSetupStatus() {
+  return gatewayStatusCache && gatewayStatusCache.channel_setup && gatewayStatusCache.channel_setup.nostr
+    ? gatewayStatusCache.channel_setup.nostr
+    : null;
+}
+
+function buildNostrStatusSummary(status) {
+  if (!status) return 'Gateway status unavailable';
+  if (status.invalid_private_key) return 'Saved key is invalid and must be replaced';
+  if (status.control_ready) return 'Owner DM control and social actions are ready';
+  if (status.tool_ready) return 'Social actions are ready; owner DM control still needs an owner pubkey';
+  if (status.needs_private_key) return 'Save a private key to enable Nostr';
+  if (status.enabled) return 'Nostr is enabled but not fully configured yet';
+  return 'Nostr is disabled';
+}
+
+function buildNostrRelaySummary(status) {
+  if (!status) return 'Unknown';
+  if (status.relay_count != null && status.connected_relay_count != null) {
+    return status.connected_relay_count + ' connected / ' + status.relay_count + ' configured';
+  }
+  if (status.relay_count != null) {
+    return status.relay_count + ' configured';
+  }
+  return 'Not configured';
+}
+
+function renderSettingsInfoRow(labelText, descText, valueText) {
+  const row = document.createElement('div');
+  row.className = 'setting-row';
+
+  const labelWrap = document.createElement('div');
+  labelWrap.className = 'setting-label-wrap';
+  labelWrap.innerHTML =
+    '<label class="setting-label">' + escapeHtml(labelText) + '</label>'
+    + '<span class="setting-desc">' + escapeHtml(descText) + '</span>';
+  row.appendChild(labelWrap);
+
+  const controlWrap = document.createElement('div');
+  controlWrap.className = 'setting-control';
+  const value = document.createElement('div');
+  value.className = 'ui-resource-note';
+  value.textContent = valueText;
+  controlWrap.appendChild(value);
+  row.appendChild(controlWrap);
+
+  return row;
+}
+
+function renderNostrSecretControl(status) {
+  const row = document.createElement('div');
+  row.className = 'setting-row';
+  row.id = 'setting-channels-nostr-private-key';
+
+  const labelWrap = document.createElement('div');
+  labelWrap.className = 'setting-label-wrap';
+  labelWrap.innerHTML =
+    '<label class="setting-label">Private key</label>'
+    + '<span class="setting-desc">Stored in the secrets store. This key is never written through the general settings API.</span>';
+  row.appendChild(labelWrap);
+
+  const controlWrap = document.createElement('div');
+  controlWrap.className = 'setting-control';
+
+  const input = document.createElement('input');
+  input.type = 'password';
+  input.id = 'nostr-private-key-input';
+  input.className = 'setting-input';
+  input.placeholder = status && (status.public_key_npub || status.public_key_hex)
+    ? 'Saved already — enter a new nsec or hex key to replace it'
+    : 'nsec or hex private key';
+  controlWrap.appendChild(input);
+
+  const statusNote = document.createElement('div');
+  statusNote.className = 'setting-desc';
+  statusNote.style.marginTop = '0.5rem';
+  statusNote.textContent = status && (status.public_key_npub || status.public_key_hex)
+    ? ('Saved for ' + (status.public_key_npub || status.public_key_hex))
+    : 'No Nostr private key is currently saved for this user.';
+  controlWrap.appendChild(statusNote);
+
+  const actions = document.createElement('div');
+  actions.className = 'ui-resource-actions';
+  actions.style.marginTop = '0.75rem';
+
+  const saveBtn = document.createElement('button');
+  saveBtn.type = 'button';
+  saveBtn.className = 'btn-restart';
+  saveBtn.textContent = 'Save key';
+  saveBtn.addEventListener('click', saveNostrPrivateKey);
+  actions.appendChild(saveBtn);
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'btn-cancel';
+  removeBtn.textContent = 'Remove key';
+  removeBtn.disabled = !(status && (status.public_key_npub || status.public_key_hex));
+  removeBtn.addEventListener('click', removeNostrPrivateKey);
+  actions.appendChild(removeBtn);
+
+  controlWrap.appendChild(actions);
+  row.appendChild(controlWrap);
+  return row;
+}
+
+function renderNostrSettingsPanel() {
+  const status = currentNostrSetupStatus();
+  const panel = document.createElement('div');
+  panel.className = 'settings-grid';
+  panel.style.marginTop = '1rem';
+
+  panel.appendChild(renderSettingsInfoRow(
+    'Runtime status',
+    'Shows whether outbound social actions are ready and whether owner DM control is actually live.',
+    buildNostrStatusSummary(status)
+  ));
+  panel.appendChild(renderSettingsInfoRow(
+    'Bot identity',
+    'Derived from the saved private key.',
+    status ? (status.public_key_npub || status.public_key_hex || 'Unavailable') : 'Unavailable'
+  ));
+  panel.appendChild(renderSettingsInfoRow(
+    'Owner control',
+    'Only this pubkey may send executable commands over encrypted Nostr DMs.',
+    status ? (status.owner_pubkey_npub || status.owner_pubkey_hex || 'Not configured') : 'Unknown'
+  ));
+  panel.appendChild(renderSettingsInfoRow(
+    'Relays',
+    'Configured versus currently connected relays for the live Nostr runtime.',
+    buildNostrRelaySummary(status)
+  ));
+  panel.appendChild(renderNostrSecretControl(status));
+
+  return panel;
+}
+
+function renderPresentationStudio(section) {
+  const shell = document.createElement('div');
+  shell.className = 'presentation-studio';
+
+  const preview = document.createElement('section');
+  preview.className = 'presentation-preview-card';
+  preview.setAttribute('data-skin-card', 'preview');
+  const skin = resolvedSkinMeta();
+  const sourceLabel = skin.source === 'webchat' ? 'WebUI override' : 'Following CLI skin';
+  preview.innerHTML =
+    '<div class="presentation-preview-head">'
+      + '<div>'
+        + '<span class="presentation-preview-kicker">Skin Studio</span>'
+        + '<h4>' + escapeHtml(skin.name) + '</h4>'
+        + '<p>' + escapeHtml(skin.tagline || 'Secure personal agent') + '</p>'
+      + '</div>'
+      + '<div class="presentation-preview-meta">'
+        + '<span class="presentation-source-pill">' + escapeHtml(sourceLabel) + '</span>'
+        + '<span class="presentation-prompt-pill">' + escapeHtml(skin.promptSymbol || '›') + '</span>'
+      + '</div>'
+    + '</div>'
+    + '<div class="presentation-art-preview">'
+      + '<pre class="presentation-ascii-preview" aria-label="Wordmark preview of the active skin">' + escapeHtml((skin.logoArt || []).join('\n') || 'No wordmark preview available.') + '</pre>'
+      + '<pre class="presentation-ascii-preview presentation-ascii-preview--hero" aria-label="Hero art preview of the active skin">' + escapeHtml((skin.heroArt || []).join('\n') || 'No hero art defined for this skin.') + '</pre>'
+    + '</div>'
+    + '<div class="presentation-tool-row">' + renderPresentationToolChips(skin, { limit: 6 }) + '</div>';
+  shell.appendChild(preview);
+
+  const controls = document.createElement('div');
+  controls.className = 'presentation-control-grid settings-grid';
+  const appendStudioField = (key) => {
+    const field = section.fields.find((entry) => entry.key === key);
+    if (field) controls.appendChild(renderSettingField(field));
+  };
+  appendStudioField('agent.cli_skin');
+  controls.appendChild(renderPresentationFollowField());
+  appendStudioField('webchat_theme');
+  appendStudioField('webchat_show_branding');
+  shell.appendChild(controls);
+
+  const gallery = document.createElement('section');
+  gallery.className = 'presentation-gallery';
+  const intro = document.createElement('div');
+  intro.className = 'presentation-gallery-copy';
+  intro.innerHTML = '<h4>Available skins</h4><p>Choose a dedicated WebUI personality or keep the Web interface following the shared CLI skin.</p>';
+  gallery.appendChild(intro);
+
+  const cardGrid = document.createElement('div');
+  cardGrid.className = 'presentation-card-grid';
+  currentSkinCatalog.forEach((entry) => {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'presentation-skin-card';
+    card.setAttribute('data-skin-card', 'catalog');
+    if (entry.name === skin.name) card.classList.add('active');
+    if (settingsCache['webchat_skin']?.value === entry.name) card.classList.add('is-override');
+    card.style.setProperty('--skin-card-accent', entry.cssVars?.accent || '#34d399');
+    card.style.setProperty('--skin-card-border', entry.cssVars?.borderStrong || 'rgba(255,255,255,0.18)');
+    card.style.setProperty('--skin-card-glow', entry.cssVars?.featureGlow || 'none');
+    card.innerHTML =
+      '<span class="presentation-skin-card-top">'
+        + '<span class="presentation-skin-card-name">' + escapeHtml(entry.name) + '</span>'
+        + '<span class="presentation-skin-card-shape">' + escapeHtml(entry.messageShape || 'rounded') + '</span>'
+      + '</span>'
+      + '<span class="presentation-skin-card-body">'
+        + '<span class="presentation-skin-card-tagline">' + escapeHtml(entry.tagline || 'Shared ThinClaw skin') + '</span>'
+        + '<span class="presentation-skin-card-meta">' + escapeHtml((entry.chromeStyle || 'avionics') + ' · ' + (entry.surfacePattern || 'grid') + ' · ' + (entry.elevation || 'medium')) + '</span>'
+        + '<span class="presentation-skin-card-tools">' + renderPresentationToolChips(entry, { limit: 3 }) + '</span>'
+      + '</span>';
+    card.addEventListener('click', () => saveSetting('webchat_skin', entry.name));
+    cardGrid.appendChild(card);
+  });
+  if (!currentSkinCatalog.length) {
+    cardGrid.innerHTML = '<div class="empty-state">No skin catalog loaded yet.</div>';
+  }
+  gallery.appendChild(cardGrid);
+  shell.appendChild(gallery);
+
+  return shell;
+}
+
+function renderPresentationFollowField() {
+  const row = document.createElement('div');
+  row.className = 'setting-row setting-row--feature';
+  row.id = 'setting-webchat-follow-cli';
+
+  const labelWrap = document.createElement('div');
+  labelWrap.className = 'setting-label-wrap';
+  labelWrap.innerHTML =
+    '<label class="setting-label">Follow CLI skin</label>'
+    + '<span class="setting-desc">When enabled, the WebUI instantly adopts the shared CLI skin and any future CLI skin changes.</span>';
+  row.appendChild(labelWrap);
+
+  const controlWrap = document.createElement('div');
+  controlWrap.className = 'setting-control';
+  const toggle = document.createElement('label');
+  toggle.className = 'toggle-switch';
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.checked = settingsCache['webchat_skin']?.value == null;
+  input.addEventListener('change', () => {
+    if (input.checked) {
+      saveSetting('webchat_skin', null);
+    } else {
+      saveSetting('webchat_skin', resolvedSkinMeta().name || settingsCache['agent.cli_skin']?.value || 'cockpit');
+    }
+  });
+  const slider = document.createElement('span');
+  slider.className = 'toggle-slider';
+  toggle.appendChild(input);
+  toggle.appendChild(slider);
+  controlWrap.appendChild(toggle);
+  row.appendChild(controlWrap);
+  return row;
+}
+
+function switchSettingsSubtab(tabName, options) {
+  const opts = options || {};
+  currentSettingsSubtab = tabName || 'General';
   document.querySelectorAll('.settings-subtab').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.tab === tabName);
+    btn.classList.toggle('active', btn.dataset.tab === currentSettingsSubtab);
   });
   document.querySelectorAll('.settings-pane').forEach(pane => {
-    pane.classList.toggle('active', pane.dataset.tab === tabName);
+    pane.classList.toggle('active', pane.dataset.tab === currentSettingsSubtab);
   });
+  if (currentTab === 'settings' && opts.updateHash !== false) {
+    writeHashState({ settingsSubtab: currentSettingsSubtab });
+  }
 }
 
 function filterSettings(query) {
-  const q = query.toLowerCase().trim();
+  const q = (query || '').toLowerCase().trim();
   const panes = document.querySelectorAll('.settings-pane');
+  settingsSearchQuery = q;
+  if (currentTab === 'settings') {
+    writeHashState({ settingsSearch: settingsSearchQuery });
+  }
 
   if (!q) {
-    // Reset: show active tab, un-hide all
     panes.forEach(pane => {
       pane.querySelectorAll('.settings-section').forEach(sec => sec.style.display = '');
       pane.querySelectorAll('.setting-row').forEach(row => row.style.display = '');
     });
-    // Restore active tab
-    document.querySelectorAll('.settings-subtab').forEach(btn => {
-      const tabName = btn.dataset.tab;
-      btn.classList.toggle('active', tabName === (document.querySelector('.settings-subtab.active')?.dataset.tab || 'General'));
-    });
+    switchSettingsSubtab(currentSettingsSubtab, { updateHash: false });
     return;
   }
 
-  // Show ALL panes during search, hide non-matching rows
   panes.forEach(pane => {
     pane.classList.add('active');
     pane.querySelectorAll('.settings-section').forEach(sec => {
@@ -10328,7 +13474,6 @@ function filterSettings(query) {
     });
   });
 
-  // Dim subtab buttons during search
   document.querySelectorAll('.settings-subtab').forEach(btn => btn.classList.remove('active'));
 }
 
@@ -10424,6 +13569,33 @@ function renderSettingField(field) {
       saveSetting(field.key, val);
     });
     controlWrap.appendChild(select);
+  } else if (field.type === 'json') {
+    const textarea = document.createElement('textarea');
+    textarea.className = 'setting-input';
+    textarea.rows = 4;
+    textarea.value = currentValue == null ? '' : JSON.stringify(currentValue, null, 2);
+    textarea.placeholder = field.nullable ? 'Not set' : '';
+    const saveJsonSetting = () => {
+      const raw = textarea.value.trim();
+      if (!raw && field.nullable) {
+        saveSetting(field.key, null);
+        return;
+      }
+      try {
+        const parsed = raw ? JSON.parse(raw) : {};
+        saveSetting(field.key, parsed);
+      } catch (_) {
+        showToast(field.label + ' must be valid JSON.', 'error');
+      }
+    };
+    textarea.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        saveJsonSetting();
+        textarea.blur();
+      }
+    });
+    textarea.addEventListener('blur', saveJsonSetting);
+    controlWrap.appendChild(textarea);
   } else {
     const input = document.createElement('input');
     input.type = 'text';
@@ -10456,7 +13628,7 @@ function resolveSettingOptions(field, currentValue) {
 }
 
 function buildSkinSettingOptions(field, currentValue) {
-  const skinNames = new Set(AVAILABLE_SKINS);
+  const skinNames = new Set(currentAvailableSkins);
   if (currentValue != null && currentValue !== '') skinNames.add(String(currentValue));
   const resolvedName = resolvedSkinMeta().name;
   if (resolvedName) skinNames.add(String(resolvedName));
@@ -10474,6 +13646,53 @@ function buildSkinSettingOptions(field, currentValue) {
   return options;
 }
 
+function saveNostrPrivateKey() {
+  const input = document.getElementById('nostr-private-key-input');
+  if (!input || !input.value.trim()) {
+    showToast('Enter a Nostr private key first.', 'error');
+    return;
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  fetch('/api/nostr/key', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ private_key: input.value.trim() }),
+  }).then(async (response) => {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || ('HTTP ' + response.status));
+    return data;
+  }).then((data) => {
+    input.value = '';
+    var identity = data.public_key_npub || data.public_key_hex || '';
+    showToast((data.message || 'Nostr private key saved') + (identity ? (' (' + identity + ')') : ''), 'success');
+    loadSettings();
+  }).catch((error) => {
+    showToast('Failed to save Nostr key: ' + error.message, 'error');
+  });
+}
+
+function removeNostrPrivateKey() {
+  const status = currentNostrSetupStatus();
+  const identity = status ? (status.public_key_npub || status.public_key_hex || 'this Nostr identity') : 'this Nostr identity';
+  if (!confirm('Remove the saved Nostr private key for ' + identity + '?')) return;
+  const headers = {};
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  fetch('/api/nostr/key', {
+    method: 'DELETE',
+    headers,
+  }).then(async (response) => {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.message || ('HTTP ' + response.status));
+    return data;
+  }).then((data) => {
+    showToast(data.message || 'Nostr private key removed', 'success');
+    loadSettings();
+  }).catch((error) => {
+    showToast('Failed to remove Nostr key: ' + error.message, 'error');
+  });
+}
+
 function saveSetting(key, value) {
   if (SENSITIVE_KEYS.has(key)) {
     showToast('This setting is managed via the secrets store, not the Settings UI.', 'error');
@@ -10488,11 +13707,17 @@ function saveSetting(key, value) {
       .then((res) => {
         if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
         delete settingsCache[key];
-        if (key === 'agent.name') currentAgentName = 'thinclaw';
+        if (key === 'agent.name') {
+          currentAgentName = currentPresentationBootstrap.agentName || WEBCHAT_BOOTSTRAP.agentName || 'Agent';
+          applyAgentPresentation();
+          renderThreadSidebar();
+        }
         if (key.indexOf('experiments.') === 0) applyOptionalFeatureFlagsFromCache();
         showToast('Reset ' + key + ' to default', 'success');
         if (PRESENTATION_SETTING_KEYS.has(key)) {
-          window.setTimeout(() => window.location.reload(), 180);
+          refreshPresentationState().catch(() => {});
+        } else if (currentTab === 'settings') {
+          renderSettings();
         }
       })
       .catch((err) => showToast('Failed: ' + err.message, 'error'));
@@ -10505,11 +13730,17 @@ function saveSetting(key, value) {
     }).then((res) => {
       if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
       settingsCache[key] = { value: value, updated_at: new Date().toISOString() };
-      if (key === 'agent.name') currentAgentName = String(value || 'thinclaw');
+      if (key === 'agent.name') {
+        currentAgentName = String(value || currentPresentationBootstrap.agentName || WEBCHAT_BOOTSTRAP.agentName || 'Agent');
+        applyAgentPresentation();
+        renderThreadSidebar();
+      }
       if (key.indexOf('experiments.') === 0) applyOptionalFeatureFlagsFromCache();
       showToast('Saved ' + key, 'success');
       if (PRESENTATION_SETTING_KEYS.has(key)) {
-        window.setTimeout(() => window.location.reload(), 180);
+        refreshPresentationState().catch(() => {});
+      } else if (currentTab === 'settings') {
+        renderSettings();
       }
     }).catch((err) => showToast('Failed: ' + err.message, 'error'));
   }

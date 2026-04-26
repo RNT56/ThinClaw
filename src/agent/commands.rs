@@ -10,8 +10,9 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::agent::checkpoint;
+use crate::agent::command_catalog;
+use crate::agent::personality::{available_personality_names, preview, resolve_personality};
 use crate::agent::submission::SubmissionResult;
-use crate::agent::vibe::{builtin_vibe_names, preview, resolve_vibe};
 use crate::agent::{Agent, MessageIntent};
 use crate::agent::{mutate_thread_runtime, session::Session};
 use crate::channels::{IncomingMessage, StatusUpdate};
@@ -46,6 +47,15 @@ fn format_checkpoint_age(timestamp: DateTime<Utc>) -> String {
 
 fn rollback_usage() -> &'static str {
     "Usage:\n  /rollback list\n  /rollback diff <N>\n  /rollback <N> [file]"
+}
+
+fn agent_display_name(name: &str) -> &str {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        "Assistant"
+    } else {
+        trimmed
+    }
 }
 
 impl Agent {
@@ -261,9 +271,23 @@ impl Agent {
             ));
         };
 
+        let heartbeat_cfg = self.heartbeat_config.clone().unwrap_or_default();
+        let runtime_heartbeat = crate::agent::HeartbeatConfig {
+            interval: std::time::Duration::from_secs(heartbeat_cfg.interval_secs),
+            enabled: heartbeat_cfg.enabled,
+            max_failures: 3,
+            notify_user_id: heartbeat_cfg.notify_user.clone(),
+            notify_channel: heartbeat_cfg.notify_channel.clone(),
+        };
+        let hygiene_cfg = self
+            .hygiene_config
+            .clone()
+            .unwrap_or_default()
+            .to_workspace_config();
+
         let mut runner = crate::agent::HeartbeatRunner::new(
-            crate::agent::HeartbeatConfig::default(),
-            crate::workspace::hygiene::HygieneConfig::default(),
+            runtime_heartbeat,
+            hygiene_cfg,
             workspace.clone(),
             self.llm().clone(),
             self.safety().clone(),
@@ -403,43 +427,9 @@ impl Agent {
         args: &[String],
     ) -> Result<SubmissionResult, Error> {
         match command {
-            "help" => Ok(SubmissionResult::response(concat!(
-                "System:\n",
-                "  /help             Show this help\n",
-                "  /status           Session status, context usage, model info\n",
-                "  /context          List context sources injected into the prompt\n",
-                "  /context detail   Show full injected context\n",
-                "  /model [name]     Show or switch the active model\n",
-                "  /rollback ...     Filesystem rollback command family (list/diff/restore)\n",
-                "  /version          Show version info\n",
-                "  /tools            List available tools\n",
-                "  /debug            Toggle debug mode\n",
-                "  /ping             Connectivity check\n",
-                "\n",
-                "Session:\n",
-                "  /undo             Undo last turn\n",
-                "  /redo             Redo undone turn\n",
-                "  /compact          Compress context window\n",
-                "  /clear            Clear current thread\n",
-                "  /interrupt        Stop current operation (takes effect between tool iterations)\n",
-                "  /new              New conversation thread\n",
-                "  /thread <id>      Switch to thread\n",
-                "  /resume <id>      Resume from checkpoint\n",
-                "  /vibe [name]      Set, show, or clear a temporary session vibe\n",
-                "  /skin [name]      Show or describe the configured CLI skin\n",
-                "\n",
-                "Skills:\n",
-                "  /skills             List installed skills\n",
-                "  /skills search <q>  Search ClawHub registry\n",
-                "\n",
-                "Agent:\n",
-                "  /heartbeat        Run heartbeat check\n",
-                "  /summarize        Summarize current thread\n",
-                "  /suggest          Suggest next steps\n",
-                "\n",
-                "  /restart          Restart agent (requires launchd/systemd/Windows SCM to relaunch)\n",
-                "  /quit             Exit",
-            ))),
+            "help" => Ok(SubmissionResult::response(
+                command_catalog::agent_help_text(),
+            )),
 
             "ping" => Ok(SubmissionResult::response("pong!")),
 
@@ -453,7 +443,65 @@ impl Agent {
                 self.handle_rollback_command(thread_id, args).await,
             )),
 
-            "vibe" => {
+            "identity" => {
+                let Some(session) = self.session_manager.session_for_thread(thread_id).await else {
+                    return Ok(SubmissionResult::error(
+                        "Could not find the active session for this thread.",
+                    ));
+                };
+                let session = session.lock().await;
+                let session_personality = session
+                    .active_personality
+                    .as_ref()
+                    .map(|personality| personality.name.as_str())
+                    .unwrap_or("base identity");
+                let (soul_pack, soul_schema, soul_summary) =
+                    match crate::identity::soul_store::read_home_soul() {
+                        Ok(content) => (
+                            crate::identity::soul::canonical_seed_pack(&content)
+                                .unwrap_or_else(|| self.config.personality_pack.clone()),
+                            crate::identity::soul::canonical_schema_version(&content).to_string(),
+                            crate::identity::soul::summarize_canonical_soul(&content),
+                        ),
+                        Err(_) => (
+                            self.config.personality_pack.clone(),
+                            "missing".to_string(),
+                            "Canonical home soul not found yet".to_string(),
+                        ),
+                    };
+                let local_overlay = if let Some(workspace) = self.workspace() {
+                    workspace
+                        .exists(crate::workspace::paths::SOUL_LOCAL)
+                        .await
+                        .ok()
+                } else {
+                    None
+                };
+                let soul_mode = if local_overlay == Some(true) {
+                    "global + local overlay"
+                } else {
+                    "global only"
+                };
+                Ok(SubmissionResult::response(format!(
+                    "Identity\n\nName: {}\nBase personality pack: {}\nCanonical soul path: {}\nSoul schema: {}\nSoul summary: {}\nWorkspace soul mode: {}\nWorkspace overlay: {}\nSession personality: {}\nConfigured CLI/Web skin: {}\n\nUse /personality <name> for a temporary overlay.\nAvailable overlays: {}",
+                    agent_display_name(&self.config.name),
+                    soul_pack,
+                    crate::identity::soul_store::canonical_soul_path().display(),
+                    soul_schema,
+                    soul_summary,
+                    soul_mode,
+                    if local_overlay == Some(true) {
+                        "SOUL.local.md present"
+                    } else {
+                        "Using global soul"
+                    },
+                    session_personality,
+                    self.config.cli_skin,
+                    available_personality_names().collect::<Vec<_>>().join(", ")
+                )))
+            }
+
+            "personality" | "vibe" => {
                 let Some(session) = self.session_manager.session_for_thread(thread_id).await else {
                     return Ok(SubmissionResult::error(
                         "Could not find the active session for this thread.",
@@ -462,35 +510,48 @@ impl Agent {
                 let mut session = session.lock().await;
                 if args.is_empty() {
                     return Ok(SubmissionResult::response(
-                        match session.active_vibe.as_ref() {
-                            Some(vibe) => {
-                                format!("Current vibe: {}\n\n{}", vibe.name, preview(vibe))
+                        match session.active_personality.as_ref() {
+                            Some(personality) => {
+                                format!(
+                                    "Current session personality: {}\n\n{}",
+                                    personality.name,
+                                    preview(personality)
+                                )
                             }
                             None => format!(
-                                "Current vibe: natural\n\nBuilt-in vibes: {}",
-                                builtin_vibe_names().collect::<Vec<_>>().join(", ")
+                                "Current session personality: base identity\n\nAvailable personalities: {}",
+                                available_personality_names().collect::<Vec<_>>().join(", ")
                             ),
                         },
                     ));
                 }
 
                 if args.len() == 1 && args[0].eq_ignore_ascii_case("reset") {
-                    session.active_vibe = None;
+                    session.active_personality = None;
                     return Ok(SubmissionResult::ok_with_message(
-                        "Vibe cleared. Back to natural voice.",
+                        "Session personality cleared. Back to your base identity.",
                     ));
                 }
 
                 let requested = args.join(" ");
-                let vibe = resolve_vibe(&requested);
-                let preview_text = preview(&vibe).into_owned();
-                let vibe_name = vibe.name.clone();
-                session.active_vibe = Some(vibe);
+                let personality = resolve_personality(&requested);
+                let preview_text = preview(&personality).into_owned();
+                let personality_name = personality.name.clone();
+                session.active_personality = Some(personality);
                 Ok(SubmissionResult::response(format!(
-                    "Vibe set: {}\n\n{}",
-                    vibe_name, preview_text
+                    "Session personality set: {}\n\n{}",
+                    personality_name, preview_text
                 )))
             }
+
+            "memory" => Ok(SubmissionResult::response(format!(
+                "Memory & Growth\n\nWorkspace memory: {}\nCore tools: memory_search, memory_read, memory_write, memory_tree, session_search\nLearning tools: learning_status, learning_outcomes, learning_history, learning_feedback, learning_proposal_review, prompt_manage\nShared commands: /compress, /summarize, /skills, /heartbeat\nWebUI surfaces: Memory & Growth, Skills, Learning Ledger\n\nUse /skills to inspect installed skills and the WebUI tabs to browse durable memory and learning history.",
+                if self.workspace().is_some() {
+                    "available"
+                } else {
+                    "unavailable until a workspace/database is attached"
+                }
+            ))),
 
             "skin" => {
                 let available = CliSkin::available_names().join(", ");
@@ -527,11 +588,16 @@ impl Agent {
             }
 
             "debug" => {
-                // Debug toggle is handled client-side in the REPL.
-                // For non-REPL channels, just acknowledge.
-                Ok(SubmissionResult::ok_with_message(
-                    "Debug toggle is handled by your client.",
-                ))
+                // Toggle debug mode on the originating channel.
+                // For WASM channels (Telegram, Slack, etc.), this controls
+                // whether tool-level status events are forwarded as messages.
+                let channel_name = &message.channel;
+                let new_state = self.channels.toggle_debug_mode(channel_name).await;
+                let label = if new_state { "on" } else { "off" };
+                Ok(SubmissionResult::ok_with_message(format!(
+                    "Debug mode {label}. Tool call details will {}be shown.",
+                    if new_state { "" } else { "not " }
+                )))
             }
 
             "skills" => {
@@ -687,8 +753,9 @@ impl Agent {
                 // Workspace sections (identity files)
                 if let Some(workspace) = ws {
                     let paths = [
+                        ("SOUL.md (home)", "SOUL.md (home)"),
                         (crate::workspace::paths::AGENTS, "AGENTS.md"),
-                        (crate::workspace::paths::SOUL, "SOUL.md"),
+                        (crate::workspace::paths::SOUL_LOCAL, "SOUL.local.md"),
                         (crate::workspace::paths::USER, "USER.md"),
                         (crate::workspace::paths::IDENTITY, "IDENTITY.md"),
                         (crate::workspace::paths::MEMORY, "MEMORY.md"),
@@ -696,6 +763,22 @@ impl Agent {
                         (crate::workspace::paths::BOOT, "BOOT.md"),
                     ];
                     for (path, label) in paths {
+                        if path == "SOUL.md (home)" {
+                            match crate::identity::soul_store::read_home_soul() {
+                                Ok(content) if !content.is_empty() => {
+                                    let preview = if detail {
+                                        content
+                                    } else {
+                                        let first_line = content.lines().next().unwrap_or("");
+                                        format!("{} ({} chars)", first_line, content.len())
+                                    };
+                                    sections.push((label, true, preview));
+                                }
+                                Ok(_) => sections.push((label, false, "(empty)".to_string())),
+                                Err(_) => sections.push((label, false, "(not found)".to_string())),
+                            }
+                            continue;
+                        }
                         match workspace.read(path).await {
                             Ok(doc) if !doc.content.is_empty() => {
                                 let preview = if detail {

@@ -251,11 +251,15 @@ async fn process_message(
     } else {
         None
     };
+    let has_pending_response = response_rx.is_some();
 
     // Send message to the channel
     let tx_guard = state.tx.read().await;
     if let Some(tx) = tx_guard.as_ref() {
         if tx.send(msg).await.is_err() {
+            if has_pending_response {
+                let _ = state.pending_responses.write().await.remove(&msg_id);
+            }
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(WebhookResponse {
@@ -266,6 +270,9 @@ async fn process_message(
             );
         }
     } else {
+        if has_pending_response {
+            let _ = state.pending_responses.write().await.remove(&msg_id);
+        }
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(WebhookResponse {
@@ -289,7 +296,9 @@ async fn process_message(
     };
 
     // Ensure pending response entry is cleaned up on timeout or cancellation
-    let _ = state.pending_responses.write().await.remove(&msg_id);
+    if has_pending_response {
+        let _ = state.pending_responses.write().await.remove(&msg_id);
+    }
 
     (
         StatusCode::OK,

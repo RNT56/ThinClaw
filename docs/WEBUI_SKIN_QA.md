@@ -35,18 +35,18 @@ ThinClaw now treats the CLI skin system as the shared brand source for both term
    Verify the card and page background show subtle aura treatment, not a flat generic panel.
 
 2. Top chrome
-   Verify the brand chip shows `ThinClaw`, the resolved skin name, and the active prompt symbol.
+   Verify the brand chip shows the active agent name, the resolved skin name, and the active prompt symbol.
    Verify the active tab state uses the resolved accent colors.
 
 3. Sidebar and thread list
    Verify active thread rows pick up the resolved accent treatment.
-   Verify assistant subsession cards inherit the updated branded styling.
+   Verify agent subsession cards inherit the updated branded styling.
 
 4. Chat transcript
    Verify user messages use `chatUserBg` and `chatUserFg`.
-   Verify assistant messages stay neutral but adopt the skin border treatment.
+   Verify agent messages stay neutral but adopt the skin border treatment.
    Verify system messages remain centered ribbons.
-   Verify role kickers render for user, assistant, and system entries.
+   Verify role kickers render for user, agent, and system entries.
 
 5. Composer
    Verify the prompt chip shows the resolved skin prompt symbol.
@@ -68,6 +68,7 @@ ThinClaw now treats the CLI skin system as the shared brand source for both term
 
 1. WebUI Presentation settings
    Verify `agent.cli_skin`, `webchat_skin`, `webchat_theme`, and `webchat_show_branding` appear in the Presentation section under General.
+   Verify `agent.personality_pack` appears in the Agent section under General.
    Verify `webchat_skin` includes a nullable `Follow agent skin` option.
    Verify `WEBCHAT_ACCENT_COLOR` does not appear in the Presentation section.
 
@@ -91,3 +92,36 @@ ThinClaw now treats the CLI skin system as the shared brand source for both term
 
 3. Existing behavior
    Verify SSE streaming, history loading, thread switching, tool event rendering, and settings save/reset flows still behave as before.
+
+## TUI Skin Fields
+
+The following TOML fields extend the skin system for the full-screen TUI. All are optional — skins that omit them receive safe defaults (rounded borders, braille spinner, left-aligned header, no gradient).
+
+| Field | Type | Default | Values |
+|-------|------|---------|--------|
+| `border_style` | string | `"rounded"` | `"plain"`, `"rounded"`, `"double"`, `"thick"` |
+| `header_alignment` | string | `"left"` | `"left"`, `"center"`, `"right"` |
+| `status_gradient` | bool | `false` | When `true`, the status bar text renders with a left-to-right accent→border color gradient |
+| `spinner_style` | string | `"braille"` | `"kawaii"`, `"braille"`, `"dots"`, `"arrows"` |
+| `spinner_frames` | string array | `[]` | Custom animation frames (overrides `spinner_style` preset when non-empty) |
+
+Example TOML snippet:
+
+```toml
+border_style = "double"
+header_alignment = "center"
+status_gradient = true
+spinner_style = "kawaii"
+# spinner_frames = ["(◕‿◕)", "(◕ᴗ◕)", "(◠‿◠)"]  # optional custom override
+```
+
+### Builtin Skin Presets
+
+| Skin | Border | Spinner | Gradient | Alignment |
+|------|--------|---------|----------|-----------|
+| cockpit | rounded | braille | ✓ | left |
+| midnight | double | kawaii | ✓ | left |
+| solar | rounded | dots | ✗ | left |
+| athena | thick | kawaii | ✓ | left |
+| delphi | rounded | kawaii | ✓ | center |
+| olympus | double | arrows | ✓ | left |

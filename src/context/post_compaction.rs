@@ -4,16 +4,20 @@
 //! workspace-level context needs to be re-injected so the agent
 //! retains critical project knowledge.
 //!
-//! Injection layers:
-//! 1. Workspace rules (always appended to summaries)
-//! 2. Active skill context (re-injected after compaction)
-//! 3. Pinned facts (user-defined persistent context)
+//! Supported injection layers:
+//! 1. Workspace rules discovered from the current workspace
+//! 2. Active skill context re-selected from the current query when available
+//! 3. Durable pinned facts re-sourced from workspace/user memory documents
 //!
 //! Configuration:
 //! - `POST_COMPACTION_INJECT` — enable context re-injection (default: true)
 //! - `POST_COMPACTION_MAX_TOKENS` — max tokens for injected context (default: 2000)
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
+
+use crate::profile::{PsychographicProfile, UserCohort};
 
 /// Configuration for post-compaction context injection.
 #[derive(Debug, Clone)]
@@ -26,7 +30,7 @@ pub struct PostCompactionConfig {
     pub include_rules: bool,
     /// Whether to include active skill context.
     pub include_skills: bool,
-    /// Whether to include pinned facts.
+    /// Whether to include caller-supplied pinned facts when provided.
     pub include_pinned: bool,
 }
 
@@ -186,9 +190,232 @@ impl ContextInjector {
     }
 }
 
+fn ordered_list_body(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    let rest = trimmed.get(digits..)?.trim_start();
+    let rest = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')'))?;
+    Some(rest.trim_start())
+}
+
+fn normalize_fact_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty()
+        || trimmed == "---"
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("<!--")
+    {
+        return None;
+    }
+
+    let trimmed = trimmed
+        .strip_prefix("- [ ]")
+        .or_else(|| trimmed.strip_prefix("- [x]"))
+        .or_else(|| trimmed.strip_prefix("- "))
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("• "))
+        .unwrap_or(trimmed)
+        .trim_start_matches(['-', '*', '•'])
+        .trim();
+    let trimmed = ordered_list_body(trimmed).unwrap_or(trimmed).trim();
+
+    if trimmed.is_empty() || trimmed == "_" || trimmed.starts_with("_(") {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn push_fact(
+    facts: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    candidate: impl Into<String>,
+    max_facts: usize,
+) {
+    if facts.len() >= max_facts {
+        return;
+    }
+    let candidate = candidate.into();
+    let key = candidate.trim().to_ascii_lowercase();
+    if !key.is_empty() && seen.insert(key) {
+        facts.push(candidate);
+    }
+}
+
+/// Extract filled markdown fields such as `**Name:** Alex` or
+/// `- **Feedback style:** direct`.
+pub fn extract_markdown_field_facts(content: &str, max_facts: usize) -> Vec<String> {
+    if max_facts == 0 {
+        return Vec::new();
+    }
+
+    let mut facts = Vec::new();
+    let mut seen = HashSet::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let is_field =
+            (trimmed.starts_with("**") || trimmed.starts_with("- **")) && trimmed.contains(':');
+        if !is_field {
+            continue;
+        }
+        let after_colon = trimmed
+            .split_once(':')
+            .map(|(_, rest)| rest.trim())
+            .unwrap_or_default();
+        if after_colon.is_empty()
+            || after_colon == "_"
+            || after_colon == "**"
+            || after_colon.starts_with("_(")
+        {
+            continue;
+        }
+        if let Some(fact) = normalize_fact_line(trimmed) {
+            push_fact(&mut facts, &mut seen, fact, max_facts);
+        }
+    }
+
+    facts
+}
+
+/// Extract durable pinned facts from markdown memory documents.
+///
+/// Priority order:
+/// 1. Explicit `PIN:` / `Pinned:` style markers
+/// 2. Lines inside sections like `## Pinned` / `## Key Facts`
+/// 3. Concise checklist or bullet entries as a conservative fallback
+pub fn extract_pinned_facts_from_markdown(content: &str, max_facts: usize) -> Vec<String> {
+    if max_facts == 0 {
+        return Vec::new();
+    }
+
+    const EXPLICIT_PREFIXES: &[&str] = &[
+        "PIN:",
+        "Pinned:",
+        "PINNED:",
+        "- PIN:",
+        "- Pinned:",
+        "- PINNED:",
+        "* PIN:",
+        "* Pinned:",
+        "* PINNED:",
+    ];
+    const PINNED_SECTION_HINTS: &[&str] = &[
+        "pinned",
+        "key fact",
+        "key facts",
+        "always remember",
+        "durable fact",
+        "durable facts",
+        "important",
+    ];
+
+    let mut facts = Vec::new();
+    let mut seen = HashSet::new();
+    let mut in_pinned_section = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            let heading = trimmed.trim_start_matches('#').trim().to_ascii_lowercase();
+            in_pinned_section = PINNED_SECTION_HINTS
+                .iter()
+                .any(|hint| heading.contains(hint));
+            continue;
+        }
+
+        if let Some(explicit) = EXPLICIT_PREFIXES
+            .iter()
+            .find_map(|prefix| trimmed.strip_prefix(prefix))
+            .and_then(normalize_fact_line)
+        {
+            push_fact(&mut facts, &mut seen, explicit, max_facts);
+            continue;
+        }
+
+        if in_pinned_section && let Some(fact) = normalize_fact_line(trimmed) {
+            push_fact(&mut facts, &mut seen, fact, max_facts);
+        }
+    }
+
+    if !facts.is_empty() {
+        return facts;
+    }
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        let looks_like_entry = trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with("- [")
+            || ordered_list_body(trimmed).is_some();
+        if !looks_like_entry {
+            continue;
+        }
+        if let Some(fact) = normalize_fact_line(trimmed) {
+            push_fact(&mut facts, &mut seen, fact, max_facts);
+        }
+    }
+
+    facts
+}
+
+/// Extract confidence-gated profile facts suitable for post-compaction context.
+pub fn extract_profile_facts(content: &str, max_facts: usize) -> Vec<String> {
+    if max_facts == 0 {
+        return Vec::new();
+    }
+
+    let Ok(profile) = serde_json::from_str::<PsychographicProfile>(content) else {
+        return Vec::new();
+    };
+    if !profile.is_populated() || profile.confidence < 0.3 {
+        return Vec::new();
+    }
+
+    let mut facts = Vec::new();
+    if !profile.preferred_name.is_empty() {
+        facts.push(format!("**Name**: {}", profile.preferred_name));
+    }
+    facts.push(format!(
+        "**Communication**: {} tone, {} detail, {} formality",
+        profile.communication.tone,
+        profile.communication.detail_level,
+        profile.communication.formality
+    ));
+    if profile.cohort.cohort != UserCohort::Other && profile.cohort.confidence > 0 {
+        facts.push(format!(
+            "**User type**: {} ({}% confidence)",
+            profile.cohort.cohort, profile.cohort.confidence
+        ));
+    }
+
+    if profile.confidence >= 0.6 {
+        facts.extend(
+            extract_markdown_field_facts(&profile.to_user_md(), max_facts)
+                .into_iter()
+                .filter(|fact| {
+                    !fact.starts_with("**Name**:")
+                        && !fact.starts_with("**Communication**:")
+                        && !fact.starts_with("**User type**:")
+                }),
+        );
+    }
+
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+    for fact in facts {
+        push_fact(&mut deduped, &mut seen, fact, max_facts);
+    }
+    deduped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::PsychographicProfile;
 
     #[test]
     fn test_default_config() {
@@ -267,5 +494,54 @@ mod tests {
 
         let result = injector.build();
         assert!(result.contains("[skill:web-search]"));
+    }
+
+    #[test]
+    fn test_extract_markdown_field_facts() {
+        let facts = extract_markdown_field_facts(
+            "# User Profile\n\n**Name**: Alex\n- **Timezone:** Europe/Berlin\n- **Notes:** Loves Rust",
+            4,
+        );
+        assert_eq!(facts.len(), 3);
+        assert!(facts.iter().any(|fact| fact.contains("Alex")));
+        assert!(facts.iter().any(|fact| fact.contains("Europe/Berlin")));
+    }
+
+    #[test]
+    fn test_extract_pinned_facts_prefers_explicit_markers() {
+        let facts = extract_pinned_facts_from_markdown(
+            "# Memory\n\nPIN: Prefers short morning check-ins\n- Pinned: Working on ThinClaw\n- Not pinned\n",
+            4,
+        );
+        assert_eq!(facts.len(), 2);
+        assert!(
+            facts
+                .iter()
+                .any(|fact| fact.contains("short morning check-ins"))
+        );
+        assert!(
+            facts
+                .iter()
+                .any(|fact| fact.contains("Working on ThinClaw"))
+        );
+    }
+
+    #[test]
+    fn test_extract_profile_facts_respects_confidence_gate() {
+        let mut profile = PsychographicProfile::default();
+        profile.preferred_name = "Sam".into();
+        profile.communication.tone = "warm".into();
+        profile.communication.detail_level = "balanced".into();
+        profile.communication.formality = "casual".into();
+        profile.confidence = 0.25;
+        let low_confidence = serde_json::to_string(&profile).expect("serialize low confidence");
+        assert!(extract_profile_facts(&low_confidence, 4).is_empty());
+
+        profile.confidence = 0.7;
+        profile.assistance.goals = vec!["Ship ThinClaw".into()];
+        let high_confidence = serde_json::to_string(&profile).expect("serialize high confidence");
+        let facts = extract_profile_facts(&high_confidence, 4);
+        assert!(facts.iter().any(|fact| fact.contains("Sam")));
+        assert!(facts.iter().any(|fact| fact.contains("Communication")));
     }
 }

@@ -1,7 +1,11 @@
 //! Final wizard summary: save settings and print configuration overview.
 
+use crate::config::resolve_personality_pack_from_settings;
 use crate::settings::KeySource;
-use crate::setup::prompts::{confirm, print_info, print_success, print_warning};
+use crate::setup::prompts::{
+    PromptUiMode as PromptRenderMode, confirm, current_prompt_ui_mode, print_info, print_success,
+    print_warning,
+};
 
 use super::helpers::capitalize_first;
 use super::{SetupError, SetupWizard};
@@ -24,6 +28,13 @@ impl SetupWizard {
         // Write bootstrap env (also idempotent)
         self.write_bootstrap_env()?;
 
+        if current_prompt_ui_mode() == PromptRenderMode::Tui {
+            print_success("Configuration saved to database");
+            print_info(&self.runtime_handoff_summary());
+            self.offer_path_setup();
+            return Ok(());
+        }
+
         println!();
         print_success("Configuration saved to database");
         println!();
@@ -32,6 +43,10 @@ impl SetupWizard {
         println!("Ready to Use");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("  Status: {}", readiness.headline);
+        println!(
+            "  Readiness: {} ready · {} attention · {} follow-ups",
+            readiness.ready_now, readiness.needs_attention, readiness.followups
+        );
 
         let backend = self
             .settings
@@ -106,7 +121,23 @@ impl SetupWizard {
             self.settings.tunnel.public_url.is_some() || self.settings.tunnel.provider.is_some();
 
         println!("  Channels:");
-        println!("    - CLI/TUI: enabled");
+        let cli_enabled = self.settings.channels.cli_enabled.unwrap_or(true);
+        println!(
+            "    - CLI/TUI: {}",
+            if cli_enabled { "enabled" } else { "disabled" }
+        );
+        if self.settings.channels.gateway_enabled.unwrap_or(true) {
+            let access = crate::platform::gateway_access::GatewayAccessInfo::from_env_and_settings(
+                Some(&self.settings),
+            );
+            println!("    - Web Gateway: enabled ({})", access.bind_display());
+            if let Some(url) = access.token_url(false) {
+                println!("      Token URL: {}", url);
+            }
+            if access.is_loopback() {
+                println!("      SSH tunnel: {}", access.ssh_tunnel_command());
+            }
+        }
 
         if self.settings.channels.http_enabled {
             let port = self.settings.channels.http_port.unwrap_or(8080);
@@ -143,6 +174,10 @@ impl SetupWizard {
             println!("    - Apple Mail: enabled");
         }
 
+        if self.settings.channels.bluebubbles_enabled {
+            println!("    - BlueBubbles (iMessage): enabled");
+        }
+
         for channel_name in &self.settings.channels.wasm_channels {
             let mode = if has_tunnel { "webhook" } else { "polling" };
             println!(
@@ -153,6 +188,8 @@ impl SetupWizard {
         }
 
         println!("  Agent: {}", self.settings.agent.name);
+        let effective_pack = resolve_personality_pack_from_settings(&self.settings);
+        println!("  Personality Pack: {}", effective_pack);
         println!("  CLI Skin: {}", self.settings.agent.cli_skin);
 
         if let Some(ref tz) = self.settings.user_timezone {
@@ -188,11 +225,12 @@ impl SetupWizard {
         }
 
         if self.settings.claude_code_enabled {
+            let default_claude_model = crate::config::ClaudeCodeConfig::default().model;
             let model = self
                 .settings
                 .claude_code_model
                 .as_deref()
-                .unwrap_or("sonnet");
+                .unwrap_or(default_claude_model.as_str());
             println!("  Claude Code: enabled (model: {})", model);
         }
 
@@ -255,8 +293,16 @@ impl SetupWizard {
 
         println!("What Happens Next");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        print_info("ThinClaw will start normally with the settings you just reviewed.");
-        print_info("There is no second setup loop here; the runtime uses these settings directly.");
+        print_info(&self.runtime_handoff_summary());
+        if self.should_continue_to_runtime() {
+            print_info(
+                "There is no second setup loop here; the runtime uses these settings directly.",
+            );
+        } else {
+            print_info(
+                "This was a settings pass only, so runtime stays paused until you launch it yourself.",
+            );
+        }
         println!();
 
         // ── PATH check & symlink offer ──────────────────────────
@@ -266,12 +312,10 @@ impl SetupWizard {
 
         println!("Resume Later");
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-        println!("To start ThinClaw, run:");
-        println!("  thinclaw");
-        println!();
-        println!("To update settings later:");
+        for command in self.what_next_commands() {
+            println!("  {}", command);
+        }
         println!("  thinclaw config set <setting> <value>");
-        println!("  thinclaw onboard");
         println!();
 
         Ok(())

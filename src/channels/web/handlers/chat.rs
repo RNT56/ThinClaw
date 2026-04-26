@@ -3,16 +3,20 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Path, Query, State, WebSocketUpgrade},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
+use futures::StreamExt;
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
 use crate::channels::web::identity_helpers::{
-    conversation_visible_to_actor, gateway_identity, get_or_create_gateway_assistant_conversation,
-    request_actor_id, request_user_id,
+    GatewayRequestIdentity, get_or_create_gateway_assistant_conversation,
+    request_identity_with_overrides, sse_event_visible_to_identity,
 };
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
@@ -28,6 +32,8 @@ pub(crate) struct HistoryQuery {
 
 pub(crate) async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    request_identity: GatewayRequestIdentity,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
     if !state.chat_rate_limiter.check() {
@@ -37,17 +43,30 @@ pub(crate) async fn chat_send_handler(
         ));
     }
 
-    let user_id = request_user_id(&state, req.user_id.as_deref()).await;
-    let actor_id = request_actor_id(&state, req.actor_id.as_deref(), &user_id);
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        req.user_id.as_deref(),
+        req.actor_id.as_deref(),
+    )
+    .await;
+    let user_id = request_identity.principal_id.clone();
+    let actor_id = request_identity.actor_id.clone();
     let mut msg = IncomingMessage::new("gateway", &user_id, &req.content);
-    let identity = gateway_identity(&user_id, &actor_id, req.thread_id.as_deref());
-    msg = msg.with_identity(identity);
+    msg = msg.with_identity(request_identity.resolved_identity(req.thread_id.as_deref()));
+    let browser_origin = request_origin(&headers);
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
         msg = msg.with_metadata(serde_json::json!({
             "thread_id": thread_id,
             "actor_id": actor_id,
+            "browser_origin": browser_origin,
+        }));
+    } else if browser_origin.is_some() {
+        msg = msg.with_metadata(serde_json::json!({
+            "actor_id": actor_id,
+            "browser_origin": browser_origin,
         }));
     }
 
@@ -77,6 +96,8 @@ pub(crate) async fn chat_send_handler(
 
 pub(crate) async fn chat_approval_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    request_identity: GatewayRequestIdentity,
     Json(req): Json<ApprovalRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
     let (approved, always) = match req.action.as_str() {
@@ -110,14 +131,31 @@ pub(crate) async fn chat_approval_handler(
         )
     })?;
 
-    let user_id = request_user_id(&state, req.user_id.as_deref()).await;
-    let actor_id = request_actor_id(&state, req.actor_id.as_deref(), &user_id);
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        req.user_id.as_deref(),
+        req.actor_id.as_deref(),
+    )
+    .await;
+    let user_id = request_identity.principal_id.clone();
+    let actor_id = request_identity.actor_id.clone();
+    let browser_origin = request_origin(&headers);
     let mut msg = IncomingMessage::new("gateway", &user_id, content);
-    let identity = gateway_identity(&user_id, &actor_id, req.thread_id.as_deref());
-    msg = msg.with_identity(identity);
+    msg = msg.with_identity(request_identity.resolved_identity(req.thread_id.as_deref()));
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
+        msg = msg.with_metadata(serde_json::json!({
+            "thread_id": thread_id,
+            "actor_id": actor_id,
+            "browser_origin": browser_origin,
+        }));
+    } else if browser_origin.is_some() {
+        msg = msg.with_metadata(serde_json::json!({
+            "actor_id": actor_id,
+            "browser_origin": browser_origin,
+        }));
     }
 
     let msg_id = msg.id;
@@ -146,6 +184,7 @@ pub(crate) async fn chat_approval_handler(
 
 pub(crate) async fn chat_auth_token_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Json(req): Json<AuthTokenRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -153,12 +192,13 @@ pub(crate) async fn chat_auth_token_handler(
         "Extension manager not available".to_string(),
     ))?;
 
+    let thread_id = active_thread_id_for_identity(&state, &request_identity).await;
     let result = ext_mgr
         .auth(&req.extension_name, Some(&req.token))
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    if result.status == "authenticated" {
+    if result.auth_status == "authenticated" || result.auth_status == "no_auth_required" {
         let msg = match ext_mgr.activate(&req.extension_name).await {
             Ok(r) => format!(
                 "{} authenticated ({} tools loaded)",
@@ -171,12 +211,17 @@ pub(crate) async fn chat_auth_token_handler(
             ),
         };
 
-        clear_auth_mode(&state).await;
+        clear_auth_mode_for_identity(&state, &request_identity).await;
 
         state.sse.broadcast(SseEvent::AuthCompleted {
             extension_name: req.extension_name,
             success: true,
             message: msg.clone(),
+            auth_mode: Some(result.auth_mode),
+            auth_status: Some(result.auth_status),
+            shared_auth_provider: result.shared_auth_provider,
+            missing_scopes: result.missing_scopes,
+            thread_id,
         });
 
         Ok(Json(ActionResponse::ok(msg)))
@@ -186,29 +231,47 @@ pub(crate) async fn chat_auth_token_handler(
             instructions: result.instructions.clone(),
             auth_url: result.auth_url.clone(),
             setup_url: result.setup_url.clone(),
+            auth_mode: result.auth_mode.clone(),
+            auth_status: result.auth_status.clone(),
+            shared_auth_provider: result.shared_auth_provider.clone(),
+            missing_scopes: result.missing_scopes.clone(),
+            thread_id: thread_id.clone(),
         });
-        Ok(Json(ActionResponse::fail(
-            result
-                .instructions
+        let instructions = result.instructions.clone();
+        let mut response = ActionResponse::fail(
+            instructions
+                .clone()
                 .unwrap_or_else(|| "Invalid token".to_string()),
-        )))
+        );
+        response.auth_url = result.auth_url;
+        response.setup_url = result.setup_url;
+        response.auth_mode = Some(result.auth_mode);
+        response.auth_status = Some(result.auth_status);
+        response.awaiting_token = Some(result.awaiting_token);
+        response.instructions = instructions;
+        response.shared_auth_provider = result.shared_auth_provider;
+        response.missing_scopes = result.missing_scopes;
+        Ok(Json(response))
     }
 }
 
 pub(crate) async fn chat_auth_cancel_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Json(_req): Json<AuthCancelRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    clear_auth_mode(&state).await;
+    clear_auth_mode_for_identity(&state, &request_identity).await;
     Ok(Json(ActionResponse::ok("Auth cancelled")))
 }
 
-pub(crate) async fn clear_auth_mode(state: &GatewayState) {
+pub(crate) async fn clear_auth_mode_for_identity(
+    state: &GatewayState,
+    request_identity: &GatewayRequestIdentity,
+) {
     if let Some(ref sm) = state.session_manager {
-        let user_id = request_user_id(state, None).await;
-        let actor_id = request_actor_id(state, None, &user_id);
-        let identity = gateway_identity(&user_id, &actor_id, None);
-        let session = sm.get_or_create_session_for_identity(&identity).await;
+        let session = sm
+            .get_or_create_session_for_identity(&request_identity.resolved_identity(None))
+            .await;
         let mut sess = session.lock().await;
         if let Some(thread_id) = sess.active_thread
             && let Some(thread) = sess.threads.get_mut(&thread_id)
@@ -218,16 +281,80 @@ pub(crate) async fn clear_auth_mode(state: &GatewayState) {
     }
 }
 
+pub(crate) fn request_origin(headers: &HeaderMap) -> Option<String> {
+    if let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        return Some(origin.trim_end_matches('/').to_string());
+    }
+
+    headers
+        .get(axum::http::header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| url::Url::parse(value).ok())
+        .map(|url| {
+            format!(
+                "{}://{}",
+                url.scheme(),
+                url.host_str().map(str::to_string).unwrap_or_default()
+                    + &url
+                        .port()
+                        .map(|port| format!(":{port}"))
+                        .unwrap_or_default()
+            )
+        })
+}
+
+pub(crate) async fn active_thread_id_for_identity(
+    state: &GatewayState,
+    request_identity: &GatewayRequestIdentity,
+) -> Option<String> {
+    let sm = state.session_manager.as_ref()?;
+    let session = sm
+        .get_or_create_session_for_identity(&request_identity.resolved_identity(None))
+        .await;
+    let sess = session.lock().await;
+    sess.active_thread.map(|id| id.to_string())
+}
+
 pub(crate) async fn chat_events_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let sse = state.sse.subscribe().ok_or((
+    let raw_stream = state.sse.subscribe_raw().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Too many connections".to_string(),
     ))?;
+    let state_for_stream = Arc::clone(&state);
+    let identity_for_stream = request_identity.clone();
+    let stream = raw_stream.filter_map(move |event| {
+        let state = Arc::clone(&state_for_stream);
+        let identity = identity_for_stream.clone();
+        async move {
+            if !sse_event_visible_to_identity(
+                state.store.as_ref(),
+                state.as_ref(),
+                &identity,
+                &event,
+            )
+            .await
+            {
+                return None;
+            }
+            let data = serde_json::to_string(&event).unwrap_or_default();
+            Some(Ok::<Event, std::convert::Infallible>(
+                Event::default().event(event.event_type()).data(data),
+            ))
+        }
+    });
     Ok((
         [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
-        sse,
+        Sse::new(stream).keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(30))
+                .text(""),
+        ),
     ))
 }
 
@@ -235,35 +362,36 @@ pub(crate) async fn chat_ws_handler(
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let origin = headers
-        .get("origin")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| {
+    let browser_origin = request_origin(&headers);
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        let parsed = url::Url::parse(origin).map_err(|_| {
             (
                 StatusCode::FORBIDDEN,
-                "WebSocket Origin header required".to_string(),
+                "WebSocket origin is invalid".to_string(),
             )
         })?;
-
-    let host = origin
-        .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-        .and_then(|rest| rest.split(':').next()?.split('/').next())
-        .unwrap_or("");
-
-    let is_local = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
-    if !is_local {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "WebSocket origin not allowed".to_string(),
-        ));
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "WebSocket origin must use http or https".to_string(),
+            ));
+        }
     }
-    Ok(ws.on_upgrade(move |socket| crate::channels::web::ws::handle_ws_connection(socket, state)))
+    Ok(ws.on_upgrade(move |socket| {
+        crate::channels::web::ws::handle_ws_connection(
+            socket,
+            state,
+            request_identity,
+            browser_origin,
+        )
+    }))
 }
 
 pub(crate) async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<HistoryResponse>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
@@ -271,11 +399,17 @@ pub(crate) async fn chat_history_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    let actor_id = request_actor_id(&state, query.actor_id.as_deref(), &user_id);
-    let identity = gateway_identity(&user_id, &actor_id, None);
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
+    let user_id = request_identity.principal_id.clone();
+    let actor_id = request_identity.actor_id.clone();
     let session = session_manager
-        .get_or_create_session_for_identity(&identity)
+        .get_or_create_session_for_identity(&request_identity.resolved_identity(None))
         .await;
     let sess = session.lock().await;
 
@@ -341,7 +475,12 @@ pub(crate) async fn chat_history_handler(
             .iter()
             .map(|t| TurnInfo {
                 turn_number: t.turn_number,
-                user_input: t.user_input.clone(),
+                user_input: if t.hide_user_input_from_ui {
+                    String::new()
+                } else {
+                    t.user_input.clone()
+                },
+                hide_user_input: t.hide_user_input_from_ui,
                 response: t.response.clone(),
                 state: format!("{:?}", t.state),
                 started_at: t.started_at.to_rfc3339(),
@@ -401,9 +540,16 @@ pub(crate) fn build_turns_from_db_messages(
 
     while let Some(msg) = iter.next() {
         if msg.role == "user" {
+            let hide_user_input = message_hidden_from_main_chat(&msg.metadata);
+
             let mut turn = TurnInfo {
                 turn_number,
-                user_input: msg.content.clone(),
+                user_input: if hide_user_input {
+                    String::new()
+                } else {
+                    msg.content.clone()
+                },
+                hide_user_input,
                 response: None,
                 state: "Completed".to_string(),
                 started_at: msg.created_at.to_rfc3339(),
@@ -423,7 +569,23 @@ pub(crate) fn build_turns_from_db_messages(
                 turn.state = "Failed".to_string();
             }
 
+            if turn.hide_user_input && turn.response.is_none() {
+                continue;
+            }
+
             turns.push(turn);
+            turn_number += 1;
+        } else if msg.role == "assistant" && message_is_startup_hook(&msg.metadata) {
+            turns.push(TurnInfo {
+                turn_number,
+                user_input: String::new(),
+                hide_user_input: true,
+                response: Some(msg.content.clone()),
+                state: "Completed".to_string(),
+                started_at: msg.created_at.to_rfc3339(),
+                completed_at: Some(msg.created_at.to_rfc3339()),
+                tool_calls: Vec::new(),
+            });
             turn_number += 1;
         }
     }
@@ -431,8 +593,28 @@ pub(crate) fn build_turns_from_db_messages(
     turns
 }
 
+pub(crate) fn message_hidden_from_main_chat(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("hide_user_input_from_webui_chat")
+        .and_then(|value| value.as_bool())
+        .or_else(|| {
+            metadata
+                .get("hide_from_webui_chat")
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+fn message_is_startup_hook(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("synthetic_origin")
+        .and_then(|value| value.as_str())
+        == Some("startup_hook")
+}
+
 pub(crate) async fn chat_threads_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<ThreadListResponse>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
@@ -440,11 +622,17 @@ pub(crate) async fn chat_threads_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    let actor_id = request_actor_id(&state, query.actor_id.as_deref(), &user_id);
-    let identity = gateway_identity(&user_id, &actor_id, None);
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
+    let user_id = request_identity.principal_id.clone();
+    let actor_id = request_identity.actor_id.clone();
     let session = session_manager
-        .get_or_create_session_for_identity(&identity)
+        .get_or_create_session_for_identity(&request_identity.resolved_identity(None))
         .await;
     let sess = session.lock().await;
 
@@ -455,15 +643,13 @@ pub(crate) async fn chat_threads_handler(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if let Ok(summaries) = store
-            .list_conversations_with_preview(&user_id, "gateway", 50)
+            .list_actor_conversations_for_recall(&user_id, &actor_id, false, 50)
             .await
         {
             let mut assistant_thread = None;
             let mut threads = Vec::new();
 
-            for s in summaries.iter().filter(|summary| {
-                conversation_visible_to_actor(summary.actor_id.as_deref(), &user_id, &actor_id)
-            }) {
+            for s in &summaries {
                 let info = ThreadInfo {
                     id: s.id,
                     state: "Idle".to_string(),
@@ -524,6 +710,7 @@ pub(crate) async fn chat_threads_handler(
 
 pub(crate) async fn chat_new_thread_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<ThreadInfo>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
@@ -531,14 +718,20 @@ pub(crate) async fn chat_new_thread_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    let actor_id = request_actor_id(&state, query.actor_id.as_deref(), &user_id);
-    let identity = gateway_identity(&user_id, &actor_id, None);
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
+    let user_id = request_identity.principal_id.clone();
+    let actor_id = request_identity.actor_id.clone();
     let session = session_manager
-        .get_or_create_session_for_identity(&identity)
+        .get_or_create_session_for_identity(&request_identity.resolved_identity(None))
         .await;
-    let mut sess = session.lock().await;
-    let thread = sess.create_thread();
+    let session_id = session.lock().await.id;
+    let thread = crate::agent::session::Thread::new(session_id);
     let thread_id = thread.id;
     let info = ThreadInfo {
         id: thread.id,
@@ -551,56 +744,87 @@ pub(crate) async fn chat_new_thread_handler(
     };
 
     if let Some(ref store) = state.store {
-        let store = Arc::clone(store);
-        let user_id = user_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = store
-                .ensure_conversation(thread_id, "gateway", &user_id, None)
-                .await
-            {
-                tracing::warn!("Failed to persist new thread: {}", e);
-            }
-            let stable_external_conversation_key = format!(
-                "gateway://direct/{}/actor/{}/thread/{}",
-                user_id, actor_id, thread_id
-            );
-            if let Err(e) = store
-                .update_conversation_identity(
-                    thread_id,
-                    Some(&actor_id),
-                    Some(crate::identity::scope_id_from_key(&format!(
-                        "principal:{user_id}"
-                    ))),
-                    crate::history::ConversationKind::Direct,
-                    Some(&stable_external_conversation_key),
+        persist_gateway_side_thread(store.as_ref(), thread_id, &user_id, &actor_id)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to create thread: {e}"),
                 )
-                .await
-            {
-                tracing::warn!("Failed to set conversation identity: {}", e);
-            }
-            let metadata_val = serde_json::json!("thread");
-            if let Err(e) = store
-                .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
-                .await
-            {
-                tracing::warn!("Failed to set thread_type metadata: {}", e);
-            }
-        });
+            })?;
     }
+
+    let mut sess = session.lock().await;
+    sess.insert_thread(thread);
+    drop(sess);
+
+    state.sse.broadcast(SseEvent::ConversationUpdated {
+        thread_id: thread_id.to_string(),
+        reason: "thread_created".to_string(),
+        channel: Some("gateway".to_string()),
+    });
 
     Ok(Json(info))
 }
 
+async fn persist_gateway_side_thread(
+    store: &dyn crate::db::Database,
+    thread_id: Uuid,
+    user_id: &str,
+    actor_id: &str,
+) -> Result<(), crate::error::DatabaseError> {
+    store
+        .ensure_conversation(thread_id, "gateway", user_id, None)
+        .await?;
+
+    let stable_external_conversation_key =
+        format!("gateway://direct/{user_id}/actor/{actor_id}/thread/{thread_id}");
+    store
+        .update_conversation_identity(
+            thread_id,
+            Some(user_id),
+            Some(actor_id),
+            Some(crate::identity::scope_id_from_key(&format!(
+                "principal:{user_id}"
+            ))),
+            crate::history::ConversationKind::Direct,
+            Some(&stable_external_conversation_key),
+        )
+        .await?;
+
+    for (key, value) in [
+        ("thread_type", serde_json::json!("thread")),
+        ("direct_thread_role", serde_json::json!("side")),
+        ("origin_channel", serde_json::json!("gateway")),
+        ("last_active_channel", serde_json::json!("gateway")),
+        ("seen_channels", serde_json::json!(["gateway"])),
+    ] {
+        store
+            .update_conversation_metadata_field(thread_id, key, &value)
+            .await?;
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn chat_delete_thread_handler(
     State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
     Path(id): Path<String>,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let thread_id: Uuid = id
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid thread ID".to_string()))?;
-    let user_id = request_user_id(&state, query.user_id.as_deref()).await;
-    let actor_id = request_actor_id(&state, query.actor_id.as_deref(), &user_id);
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
+    let user_id = request_identity.principal_id.clone();
+    let actor_id = request_identity.actor_id.clone();
 
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -634,9 +858,8 @@ pub(crate) async fn chat_delete_thread_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if let Some(ref session_manager) = state.session_manager {
-        let identity = gateway_identity(&user_id, &actor_id, None);
         let session = session_manager
-            .get_or_create_session_for_identity(&identity)
+            .get_or_create_session_for_identity(&request_identity.resolved_identity(None))
             .await;
         let mut sess = session.lock().await;
         sess.threads.remove(&thread_id);
@@ -644,8 +867,209 @@ pub(crate) async fn chat_delete_thread_handler(
 
     tracing::info!(thread_id = %thread_id, deleted = deleted, "Thread deleted");
 
+    if deleted {
+        state.sse.broadcast(SseEvent::ConversationDeleted {
+            thread_id: thread_id.to_string(),
+            principal_id: user_id,
+            actor_id,
+        });
+    }
+
     Ok(Json(serde_json::json!({
         "deleted": deleted,
         "thread_id": thread_id.to_string(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+
+    fn test_gateway_state(
+        session_manager: Arc<crate::agent::SessionManager>,
+        store: Option<Arc<dyn crate::db::Database>>,
+    ) -> Arc<GatewayState> {
+        Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: crate::channels::web::sse::SseManager::new(),
+            workspace: None,
+            session_manager: Some(session_manager),
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store,
+            job_manager: None,
+            prompt_queue: None,
+            context_manager: None,
+            scheduler: tokio::sync::RwLock::new(None),
+            user_id: "gateway-user".to_string(),
+            actor_id: "gateway-actor".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            llm_runtime: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skill_remote_hub: None,
+            skill_quarantine: None,
+            chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            cost_tracker: None,
+            routine_engine: None,
+            startup_time: std::time::Instant::now(),
+            restart_requested: std::sync::atomic::AtomicBool::new(false),
+            secrets_store: None,
+            channel_manager: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn new_thread_handler_persists_side_thread_before_return() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let store: Arc<dyn crate::db::Database> = db.clone();
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let state = test_gateway_state(session_manager, Some(store.clone()));
+        let mut sse = Box::pin(
+            state
+                .sse
+                .subscribe_raw()
+                .expect("conversation event stream should subscribe"),
+        );
+
+        let Json(info) = chat_new_thread_handler(
+            State(Arc::clone(&state)),
+            GatewayRequestIdentity::new(
+                "user-1",
+                "actor-1",
+                crate::channels::web::identity_helpers::GatewayAuthSource::TrustedProxy,
+                false,
+            ),
+            Query(HistoryQuery {
+                thread_id: None,
+                limit: None,
+                before: None,
+                user_id: None,
+                actor_id: None,
+            }),
+        )
+        .await
+        .expect("create thread should succeed");
+
+        let summaries = db
+            .list_actor_conversations_for_recall("user-1", "actor-1", false, 20)
+            .await
+            .expect("thread list should succeed");
+        let metadata = db
+            .get_conversation_metadata(info.id)
+            .await
+            .expect("metadata query should succeed")
+            .expect("thread metadata should exist");
+
+        assert!(summaries.iter().any(|summary| summary.id == info.id));
+        assert_eq!(
+            metadata.get("thread_type"),
+            Some(&serde_json::json!("thread"))
+        );
+        assert_eq!(
+            metadata.get("direct_thread_role"),
+            Some(&serde_json::json!("side"))
+        );
+        assert_eq!(
+            metadata.get("last_active_channel"),
+            Some(&serde_json::json!("gateway"))
+        );
+
+        let event = sse.next().await.expect("thread creation event");
+        match event {
+            SseEvent::ConversationUpdated {
+                thread_id,
+                reason,
+                channel,
+            } => {
+                assert_eq!(thread_id, info.id.to_string());
+                assert_eq!(reason, "thread_created");
+                assert_eq!(channel.as_deref(), Some("gateway"));
+            }
+            other => panic!("unexpected SSE event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_thread_handler_emits_conversation_deleted() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let store: Arc<dyn crate::db::Database> = db.clone();
+        let session_manager = Arc::new(crate::agent::SessionManager::new());
+        let state = test_gateway_state(session_manager, Some(store.clone()));
+        let identity = GatewayRequestIdentity::new(
+            "user-1",
+            "actor-1",
+            crate::channels::web::identity_helpers::GatewayAuthSource::TrustedProxy,
+            false,
+        );
+
+        // Pre-create the assistant thread so the side thread we create next
+        // does not get promoted to assistant by the fallback logic.
+        crate::channels::web::identity_helpers::get_or_create_gateway_assistant_conversation(
+            store.as_ref(),
+            "user-1",
+            "actor-1",
+        )
+        .await
+        .expect("pre-create assistant thread");
+
+        let Json(info) = chat_new_thread_handler(
+            State(Arc::clone(&state)),
+            identity.clone(),
+            Query(HistoryQuery {
+                thread_id: None,
+                limit: None,
+                before: None,
+                user_id: None,
+                actor_id: None,
+            }),
+        )
+        .await
+        .expect("create thread should succeed");
+
+        let mut sse = Box::pin(
+            state
+                .sse
+                .subscribe_raw()
+                .expect("conversation event stream should subscribe"),
+        );
+
+        let Json(payload) = chat_delete_thread_handler(
+            State(Arc::clone(&state)),
+            identity,
+            Path(info.id.to_string()),
+            Query(HistoryQuery {
+                thread_id: None,
+                limit: None,
+                before: None,
+                user_id: None,
+                actor_id: None,
+            }),
+        )
+        .await
+        .expect("delete thread should succeed");
+
+        assert_eq!(payload.get("deleted"), Some(&serde_json::json!(true)));
+
+        let event = sse.next().await.expect("thread deletion event");
+        match event {
+            SseEvent::ConversationDeleted {
+                thread_id,
+                principal_id,
+                actor_id,
+            } => {
+                assert_eq!(thread_id, info.id.to_string());
+                assert_eq!(principal_id, "user-1");
+                assert_eq!(actor_id, "actor-1");
+            }
+            other => panic!("unexpected SSE event: {other:?}"),
+        }
+    }
 }

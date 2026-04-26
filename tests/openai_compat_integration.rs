@@ -74,6 +74,7 @@ impl LlmProvider for MockLlmProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            token_capture: None,
         })
     }
 
@@ -102,6 +103,7 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 15,
                 output_tokens: 8,
                 finish_reason: FinishReason::ToolUse,
+                token_capture: None,
             })
         } else {
             Ok(ToolCompletionResponse {
@@ -113,6 +115,7 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 10,
                 output_tokens: 4,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
     }
@@ -154,6 +157,7 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            token_capture: None,
         })
     }
 
@@ -170,6 +174,7 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            token_capture: None,
         })
     }
 
@@ -206,6 +211,8 @@ async fn start_test_server_with_provider(
         store: None,
         job_manager: None,
         prompt_queue: None,
+        context_manager: None,
+        scheduler: tokio::sync::RwLock::new(None),
         user_id: "test-user".to_string(),
         actor_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
@@ -214,6 +221,8 @@ async fn start_test_server_with_provider(
         llm_runtime: None,
         skill_registry: None,
         skill_catalog: None,
+        skill_remote_hub: None,
+        skill_quarantine: None,
         chat_rate_limiter: thinclaw::channels::web::rate_limiter::RateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
@@ -701,6 +710,8 @@ async fn test_no_llm_provider_returns_503() {
         store: None,
         job_manager: None,
         prompt_queue: None,
+        context_manager: None,
+        scheduler: tokio::sync::RwLock::new(None),
         user_id: "test-user".to_string(),
         actor_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
@@ -709,6 +720,8 @@ async fn test_no_llm_provider_returns_503() {
         llm_runtime: None,
         skill_registry: None,
         skill_catalog: None,
+        skill_remote_hub: None,
+        skill_quarantine: None,
         chat_rate_limiter: thinclaw::channels::web::rate_limiter::RateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
@@ -787,6 +800,7 @@ impl LlmProvider for ThinkingMockProvider {
             input_tokens: 20,
             output_tokens: 10,
             finish_reason: FinishReason::Stop,
+            token_capture: None,
         })
     }
 
@@ -803,6 +817,7 @@ impl LlmProvider for ThinkingMockProvider {
             input_tokens: 15,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            token_capture: None,
         })
     }
 }

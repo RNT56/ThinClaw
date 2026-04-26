@@ -6,17 +6,22 @@ pub mod llm_tools;
 mod agent_control;
 pub mod agent_management;
 mod apple_mail;
+#[cfg(feature = "browser")]
 mod browser;
+#[cfg(feature = "browser")]
 mod browser_a11y;
+#[cfg(feature = "browser")]
 mod browser_cloud;
 mod camera_capture;
 mod canvas;
 mod clarify;
+mod desktop_autonomy;
 mod device_info;
 mod discord_actions;
 mod echo;
 mod execute_code;
 pub mod extension_tools;
+mod external_memory;
 #[cfg(feature = "document-extraction")]
 mod extract_document;
 mod file;
@@ -28,6 +33,8 @@ mod learning_tools;
 mod location;
 mod memory;
 mod moa;
+#[cfg(feature = "nostr")]
+mod nostr_actions;
 pub(crate) mod process;
 pub mod routine;
 mod screen_capture;
@@ -44,22 +51,30 @@ pub(crate) mod todo;
 mod tts;
 mod vision;
 
+pub use crate::sandbox_types::PromptQueue;
 pub use agent_control::{AgentThinkTool, EmitUserMessageTool};
 pub use agent_management::{
     CreateAgentTool, ListAgentsTool, MessageAgentTool, RemoveAgentTool, UpdateAgentTool,
 };
 pub use apple_mail::AppleMailTool;
+#[cfg(feature = "browser")]
 pub use browser::BrowserTool;
+#[cfg(feature = "browser")]
 pub use browser_a11y::AgentBrowserTool;
 pub use camera_capture::CameraCaptureTool;
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};
 pub use clarify::ClarifyTool;
+pub use desktop_autonomy::DesktopAutonomyTool;
 pub use device_info::DeviceInfoTool;
 pub use discord_actions::DiscordActionsTool;
 pub use echo::EchoTool;
 pub use execute_code::ExecuteCodeTool;
 pub use extension_tools::{
     ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
+};
+pub use external_memory::{
+    ExternalMemoryExportTool, ExternalMemoryOffTool, ExternalMemoryRecallTool,
+    ExternalMemorySetupTool, ExternalMemoryStatusTool,
 };
 #[cfg(feature = "document-extraction")]
 pub use extract_document::ExtractDocumentTool;
@@ -68,12 +83,11 @@ pub use homeassistant::HomeAssistantTool;
 pub use http::HttpTool;
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
-    PromptQueue,
 };
 pub use json::JsonTool;
 pub use learning_tools::{
-    LearningFeedbackTool, LearningHistoryTool, LearningProposalReviewTool, LearningStatusTool,
-    PromptManageTool, SkillManageTool,
+    LearningFeedbackTool, LearningHistoryTool, LearningOutcomesTool, LearningProposalReviewTool,
+    LearningStatusTool, PromptManageTool, SkillManageTool,
 };
 pub use llm_tools::{
     LlmListModelsTool, LlmSelectTool, SharedModelOverride, new_shared_model_override,
@@ -84,6 +98,8 @@ pub use memory::{
     SessionSearchTool,
 };
 pub use moa::MoaTool;
+#[cfg(feature = "nostr")]
+pub use nostr_actions::NostrActionsTool;
 pub use process::{ProcessTool, SharedProcessRegistry, start_reaper};
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
@@ -93,8 +109,10 @@ pub use search_files::SearchFilesTool;
 pub use send_message::{SendMessageFn, SendMessageTool};
 pub use shell::ShellTool;
 pub use skill_tools::{
-    SkillInstallTool, SkillListTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
-    SkillSearchTool,
+    SkillAuditTool, SkillCheckTool, SkillInspectTool, SkillInstallTool, SkillListTool,
+    SkillPromoteTrustTool, SkillPublishTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
+    SkillSearchTool, SkillSnapshotTool, SkillTapAddTool, SkillTapListTool, SkillTapRefreshTool,
+    SkillTapRemoveTool, SkillUpdateTool,
 };
 pub use slack_actions::SlackActionsTool;
 pub use subagent::{CancelSubagentTool, ListSubagentsTool, SpawnSubagentTool};

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use crate::agent::routine_engine::RoutineEngine;
+use crate::agent::{outcomes, routine_engine::RoutineEngine};
 use crate::channels::web::types::*;
 use crate::db::Database;
 
@@ -71,6 +71,9 @@ pub async fn toggle_routine(
         .update_routine(&routine)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if !routine.enabled {
+        let _ = outcomes::observe_routine_state_change(store, &routine, "routine_disabled").await;
+    }
 
     Ok(serde_json::json!({
         "status": if routine.enabled { "enabled" } else { "disabled" },
@@ -84,6 +87,10 @@ pub async fn delete_routine(
     routine_id: &str,
 ) -> ApiResult<serde_json::Value> {
     let id = Uuid::parse_str(routine_id)?;
+    let routine = store
+        .get_routine(id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let deleted = store
         .delete_routine(id)
@@ -91,6 +98,9 @@ pub async fn delete_routine(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     if deleted {
+        if let Some(routine) = routine.as_ref() {
+            let _ = outcomes::observe_routine_state_change(store, routine, "routine_deleted").await;
+        }
         Ok(serde_json::json!({
             "status": "deleted",
             "routine_id": routine_id,
@@ -106,14 +116,37 @@ pub async fn delete_routine(
 /// Convert a `Routine` to the trimmed `RoutineInfo` for list display.
 fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
     let (trigger_type, trigger_summary) = match &r.trigger {
-        crate::agent::routine::Trigger::Cron { schedule } => {
-            ("cron".to_string(), format!("cron: {}", schedule))
-        }
+        crate::agent::routine::Trigger::Cron { schedule } => (
+            "cron".to_string(),
+            if schedule.starts_with("every ") {
+                format!("schedule: {}", schedule)
+            } else {
+                format!("cron: {}", schedule)
+            },
+        ),
         crate::agent::routine::Trigger::Event {
-            pattern, channel, ..
+            pattern,
+            channel,
+            event_type,
+            actor,
+            priority,
+            ..
         } => {
             let ch = channel.as_deref().unwrap_or("any");
-            ("event".to_string(), format!("on {} /{}/", ch, pattern))
+            let event_label = event_type.as_deref().unwrap_or("message");
+            let actor_label = actor
+                .as_deref()
+                .map(|value| format!(" actor {}", value))
+                .unwrap_or_default();
+            let summary = if *priority == 0 {
+                format!("on {} {}{} /{}/", ch, event_label, actor_label, pattern)
+            } else {
+                format!(
+                    "on {} {}{} /{}/ (prio {})",
+                    ch, event_label, actor_label, pattern, priority
+                )
+            };
+            ("event".to_string(), summary)
         }
         crate::agent::routine::Trigger::Webhook { path, .. } => {
             let p = path.as_deref().unwrap_or("/");
@@ -124,7 +157,16 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
             let sched = schedule.as_deref().unwrap_or("on-demand");
             ("system_event".to_string(), {
                 let truncated: String = message.chars().take(40).collect();
-                format!("event: {} ({})", truncated, sched)
+                format!(
+                    "event: {} ({}, {})",
+                    truncated,
+                    sched,
+                    match r.policy.catch_up_mode {
+                        crate::agent::routine::RoutineCatchUpMode::Skip => "skip",
+                        crate::agent::routine::RoutineCatchUpMode::RunOnceNow => "run once",
+                        crate::agent::routine::RoutineCatchUpMode::Replay => "replay",
+                    }
+                )
             })
         }
     };

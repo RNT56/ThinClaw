@@ -228,37 +228,68 @@ fn execute_inner(params: &str) -> Result<String, String> {
 
     match action {
         // Search
-        NotionAction::Search { query, filter, page_size, start_cursor } => {
-            search(query.as_deref(), filter, page_size, start_cursor.as_deref())
-        }
+        NotionAction::Search {
+            query,
+            filter,
+            page_size,
+            start_cursor,
+        } => search(query.as_deref(), filter, page_size, start_cursor.as_deref()),
 
         // Pages
         NotionAction::GetPage { page_id } => get_page(&page_id),
-        NotionAction::CreatePage { parent_id, parent_type, title, properties, children } => {
-            create_page(&parent_id, parent_type.as_deref(), &title, properties, children)
-        }
-        NotionAction::UpdatePage { page_id, properties, archived } => {
-            update_page(&page_id, properties, archived)
-        }
+        NotionAction::CreatePage {
+            parent_id,
+            parent_type,
+            title,
+            properties,
+            children,
+        } => create_page(
+            &parent_id,
+            parent_type.as_deref(),
+            &title,
+            properties,
+            children,
+        ),
+        NotionAction::UpdatePage {
+            page_id,
+            properties,
+            archived,
+        } => update_page(&page_id, properties, archived),
         NotionAction::ArchivePage { page_id } => archive_page(&page_id),
 
         // Databases
         NotionAction::GetDatabase { database_id } => get_database(&database_id),
-        NotionAction::QueryDatabase { database_id, filter, sorts, page_size, start_cursor } => {
-            query_database(&database_id, filter, sorts, page_size, start_cursor.as_deref())
-        }
-        NotionAction::CreateDatabase { parent_id, title, properties } => {
-            create_database(&parent_id, &title, properties)
-        }
-        NotionAction::UpdateDatabase { database_id, title, properties } => {
-            update_database(&database_id, title.as_deref(), properties)
-        }
+        NotionAction::QueryDatabase {
+            database_id,
+            filter,
+            sorts,
+            page_size,
+            start_cursor,
+        } => query_database(
+            &database_id,
+            filter,
+            sorts,
+            page_size,
+            start_cursor.as_deref(),
+        ),
+        NotionAction::CreateDatabase {
+            parent_id,
+            title,
+            properties,
+        } => create_database(&parent_id, &title, properties),
+        NotionAction::UpdateDatabase {
+            database_id,
+            title,
+            properties,
+        } => update_database(&database_id, title.as_deref(), properties),
 
         // Blocks
         NotionAction::GetBlock { block_id } => get_block(&block_id),
-        NotionAction::GetBlockChildren { block_id, page_size, start_cursor } => {
-            get_block_children(&block_id, page_size, start_cursor.as_deref())
-        }
+        NotionAction::GetBlockChildren {
+            block_id,
+            page_size,
+            start_cursor,
+        } => get_block_children(&block_id, page_size, start_cursor.as_deref()),
         NotionAction::AppendBlockChildren { block_id, children } => {
             append_block_children(&block_id, children)
         }
@@ -266,19 +297,24 @@ fn execute_inner(params: &str) -> Result<String, String> {
         NotionAction::DeleteBlock { block_id } => delete_block(&block_id),
 
         // Users
-        NotionAction::ListUsers { page_size, start_cursor } => {
-            list_users(page_size, start_cursor.as_deref())
-        }
+        NotionAction::ListUsers {
+            page_size,
+            start_cursor,
+        } => list_users(page_size, start_cursor.as_deref()),
         NotionAction::GetUser { user_id } => get_user(&user_id),
         NotionAction::GetMe => get_me(),
 
         // Comments
-        NotionAction::GetComments { block_id, page_size, start_cursor } => {
-            get_comments(&block_id, page_size, start_cursor.as_deref())
-        }
-        NotionAction::CreateComment { parent_id, rich_text, discussion_id } => {
-            create_comment(&parent_id, rich_text, discussion_id.as_deref())
-        }
+        NotionAction::GetComments {
+            block_id,
+            page_size,
+            start_cursor,
+        } => get_comments(&block_id, page_size, start_cursor.as_deref()),
+        NotionAction::CreateComment {
+            parent_id,
+            rich_text,
+            discussion_id,
+        } => create_comment(&parent_id, rich_text, discussion_id.as_deref()),
     }
 }
 
@@ -430,7 +466,10 @@ fn create_page(
 
     // If creating in a database, set the "Name" or "title" property
     if parent_type == "database_id" {
-        if !props.as_object().map_or(false, |o| o.contains_key("Name") || o.contains_key("title")) {
+        if !props
+            .as_object()
+            .map_or(false, |o| o.contains_key("Name") || o.contains_key("title"))
+        {
             props["Name"] = serde_json::json!({
                 "title": [{ "text": { "content": title } }]
             });
@@ -838,3 +877,58 @@ const SCHEMA: &str = r#"{
 }"#;
 
 export!(NotionTool);
+
+#[cfg(test)]
+mod tests {
+    use super::{url_encode_path, validate_input_length, NotionAction, MAX_TEXT_LENGTH};
+
+    #[test]
+    fn validate_input_length_accepts_short_strings() {
+        assert!(validate_input_length("hello", "title").is_ok());
+    }
+
+    #[test]
+    fn validate_input_length_rejects_oversized_strings() {
+        let oversized = "a".repeat(MAX_TEXT_LENGTH + 1);
+        let error = validate_input_length(&oversized, "title").unwrap_err();
+        assert!(error.contains("title"));
+        assert!(error.contains(&MAX_TEXT_LENGTH.to_string()));
+    }
+
+    #[test]
+    fn url_encode_path_encodes_reserved_characters() {
+        assert_eq!(url_encode_path("page id"), "page%20id");
+        assert_eq!(url_encode_path("folder/subpage"), "folder%2Fsubpage");
+    }
+
+    #[test]
+    fn search_action_deserializes_optional_fields() {
+        let action: NotionAction = serde_json::from_value(serde_json::json!({
+            "action": "search",
+            "query": "roadmap",
+            "filter": {
+                "value": "page",
+                "property": "object"
+            },
+            "page_size": 10
+        }))
+        .unwrap();
+
+        match action {
+            NotionAction::Search {
+                query,
+                filter,
+                page_size,
+                start_cursor,
+            } => {
+                assert_eq!(query.as_deref(), Some("roadmap"));
+                let filter = filter.expect("expected filter");
+                assert_eq!(filter.value, "page");
+                assert_eq!(filter.property, "object");
+                assert_eq!(page_size, Some(10));
+                assert_eq!(start_cursor, None);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+}

@@ -3,20 +3,28 @@
 # ThinClaw Remote Deployment Setup Script
 # ============================================================================
 #
-# Bootstraps a Linux server for running the ThinClaw agent via Docker Compose.
+# Bootstraps a Linux server for running ThinClaw natively or via Docker Compose.
 #
-# Core features (always installed):
+# Core Docker features:
 #   - Docker Engine + Docker Compose
-#   - UFW Firewall (allows SSH + port 18789)
+#   - UFW Firewall (allows SSH + the ThinClaw gateway port)
 #   - Fail2ban (SSH brute-force protection)
 #   - ThinClaw Docker Compose stack
 #
+# Core native Pi OS Lite features:
+#   - /usr/local/bin/thinclaw
+#   - /var/lib/thinclaw/.thinclaw/.env
+#   - system thinclaw.service running as the unprivileged thinclaw user
+#
 # Optional features (via flags):
+#   --mode <auto|native|docker>
+#   --binary <path>          Native install source binary
+#   --image <image>          Docker image for Compose
 #   --tailscale <auth-key>   Install Tailscale VPN and join the network
 #   --systemd                Create a systemd service for ThinClaw
 #
 # Usage:
-#   sudo bash setup.sh --token <gateway_token> [--tailscale <ts-key>] [--systemd]
+#   sudo bash setup.sh --token <gateway_token> [--mode auto|native|docker] [--tailscale <ts-key>] [--systemd]
 #
 # Examples:
 #   # Minimal (Docker only):
@@ -34,18 +42,27 @@ set -euo pipefail
 TOKEN=""
 TAILSCALE_KEY=""
 ENABLE_SYSTEMD=false
+MODE="auto"
+BINARY_PATH=""
+THINCLAW_IMAGE="${THINCLAW_IMAGE:-ghcr.io/rnt56/thinclaw:latest}"
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --token) TOKEN="$2"; shift ;;
+        --mode) MODE="$2"; shift ;;
+        --binary) BINARY_PATH="$2"; shift ;;
+        --image) THINCLAW_IMAGE="$2"; shift ;;
         --tailscale) TAILSCALE_KEY="$2"; shift ;;
         --systemd) ENABLE_SYSTEMD=true ;;
         --help|-h)
-            echo "Usage: sudo bash setup.sh --token <token> [--tailscale <auth-key>] [--systemd]"
+            echo "Usage: sudo bash setup.sh --token <token> [--mode auto|native|docker] [--binary <path>] [--image <image>] [--tailscale <auth-key>] [--systemd]"
             echo ""
             echo "  --token <token>         Gateway auth token (required)"
+            echo "  --mode <mode>           Install mode: auto, native, or docker (default: auto)"
+            echo "  --binary <path>         Native install source binary"
+            echo "  --image <image>         Docker image for Compose (default: $THINCLAW_IMAGE)"
             echo "  --tailscale <auth-key>  Install Tailscale VPN and authenticate with this key"
-            echo "  --systemd               Create a systemd service for auto-start management"
+            echo "  --systemd               In docker mode, create a systemd service for auto-start management"
             echo ""
             exit 0
             ;;
@@ -60,10 +77,15 @@ if [[ -z "$TOKEN" ]]; then
     exit 1
 fi
 
+if [[ "$MODE" != "auto" && "$MODE" != "native" && "$MODE" != "docker" ]]; then
+    echo "ERROR: --mode must be one of: auto, native, docker"
+    exit 1
+fi
+
 # ── Detect environment ──────────────────────────────────────────────────────
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-THINCLAW_PORT=18789
+THINCLAW_PORT="${GATEWAY_PORT:-3000}"
 
 echo "============================================================"
 echo "  ThinClaw Remote Agent Setup"
@@ -71,6 +93,7 @@ echo "============================================================"
 echo ""
 echo "Deploy directory: $DEPLOY_DIR"
 echo "Gateway port:     $THINCLAW_PORT"
+echo "Requested mode:   $MODE"
 echo "Tailscale:        $([ -n "$TAILSCALE_KEY" ] && echo 'Yes' || echo 'No')"
 echo "Systemd service:  $([ "$ENABLE_SYSTEMD" = true ] && echo 'Yes' || echo 'No')"
 echo ""
@@ -80,6 +103,100 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "ERROR: This script must be run as root (use: sudo bash setup.sh ...)"
     exit 1
 fi
+
+ROLLBACK_DIR="$(mktemp -d /tmp/thinclaw-setup.XXXXXX)"
+SETUP_COMPLETE=false
+DOCKER_COMPOSE_TOUCHED=false
+THINCLAW_SERVICE_WAS_ACTIVE=false
+THINCLAW_USER_CREATED=false
+PACKAGE_ROLLBACK="${THINCLAW_ROLLBACK_PACKAGES:-true}"
+DOCKER_WAS_INSTALLED=false
+DOCKER_WAS_ACTIVE=false
+DOCKER_WAS_ENABLED=false
+FAIL2BAN_WAS_ACTIVE=false
+FAIL2BAN_WAS_ENABLED=false
+UFW_WAS_ACTIVE=false
+TAILSCALE_WAS_INSTALLED=false
+TAILSCALE_WAS_RUNNING=false
+TAILSCALE_TOUCHED=false
+declare -a ROLLBACK_PATHS=()
+declare -a PACKAGES_INSTALLED_BY_SETUP=()
+
+backup_path() {
+    local path="$1"
+    local item=""
+    for item in "${ROLLBACK_PATHS[@]}"; do
+        if [[ "$item" == "$path|"* ]]; then
+            return 0
+        fi
+    done
+
+    local label=""
+    label="$(printf '%s' "$path" | sed 's#[^A-Za-z0-9._-]#_#g')"
+    local backup="$ROLLBACK_DIR/$label"
+    if [[ -e "$path" || -L "$path" ]]; then
+        mkdir -p "$(dirname "$backup")"
+        cp -a "$path" "$backup"
+    else
+        backup=""
+    fi
+    ROLLBACK_PATHS+=("$path|$backup")
+}
+
+restore_backed_up_paths() {
+    local idx=""
+    for ((idx=${#ROLLBACK_PATHS[@]}-1; idx>=0; idx--)); do
+        local item="${ROLLBACK_PATHS[$idx]}"
+        local path="${item%%|*}"
+        local backup="${item#*|}"
+        if [[ -n "$backup" && ( -e "$backup" || -L "$backup" ) ]]; then
+            rm -rf "$path"
+            mkdir -p "$(dirname "$path")"
+            cp -a "$backup" "$path"
+        else
+            rm -rf "$path"
+        fi
+    done
+}
+
+rollback_setup() {
+    local status="$1"
+    if [[ "$SETUP_COMPLETE" == "true" || "$status" -eq 0 ]]; then
+        rm -rf "$ROLLBACK_DIR"
+        return 0
+    fi
+
+    echo ""
+    echo "ERROR: setup failed; rolling back ThinClaw-managed files and services." >&2
+    if [[ "$DOCKER_COMPOSE_TOUCHED" == "true" ]]; then
+        (cd "$DEPLOY_DIR" && docker compose down >/dev/null 2>&1) || true
+    fi
+    rollback_tailscale_state
+    if [[ "$THINCLAW_USER_CREATED" == "true" ]]; then
+        userdel -r thinclaw >/dev/null 2>&1 || true
+    fi
+    rollback_installed_packages
+    restore_backed_up_paths
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    restore_ufw_state
+    restore_service_state docker "$DOCKER_WAS_ACTIVE" "$DOCKER_WAS_ENABLED" "$DOCKER_WAS_INSTALLED"
+    restore_service_state fail2ban "$FAIL2BAN_WAS_ACTIVE" "$FAIL2BAN_WAS_ENABLED" "true"
+    if [[ "$THINCLAW_SERVICE_WAS_ACTIVE" == "true" ]]; then
+        systemctl restart thinclaw.service >/dev/null 2>&1 || true
+    else
+        systemctl stop thinclaw.service >/dev/null 2>&1 || true
+    fi
+    rm -rf "$ROLLBACK_DIR"
+    echo "Rollback complete." >&2
+}
+
+on_exit() {
+    local status="$?"
+    rollback_setup "$status"
+    exit "$status"
+}
+
+trap on_exit EXIT
 
 # Detect package manager
 if command -v apt-get &> /dev/null; then
@@ -96,6 +213,500 @@ fi
 
 echo "==> Detected package manager: $PKG_MANAGER"
 
+is_pi_os_lite_64() {
+    local arch=""
+    arch="$(uname -m 2>/dev/null || true)"
+    [[ "$arch" == "aarch64" || "$arch" == "arm64" ]] || return 1
+    [[ -f /etc/os-release ]] || return 1
+    grep -qi "bookworm" /etc/os-release || return 1
+    if grep -qi "raspberry pi" /etc/os-release 2>/dev/null; then
+        return 0
+    fi
+    if [[ -f /etc/rpi-issue ]] && grep -qi "raspberry pi" /etc/rpi-issue; then
+        return 0
+    fi
+    return 1
+}
+
+generate_hex_32() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+    else
+        od -An -N32 -tx1 /dev/urandom | tr -d ' \n'
+    fi
+}
+
+dotenv_quote() {
+    local value="$1"
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+        echo "ERROR: dotenv values must not contain newlines" >&2
+        exit 1
+    fi
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "$value"
+}
+
+set_env_value() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    local quoted=""
+    quoted="$(dotenv_quote "$value")"
+    if grep -q "^${key}=" "$file"; then
+        sed -i "s|^${key}=.*|${key}=${quoted}|" "$file"
+    else
+        printf '%s=%s\n' "$key" "$quoted" >> "$file"
+    fi
+}
+
+wait_for_health() {
+    local attempts="${1:-60}"
+    local delay="${2:-1}"
+    local attempt=""
+    for ((attempt=1; attempt<=attempts; attempt++)); do
+        if curl -fsS "http://localhost:$THINCLAW_PORT/api/health" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep "$delay"
+    done
+    return 1
+}
+
+service_active() {
+    systemctl is-active --quiet "$1" >/dev/null 2>&1 && echo true || echo false
+}
+
+service_enabled() {
+    systemctl is-enabled --quiet "$1" >/dev/null 2>&1 && echo true || echo false
+}
+
+ufw_active() {
+    command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active' && echo true || echo false
+}
+
+tailscale_running() {
+    command -v tailscale >/dev/null 2>&1 && tailscale status --json 2>/dev/null | grep -q '"BackendState"[[:space:]]*:[[:space:]]*"Running"' && echo true || echo false
+}
+
+capture_initial_host_state() {
+    command -v docker >/dev/null 2>&1 && DOCKER_WAS_INSTALLED=true || DOCKER_WAS_INSTALLED=false
+    DOCKER_WAS_ACTIVE="$(service_active docker)"
+    DOCKER_WAS_ENABLED="$(service_enabled docker)"
+    FAIL2BAN_WAS_ACTIVE="$(service_active fail2ban)"
+    FAIL2BAN_WAS_ENABLED="$(service_enabled fail2ban)"
+    UFW_WAS_ACTIVE="$(ufw_active)"
+    command -v tailscale >/dev/null 2>&1 && TAILSCALE_WAS_INSTALLED=true || TAILSCALE_WAS_INSTALLED=false
+    TAILSCALE_WAS_RUNNING="$(tailscale_running)"
+}
+
+package_installed() {
+    local package="$1"
+    case "$PKG_MANAGER" in
+        apt)
+            dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -q '^ii'
+            ;;
+        yum|dnf)
+            rpm -q "$package" >/dev/null 2>&1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+record_package_installed() {
+    local package="$1"
+    local item=""
+    for item in "${PACKAGES_INSTALLED_BY_SETUP[@]}"; do
+        if [[ "$item" == "$package" ]]; then
+            return 0
+        fi
+    done
+    PACKAGES_INSTALLED_BY_SETUP+=("$package")
+}
+
+install_packages() {
+    local package=""
+    local -a newly_requested=()
+    for package in "$@"; do
+        if ! package_installed "$package"; then
+            newly_requested+=("$package")
+        fi
+    done
+
+    case "$PKG_MANAGER" in
+        apt)
+            apt-get install -y -qq "$@"
+            ;;
+        yum|dnf)
+            "$PKG_MANAGER" install -y "$@"
+            ;;
+        *)
+            echo "ERROR: unsupported package manager $PKG_MANAGER" >&2
+            exit 1
+            ;;
+    esac
+
+    for package in "${newly_requested[@]}"; do
+        if package_installed "$package"; then
+            record_package_installed "$package"
+        fi
+    done
+}
+
+rollback_installed_packages() {
+    if [[ "${#PACKAGES_INSTALLED_BY_SETUP[@]}" -eq 0 ]]; then
+        return 0
+    fi
+    if [[ "$PACKAGE_ROLLBACK" != "true" ]]; then
+        echo "Package rollback disabled; leaving installed packages: ${PACKAGES_INSTALLED_BY_SETUP[*]}" >&2
+        return 0
+    fi
+
+    echo "Removing packages installed by failed setup: ${PACKAGES_INSTALLED_BY_SETUP[*]}" >&2
+    case "$PKG_MANAGER" in
+        apt)
+            apt-get purge -y -qq "${PACKAGES_INSTALLED_BY_SETUP[@]}" >/dev/null 2>&1 || true
+            apt-get autoremove -y -qq >/dev/null 2>&1 || true
+            ;;
+        yum|dnf)
+            "$PKG_MANAGER" remove -y "${PACKAGES_INSTALLED_BY_SETUP[@]}" >/dev/null 2>&1 || true
+            ;;
+    esac
+}
+
+restore_service_state() {
+    local service="$1"
+    local was_active="$2"
+    local was_enabled="$3"
+    local existed_before="$4"
+    if [[ "$existed_before" != "true" ]] && ! systemctl status "$service" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [[ "$was_enabled" == "true" ]]; then
+        systemctl enable "$service" >/dev/null 2>&1 || true
+    else
+        systemctl disable "$service" >/dev/null 2>&1 || true
+    fi
+
+    if [[ "$was_active" == "true" ]]; then
+        systemctl restart "$service" >/dev/null 2>&1 || systemctl start "$service" >/dev/null 2>&1 || true
+    else
+        systemctl stop "$service" >/dev/null 2>&1 || true
+    fi
+}
+
+restore_ufw_state() {
+    if ! command -v ufw >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ "$UFW_WAS_ACTIVE" == "true" ]]; then
+        echo "y" | ufw enable >/dev/null 2>&1 || true
+    else
+        ufw disable >/dev/null 2>&1 || true
+    fi
+}
+
+rollback_tailscale_state() {
+    if [[ "$TAILSCALE_TOUCHED" != "true" ]] || ! command -v tailscale >/dev/null 2>&1; then
+        return 0
+    fi
+    if [[ "$TAILSCALE_WAS_RUNNING" != "true" ]]; then
+        tailscale down >/dev/null 2>&1 || true
+    else
+        echo "Tailscale was already running before setup; leaving it up after rollback." >&2
+    fi
+}
+
+configure_firewall() {
+    echo ""
+    echo "==> Configuring UFW Firewall..."
+
+    backup_path /etc/ufw
+
+    if ! command -v ufw &> /dev/null; then
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            install_packages ufw
+        elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
+            install_packages epel-release 2>/dev/null || true
+            install_packages ufw 2>/dev/null || true
+        fi
+    fi
+
+    if command -v ufw &> /dev/null; then
+        if [[ "${THINCLAW_FIREWALL_STRICT:-false}" == "true" ]]; then
+            ufw default deny incoming
+            ufw default allow outgoing
+        fi
+        ufw allow ssh comment "SSH access"
+        ufw allow "$THINCLAW_PORT/tcp" comment "ThinClaw Gateway"
+
+        if [[ -n "$TAILSCALE_KEY" ]]; then
+            ufw allow in on tailscale0 comment "Tailscale VPN"
+        fi
+
+        echo "y" | ufw enable
+        echo "    UFW configured:"
+        ufw status numbered 2>/dev/null || ufw status
+    else
+        echo "    WARNING: UFW could not be installed. Configure your firewall manually."
+        echo "    Required ports: SSH (22), ThinClaw ($THINCLAW_PORT/tcp)"
+    fi
+}
+
+install_fail2ban() {
+    echo ""
+    echo "==> Installing Fail2ban..."
+
+    if ! command -v fail2ban-client &> /dev/null; then
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            install_packages fail2ban
+        elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
+            install_packages epel-release 2>/dev/null || true
+            install_packages fail2ban
+        fi
+    fi
+
+    if command -v fail2ban-client &> /dev/null; then
+        backup_path /etc/fail2ban/jail.local
+        cat > /etc/fail2ban/jail.local <<'FAIL2BAN_CONF'
+[DEFAULT]
+bantime  = 3600
+findtime = 600
+maxretry = 5
+
+[sshd]
+enabled = true
+port    = ssh
+filter  = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+FAIL2BAN_CONF
+
+        if [ ! -f /var/log/auth.log ]; then
+            sed -i 's|logpath = /var/log/auth.log|backend = systemd|' /etc/fail2ban/jail.local
+        fi
+
+        systemctl enable fail2ban
+        systemctl restart fail2ban
+        echo "    Fail2ban installed and configured."
+    else
+        echo "    WARNING: Fail2ban could not be installed."
+    fi
+}
+
+install_tailscale_if_requested() {
+    if [[ -z "$TAILSCALE_KEY" ]]; then
+        echo ""
+        echo "==> Tailscale: Skipped (no --tailscale flag provided)"
+        return 0
+    fi
+
+    echo ""
+    echo "==> Installing Tailscale VPN..."
+    if ! command -v tailscale &> /dev/null; then
+        backup_path /etc/apt/sources.list.d/tailscale.list
+        backup_path /usr/share/keyrings/tailscale-archive-keyring.gpg
+        backup_path /etc/yum.repos.d/tailscale.repo
+        curl -fsSL https://tailscale.com/install.sh | sh
+        if [[ "$TAILSCALE_WAS_INSTALLED" != "true" ]] && package_installed tailscale; then
+            record_package_installed tailscale
+        fi
+    fi
+
+    if command -v tailscale &> /dev/null; then
+        TAILSCALE_TOUCHED=true
+        tailscale up --authkey="$TAILSCALE_KEY" --accept-routes --accept-dns=false
+        TS_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
+        echo "    Tailscale installed and connected."
+        echo "    Tailscale IPv4: $TS_IP"
+        if command -v ufw &> /dev/null; then
+            ufw delete allow "$THINCLAW_PORT/tcp" 2>/dev/null || true
+            ufw allow in on tailscale0 to any port "$THINCLAW_PORT" proto tcp \
+                comment "ThinClaw via Tailscale only"
+            echo "    UFW updated: port $THINCLAW_PORT only accessible via Tailscale."
+        fi
+    else
+        echo "    ERROR: Tailscale installation failed."
+        exit 1
+    fi
+}
+
+resolve_native_binary() {
+    if [[ -n "$BINARY_PATH" && -x "$BINARY_PATH" ]]; then
+        echo "$BINARY_PATH"
+        return 0
+    fi
+    if [[ -x "$DEPLOY_DIR/../target/release/thinclaw" ]]; then
+        echo "$DEPLOY_DIR/../target/release/thinclaw"
+        return 0
+    fi
+    if [[ -x "$DEPLOY_DIR/../thinclaw" ]]; then
+        echo "$DEPLOY_DIR/../thinclaw"
+        return 0
+    fi
+    if command -v thinclaw >/dev/null 2>&1; then
+        command -v thinclaw
+        return 0
+    fi
+    return 1
+}
+
+install_native_pi() {
+    echo ""
+    echo "==> Native Raspberry Pi OS Lite install"
+
+    if [ "$PKG_MANAGER" != "apt" ]; then
+        echo "ERROR: Native Pi OS Lite mode expects apt."
+        exit 1
+    fi
+
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y -qq
+    install_packages ca-certificates curl openssl
+
+    local source_binary=""
+    if ! source_binary="$(resolve_native_binary)"; then
+        echo "ERROR: Could not find a ThinClaw binary to install."
+        echo "Provide one with --binary /path/to/thinclaw, or install the aarch64-unknown-linux-gnu release artifact first."
+        exit 1
+    fi
+
+    backup_path /usr/local/bin/thinclaw
+    if [[ "$(readlink -f "$source_binary" 2>/dev/null || echo "$source_binary")" != "/usr/local/bin/thinclaw" ]]; then
+        install -m 0755 "$source_binary" /usr/local/bin/thinclaw
+    else
+        chmod 0755 /usr/local/bin/thinclaw
+    fi
+
+    if ! id thinclaw >/dev/null 2>&1; then
+        useradd --system --create-home --home-dir /var/lib/thinclaw --shell /usr/sbin/nologin thinclaw
+        THINCLAW_USER_CREATED=true
+    fi
+
+    install -d -m 0750 -o thinclaw -g thinclaw /var/lib/thinclaw/.thinclaw
+    install -d -m 0750 -o thinclaw -g thinclaw /var/lib/thinclaw/.thinclaw/logs
+
+    local master_key=""
+    master_key="$(generate_hex_32)"
+    local quoted_token=""
+    local quoted_port=""
+    local quoted_master_key=""
+    quoted_token="$(dotenv_quote "$TOKEN")"
+    quoted_port="$(dotenv_quote "$THINCLAW_PORT")"
+    quoted_master_key="$(dotenv_quote "$master_key")"
+    backup_path /var/lib/thinclaw/.thinclaw/.env
+    cat > /var/lib/thinclaw/.thinclaw/.env <<ENV
+ONBOARD_COMPLETED=true
+THINCLAW_HOME=/var/lib/thinclaw/.thinclaw
+THINCLAW_RUNTIME_PROFILE=pi-os-lite-64
+THINCLAW_HEADLESS=true
+DATABASE_BACKEND=libsql
+LIBSQL_PATH=/var/lib/thinclaw/.thinclaw/thinclaw.db
+GATEWAY_ENABLED=true
+GATEWAY_HOST=0.0.0.0
+GATEWAY_PORT=${quoted_port}
+GATEWAY_AUTH_TOKEN=${quoted_token}
+THINCLAW_ALLOW_ENV_MASTER_KEY=1
+SECRETS_MASTER_KEY=${quoted_master_key}
+LLM_BACKEND=openai_compatible
+LLM_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_API_KEY=CHANGE_ME
+EMBEDDING_ENABLED=false
+CLI_ENABLED=false
+HEARTBEAT_ENABLED=false
+SANDBOX_ENABLED=false
+ROUTINES_ENABLED=true
+BROWSER_DOCKER=auto
+CHROMIUM_IMAGE=chromedp/headless-shell:latest
+SCREEN_CAPTURE_ENABLED=false
+CAMERA_CAPTURE_ENABLED=false
+TALK_MODE_ENABLED=false
+LOCATION_ENABLED=false
+LOCATION_ALLOW_IP_FALLBACK=false
+DESKTOP_AUTONOMY_ENABLED=false
+ENV
+    chown thinclaw:thinclaw /var/lib/thinclaw/.thinclaw/.env
+    chmod 0600 /var/lib/thinclaw/.thinclaw/.env
+
+    backup_path /etc/systemd/system/thinclaw.service
+    systemctl is-active --quiet thinclaw.service && THINCLAW_SERVICE_WAS_ACTIVE=true || true
+    cat > /etc/systemd/system/thinclaw.service <<'SYSTEMD_UNIT'
+[Unit]
+Description=ThinClaw AI Agent
+Documentation=https://github.com/RNT56/ThinClaw
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=thinclaw
+Group=thinclaw
+WorkingDirectory=/var/lib/thinclaw
+Environment=THINCLAW_HOME=/var/lib/thinclaw/.thinclaw
+Environment=HOME=/var/lib/thinclaw
+ExecStart=/usr/local/bin/thinclaw run --no-onboard
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMD_UNIT
+
+    systemctl daemon-reload
+    systemctl enable thinclaw.service
+    systemctl restart thinclaw.service || true
+
+    configure_firewall
+    install_fail2ban
+    install_tailscale_if_requested
+
+    echo ""
+    echo "==> Verifying native ThinClaw health..."
+    if wait_for_health 90 1; then
+        echo "    Health endpoint responded on http://localhost:$THINCLAW_PORT/api/health"
+    else
+        echo "ERROR: Native ThinClaw service did not respond on http://localhost:$THINCLAW_PORT/api/health"
+        journalctl -u thinclaw -n 120 --no-pager || true
+        exit 1
+    fi
+
+    echo ""
+    echo "============================================================"
+    echo "  ThinClaw Native Pi OS Lite Setup Complete!"
+    echo "============================================================"
+    echo "  Binary:       /usr/local/bin/thinclaw"
+    echo "  Config:       /var/lib/thinclaw/.thinclaw/.env"
+    echo "  Service:      systemctl status thinclaw"
+    echo "  Gateway URL:  http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo '<pi-ip>'):$THINCLAW_PORT"
+    echo "  Token:        $TOKEN"
+    echo ""
+    echo "  Next:"
+    echo "    1. Edit /var/lib/thinclaw/.thinclaw/.env and replace OPENROUTER_API_KEY=CHANGE_ME or configure another LLM."
+    echo "    2. Run: sudo systemctl restart thinclaw"
+    echo "    3. Verify: curl http://localhost:$THINCLAW_PORT/api/health"
+    echo "============================================================"
+    SETUP_COMPLETE=true
+}
+
+capture_initial_host_state
+
+if [[ "$MODE" == "auto" ]]; then
+    if is_pi_os_lite_64; then
+        MODE="native"
+    else
+        MODE="docker"
+    fi
+    echo "==> Auto-selected install mode: $MODE"
+fi
+
+if [[ "$MODE" == "native" ]]; then
+    install_native_pi
+    exit 0
+fi
+
 # ============================================================================
 # 1. INSTALL DOCKER
 # ============================================================================
@@ -107,9 +718,11 @@ if ! command -v docker &> /dev/null; then
     if [ "$PKG_MANAGER" = "apt" ]; then
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -y -qq
-        apt-get install -y -qq ca-certificates curl gnupg lsb-release
+        install_packages ca-certificates curl gnupg lsb-release
 
         # Add Docker's official GPG key
+        backup_path /etc/apt/keyrings/docker.asc
+        backup_path /etc/apt/sources.list.d/docker.list
         install -m 0755 -d /etc/apt/keyrings
         if [ -f /etc/apt/keyrings/docker.asc ]; then
             rm /etc/apt/keyrings/docker.asc
@@ -126,13 +739,14 @@ if ! command -v docker &> /dev/null; then
           tee /etc/apt/sources.list.d/docker.list > /dev/null
 
         apt-get update -y -qq
-        apt-get install -y -qq docker-ce docker-ce-cli containerd.io \
+        install_packages docker-ce docker-ce-cli containerd.io \
             docker-buildx-plugin docker-compose-plugin
 
     elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
-        $PKG_MANAGER install -y yum-utils
+        install_packages yum-utils
+        backup_path /etc/yum.repos.d/docker-ce.repo
         yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-        $PKG_MANAGER install -y docker-ce docker-ce-cli containerd.io \
+        install_packages docker-ce docker-ce-cli containerd.io \
             docker-buildx-plugin docker-compose-plugin
     fi
 
@@ -159,23 +773,25 @@ fi
 echo ""
 echo "==> [2/6] Configuring UFW Firewall..."
 
+backup_path /etc/ufw
+
 if ! command -v ufw &> /dev/null; then
     if [ "$PKG_MANAGER" = "apt" ]; then
-        apt-get install -y -qq ufw
+        install_packages ufw
     elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
         # UFW isn't native on RHEL — install EPEL first
-        $PKG_MANAGER install -y epel-release 2>/dev/null || true
-        $PKG_MANAGER install -y ufw 2>/dev/null || true
+        install_packages epel-release 2>/dev/null || true
+        install_packages ufw 2>/dev/null || true
     fi
 fi
 
 if command -v ufw &> /dev/null; then
-    # Reset to clean state (non-interactive)
-    echo "y" | ufw reset 2>/dev/null || true
-
-    # Default policies: deny incoming, allow outgoing
-    ufw default deny incoming
-    ufw default allow outgoing
+    # Keep existing firewall rules intact. Operators can opt into strict
+    # defaults with THINCLAW_FIREWALL_STRICT=true.
+    if [[ "${THINCLAW_FIREWALL_STRICT:-false}" == "true" ]]; then
+        ufw default deny incoming
+        ufw default allow outgoing
+    fi
 
     # Allow SSH (critical — don't lock yourself out!)
     ufw allow ssh comment "SSH access"
@@ -207,15 +823,16 @@ echo "==> [3/6] Installing Fail2ban..."
 
 if ! command -v fail2ban-client &> /dev/null; then
     if [ "$PKG_MANAGER" = "apt" ]; then
-        apt-get install -y -qq fail2ban
+        install_packages fail2ban
     elif [ "$PKG_MANAGER" = "yum" ] || [ "$PKG_MANAGER" = "dnf" ]; then
-        $PKG_MANAGER install -y epel-release 2>/dev/null || true
-        $PKG_MANAGER install -y fail2ban
+        install_packages epel-release 2>/dev/null || true
+        install_packages fail2ban
     fi
 fi
 
 if command -v fail2ban-client &> /dev/null; then
     # Create local config (overrides without touching defaults)
+    backup_path /etc/fail2ban/jail.local
     cat > /etc/fail2ban/jail.local <<'FAIL2BAN_CONF'
 [DEFAULT]
 # Ban for 1 hour after 5 failed attempts within 10 minutes
@@ -254,11 +871,18 @@ if [[ -n "$TAILSCALE_KEY" ]]; then
 
     if ! command -v tailscale &> /dev/null; then
         # Official Tailscale install script
+        backup_path /etc/apt/sources.list.d/tailscale.list
+        backup_path /usr/share/keyrings/tailscale-archive-keyring.gpg
+        backup_path /etc/yum.repos.d/tailscale.repo
         curl -fsSL https://tailscale.com/install.sh | sh
+        if [[ "$TAILSCALE_WAS_INSTALLED" != "true" ]] && package_installed tailscale; then
+            record_package_installed tailscale
+        fi
     fi
 
     if command -v tailscale &> /dev/null; then
         # Authenticate and connect
+        TAILSCALE_TOUCHED=true
         tailscale up --authkey="$TAILSCALE_KEY" --accept-routes --accept-dns=false
 
         # Get Tailscale IP
@@ -281,6 +905,7 @@ if [[ -n "$TAILSCALE_KEY" ]]; then
         fi
     else
         echo "    ERROR: Tailscale installation failed."
+        exit 1
     fi
 else
     echo ""
@@ -298,15 +923,20 @@ cd "$DEPLOY_DIR"
 
 # Backup existing config
 if [[ -f .env ]]; then
+    backup_path "$DEPLOY_DIR/.env"
     cp .env ".env.bak.$(date +%Y%m%d%H%M%S)"
     echo "    Backed up existing .env"
+else
+    backup_path "$DEPLOY_DIR/.env"
 fi
 
 # Create .env from template
-cp .env.template .env
+cp env.example .env
 
 # Inject the gateway auth token
-sed -i "s/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=${TOKEN}/" .env
+set_env_value .env GATEWAY_AUTH_TOKEN "$TOKEN"
+set_env_value .env GATEWAY_PORT "$THINCLAW_PORT"
+set_env_value .env THINCLAW_IMAGE "$THINCLAW_IMAGE"
 
 echo "    .env configured with gateway token."
 
@@ -315,7 +945,9 @@ echo ""
 echo "==> Starting ThinClaw Docker Compose stack..."
 
 docker compose down 2>/dev/null || true
-docker compose up -d --build
+docker compose pull thinclaw 2>/dev/null || true
+docker compose up -d
+DOCKER_COMPOSE_TOUCHED=true
 
 echo "    Docker Compose stack started."
 
@@ -327,6 +959,8 @@ if [ "$ENABLE_SYSTEMD" = true ]; then
     echo ""
     echo "==> [6/6] Creating systemd service..."
 
+    backup_path /etc/systemd/system/thinclaw.service
+    systemctl is-active --quiet thinclaw.service && THINCLAW_SERVICE_WAS_ACTIVE=true || true
     cat > /etc/systemd/system/thinclaw.service <<SYSTEMD_UNIT
 [Unit]
 Description=ThinClaw AI Agent (Docker Compose)
@@ -383,6 +1017,15 @@ sleep 5
 
 CONTAINER_STATUS=$(docker ps --filter "name=thinclaw-remote" --format "{{.Status}}" 2>/dev/null || echo "unknown")
 echo "  Container status: $CONTAINER_STATUS"
+if wait_for_health 60 1; then
+    echo "  Health endpoint:  http://localhost:$THINCLAW_PORT/api/health OK"
+else
+    echo "  ERROR: Health endpoint did not respond on http://localhost:$THINCLAW_PORT/api/health"
+    echo "         Check: docker compose ps && docker compose logs thinclaw"
+    docker compose ps || true
+    docker compose logs thinclaw || true
+    exit 1
+fi
 
 # Determine connection URL
 if [[ -n "$TAILSCALE_KEY" ]] && command -v tailscale &> /dev/null; then
@@ -414,4 +1057,5 @@ if [ "$ENABLE_SYSTEMD" = true ]; then
     echo "    journalctl -u thinclaw -f"
     echo ""
 fi
+SETUP_COMPLETE=true
 echo "============================================================"

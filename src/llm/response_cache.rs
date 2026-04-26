@@ -26,8 +26,8 @@ use tokio::sync::Mutex;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamSupport,
+    TokenCaptureSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// Configuration for the response cache.
@@ -114,6 +114,12 @@ fn cache_key(model: &str, request: &CompletionRequest) -> String {
     // serde_json produces stable output for the same input structure.
     if let Ok(json) = serde_json::to_string(&request.messages) {
         hasher.update(json.as_bytes());
+    }
+    if !request.context_documents.is_empty() {
+        hasher.update(b"|docs:");
+        if let Ok(json) = serde_json::to_string(&request.context_documents) {
+            hasher.update(json.as_bytes());
+        }
     }
 
     // Include response-affecting parameters so different temperatures,
@@ -280,6 +286,25 @@ impl LlmProvider for CachedProvider {
     fn supports_streaming(&self) -> bool {
         self.inner.supports_streaming()
     }
+
+    fn stream_support(&self) -> StreamSupport {
+        self.inner.stream_support()
+    }
+
+    fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
+        self.inner.stream_support_for_model(requested_model)
+    }
+
+    fn token_capture_support(&self) -> TokenCaptureSupport {
+        self.inner.token_capture_support()
+    }
+
+    fn token_capture_support_for_model(
+        &self,
+        requested_model: Option<&str>,
+    ) -> TokenCaptureSupport {
+        self.inner.token_capture_support_for_model(requested_model)
+    }
 }
 
 #[cfg(test)]
@@ -291,11 +316,13 @@ mod tests {
     fn simple_request() -> CompletionRequest {
         CompletionRequest {
             messages: vec![ChatMessage::user("hello")],
+            context_documents: Vec::new(),
             model: None,
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
             thinking: Default::default(),
+            stream_policy: Default::default(),
             metadata: Default::default(),
         }
     }
@@ -303,11 +330,13 @@ mod tests {
     fn different_request() -> CompletionRequest {
         CompletionRequest {
             messages: vec![ChatMessage::user("goodbye")],
+            context_documents: Vec::new(),
             model: None,
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
             thinking: Default::default(),
+            stream_policy: Default::default(),
             metadata: Default::default(),
         }
     }
@@ -351,6 +380,15 @@ mod tests {
         req_a.max_tokens = Some(100);
         let mut req_b = simple_request();
         req_b.max_tokens = Some(500);
+        assert_ne!(cache_key("m", &req_a), cache_key("m", &req_b));
+    }
+
+    #[test]
+    fn cache_key_varies_by_context_documents() {
+        let mut req_a = simple_request();
+        req_a.context_documents = vec!["ephemeral context A".to_string()];
+        let mut req_b = simple_request();
+        req_b.context_documents = vec!["ephemeral context B".to_string()];
         assert_ne!(cache_key("m", &req_a), cache_key("m", &req_b));
     }
 
@@ -431,11 +469,13 @@ mod tests {
         // Add a third: should evict the oldest
         let third = CompletionRequest {
             messages: vec![ChatMessage::user("third")],
+            context_documents: Vec::new(),
             model: None,
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
             thinking: Default::default(),
+            stream_policy: Default::default(),
             metadata: Default::default(),
         };
         cached.complete(third).await.unwrap();
@@ -450,12 +490,14 @@ mod tests {
 
         let req = ToolCompletionRequest {
             messages: vec![ChatMessage::user("use tool")],
+            context_documents: Vec::new(),
             tools: vec![],
             model: None,
             max_tokens: None,
             temperature: None,
             tool_choice: None,
             thinking: Default::default(),
+            stream_policy: Default::default(),
             metadata: Default::default(),
         };
 

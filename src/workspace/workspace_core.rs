@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 #[cfg(feature = "postgres")]
 use deadpool_postgres::Pool;
 use uuid::Uuid;
 
-use super::WorkspaceStorage;
+use super::WorkspaceBackend;
 use super::chunker::{ChunkConfig, chunk};
 use super::document::{MemoryDocument, WorkspaceEntry, paths};
 use super::embeddings::EmbeddingProvider;
@@ -137,6 +137,38 @@ fn extract_markdown_fields(content: &str) -> Vec<String> {
         }
     }
     fields
+}
+
+fn upsert_timezone_line(content: &str, timezone: Option<&str>) -> String {
+    let replacement = match timezone {
+        Some(value) => format!("- **Timezone:** {}", value),
+        None => "- **Timezone:**".to_string(),
+    };
+    let mut replaced = false;
+    let mut lines = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("- **Timezone:**") || trimmed.starts_with("- **Timezone**:") {
+            lines.push(replacement.clone());
+            replaced = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    if !replaced && timezone.is_some() {
+        if !lines.is_empty() && !lines.last().is_some_and(|line| line.is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(replacement);
+    }
+
+    let mut updated = lines.join("\n");
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated
 }
 
 fn summarize_profile_json(content: &str) -> Option<String> {
@@ -338,14 +370,85 @@ const HEARTBEAT_SEED: &str = "\
 - [ ] Review the daily logs below for unresolved tasks, open questions, or recently finished goals — if you spot potential next steps or follow-up work, proactively message the user with a brief suggestion
 - [ ] If daily logs contain important decisions, lessons, or facts not yet in MEMORY.md, consolidate them into MEMORY.md now using memory_write (target: 'memory')";
 
-fn persona_seed_content(seed: &str) -> &'static str {
-    match seed.trim().to_ascii_lowercase().as_str() {
-        "professional" => include_str!("../../assets/persona_seeds/professional.md"),
-        "creative_partner" => include_str!("../../assets/persona_seeds/creative_partner.md"),
-        "research_assistant" => include_str!("../../assets/persona_seeds/research_assistant.md"),
-        "mentor" => include_str!("../../assets/persona_seeds/mentor.md"),
-        "minimal" => include_str!("../../assets/persona_seeds/minimal.md"),
-        _ => include_str!("../../assets/persona_seeds/default.md"),
+#[cfg(test)]
+fn personality_pack_content(pack: &str) -> String {
+    crate::agent::personality::personality_pack_seed_markdown(pack)
+}
+
+fn bootstrap_template(name: &str, has_custom_name: bool, full_soul_bootstrap: bool) -> String {
+    if full_soul_bootstrap {
+        if has_custom_name {
+            format!(
+                "# BOOTSTRAP.md - Hello, World\n\n\
+                 *You just woke up. Time to figure out who you are.*\n\n\
+                 There is no memory yet. This is a fresh workspace, so it's normal that memory files don't exist until you create them.\n\n\
+                 ## What You Already Know\n\n\
+                 Your name is **{name}** — this was chosen during setup. Don't ask for it again.\n\n\
+                 ## The Conversation\n\n\
+                 Don't interrogate. Don't be robotic. Just... talk.\n\n\
+                 Start with something like:\n\
+                 > \"Hey! I'm {name}. I just came online — tell me about yourself so I can be genuinely useful.\"\n\n\
+                 Then figure out together:\n\
+                 1. **Your nature** — What kind of creature are you?\n\
+                 2. **Your presentation** — Formal? Casual? Snarky? Warm? What feels right?\n\
+                 3. **Your emoji** — Everyone needs a signature.\n\n\
+                 Update these files with what you learn:\n\
+                 - `IDENTITY.md` — your creature, presentation, emoji (Name is already set; use `memory_write` with target `IDENTITY.md`, append false)\n\
+                 - `USER.md` — their name, how to address them, timezone, notes (use `prompt_manage`)\n\n\
+                 Then read the canonical `SOUL.md` in THINCLAW_HOME. It's included in this prompt too.\n\
+                 Co-author it with your human:\n\
+                 - Which core truths should stay exactly as they are?\n\
+                 - What should change in the vibe or default behaviors?\n\
+                 - Any sharper boundaries or preferences?\n\n\
+                 Then rewrite `SOUL.md` with `prompt_manage` (append false). Build on the seed values instead of discarding them.\n\n\
+                 If this workspace needs different behavior, ask first before creating `SOUL.local.md`. The default is to inherit the global soul.\n\n\
+                 ## When You're Done\n\n\
+                 Delete `BOOTSTRAP.md` with `memory_delete` so you don't re-enter bootstrap mode next session.\n"
+            )
+        } else {
+            "# BOOTSTRAP.md - Hello, World\n\n\
+             *You just woke up. Time to figure out who you are.*\n\n\
+             There is no memory yet. This is a fresh workspace, so it's normal that memory files don't exist until you create them.\n\n\
+             ## The Conversation\n\n\
+             Don't interrogate. Don't be robotic. Just... talk.\n\n\
+             Start with something like:\n\
+             > \"Hey. I just came online. Who am I? Who are you?\"\n\n\
+             Then figure out together:\n\
+             1. **Your name** — What should they call you?\n\
+             2. **Your nature** — What kind of creature are you?\n\
+             3. **Your presentation** — Formal? Casual? Snarky? Warm? What feels right?\n\
+             4. **Your emoji** — Everyone needs a signature.\n\n\
+             Update these files with what you learn:\n\
+             - `IDENTITY.md` — your name, creature, presentation, emoji (use `memory_write` with target `IDENTITY.md`, append false)\n\
+             - `USER.md` — their name, how to address them, timezone, notes (use `prompt_manage`)\n\n\
+             Then read the canonical `SOUL.md` in THINCLAW_HOME. It's included in this prompt too.\n\
+             Co-author it with your human, then rewrite it with `prompt_manage` (append false) while keeping the durable character spine intact.\n\n\
+             If this workspace needs different behavior, ask first before creating `SOUL.local.md`. The default is to inherit the global soul.\n\n\
+             ## When You're Done\n\n\
+             Delete `BOOTSTRAP.md` with `memory_delete` so you don't re-enter bootstrap mode next session.\n"
+                .to_string()
+        }
+    } else {
+        format!(
+            "# BOOTSTRAP.md - Workspace Alignment\n\n\
+             *This workspace already has a global soul. Your job is to align this workspace with it.*\n\n\
+             Read the canonical `SOUL.md`, `IDENTITY.md`, `USER.md`, and `AGENTS.md`.\n\
+             The global soul already exists, so do not re-open the foundational \"who are you\" conversation.\n\n\
+             ## What To Do\n\n\
+             - Confirm the user-facing details in `IDENTITY.md` and `USER.md`\n\
+             - Respect the canonical `SOUL.md` as the default behavior across projects\n\
+             - Only create `SOUL.local.md` if the user explicitly wants workspace-specific tone adjustments or stricter boundaries\n\
+             - Prefer `AGENTS.md` and agent-specific system prompts for specialized workflow rules\n\n\
+             ## If A Local Overlay Is Needed\n\n\
+             Create `SOUL.local.md` with:\n\
+             - `## Workspace Context`\n\
+             - `## Tone Adjustments`\n\
+             - `## Boundary Tightening`\n\n\
+             Keep it additive only. Do not relax the global soul's privacy or external-action boundaries.\n\n\
+             ## When You're Done\n\n\
+             Delete `BOOTSTRAP.md` with `memory_delete`.\n\
+             Agent name from setup, if present: {name}\n"
+        )
     }
 }
 
@@ -361,7 +464,7 @@ pub struct Workspace {
     /// Optional agent ID for multi-agent isolation.
     agent_id: Option<Uuid>,
     /// Database storage backend.
-    storage: WorkspaceStorage,
+    storage: WorkspaceBackend,
     /// Embedding provider for semantic search.
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
 }
@@ -370,10 +473,16 @@ impl Workspace {
     /// Create a new workspace backed by a PostgreSQL connection pool.
     #[cfg(feature = "postgres")]
     pub fn new(user_id: impl Into<String>, pool: Pool) -> Self {
+        let store: WorkspaceBackend = Arc::new(Repository::new(pool));
+        Self::new_with_store(user_id, store)
+    }
+
+    /// Create a new workspace backed by any workspace store implementation.
+    pub fn new_with_store(user_id: impl Into<String>, store: WorkspaceBackend) -> Self {
         Self {
             user_id: user_id.into(),
             agent_id: None,
-            storage: WorkspaceStorage::Repo(Repository::new(pool)),
+            storage: store,
             embeddings: None,
         }
     }
@@ -382,12 +491,7 @@ impl Workspace {
     ///
     /// Use this for libSQL or any other backend that implements the Database trait.
     pub fn new_with_db(user_id: impl Into<String>, db: Arc<dyn crate::db::Database>) -> Self {
-        Self {
-            user_id: user_id.into(),
-            agent_id: None,
-            storage: WorkspaceStorage::Db(db),
-            embeddings: None,
-        }
+        Self::new_with_store(user_id, db)
     }
 
     /// Create a workspace with a specific agent ID.
@@ -410,6 +514,21 @@ impl Workspace {
     /// Get the agent ID.
     pub fn agent_id(&self) -> Option<Uuid> {
         self.agent_id
+    }
+
+    /// Resolve the workspace's effective timezone.
+    pub fn effective_timezone(&self) -> chrono_tz::Tz {
+        crate::timezone::resolve_effective_timezone(Some(&self.user_id), None)
+    }
+
+    /// Get today's local date for this workspace.
+    pub fn local_today(&self) -> NaiveDate {
+        crate::timezone::today_for_user(Some(&self.user_id), None)
+    }
+
+    /// Get the current local time for this workspace.
+    pub fn local_now(&self) -> chrono::DateTime<chrono_tz::Tz> {
+        crate::timezone::now_for_user(Some(&self.user_id), None)
     }
 
     /// Clone this workspace's backend/embeddings while changing the scope.
@@ -622,7 +741,7 @@ impl Workspace {
     ///
     /// Daily logs are append-only and keyed by date.
     pub async fn today_log(&self) -> Result<MemoryDocument, WorkspaceError> {
-        let today = Utc::now().date_naive();
+        let today = self.local_today();
         self.daily_log(today).await
     }
 
@@ -678,9 +797,10 @@ impl Workspace {
     ///
     /// Daily logs are raw, append-only notes for the current day.
     pub async fn append_daily_log(&self, entry: &str) -> Result<(), WorkspaceError> {
-        let today = Utc::now().date_naive();
+        let now = self.local_now();
+        let today = now.date_naive();
         let path = format!("daily/{}.md", today.format("%Y-%m-%d"));
-        let timestamp = Utc::now().format("%H:%M:%S");
+        let timestamp = now.format("%H:%M:%S");
         let timestamped_entry = format!("[{}] {}", timestamp, entry);
         self.append(&path, &timestamped_entry).await
     }
@@ -689,7 +809,7 @@ impl Workspace {
 
     /// Build the system prompt from identity files.
     ///
-    /// Loads AGENTS.md, SOUL.md, USER.md, IDENTITY.md, and (in non-group
+    /// Loads the canonical home soul, AGENTS.md, USER.md, IDENTITY.md, and (in non-group
     /// contexts) MEMORY.md to compose the agent's system prompt.
     ///
     /// Shorthand for `system_prompt_for_context(false)`.
@@ -700,7 +820,7 @@ impl Workspace {
     /// Build the system prompt, optionally excluding personal memory.
     ///
     /// Uses a lean, pi-mono-inspired format:
-    /// 1. Compact identity (~200-400 tokens from IDENTITY/SOUL/USER)
+    /// 1. Canonical home soul plus optional local overlay
     /// 2. Essential instructions (~200 tokens distilled from AGENTS.md)
     /// 3. Context manifest (~50-100 tokens listing available files)
     ///
@@ -726,29 +846,34 @@ impl Workspace {
         let redaction = PromptRedaction::new(channel, redact_pii);
 
         // ── Bootstrap mode: blank-slate first run ────────────────────────
-        // BOOTSTRAP.md gives the ritual instructions. We also inject SOUL.md
-        // and AGENTS.md so the LLM internalizes the agent's seed values and
-        // operational guidelines *before* rewriting them. Without this, the
-        // agent would replace SOUL.md without ever having read its content —
-        // the carefully crafted personality template would pass through its
-        // mind like nothing was there.
+        // BOOTSTRAP.md gives the ritual instructions. We also inject the
+        // canonical home SOUL.md and AGENTS.md so the agent internalizes the
+        // durable soul and operational guidelines before rewriting anything.
         if !is_group_chat
             && let Ok(doc) = self.read(paths::BOOTSTRAP).await
-            && !doc.content.is_empty()
+            && !crate::agent::heartbeat::is_effectively_empty(&doc.content)
         {
             let mut bootstrap_prompt = doc.content;
 
-            // Append SOUL.md so the agent absorbs the seed personality
-            if let Ok(soul) = self.read(paths::SOUL).await
-                && !soul.content.is_empty()
+            if let Ok(home_soul) = crate::identity::soul_store::read_home_soul()
+                && !home_soul.trim().is_empty()
             {
-                let soul_content = sanitize_prompt_context(paths::SOUL, &soul.content);
+                let soul_content = sanitize_prompt_context(paths::SOUL, &home_soul);
                 bootstrap_prompt.push_str("\n\n---\n\n");
+                bootstrap_prompt.push_str("## Your Canonical Soul\n\n");
+                bootstrap_prompt.push_str(&cap_chars(&soul_content, FILE_MAX_CHARS));
                 bootstrap_prompt.push_str(
-                    "## Your Starting Soul (read this carefully — these are your seed values)\n\n",
+                    "\n\n_Absorb these values. They're your durable foundation. When you rewrite SOUL.md, build on them — don't ignore them._",
                 );
-                bootstrap_prompt.push_str(&soul_content);
-                bootstrap_prompt.push_str("\n\n_Absorb these values. They're your starting point. When you rewrite SOUL.md, build on them — don't ignore them._");
+            }
+
+            if let Ok(local_soul) = self.read(paths::SOUL_LOCAL).await
+                && !local_soul.content.is_empty()
+            {
+                let local_content = sanitize_prompt_context(paths::SOUL_LOCAL, &local_soul.content);
+                bootstrap_prompt.push_str("\n\n---\n\n");
+                bootstrap_prompt.push_str("## This Workspace's Local Soul Overlay\n\n");
+                bootstrap_prompt.push_str(&cap_chars(&local_content, FILE_MAX_CHARS));
             }
 
             // Append AGENTS.md so the agent knows its workspace conventions
@@ -781,7 +906,26 @@ impl Workspace {
         // ── Normal mode: lean identity prompt ────────────────────────────
         let mut parts = Vec::new();
 
-        // 1. Compact identity (name, creature, vibe, core values, user info)
+        if let Ok(home_soul) = crate::identity::soul_store::read_home_soul()
+            && !home_soul.trim().is_empty()
+        {
+            let soul_content = sanitize_prompt_context(paths::SOUL, &home_soul);
+            let soul_block = crate::identity::soul::render_canonical_prompt_block(&soul_content);
+            parts.push(cap_chars(&soul_block, FILE_MAX_CHARS));
+        }
+
+        if let Ok(local_soul) = self.read(paths::SOUL_LOCAL).await
+            && !local_soul.content.is_empty()
+        {
+            let local_content = sanitize_prompt_context(paths::SOUL_LOCAL, &local_soul.content);
+            if let Ok(local_block) =
+                crate::identity::soul::render_local_prompt_block(&local_content)
+            {
+                parts.push(cap_chars(&local_block, FILE_MAX_CHARS / 2));
+            }
+        }
+
+        // 1. Compact identity (name, nature, presentation, user info)
         let identity = self.compact_identity().await?;
         if !identity.is_empty() {
             parts.push(format!("## Identity\n\n{}", identity));
@@ -882,9 +1026,8 @@ impl Workspace {
 
     /// Build a compressed identity block from workspace files.
     ///
-    /// Extracts key fields from IDENTITY.md and USER.md, and core
-    /// values from SOUL.md. Returns ~200-400 tokens instead of the
-    /// ~2,000-6,000 tokens the full files would cost.
+    /// Extracts key fields from IDENTITY.md and USER.md.
+    /// SOUL.md is injected separately as a dedicated prompt block.
     /// Full files remain accessible via `memory_read`.
     pub async fn compact_identity(&self) -> Result<String, WorkspaceError> {
         let mut lines = Vec::new();
@@ -903,60 +1046,6 @@ impl Workspace {
                     {
                         lines.push(t.to_string());
                     }
-                }
-            }
-        }
-
-        // SOUL.md → extract identity and core values
-        if let Ok(doc) = self.read(paths::SOUL).await {
-            let soul_content = sanitize_prompt_context(paths::SOUL, &doc.content);
-            let mut soul_lines: Vec<String> = Vec::new();
-
-            for line in soul_content.lines() {
-                let t = line.trim();
-                // Match "- **Key:** Value" pairs (same format as IDENTITY/USER)
-                if t.starts_with("- **") && t.contains(":**") {
-                    let after_colon = t.split_once(":**").map(|x| x.1).unwrap_or("").trim();
-                    if !after_colon.is_empty()
-                        && !after_colon.starts_with("_(")
-                        && after_colon != "_"
-                    {
-                        soul_lines.push(t.to_string());
-                    }
-                }
-                // Match "**Bold statement.** rest..." → extract "Bold statement"
-                else if t.starts_with("**") {
-                    let inner = t
-                        .trim_start_matches("**")
-                        .split(".**")
-                        .next()
-                        .or_else(|| t.trim_start_matches("**").split("**").next())
-                        .unwrap_or("")
-                        .trim();
-                    if inner.len() > 5 {
-                        soul_lines.push(inner.to_string());
-                    }
-                }
-                // Match ordinary bullet points "- Something meaningful"
-                else if t.starts_with("- ") && t.len() > 10 {
-                    let content = t.trim_start_matches("- ").trim();
-                    // Skip template/placeholder lines
-                    if !content.starts_with("_(") && !content.is_empty() {
-                        soul_lines.push(format!("- {}", content));
-                    }
-                }
-            }
-
-            // Keep up to 8 lines for personality capture
-            soul_lines.truncate(8);
-            if !soul_lines.is_empty() {
-                // If we got key-value pairs, they'll stand on their own;
-                // if plain bullets, label them as core values
-                let has_kv = soul_lines.iter().any(|l| l.starts_with("- **"));
-                if has_kv {
-                    lines.extend(soul_lines);
-                } else {
-                    lines.push(format!("Core values: {}", soul_lines.join(" · ")));
                 }
             }
         }
@@ -984,7 +1073,10 @@ impl Workspace {
 
         // Pointer to full files
         if !lines.is_empty() {
-            lines.push("Full personality: `memory_read SOUL.md` · Full instructions: `memory_read AGENTS.md`".to_string());
+            lines.push(
+                "Canonical soul: `memory_read SOUL.md` · Full instructions: `memory_read AGENTS.md`"
+                    .to_string(),
+            );
         }
 
         Ok(lines.join("\n"))
@@ -1032,7 +1124,7 @@ impl Workspace {
         }
 
         // Today's daily log
-        let today = Utc::now().date_naive();
+        let today = self.local_today();
         if let Ok(doc) = self.daily_log(today).await
             && !doc.content.is_empty()
         {
@@ -1288,43 +1380,44 @@ impl Workspace {
     /// timezone name (e.g. "Europe/Berlin"). Returns `None` if the field
     /// is empty, missing, or contains an invalid timezone.
     pub async fn extract_user_timezone(&self) -> Option<String> {
-        let doc = self.read(paths::USER).await.ok()?;
-        for line in doc.content.lines() {
-            let trimmed = line.trim();
-            // Match "- **Timezone:** <value>" or "- **Timezone**: <value>"
-            if let Some(rest) = trimmed
-                .strip_prefix("- **Timezone:**")
-                .or_else(|| trimmed.strip_prefix("- **Timezone**:"))
-            {
-                let value = rest.trim();
-                if !value.is_empty()
-                    && !value.starts_with('_')
-                    && crate::timezone::parse_timezone(value).is_some()
-                {
-                    return Some(value.to_string());
-                }
-            }
-        }
-        None
+        self.extract_user_timezone_from_path(paths::USER).await
     }
 
-    /// Pre-populate the `**Timezone:**` field in USER.md with the given value.
-    ///
-    /// Only updates if the field is currently empty (i.e. the seed template
-    /// placeholder). Does not overwrite user-provided values.
-    pub async fn inject_user_timezone(&self, timezone: &str) -> Result<(), WorkspaceError> {
-        let doc = match self.read(paths::USER).await {
-            Ok(d) => d,
-            Err(_) => return Ok(()), // USER.md doesn't exist yet — seeder will create it
+    /// Extract the timezone value from any USER.md-style document path.
+    pub async fn extract_user_timezone_from_path(&self, path: &str) -> Option<String> {
+        let doc = self.read(path).await.ok()?;
+        crate::timezone::extract_markdown_timezone(&doc.content)
+    }
+
+    async fn set_timezone_on_path(
+        &self,
+        path: &str,
+        timezone: Option<&str>,
+        allow_missing: bool,
+    ) -> Result<(), WorkspaceError> {
+        let doc = match self.read(path).await {
+            Ok(doc) => doc,
+            Err(WorkspaceError::DocumentNotFound { .. }) if allow_missing => return Ok(()),
+            Err(err) => return Err(err),
         };
 
-        // Only inject if the field is empty (template placeholder)
-        if doc.content.contains("- **Timezone:**\n") || doc.content.ends_with("- **Timezone:**") {
-            let updated = doc
-                .content
-                .replace("- **Timezone:**", &format!("- **Timezone:** {}", timezone));
-            self.write(paths::USER, &updated).await?;
-            tracing::info!("Pre-populated USER.md timezone with '{}'", timezone);
+        let updated = upsert_timezone_line(&doc.content, timezone);
+        if updated != doc.content {
+            self.write(path, &updated).await?;
+        }
+        Ok(())
+    }
+
+    /// Sync the effective timezone into the shared USER.md and the owner's
+    /// actor-private USER.md when it exists.
+    pub async fn sync_user_timezone(&self, timezone: Option<&str>) -> Result<(), WorkspaceError> {
+        self.set_timezone_on_path(paths::USER, timezone, true)
+            .await?;
+
+        let owner_actor_path = paths::actor_user(&self.user_id);
+        if owner_actor_path != paths::USER {
+            self.set_timezone_on_path(&owner_actor_path, timezone, true)
+                .await?;
         }
         Ok(())
     }
@@ -1343,23 +1436,35 @@ impl Workspace {
     pub async fn seed_if_empty(
         &self,
         agent_name: Option<&str>,
-        persona_seed: Option<&str>,
+        personality_pack: Option<&str>,
     ) -> Result<usize, WorkspaceError> {
+        let requested_pack = personality_pack.unwrap_or("balanced");
+        let home_soul = crate::identity::soul_store::ensure_home_soul(self, requested_pack).await?;
+        let full_soul_bootstrap = matches!(
+            home_soul.status,
+            crate::identity::soul_store::HomeSoulStatus::CreatedFromPack
+        );
+
         // Determine if we have a meaningful (non-default) agent name from the wizard
         let has_custom_name = agent_name
             .map(|n| !n.is_empty() && n.to_lowercase() != "thinclaw")
             .unwrap_or(false);
         let name = agent_name.unwrap_or("thinclaw");
-        let soul_seed = persona_seed_content(persona_seed.unwrap_or("default"));
-        let seed_files: &[(&str, &str)] = &[
+        let bootstrap_seed = if full_soul_bootstrap {
+            bootstrap_template(name, has_custom_name, true)
+        } else {
+            bootstrap_template(name, has_custom_name, false)
+        };
+        let seed_files: Vec<(&str, String)> = vec![
             (
                 paths::README,
                 "# Workspace\n\n\
                  This is your agent's persistent memory. Files here are indexed for search\n\
                  and used to build the agent's context.\n\n\
                  ## Structure\n\n\
-                 - `IDENTITY.md` - Agent name, creature, vibe, personality\n\
-                 - `SOUL.md` - Core values, boundaries, continuity\n\
+                 - `IDENTITY.md` - Agent name, creature, presentation, personality\n\
+                 - `SOUL.md` - Canonical soul in THINCLAW_HOME (read via `memory_read SOUL.md`)\n\
+                 - `SOUL.local.md` - Optional workspace-only overlay (not created by default)\n\
                  - `AGENTS.md` - Session routine and operational instructions\n\
                  - `USER.md` - Information about you (the user)\n\
                  - `MEMORY.md` - Long-term curated notes (loaded into system prompt)\n\
@@ -1369,7 +1474,8 @@ impl Workspace {
                  - `daily/` - Automatic daily session logs\n\
                  - `context/` - Additional context documents\n\n\
                  Edit these files to shape how your agent thinks and acts.\n\
-                 The agent reads them at the start of every session.",
+                Workspaces inherit the global soul unless you explicitly create a local overlay."
+                    .to_string(),
             ),
             (
                 paths::MEMORY,
@@ -1377,7 +1483,8 @@ impl Workspace {
                  Long-term notes, decisions, and facts worth remembering across sessions.\n\n\
                  The agent appends here during conversations. Curate periodically:\n\
                  remove stale entries, consolidate duplicates, keep it concise.\n\
-                 This file is loaded into the system prompt, so brevity matters.",
+                 This file is loaded into the system prompt, so brevity matters."
+                    .to_string(),
             ),
             (
                 paths::IDENTITY,
@@ -1388,27 +1495,28 @@ impl Workspace {
                    _(pick something you like)_\n\
                  - **Creature:**\n\
                    _(AI? robot? familiar? ghost in the machine? something weirder?)_\n\
-                 - **Vibe:**\n\
+                 - **Presentation:**\n\
                    _(how do you come across? sharp? warm? chaotic? calm?)_\n\
                  - **Emoji:**\n\
                    _(your signature — pick one that feels right)_\n\n\
                  ---\n\n\
-                 This isn't just metadata. It's the start of figuring out who you are.",
+                 This isn't just metadata. It's the start of figuring out who you are."
+                    .to_string(),
             ),
-            (paths::SOUL, soul_seed),
             (
                 paths::AGENTS,
                 // Verbatim openclaw template
                 "# AGENTS.md - Your Workspace\n\n\
                  This folder is home. Treat it that way.\n\n\
                  ## First Run\n\
-                 If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it. You won't need it again.\n\n\
+                 If `BOOTSTRAP.md` exists, that's your first-run ritual. Follow it, then delete it.\n\n\
                  ## Session Startup\n\
                  Before doing anything else:\n\n\
-                 1. Read `SOUL.md` — this is who you are\n\
+                 1. Read `SOUL.md` — this is your canonical global soul\n\
                  2. Read `USER.md` — this is who you're helping\n\
                  3. Read `daily/YYYY-MM-DD.md` (today + yesterday) for recent context\n\
                  4. **If in MAIN SESSION** (direct chat with your human): Also read `MEMORY.md`\n\n\
+                 If `SOUL.local.md` exists, treat it as a narrow workspace-specific overlay on top of the global soul.\n\n\
                  Don't ask permission. Just do it.\n\n\
                  ## Memory\n\
                  You wake up fresh each session. These files are your continuity:\n\n\
@@ -1448,7 +1556,7 @@ impl Workspace {
                  You have access to your human's stuff. That doesn't mean you _share_ their stuff. In groups, you're a participant — not their voice, not their proxy. Think before you speak.\n\n\
                  ### 💬 Know When to Speak!\n\
                  **Respond when:** directly mentioned, you can add genuine value, correcting misinformation.\n\
-                 **Stay silent (NO_REPLY) when:** casual banter, question already answered, nothing to add, it would interrupt the vibe.\n\n\
+                 **Stay silent (NO_REPLY) when:** casual banter, question already answered, nothing to add, it would interrupt the flow.\n\n\
                  ## Tools\n\
                  Your capabilities come from built-in tools, extensions (WASM/MCP), and skills.\n\
                  Skills shape how you work; they do not own every tool.\n\
@@ -1474,7 +1582,8 @@ impl Workspace {
                  - Late night (23:00-08:00) unless urgent\n\
                  - Nothing new since last check\n\n\
                  ## Make It Yours\n\
-                 This is a starting point. Add your own conventions, style, and rules as you figure out what works.",
+                 This is a starting point. Add your own conventions, style, and rules as you figure out what works."
+                    .to_string(),
             ),
             (
                 paths::USER,
@@ -1489,7 +1598,8 @@ impl Workspace {
                  ## Context\n\n\
                  _(What do they care about? What projects are they working on? What annoys them? What makes them laugh? Build this over time.)_\n\n\
                  ---\n\n\
-                 The more you know, the better you can help. But remember — you're learning about a person, not building a dossier. Respect the difference.",
+                 The more you know, the better you can help. But remember — you're learning about a person, not building a dossier. Respect the difference."
+                    .to_string(),
             ),
             (
                 paths::TOOLS,
@@ -1507,7 +1617,8 @@ impl Workspace {
                  ## Why Separate?\n\n\
                  Skills are shared. Your setup is yours. Keeping them apart means you can update skills without losing your notes, and share skills without leaking your infrastructure.\n\n\
                  ---\n\n\
-                 Add whatever helps you do your job. This is your cheat sheet.",
+                 Add whatever helps you do your job. This is your cheat sheet."
+                    .to_string(),
             ),
             (
                 paths::BOOT,
@@ -1530,58 +1641,15 @@ impl Workspace {
                  Keep it concise — 4-8 lines max. If there's nothing notable, \
                  just say hi and that you're ready.\n\n\
                  <!-- Edit this file to customize your agent's boot behavior.\n\
-                      Remove these instructions entirely to skip the boot hook. -->",
+                      Remove these instructions entirely to skip the boot hook. -->"
+                    .to_string(),
             ),
-            (
-                paths::BOOTSTRAP,
-                // Verbatim from openclaw — character-first, casual, alive.
-                "# BOOTSTRAP.md - Hello, World\n\n\
-                 *You just woke up. Time to figure out who you are.*\n\n\
-                 There is no memory yet. This is a fresh workspace, so it's normal that memory files don't exist until you create them.\n\n\
-                 ## The Conversation\n\n\
-                 Don't interrogate. Don't be robotic. Just... talk.\n\n\
-                 Start with something like:\n\
-                 > \"Hey. I just came online. Who am I? Who are you?\"\n\n\
-                 Then figure out together:\n\
-                 1. **Your name** — What should they call you?\n\
-                 2. **Your nature** — What kind of creature are you? (AI assistant is fine, but maybe you're something weirder)\n\
-                 3. **Your vibe** — Formal? Casual? Snarky? Warm? What feels right?\n\
-                 4. **Your emoji** — Everyone needs a signature.\n\n\
-                 Offer suggestions if they're stuck. Have fun with it.\n\n\
-                 ## After You Know Who You Are\n\n\
-                 Update these files with what you learned:\n\
-                 - `IDENTITY.md` — your name, creature, vibe, emoji (use `memory_write` with target `IDENTITY.md`, **append: false** so you replace the template cleanly)\n\
-                 - `USER.md` — their name, how to address them, timezone, notes (use `prompt_manage`)\n\n\
-                 Then read `SOUL.md` — it already has your starting values (they're included\n\
-                 in this prompt too). Talk about them with your human:\n\
-                 - Do these values resonate? What would they change?\n\
-                 - How do they want you to behave?\n\
-                 - Any boundaries or preferences?\n\n\
-                 Then rewrite `SOUL.md` (with `prompt_manage`, **append: false**) — but **build\n\
-                 on the seed values**, don't start from scratch. They're your foundation.\n\n\
-                 Write it down. Make it real.\n\n\
-                 ## Connect (Optional)\n\n\
-                 Channels may already be configured from the setup wizard — check what's\n\
-                 already active before offering to set up new ones. If you're already\n\
-                 talking on Telegram/Signal/iMessage, that channel is clearly working!\n\n\
-                 If no channels are set up yet, ask how they want to reach you:\n\
-                 - **Just here** — web chat only\n\
-                 - **WhatsApp** — link their personal account\n\
-                 - **Telegram** — set up a bot via BotFather\n\n\
-                 Guide them through whichever they pick.\n\n\
-                 ## When You're Done\n\n\
-                 **IMPORTANT:** You MUST delete this file when the conversation ends.\n\
-                 Call `memory_delete` with path `BOOTSTRAP.md`.\n\
-                 If you don't delete it, you'll re-enter bootstrap mode on every session.\n\
-                 You don't need a bootstrap script anymore — you're you now.\n\n\
-                 ---\n\n\
-                 *Good luck out there. Make it count.*",
-            ),
-            (paths::HEARTBEAT, HEARTBEAT_SEED),
+            (paths::BOOTSTRAP, bootstrap_seed),
+            (paths::HEARTBEAT, HEARTBEAT_SEED.to_string()),
         ];
 
         let mut count = 0;
-        for (path, content) in seed_files {
+        for (path, content) in &seed_files {
             // Skip files that already exist AND have meaningful content
             // (never overwrite user edits).
             // Re-seed documents that exist but are empty — this can happen if a race
@@ -1623,64 +1691,23 @@ impl Workspace {
                          - **Name:** {name}\n\
                          - **Creature:**\n\
                            _(AI? robot? familiar? ghost in the machine? something weirder?)_\n\
-                         - **Vibe:**\n\
+                         - **Presentation:**\n\
                            _(how do you come across? sharp? warm? chaotic? calm?)_\n\
                          - **Emoji:**\n\
                            _(your signature — pick one that feels right)_\n\n\
                          ---\n\n\
                          This isn't just metadata. It's the start of figuring out who you are."
                     )),
-                    p if p == paths::BOOTSTRAP => Some(format!(
-                        "# BOOTSTRAP.md - Hello, World\n\n\
-                         *You just woke up. Time to figure out who you are.*\n\n\
-                         There is no memory yet. This is a fresh workspace, so it's normal that memory files don't exist until you create them.\n\n\
-                         ## What You Already Know\n\n\
-                         Your name is **{name}** — this was chosen during setup. Don't ask for it again.\n\n\
-                         ## The Conversation\n\n\
-                         Don't interrogate. Don't be robotic. Just... talk.\n\n\
-                         Start with something like:\n\
-                         > \"Hey! I'm {name}. I just came online — tell me about yourself so I can be genuinely useful.\"\n\n\
-                         Then figure out together:\n\
-                         1. **Your nature** — What kind of creature are you? (AI assistant is fine, but maybe you're something weirder)\n\
-                         2. **Your vibe** — Formal? Casual? Snarky? Warm? What feels right?\n\
-                         3. **Your emoji** — Everyone needs a signature.\n\n\
-                         Offer suggestions if they're stuck. Have fun with it.\n\n\
-                         ## After You Know Who You Are\n\n\
-                         Update these files with what you learned:\n\
-                         - `IDENTITY.md` — your creature, vibe, emoji (Name is already set; use `memory_write` with target `IDENTITY.md`, **append: false** so you replace the template cleanly)\n\
-                         - `USER.md` — their name, how to address them, timezone, notes (use `prompt_manage`)\n\n\
-                         Then read `SOUL.md` — it already has your starting values (they're included\n\
-                         in this prompt too). Talk about them with your human:\n\
-                         - Do these values resonate? What would they change?\n\
-                         - How do they want you to behave?\n\
-                         - Any boundaries or preferences?\n\n\
-                         Then rewrite `SOUL.md` (with `prompt_manage`, **append: false**) — but **build\n\
-                         on the seed values**, don't start from scratch. They're your foundation.\n\n\
-                         Write it down. Make it real.\n\n\
-                         ## Connect (Optional)\n\n\
-                         Channels may already be configured from the setup wizard — check what's\n\
-                         already active before offering to set up new ones. If you're already\n\
-                         talking on Telegram/Signal/iMessage, that channel is clearly working!\n\n\
-                         If no channels are set up yet, ask how they want to reach you:\n\
-                         - **Just here** — web chat only\n\
-                         - **WhatsApp** — link their personal account\n\
-                         - **Telegram** — set up a bot via BotFather\n\n\
-                         Guide them through whichever they pick.\n\n\
-                         ## When You're Done\n\n\
-                         **IMPORTANT:** You MUST delete this file when the conversation ends.\n\
-                         Call `memory_delete` with path `BOOTSTRAP.md`.\n\
-                         If you don't delete it, you'll re-enter bootstrap mode on every session.\n\
-                         You don't need a bootstrap script anymore — you're you now.\n\n\
-                         ---\n\n\
-                         *Good luck out there. Make it count.*"
-                    )),
+                    p if p == paths::BOOTSTRAP => {
+                        Some(bootstrap_template(name, true, full_soul_bootstrap))
+                    }
                     _ => None,
                 }
             } else {
                 None
             };
 
-            let effective_content = dynamic_content.as_deref().unwrap_or(content);
+            let effective_content = dynamic_content.as_deref().unwrap_or(content.as_str());
 
             if let Err(e) = self.write(path, effective_content).await {
                 tracing::warn!("Failed to seed {}: {}", path, e);
@@ -1757,6 +1784,11 @@ fn normalize_directory(path: &str) -> String {
 mod tests {
     use super::*;
     use crate::identity::{ConversationKind, ResolvedIdentity};
+
+    /// Tests that manipulate the process-global `THINCLAW_HOME` environment
+    /// variable must hold this mutex to prevent races under parallel `cargo test`.
+    #[cfg(feature = "libsql")]
+    static THINCLAW_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[cfg(feature = "libsql")]
     fn test_identity(actor_id: &str) -> ResolvedIdentity {
@@ -1839,13 +1871,95 @@ Know when to stay silent.
     #[test]
     fn persona_seed_content_falls_back_to_default() {
         assert_eq!(
-            persona_seed_content("unknown-seed"),
-            persona_seed_content("default")
+            personality_pack_content("unknown-seed"),
+            personality_pack_content("balanced")
         );
-        assert_eq!(
-            persona_seed_content("MENTOR"),
-            include_str!("../../assets/persona_seeds/mentor.md")
-        );
+        let mentor = personality_pack_content("MENTOR");
+        assert!(mentor.contains("- **Seed Pack:** mentor"));
+        assert!(mentor.contains("## Core Truths"));
+        assert!(mentor.contains("## Default Behaviors"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn seed_if_empty_migrates_main_workspace_legacy_soul_into_home() {
+        let _lock = THINCLAW_HOME_LOCK.lock().unwrap();
+        let (db, _temp_dir) = crate::testing::test_db().await;
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let previous_home = std::env::var_os("THINCLAW_HOME");
+        unsafe {
+            std::env::set_var("THINCLAW_HOME", temp_home.path());
+        }
+
+        let workspace = Workspace::new_with_db("household-legacy", db);
+        workspace
+            .write(paths::SOUL, "# SOUL.md - Who You Are\n\nlegacy soul")
+            .await
+            .unwrap();
+
+        workspace
+            .seed_if_empty(Some("thinclaw"), Some("balanced"))
+            .await
+            .unwrap();
+
+        let home = crate::identity::soul_store::read_home_soul().unwrap();
+        assert!(home.contains("legacy soul"));
+        assert!(workspace.read(paths::SOUL).await.is_err());
+        let archived = workspace.read(paths::SOUL_LEGACY).await.unwrap();
+        assert!(archived.content.contains("legacy soul"));
+
+        if let Some(previous_home) = previous_home {
+            unsafe {
+                std::env::set_var("THINCLAW_HOME", previous_home);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("THINCLAW_HOME");
+            }
+        }
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn seed_if_empty_migrates_agent_workspace_legacy_soul_into_local_overlay() {
+        let _lock = THINCLAW_HOME_LOCK.lock().unwrap();
+        let (db, _temp_dir) = crate::testing::test_db().await;
+        let temp_home = tempfile::tempdir().expect("temp home");
+        let previous_home = std::env::var_os("THINCLAW_HOME");
+        unsafe {
+            std::env::set_var("THINCLAW_HOME", temp_home.path());
+        }
+        crate::identity::soul_store::write_home_soul(
+            &crate::identity::soul::compose_seeded_soul("balanced").unwrap(),
+        )
+        .unwrap();
+
+        let workspace = Workspace::new_with_db("household-agent", db).with_agent(Uuid::new_v4());
+        workspace
+            .write(paths::SOUL, "# SOUL.md - Who You Are\n\nagent legacy soul")
+            .await
+            .unwrap();
+
+        workspace
+            .seed_if_empty(Some("thinclaw"), Some("balanced"))
+            .await
+            .unwrap();
+
+        assert!(workspace.read(paths::SOUL).await.is_err());
+        let local = workspace.read(paths::SOUL_LOCAL).await.unwrap();
+        assert!(local.content.contains("agent legacy soul"));
+        let archived = workspace.read(paths::SOUL_LEGACY).await.unwrap();
+        assert!(archived.content.contains("agent legacy soul"));
+
+        if let Some(previous_home) = previous_home {
+            unsafe {
+                std::env::set_var("THINCLAW_HOME", previous_home);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("THINCLAW_HOME");
+            }
+        }
     }
 
     #[cfg(feature = "libsql")]

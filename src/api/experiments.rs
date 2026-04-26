@@ -1,17 +1,22 @@
 //! Experiments API — optional research automation with local and remote runners.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 use tokio::time::{Duration as TokioDuration, interval};
 use uuid::Uuid;
 
+use crate::agent::env::{
+    AgentAction, EnvRunner, SkillBenchCase, SkillBenchEnv, TerminalBenchCase, TerminalBenchEnv,
+    Trajectory,
+};
+use crate::agent::run_artifact::{digest_json, digest_text};
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
+use crate::agent::{AgentRunArtifact, AgentRunStatus};
 use crate::api::{ApiError, ApiResult};
 use crate::db::Database;
 use crate::experiments::adapters::{self, RemoteLaunchAction, RunnerLaunchOutcome};
@@ -26,17 +31,22 @@ use crate::experiments::{
     ExperimentTarget, ExperimentTargetKind, ExperimentTargetLink, ExperimentTrial,
     ExperimentTrialStatus, compare_metrics, extract_metrics, hash_lease_token,
 };
+use crate::history::{OutcomeContract, OutcomeContractQuery};
 use crate::llm::usage_tracking::{
     USAGE_TRACKING_EXPERIMENT_CAMPAIGN_ID_KEY, USAGE_TRACKING_EXPERIMENT_ROLE_KEY,
     USAGE_TRACKING_EXPERIMENT_TARGET_IDS_KEY, USAGE_TRACKING_EXPERIMENT_TRIAL_ID_KEY,
 };
 use crate::secrets::SecretsStore;
 use crate::settings::Settings;
+use crate::tools::execution_backend::{
+    CommandExecutionRequest, DockerSandboxExecutionBackend, ExecutionBackend, ExecutionResult,
+    LocalHostExecutionBackend, ScriptExecutionRequest, experiment_runner_runtime_descriptor,
+    subagent_executor_runtime_descriptor,
+};
 
 const DEFAULT_REMOTE_LEASE_MINUTES: i64 = 60;
 const DEFAULT_EXPERIMENT_CONTROLLER_TICK_SECS: u64 = 30;
 const STALE_LEASE_GRACE_MINUTES: i64 = 10;
-const DEFAULT_EXPERIMENT_USER_ID: &str = "default";
 const RESEARCH_SUBAGENT_CHANNEL: &str = "tauri";
 const RESEARCH_SUBAGENT_THREAD_ID: &str = "agent:research";
 const RESEARCH_SHARED_TOOL_DENYLIST: &[&str] = &[
@@ -52,6 +62,9 @@ const RESEARCH_SHARED_TOOL_DENYLIST: &[&str] = &[
     "skill_reload",
     "skill_manage",
     "prompt_manage",
+    "memory_read",
+    "memory_search",
+    "session_search",
     "memory_write",
     "memory_delete",
     "tts",
@@ -72,6 +85,10 @@ const RESEARCH_SHARED_TOOL_DENYLIST: &[&str] = &[
     "routine_update",
     "routine_delete",
     "routine_history",
+    "shell",
+    "execute_code",
+    "process",
+    "build_software",
 ];
 const RESEARCH_READ_ONLY_TOOL_DENYLIST: &[&str] = &[
     "write_file",
@@ -130,6 +147,57 @@ struct ReviewerDecision {
     scope_ok: bool,
     benchmark_ready: bool,
     reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResearchSubagentOutput<T> {
+    value: T,
+    run_artifact: AgentRunArtifact,
+}
+
+#[derive(Debug, Clone)]
+struct ResearchSubagentError {
+    message: String,
+    run_artifact: AgentRunArtifact,
+}
+
+impl std::fmt::Display for ResearchSubagentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+#[derive(Debug)]
+enum ResearchSubagentInvocationError {
+    Api(ApiError),
+    Run(Box<ResearchSubagentError>),
+}
+
+impl From<ApiError> for ResearchSubagentInvocationError {
+    fn from(value: ApiError) -> Self {
+        Self::Api(value)
+    }
+}
+
+impl From<ResearchSubagentError> for ResearchSubagentInvocationError {
+    fn from(value: ResearchSubagentError) -> Self {
+        Self::Run(Box::new(value))
+    }
+}
+
+#[derive(Debug)]
+struct CandidateGenerationError {
+    message: String,
+    run_artifacts: Vec<AgentRunArtifact>,
+}
+
+impl CandidateGenerationError {
+    fn new(message: impl Into<String>, run_artifacts: Vec<AgentRunArtifact>) -> Self {
+        Self {
+            message: message.into(),
+            run_artifacts,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -213,6 +281,8 @@ pub struct ExperimentLaunchDetails {
 pub struct ExperimentRunnerValidationResponse {
     pub runner: ExperimentRunnerProfile,
     pub valid: bool,
+    pub readiness_class: crate::experiments::ExperimentRunnerReadinessClass,
+    pub launch_eligible: bool,
     pub message: String,
 }
 
@@ -424,7 +494,14 @@ async fn research_provider_api_key(
         }
     }
     for name in names {
-        match secrets.get_decrypted(user_id, &name).await {
+        match secrets
+            .get_for_injection(
+                user_id,
+                &name,
+                crate::secrets::SecretAccessContext::new("experiments.api", "gpu_cloud_credential"),
+            )
+            .await
+        {
             Ok(secret) => return Some(secret.expose().to_string()),
             Err(err) => {
                 tracing::debug!(
@@ -466,6 +543,189 @@ fn ready_project_status(project: &ExperimentProject) -> ExperimentProjectStatus 
     } else {
         ExperimentProjectStatus::Draft
     }
+}
+
+fn validate_project_workdir_fragment(workdir: &str) -> ApiResult<PathBuf> {
+    let trimmed = workdir.trim();
+    let candidate = if trimmed.is_empty() {
+        PathBuf::from(".")
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    if candidate.is_absolute() {
+        return Err(ApiError::InvalidInput(
+            "Project workdir must be relative to the workspace root.".to_string(),
+        ));
+    }
+
+    if candidate.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(ApiError::InvalidInput(
+            "Project workdir must stay inside the workspace root.".to_string(),
+        ));
+    }
+
+    Ok(candidate)
+}
+
+async fn resolve_project_workdir(project: &ExperimentProject) -> ApiResult<PathBuf> {
+    let workspace_root = tokio::fs::canonicalize(&project.workspace_path)
+        .await
+        .map_err(|e| {
+            ApiError::InvalidInput(format!(
+                "Workspace path does not exist: {} ({e})",
+                project.workspace_path
+            ))
+        })?;
+    let workdir_fragment = validate_project_workdir_fragment(&project.workdir)?;
+    let workdir = workspace_root.join(workdir_fragment);
+    let resolved = tokio::fs::canonicalize(&workdir).await.map_err(|e| {
+        ApiError::InvalidInput(format!(
+            "Project workdir does not exist: {} ({e})",
+            workdir.display()
+        ))
+    })?;
+    if !resolved.starts_with(&workspace_root) {
+        return Err(ApiError::InvalidInput(
+            "Project workdir resolves outside the workspace root.".to_string(),
+        ));
+    }
+    Ok(resolved)
+}
+
+async fn validate_project_launch_readiness(project: &ExperimentProject) -> ApiResult<()> {
+    if !Path::new(&project.workspace_path).is_dir() {
+        return Err(ApiError::InvalidInput(format!(
+            "Workspace path does not exist: {}",
+            project.workspace_path
+        )));
+    }
+    if project.mutable_paths.is_empty() {
+        return Err(ApiError::InvalidInput(
+            "Project must define at least one mutable path before launch.".to_string(),
+        ));
+    }
+    if project.run_command.trim().is_empty() {
+        return Err(ApiError::InvalidInput(
+            "Project run_command must not be empty.".to_string(),
+        ));
+    }
+
+    let _ = resolve_project_workdir(project).await?;
+
+    git_output(&project.workspace_path, &["rev-parse", "--show-toplevel"])
+        .await
+        .map_err(|error| {
+            ApiError::InvalidInput(format!(
+                "Workspace path is not a git repository ThinClaw can use: {error}"
+            ))
+        })?;
+    git_output(
+        &project.workspace_path,
+        &["rev-parse", "--verify", &project.base_branch],
+    )
+    .await
+    .map_err(|error| {
+        ApiError::InvalidInput(format!(
+            "Base branch '{}' is not available locally: {error}",
+            project.base_branch
+        ))
+    })?;
+    git_output(
+        &project.workspace_path,
+        &["remote", "get-url", &project.git_remote_name],
+    )
+    .await
+    .map_err(|error| {
+        ApiError::InvalidInput(format!(
+            "Configured git remote '{}' is not available: {error}",
+            project.git_remote_name
+        ))
+    })?;
+
+    Ok(())
+}
+
+fn parse_secret_reference(reference: &str) -> Option<(String, Vec<String>)> {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    for separator in [':', '='] {
+        if let Some((secret_name, env_var)) = trimmed.split_once(separator) {
+            let secret_name = secret_name.trim();
+            let env_var = env_var.trim();
+            if !secret_name.is_empty() && !env_var.is_empty() {
+                return Some((secret_name.to_string(), vec![env_var.to_string()]));
+            }
+        }
+    }
+
+    let upper = trimmed.to_ascii_uppercase();
+    let env_names = if upper == trimmed {
+        vec![trimmed.to_string()]
+    } else {
+        vec![trimmed.to_string(), upper]
+    };
+    Some((trimmed.to_string(), env_names))
+}
+
+async fn resolved_secret_env_pairs(
+    user_id: &str,
+    runner: &ExperimentRunnerProfile,
+) -> Vec<(String, String)> {
+    let Some(secrets) = research_secrets_store() else {
+        return Vec::new();
+    };
+
+    let mut pairs = Vec::new();
+    for reference in &runner.secret_references {
+        let Some((secret_name, env_names)) = parse_secret_reference(reference) else {
+            continue;
+        };
+        match secrets
+            .get_for_injection(
+                user_id,
+                &secret_name,
+                crate::secrets::SecretAccessContext::new(
+                    "experiments.api",
+                    "runner_env_credential",
+                ),
+            )
+            .await
+        {
+            Ok(secret) => {
+                let value = secret.expose().to_string();
+                for env_name in env_names {
+                    pairs.push((env_name, value.clone()));
+                }
+            }
+            Err(error) => tracing::debug!(
+                secret_name = %secret_name,
+                error = %error,
+                "Research benchmark secret lookup failed"
+            ),
+        }
+    }
+    pairs
+}
+
+async fn resolved_runner_env_grants(
+    user_id: &str,
+    runner: &ExperimentRunnerProfile,
+) -> serde_json::Value {
+    let mut merged = runner.env_grants.as_object().cloned().unwrap_or_default();
+    for (env_name, value) in resolved_secret_env_pairs(user_id, runner).await {
+        merged
+            .entry(env_name)
+            .or_insert_with(|| serde_json::json!(value));
+    }
+    serde_json::Value::Object(merged)
 }
 
 pub async fn list_projects(
@@ -660,6 +920,8 @@ pub async fn create_runner(
         secret_references: req.secret_references,
         cache_policy: req.cache_policy,
         status: ExperimentRunnerStatus::Draft,
+        readiness_class: crate::experiments::ExperimentRunnerReadinessClass::ManualOnly,
+        launch_eligible: false,
         created_at: now,
         updated_at: now,
     };
@@ -728,12 +990,14 @@ pub async fn validate_runner(
 ) -> ApiResult<ExperimentRunnerValidationResponse> {
     let settings = ensure_experiments_enabled(store, user_id).await?;
     let mut runner = get_runner(store, user_id, id).await?;
-    let (valid, message) = validate_runner_profile_impl(user_id, &runner, &settings).await;
-    runner.status = if valid {
+    let validation = validate_runner_profile_impl(user_id, &runner, &settings).await;
+    runner.status = if validation.valid {
         ExperimentRunnerStatus::Validated
     } else {
         ExperimentRunnerStatus::Unavailable
     };
+    runner.readiness_class = validation.readiness_class;
+    runner.launch_eligible = validation.launch_eligible;
     runner.updated_at = Utc::now();
     store
         .update_experiment_runner_profile(&runner)
@@ -741,8 +1005,10 @@ pub async fn validate_runner(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(ExperimentRunnerValidationResponse {
         runner,
-        valid,
-        message,
+        valid: validation.valid,
+        readiness_class: validation.readiness_class,
+        launch_eligible: validation.launch_eligible,
+        message: validation.message,
     })
 }
 
@@ -752,7 +1018,7 @@ pub async fn list_campaigns(
 ) -> ApiResult<ExperimentCampaignListResponse> {
     ensure_experiments_enabled(store, user_id).await?;
     let campaigns = store
-        .list_experiment_campaigns()
+        .list_experiment_campaigns_for_owner(user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(ExperimentCampaignListResponse { campaigns })
@@ -764,11 +1030,12 @@ pub async fn get_campaign(
     id: Uuid,
 ) -> ApiResult<ExperimentCampaign> {
     ensure_experiments_enabled(store, user_id).await?;
-    store
-        .get_experiment_campaign(id)
+    let campaign = store
+        .get_experiment_campaign_for_owner(id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::SessionNotFound(format!("Experiment campaign {id} not found")))
+        .ok_or_else(|| ApiError::SessionNotFound(format!("Experiment campaign {id} not found")))?;
+    Ok(campaign)
 }
 
 pub async fn list_trials(
@@ -777,8 +1044,9 @@ pub async fn list_trials(
     campaign_id: Uuid,
 ) -> ApiResult<ExperimentTrialListResponse> {
     ensure_experiments_enabled(store, user_id).await?;
+    let campaign = get_campaign(store, user_id, campaign_id).await?;
     let trials = store
-        .list_experiment_trials(campaign_id)
+        .list_experiment_trials_for_owner(campaign.id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(ExperimentTrialListResponse { trials })
@@ -790,11 +1058,12 @@ pub async fn get_trial(
     id: Uuid,
 ) -> ApiResult<ExperimentTrial> {
     ensure_experiments_enabled(store, user_id).await?;
-    store
-        .get_experiment_trial(id)
+    let trial = store
+        .get_experiment_trial_for_owner(id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::SessionNotFound(format!("Experiment trial {id} not found")))
+        .ok_or_else(|| ApiError::SessionNotFound(format!("Experiment trial {id} not found")))?;
+    Ok(trial)
 }
 
 pub async fn list_artifacts(
@@ -804,7 +1073,7 @@ pub async fn list_artifacts(
 ) -> ApiResult<ExperimentArtifactListResponse> {
     ensure_experiments_enabled(store, user_id).await?;
     let artifacts = store
-        .list_experiment_artifacts(trial_id)
+        .list_experiment_artifacts_for_owner(trial_id, user_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(ExperimentArtifactListResponse { artifacts })
@@ -828,7 +1097,7 @@ pub async fn start_experiment_controller_loop(store: Arc<dyn Database>) {
     ));
     interval.tick().await;
     loop {
-        match reconcile_experiments_once(&store, DEFAULT_EXPERIMENT_USER_ID).await {
+        match reconcile_experiments_once(&store).await {
             Ok(()) => {}
             Err(error) => match error {
                 ApiError::FeatureDisabled(_) => {
@@ -841,22 +1110,15 @@ pub async fn start_experiment_controller_loop(store: Arc<dyn Database>) {
     }
 }
 
-async fn reconcile_experiments_once(store: &Arc<dyn Database>, user_id: &str) -> ApiResult<()> {
-    let map = store
-        .get_all_settings(user_id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let settings = Settings::from_db_map(&map);
-    if !settings.experiments.enabled {
-        return Ok(());
-    }
-
+async fn reconcile_experiments_once(store: &Arc<dyn Database>) -> ApiResult<()> {
     let campaigns = store
         .list_experiment_campaigns()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut owners = HashSet::new();
 
     for mut campaign in campaigns {
+        owners.insert(campaign.owner_user_id.clone());
         if matches!(
             campaign.status,
             ExperimentCampaignStatus::Completed
@@ -877,11 +1139,15 @@ async fn reconcile_experiments_once(store: &Arc<dyn Database>, user_id: &str) ->
             || (campaign.status == ExperimentCampaignStatus::PendingBaseline
                 && campaign.queue_state != ExperimentCampaignQueueState::Queued)
         {
-            reconcile_active_campaign(store, user_id, &mut campaign).await?;
+            let owner_user_id = campaign.owner_user_id.clone();
+            reconcile_active_campaign(store, &owner_user_id, &mut campaign).await?;
         }
     }
 
-    maybe_launch_next_queued_after_slot_release(store, user_id).await
+    for owner_user_id in owners {
+        maybe_launch_next_queued_after_slot_release(store, &owner_user_id).await?;
+    }
+    Ok(())
 }
 
 async fn reconcile_active_campaign(
@@ -981,7 +1247,7 @@ async fn reconcile_active_campaign(
                 campaign.status = ExperimentCampaignStatus::AwaitingPromotion;
                 campaign.pause_reason = Some(format!(
                     "Reached max_trials={limit}. Promote the best commit when ready.",
-                    limit = max_trials.unwrap()
+                    limit = max_trials.unwrap_or(0)
                 ));
                 campaign.updated_at = Utc::now();
                 store
@@ -1118,13 +1384,44 @@ async fn launch_next_trial_if_ready(
             return Ok(());
         }
         ExperimentAutonomyMode::SuggestOnly => {
-            let planner = run_planner_subagent(store, campaign, project, None).await?;
+            let planner = match run_planner_subagent(store, campaign, project, None).await {
+                Ok(planner) => planner,
+                Err(ResearchSubagentInvocationError::Api(error)) => return Err(error),
+                Err(ResearchSubagentInvocationError::Run(error)) => {
+                    let error = *error;
+                    campaign.status = ExperimentCampaignStatus::Paused;
+                    campaign.queue_state = ExperimentCampaignQueueState::NotQueued;
+                    campaign.pause_reason =
+                        Some(format!("Suggestion generation paused: {}", error.message));
+                    record_campaign_candidate_generation(
+                        campaign,
+                        "suggest_only",
+                        "failed",
+                        &error.message,
+                        &[error.run_artifact],
+                    );
+                    campaign.updated_at = Utc::now();
+                    store
+                        .update_experiment_campaign(campaign)
+                        .await
+                        .map_err(|e| ApiError::Internal(e.to_string()))?;
+                    maybe_launch_next_queued_after_slot_release(store, user_id).await?;
+                    return Ok(());
+                }
+            };
             campaign.status = ExperimentCampaignStatus::Paused;
             campaign.queue_state = ExperimentCampaignQueueState::NotQueued;
             campaign.pause_reason = Some(format!(
                 "Suggestion ready: {}",
-                truncate_for_prompt(&planner.mutation_brief, 500)
+                truncate_for_prompt(&planner.value.mutation_brief, 500)
             ));
+            record_campaign_candidate_generation(
+                campaign,
+                "suggest_only",
+                "completed",
+                &planner.value.mutation_brief,
+                std::slice::from_ref(&planner.run_artifact),
+            );
             campaign.updated_at = Utc::now();
             store
                 .update_experiment_campaign(campaign)
@@ -1141,8 +1438,17 @@ async fn launch_next_trial_if_ready(
         Err(error) => {
             campaign.status = ExperimentCampaignStatus::Paused;
             campaign.queue_state = ExperimentCampaignQueueState::NotQueued;
-            campaign.pause_reason =
-                Some(format!("Autonomous candidate generation paused: {error}"));
+            campaign.pause_reason = Some(format!(
+                "Autonomous candidate generation paused: {}",
+                error.message
+            ));
+            record_campaign_candidate_generation(
+                campaign,
+                "autonomous",
+                "failed",
+                &error.message,
+                &error.run_artifacts,
+            );
             campaign.updated_at = Utc::now();
             store
                 .update_experiment_campaign(campaign)
@@ -1152,6 +1458,10 @@ async fn launch_next_trial_if_ready(
             return Ok(());
         }
     };
+    store
+        .create_experiment_trial(&trial)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     let response = launch_trial(
         store,
         user_id,
@@ -1447,9 +1757,28 @@ pub async fn list_opportunities(
         .list_experiment_target_links()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(ExperimentOpportunityListResponse {
-        opportunities: derive_opportunities(&usage, &targets, &target_links),
-    })
+    let outcome_contracts = store
+        .list_outcome_contracts(&OutcomeContractQuery {
+            user_id: user_id.to_string(),
+            actor_id: None,
+            status: Some("evaluated".to_string()),
+            contract_type: None,
+            source_kind: None,
+            source_id: None,
+            thread_id: None,
+            limit: ((limit.max(25)) * 8) as i64,
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut opportunities = derive_opportunities(&usage, &targets, &target_links);
+    opportunities.extend(derive_outcome_opportunities(
+        &outcome_contracts,
+        &targets,
+        limit,
+    ));
+    sort_experiment_opportunities(&mut opportunities);
+    opportunities.truncate(limit.max(1));
+    Ok(ExperimentOpportunityListResponse { opportunities })
 }
 
 pub async fn list_gpu_cloud_providers(
@@ -1495,6 +1824,7 @@ pub async fn start_campaign(
 ) -> ApiResult<ExperimentCampaignActionResponse> {
     let settings = ensure_experiments_enabled(store, user_id).await?;
     let project = get_project(store, user_id, project_id).await?;
+    validate_project_launch_readiness(&project).await?;
     let active_before = active_campaign_count(store).await?;
     let queue_state = if active_before >= settings.experiments.max_concurrent_campaigns as usize {
         ExperimentCampaignQueueState::Queued
@@ -1511,9 +1841,27 @@ pub async fn start_campaign(
         .or(project.default_runner_profile_id)
         .ok_or_else(|| ApiError::InvalidInput("runner_profile_id is required".to_string()))?;
     let runner = get_runner(store, user_id, runner_id).await?;
-    if runner.status != ExperimentRunnerStatus::Validated {
+    let validation = validate_runner_profile_impl(user_id, &runner, &settings).await;
+    if !validation.valid {
+        return Err(ApiError::InvalidInput(format!(
+            "Runner profile is not launchable: {}",
+            validation.message
+        )));
+    }
+    if queue_state == ExperimentCampaignQueueState::Queued && !validation.launch_eligible {
         return Err(ApiError::InvalidInput(
-            "Runner profile must be validated before starting a campaign".to_string(),
+            "This runner requires operator action and cannot be queued for automatic launch. Wait for a free slot or use a launch-ready runner.".to_string(),
+        ));
+    }
+    let normalized_gateway_url = req
+        .gateway_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if req.gateway_url.is_some() && normalized_gateway_url.is_none() {
+        return Err(ApiError::InvalidInput(
+            "gateway_url must not be empty when provided.".to_string(),
         ));
     }
 
@@ -1525,6 +1873,7 @@ pub async fn start_campaign(
         id: campaign_id,
         project_id: project.id,
         runner_profile_id: runner.id,
+        owner_user_id: user_id.to_string(),
         status: ExperimentCampaignStatus::PendingBaseline,
         baseline_commit: None,
         best_commit: None,
@@ -1546,7 +1895,7 @@ pub async fn start_campaign(
         total_runner_cost_usd: 0.0,
         consecutive_non_improving_trials: 0,
         max_trials_override: req.max_trials_override,
-        gateway_url: req.gateway_url,
+        gateway_url: normalized_gateway_url,
         metadata: serde_json::json!({}),
         created_at: now,
         updated_at: now,
@@ -1650,7 +1999,10 @@ async fn next_queue_position(store: &Arc<dyn Database>) -> ApiResult<u32> {
         .saturating_add(1))
 }
 
-async fn next_queued_campaign(store: &Arc<dyn Database>) -> ApiResult<Option<ExperimentCampaign>> {
+async fn next_queued_campaign_for_owner(
+    store: &Arc<dyn Database>,
+    owner_user_id: Option<&str>,
+) -> ApiResult<Option<ExperimentCampaign>> {
     let mut queued: Vec<_> = store
         .list_experiment_campaigns()
         .await
@@ -1659,6 +2011,7 @@ async fn next_queued_campaign(store: &Arc<dyn Database>) -> ApiResult<Option<Exp
         .filter(|campaign| {
             campaign.status == ExperimentCampaignStatus::PendingBaseline
                 && campaign.queue_state == ExperimentCampaignQueueState::Queued
+                && owner_user_id.is_none_or(|owner| campaign.owner_user_id == owner)
         })
         .collect();
     queued.sort_by_key(|campaign| (campaign.queue_position, campaign.created_at));
@@ -1675,17 +2028,40 @@ async fn maybe_launch_next_queued_campaign(
         return Ok(None);
     }
 
-    let Some(mut campaign) = next_queued_campaign(store).await? else {
+    let Some(mut campaign) = next_queued_campaign_for_owner(store, Some(user_id)).await? else {
         return Ok(None);
     };
-    let project = get_project(store, user_id, campaign.project_id).await?;
-    let runner = get_runner(store, user_id, campaign.runner_profile_id).await?;
-
-    if runner.status != ExperimentRunnerStatus::Validated {
+    let campaign_owner_user_id = campaign.owner_user_id.clone();
+    let project = get_project(store, &campaign_owner_user_id, campaign.project_id).await?;
+    let runner = get_runner(store, &campaign_owner_user_id, campaign.runner_profile_id).await?;
+    if let Err(error) = validate_project_launch_readiness(&project).await {
         campaign.status = ExperimentCampaignStatus::Failed;
         campaign.pause_reason = Some(format!(
-            "Queued launch failed because runner '{}' is not validated.",
-            runner.name
+            "Queued launch failed project validation: {}",
+            error
+        ));
+        campaign.ended_at = Some(Utc::now());
+        campaign.updated_at = Utc::now();
+        store
+            .update_experiment_campaign(&campaign)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        return Ok(Some(ExperimentCampaignActionResponse {
+            campaign,
+            trial: None,
+            lease: None,
+            launch: None,
+            message: "Queued campaign failed project validation before launch.".to_string(),
+        }));
+    }
+
+    let validation =
+        validate_runner_profile_impl(&campaign_owner_user_id, &runner, &settings).await;
+    if !validation.valid {
+        campaign.status = ExperimentCampaignStatus::Failed;
+        campaign.pause_reason = Some(format!(
+            "Queued launch failed because runner '{}' is not valid: {}",
+            runner.name, validation.message
         ));
         campaign.ended_at = Some(Utc::now());
         campaign.updated_at = Utc::now();
@@ -1701,10 +2077,37 @@ async fn maybe_launch_next_queued_campaign(
             message: "Queued campaign failed validation before launch.".to_string(),
         }));
     }
+    if !validation.launch_eligible {
+        campaign.status = ExperimentCampaignStatus::Paused;
+        campaign.queue_state = ExperimentCampaignQueueState::NotQueued;
+        campaign.pause_reason = Some(format!(
+            "Queued launch requires operator action because runner '{}' is {}.",
+            runner.name,
+            match validation.readiness_class {
+                crate::experiments::ExperimentRunnerReadinessClass::ManualOnly => "manual_only",
+                crate::experiments::ExperimentRunnerReadinessClass::BootstrapReady =>
+                    "bootstrap_ready",
+                crate::experiments::ExperimentRunnerReadinessClass::LaunchReady => "launch_ready",
+            }
+        ));
+        campaign.updated_at = Utc::now();
+        store
+            .update_experiment_campaign(&campaign)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        return Ok(Some(ExperimentCampaignActionResponse {
+            campaign,
+            trial: None,
+            lease: None,
+            launch: None,
+            message: "Queued campaign paused until an operator starts the runner manually."
+                .to_string(),
+        }));
+    }
 
     match launch_campaign_baseline(
         store,
-        user_id,
+        &campaign_owner_user_id,
         &settings,
         &project,
         &runner,
@@ -1919,42 +2322,141 @@ async fn create_experiment_trial_commit(
     campaign: &ExperimentCampaign,
     project: &ExperimentProject,
     runner: &ExperimentRunnerProfile,
-) -> ApiResult<ExperimentTrial> {
+) -> Result<ExperimentTrial, CandidateGenerationError> {
     let sequence = latest_trial(store, campaign.id)
-        .await?
+        .await
+        .map_err(|error| CandidateGenerationError::new(error.to_string(), Vec::new()))?
         .map(|trial| trial.sequence + 1)
         .unwrap_or(1);
     let trial_id = Uuid::new_v4();
-    let planner = run_planner_subagent(store, campaign, project, Some(trial_id)).await?;
-    let mutator = run_mutator_subagent(campaign, project, &planner, Some(trial_id)).await?;
-    let worktree_path = campaign
-        .worktree_path
-        .as_deref()
-        .ok_or_else(|| ApiError::InvalidInput("Campaign has no worktree".to_string()))?;
-    let changed_files = filtered_changed_files(git_changed_files(worktree_path).await?);
+    let planner = match run_planner_subagent(store, campaign, project, Some(trial_id)).await {
+        Ok(planner) => planner,
+        Err(ResearchSubagentInvocationError::Api(error)) => {
+            return Err(CandidateGenerationError::new(error.to_string(), Vec::new()));
+        }
+        Err(ResearchSubagentInvocationError::Run(error)) => {
+            let error = *error;
+            return Err(CandidateGenerationError::new(
+                error.message,
+                vec![error.run_artifact],
+            ));
+        }
+    };
+    let mutator =
+        match run_mutator_subagent(campaign, project, &planner.value, Some(trial_id)).await {
+            Ok(mutator) => mutator,
+            Err(ResearchSubagentInvocationError::Api(error)) => {
+                return Err(CandidateGenerationError::new(
+                    error.to_string(),
+                    vec![planner.run_artifact.clone()],
+                ));
+            }
+            Err(ResearchSubagentInvocationError::Run(error)) => {
+                let error = *error;
+                return Err(CandidateGenerationError::new(
+                    error.message,
+                    vec![planner.run_artifact.clone(), error.run_artifact],
+                ));
+            }
+        };
+    let worktree_path = campaign.worktree_path.as_deref().ok_or_else(|| {
+        CandidateGenerationError::new(
+            "Campaign has no worktree",
+            vec![planner.run_artifact.clone(), mutator.run_artifact.clone()],
+        )
+    })?;
+    let changed_files =
+        filtered_changed_files(git_changed_files(worktree_path).await.map_err(|e| {
+            CandidateGenerationError::new(
+                e.to_string(),
+                vec![planner.run_artifact.clone(), mutator.run_artifact.clone()],
+            )
+        })?);
     if changed_files.is_empty() {
-        return Err(ApiError::InvalidInput(
-            "Autonomous mutator did not produce any candidate changes.".to_string(),
+        let mut mutator_artifact = mutator.run_artifact.clone();
+        mark_run_artifact_failed(
+            &mut mutator_artifact,
+            "Autonomous mutator did not produce any candidate changes.",
+        );
+        return Err(CandidateGenerationError::new(
+            "Autonomous mutator did not produce any candidate changes.",
+            vec![planner.run_artifact.clone(), mutator_artifact],
         ));
     }
-    enforce_mutable_paths(&project.mutable_paths, &changed_files)?;
-    let diff_stat = git_output(worktree_path, &["diff", "--stat", "--", "."]).await?;
-    let diff_preview = git_output(worktree_path, &["diff", "--", "."]).await?;
-    let reviewer = run_reviewer_subagent(
+    if let Err(error) = enforce_mutable_paths(&project.mutable_paths, &changed_files) {
+        let mut mutator_artifact = mutator.run_artifact.clone();
+        mark_run_artifact_failed(&mut mutator_artifact, error.to_string());
+        return Err(CandidateGenerationError::new(
+            error.to_string(),
+            vec![planner.run_artifact.clone(), mutator_artifact],
+        ));
+    }
+    let diff_stat = git_output(worktree_path, &["diff", "--stat", "--", "."])
+        .await
+        .map_err(|e| {
+            CandidateGenerationError::new(
+                e.to_string(),
+                vec![planner.run_artifact.clone(), mutator.run_artifact.clone()],
+            )
+        })?;
+    let diff_preview = git_output(worktree_path, &["diff", "--", "."])
+        .await
+        .map_err(|e| {
+            CandidateGenerationError::new(
+                e.to_string(),
+                vec![planner.run_artifact.clone(), mutator.run_artifact.clone()],
+            )
+        })?;
+    let reviewer = match run_reviewer_subagent(
         campaign,
         project,
-        &planner,
+        &planner.value,
         &diff_stat,
         &diff_preview,
         Some(trial_id),
     )
-    .await?;
-    if !(reviewer.approved && reviewer.scope_ok && reviewer.benchmark_ready) {
-        return Err(ApiError::InvalidInput(format!(
-            "Reviewer rejected the autonomous candidate: {}",
-            reviewer.reason
-        )));
+    .await
+    {
+        Ok(reviewer) => reviewer,
+        Err(ResearchSubagentInvocationError::Api(error)) => {
+            return Err(CandidateGenerationError::new(
+                error.to_string(),
+                vec![planner.run_artifact.clone(), mutator.run_artifact.clone()],
+            ));
+        }
+        Err(ResearchSubagentInvocationError::Run(error)) => {
+            let error = *error;
+            return Err(CandidateGenerationError::new(
+                error.message,
+                vec![
+                    planner.run_artifact.clone(),
+                    mutator.run_artifact.clone(),
+                    error.run_artifact,
+                ],
+            ));
+        }
+    };
+    if !(reviewer.value.approved && reviewer.value.scope_ok && reviewer.value.benchmark_ready) {
+        let mut reviewer_artifact = reviewer.run_artifact.clone();
+        mark_run_artifact_failed(&mut reviewer_artifact, reviewer.value.reason.clone());
+        return Err(CandidateGenerationError::new(
+            format!(
+                "Reviewer rejected the autonomous candidate: {}",
+                reviewer.value.reason
+            ),
+            vec![
+                planner.run_artifact.clone(),
+                mutator.run_artifact.clone(),
+                reviewer_artifact,
+            ],
+        ));
     }
+    let planner_hypothesis = planner.value.hypothesis.clone();
+    let planner_target_ids = planner.value.target_ids.clone();
+    let expected_metric_direction = planner.value.expected_metric_direction.clone();
+    let mutator_mutation_summary = mutator.value.mutation_summary.clone();
+    let mutator_changed_paths = mutator.value.changed_paths.clone();
+    let reviewer_reason = reviewer.value.reason.clone();
     prepare_candidate_trial_from_worktree(
         store,
         campaign,
@@ -1962,19 +2464,34 @@ async fn create_experiment_trial_commit(
         runner,
         trial_id,
         sequence,
-        planner.hypothesis,
-        mutator.mutation_summary,
-        reviewer.reason,
+        planner_hypothesis,
+        mutator_mutation_summary,
+        reviewer_reason,
         serde_json::json!({
             "candidate_source": "autonomous_subagent",
             "changed_paths": changed_files,
-            "planner_target_ids": planner.target_ids,
-            "expected_metric_direction": planner.expected_metric_direction,
-            "mutator_changed_paths": mutator.changed_paths,
+            "planner_target_ids": planner_target_ids,
+            "expected_metric_direction": expected_metric_direction,
+            "mutator_changed_paths": mutator_changed_paths,
             "workspace": worktree_path,
+            "run_artifacts": [
+                planner.run_artifact.clone(),
+                mutator.run_artifact.clone(),
+                reviewer.run_artifact.clone()
+            ],
         }),
     )
     .await
+    .map_err(|error| {
+        CandidateGenerationError::new(
+            error.to_string(),
+            vec![
+                planner.run_artifact.clone(),
+                mutator.run_artifact.clone(),
+                reviewer.run_artifact.clone(),
+            ],
+        )
+    })
 }
 
 async fn latest_active_lease(
@@ -2252,7 +2769,7 @@ pub async fn reissue_lease(
         )
         .await?;
     }
-    let lease = create_lease(store, &project, &runner, &campaign, &trial).await?;
+    let lease = create_lease(store, user_id, &project, &runner, &campaign, &trial).await?;
     let provider_api_key = research_provider_api_key(user_id, &runner).await;
     let launch_outcome = adapters::try_auto_launch(
         &runner,
@@ -2571,14 +3088,15 @@ pub async fn lease_complete(
     let mut campaign = get_campaign(store, user_id, lease.campaign_id).await?;
     let project = get_project(store, user_id, campaign.project_id).await?;
     let mut trial = get_trial(store, user_id, lease.trial_id).await?;
-    finalize_trial(store, &project, &mut campaign, &mut trial, completion).await?;
-    lease.status = ExperimentLeaseStatus::Completed;
-    lease.completed_at = Some(Utc::now());
-    lease.updated_at = Utc::now();
-    store
-        .update_experiment_lease(&lease)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    complete_trial_terminal(
+        store,
+        &project,
+        &mut campaign,
+        &mut trial,
+        Some(&mut lease),
+        completion,
+    )
+    .await?;
     maybe_launch_next_queued_after_slot_release(store, user_id).await?;
     Ok(ExperimentCampaignActionResponse {
         campaign,
@@ -2587,6 +3105,25 @@ pub async fn lease_complete(
         launch: None,
         message: "Lease completed.".to_string(),
     })
+}
+
+pub async fn lease_owner_user_id(
+    store: &Arc<dyn Database>,
+    lease_id: Uuid,
+    token: &str,
+) -> ApiResult<String> {
+    let lease = verified_lease(store, lease_id, token).await?;
+    let campaign = store
+        .get_experiment_campaign(lease.campaign_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| {
+            ApiError::SessionNotFound(format!(
+                "Experiment campaign {} not found",
+                lease.campaign_id
+            ))
+        })?;
+    Ok(campaign.owner_user_id)
 }
 
 async fn launch_trial(
@@ -2599,7 +3136,7 @@ async fn launch_trial(
     mut trial: ExperimentTrial,
 ) -> ApiResult<ExperimentCampaignActionResponse> {
     if runner.backend.is_remote() {
-        let lease = create_lease(store, project, runner, &campaign, &trial).await?;
+        let lease = create_lease(store, user_id, project, runner, &campaign, &trial).await?;
         let provider_api_key = research_provider_api_key(user_id, runner).await;
         let launch_outcome = adapters::try_auto_launch(
             runner,
@@ -2659,8 +3196,9 @@ async fn launch_trial(
             "experiments.max_concurrent_campaigns is set to 0".to_string(),
         ));
     }
-    let completion = execute_local_trial(project, runner, &campaign, &mut trial).await?;
-    finalize_trial(store, project, &mut campaign, &mut trial, completion).await?;
+    let completion =
+        execute_local_trial(user_id, settings, project, runner, &campaign, &mut trial).await?;
+    complete_trial_terminal(store, project, &mut campaign, &mut trial, None, completion).await?;
     Ok(ExperimentCampaignActionResponse {
         campaign,
         trial: Some(trial),
@@ -2670,6 +3208,81 @@ async fn launch_trial(
     })
 }
 
+fn normalize_trial_completion(
+    mut completion: ExperimentRunnerCompletion,
+) -> ExperimentRunnerCompletion {
+    if !completion.artifact_manifest_json.is_object() {
+        completion.artifact_manifest_json = serde_json::json!({});
+    }
+    let has_stage = completion
+        .artifact_manifest_json
+        .get("stage")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if !has_stage {
+        let stage = if completion.exit_code == Some(0) {
+            "complete"
+        } else {
+            "run"
+        };
+        completion.artifact_manifest_json = merge_json(
+            &completion.artifact_manifest_json,
+            &serde_json::json!({ "stage": stage }),
+        );
+    }
+    completion
+}
+
+fn lease_completion_rejection(status: ExperimentLeaseStatus) -> ApiError {
+    match status {
+        ExperimentLeaseStatus::Claimed => {
+            ApiError::InvalidInput("lease is already claimed".to_string())
+        }
+        ExperimentLeaseStatus::Completed => ApiError::InvalidInput(
+            "lease completion was already recorded; repeated terminal completions are ignored"
+                .to_string(),
+        ),
+        ExperimentLeaseStatus::Revoked => ApiError::InvalidInput(
+            "lease was revoked before completion and can no longer transition to terminal"
+                .to_string(),
+        ),
+        ExperimentLeaseStatus::Pending => ApiError::InvalidInput(
+            "lease must be claimed before completion can be recorded".to_string(),
+        ),
+    }
+}
+
+async fn complete_trial_terminal(
+    store: &Arc<dyn Database>,
+    project: &ExperimentProject,
+    campaign: &mut ExperimentCampaign,
+    trial: &mut ExperimentTrial,
+    lease: Option<&mut ExperimentLease>,
+    completion: ExperimentRunnerCompletion,
+) -> ApiResult<()> {
+    if let Some(lease) = lease.as_ref()
+        && lease.status != ExperimentLeaseStatus::Claimed
+    {
+        return Err(lease_completion_rejection(lease.status));
+    }
+
+    let completion = normalize_trial_completion(completion);
+    finalize_trial(store, project, campaign, trial, completion).await?;
+
+    if let Some(lease) = lease {
+        lease.status = ExperimentLeaseStatus::Completed;
+        lease.completed_at = Some(Utc::now());
+        lease.updated_at = Utc::now();
+        store
+            .update_experiment_lease(lease)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+
+    Ok(())
+}
+
 async fn finalize_trial(
     store: &Arc<dyn Database>,
     project: &ExperimentProject,
@@ -2677,13 +3290,18 @@ async fn finalize_trial(
     trial: &mut ExperimentTrial,
     completion: ExperimentRunnerCompletion,
 ) -> ApiResult<()> {
+    trial.completed_at = Some(Utc::now());
+    let runner_run_artifact = trial_runner_run_artifact(campaign, trial, &completion);
     trial.exit_code = completion.exit_code;
     trial.metrics_json = completion.metrics_json;
     trial.summary = completion.summary;
     trial.log_preview_path = completion.log_preview_path;
-    trial.artifact_manifest_json = completion.artifact_manifest_json;
-    trial.completed_at = Some(Utc::now());
+    trial.artifact_manifest_json = merge_json(
+        &trial.artifact_manifest_json,
+        &completion.artifact_manifest_json,
+    );
     trial.updated_at = Utc::now();
+    push_run_artifact(&mut trial.artifact_manifest_json, runner_run_artifact);
     campaign.active_trial_id = None;
     campaign.queue_state = ExperimentCampaignQueueState::NotQueued;
     trial.runtime_ms = completion.runtime_ms;
@@ -2739,8 +3357,23 @@ async fn finalize_trial(
     let mut non_improving = campaign.consecutive_non_improving_trials;
 
     if !success_exit {
-        trial.status = ExperimentTrialStatus::Crashed;
-        trial.decision_reason = Some("Benchmark command exited non-zero.".to_string());
+        let failure_stage = trial
+            .artifact_manifest_json
+            .get("stage")
+            .and_then(|value| value.as_str());
+        if matches!(
+            failure_stage,
+            Some("prepare" | "checkout" | "clone" | "fetch" | "run")
+        ) {
+            trial.status = ExperimentTrialStatus::InfraFailed;
+            trial.decision_reason = Some(format!(
+                "{} command exited non-zero.",
+                failure_stage.unwrap_or("runner")
+            ));
+        } else {
+            trial.status = ExperimentTrialStatus::Crashed;
+            trial.decision_reason = Some("Benchmark command exited non-zero.".to_string());
+        }
         campaign.failure_count += 1;
     } else if !has_primary_metric {
         trial.status = ExperimentTrialStatus::InfraFailed;
@@ -2782,14 +3415,27 @@ async fn finalize_trial(
             project.primary_metric.name
         ));
         non_improving += 1;
-        if let (Some(worktree_path), Some(best_commit)) = (
-            campaign.worktree_path.as_deref(),
-            campaign.best_commit.as_deref(),
-        ) {
-            let _ = git_output(worktree_path, &["reset", "--hard", best_commit]).await;
-            let _ = git_output(worktree_path, &["clean", "-fd"]).await;
-        }
     }
+
+    let restore_commit = match trial.status {
+        ExperimentTrialStatus::Rejected => campaign.best_commit.as_deref(),
+        _ => trial
+            .candidate_commit
+            .as_deref()
+            .or(campaign.best_commit.as_deref()),
+    };
+    let restore_error =
+        if let Err(error) = restore_campaign_worktree_after_trial(campaign, restore_commit).await {
+            trial.artifact_manifest_json = merge_json(
+                &trial.artifact_manifest_json,
+                &serde_json::json!({
+                    "worktree_restore_error": error,
+                }),
+            );
+            Some(error)
+        } else {
+            None
+        };
 
     campaign.consecutive_non_improving_trials = non_improving;
     campaign.trial_count = campaign.trial_count.max(trial.sequence);
@@ -2811,26 +3457,33 @@ async fn finalize_trial(
         .max_total_cost_usd
         .is_some_and(|limit| campaign.total_cost_usd >= limit);
 
-    campaign.pause_reason = Some(campaign_status_message(
-        campaign,
-        project,
-        trial,
-        non_improving,
-        max_trials,
-        plateau_limit,
-        runtime_limit_reached,
-        cost_limit_reached,
-    ));
-    campaign.status = next_campaign_status(
-        campaign,
-        project,
-        trial,
-        non_improving,
-        max_trials,
-        plateau_limit,
-        runtime_limit_reached,
-        cost_limit_reached,
-    );
+    if let Some(error) = restore_error {
+        campaign.status = ExperimentCampaignStatus::Paused;
+        campaign.pause_reason = Some(format!(
+            "Campaign paused: failed to restore campaign worktree: {error}"
+        ));
+    } else {
+        campaign.pause_reason = Some(campaign_status_message(
+            campaign,
+            project,
+            trial,
+            non_improving,
+            max_trials,
+            plateau_limit,
+            runtime_limit_reached,
+            cost_limit_reached,
+        ));
+        campaign.status = next_campaign_status(
+            campaign,
+            project,
+            trial,
+            non_improving,
+            max_trials,
+            plateau_limit,
+            runtime_limit_reached,
+            cost_limit_reached,
+        );
+    }
     if matches!(
         campaign.status,
         ExperimentCampaignStatus::Completed
@@ -2960,6 +3613,7 @@ fn campaign_status_message(
 
 async fn create_lease(
     store: &Arc<dyn Database>,
+    user_id: &str,
     project: &ExperimentProject,
     runner: &ExperimentRunnerProfile,
     campaign: &ExperimentCampaign,
@@ -2971,6 +3625,7 @@ async fn create_lease(
         &["remote", "get-url", &project.git_remote_name],
     )
     .await?;
+    let resolved_env_grants = resolved_runner_env_grants(user_id, runner).await;
     let git_ref = campaign
         .experiment_branch
         .clone()
@@ -2989,7 +3644,7 @@ async fn create_lease(
         run_command: project.run_command.clone(),
         primary_metric: project.primary_metric.clone(),
         secondary_metrics: project.secondary_metrics.clone(),
-        env_grants: runner.env_grants.clone(),
+        env_grants: resolved_env_grants.clone(),
         artifact_paths: vec!["run.log".to_string(), "summary.json".to_string()],
     };
     let lease = ExperimentLease {
@@ -3001,7 +3656,7 @@ async fn create_lease(
         token_hash: hash_lease_token(&token),
         job_payload: serde_json::to_value(&job).map_err(|e| ApiError::Internal(e.to_string()))?,
         credentials_payload: serde_json::json!({
-            "env": runner.env_grants,
+            "env": resolved_env_grants,
             "secret_references": runner.secret_references,
         }),
         expires_at: Utc::now() + chrono::Duration::minutes(DEFAULT_REMOTE_LEASE_MINUTES),
@@ -3074,7 +3729,7 @@ async fn validate_runner_profile_impl(
     user_id: &str,
     runner: &ExperimentRunnerProfile,
     settings: &Settings,
-) -> (bool, String) {
+) -> crate::experiments::adapters::RunnerValidationOutcome {
     let provider_api_key = research_provider_api_key(user_id, runner).await;
     adapters::validate_runner_profile(runner, settings, provider_api_key.as_deref()).await
 }
@@ -3090,6 +3745,13 @@ async fn prepare_campaign_worktree(
         )));
     }
     if worktree_path.exists() {
+        let worktree = worktree_path.to_string_lossy().to_string();
+        let _ = git_output(
+            &project.workspace_path,
+            &["worktree", "remove", "--force", &worktree],
+        )
+        .await;
+        let _ = git_output(&project.workspace_path, &["worktree", "prune"]).await;
         tokio::fs::remove_dir_all(worktree_path)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -3123,13 +3785,28 @@ fn short_id(id: Uuid) -> String {
 }
 
 async fn git_changed_files(worktree_path: &str) -> ApiResult<Vec<String>> {
-    let output = git_output(worktree_path, &["status", "--porcelain"]).await?;
-    Ok(output
-        .lines()
-        .filter_map(|line| line.get(3..).map(str::trim))
-        .filter(|path| !path.is_empty())
-        .map(str::to_string)
-        .collect())
+    let output = git_output_raw(worktree_path, &["status", "--porcelain", "-z"]).await?;
+    let mut entries = output.split('\0').filter(|entry| !entry.is_empty());
+    let mut changed_files = Vec::new();
+
+    while let Some(entry) = entries.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let status = &entry[..2];
+        let primary_path = entry[3..].trim();
+        let effective_path = if status.contains('R') || status.contains('C') {
+            let _ = entries.next();
+            primary_path
+        } else {
+            primary_path
+        };
+        if !effective_path.is_empty() {
+            changed_files.push(effective_path.to_string());
+        }
+    }
+
+    Ok(changed_files)
 }
 
 fn filtered_changed_files(changed_files: Vec<String>) -> Vec<String> {
@@ -3162,20 +3839,146 @@ fn truncate_for_prompt(value: &str, max_len: usize) -> String {
     format!("{truncated}...")
 }
 
+fn push_run_artifact(manifest: &mut serde_json::Value, artifact: AgentRunArtifact) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let artifact_for_log = artifact.clone();
+        handle.spawn(async move {
+            if let Err(err) = crate::agent::AgentRunHarness::new(None)
+                .append_artifact(&artifact_for_log)
+                .await
+            {
+                tracing::debug!(error = %err, "Failed to append experiment run artifact");
+            }
+        });
+    } else {
+        tracing::debug!(
+            "Skipping experiment run-artifact append because no Tokio runtime is active"
+        );
+    }
+    if !manifest.is_object() {
+        *manifest = serde_json::json!({});
+    }
+    let Some(obj) = manifest.as_object_mut() else {
+        return;
+    };
+    let entry = obj
+        .entry("run_artifacts".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !entry.is_array() {
+        *entry = serde_json::Value::Array(Vec::new());
+    }
+    if let Some(items) = entry.as_array_mut()
+        && let Ok(value) = serde_json::to_value(artifact)
+    {
+        items.push(value);
+    }
+}
+
+fn mark_run_artifact_failed(artifact: &mut AgentRunArtifact, reason: impl Into<String>) {
+    artifact.status = AgentRunStatus::Failed;
+    artifact.completed_at = Some(Utc::now());
+    artifact.failure_reason = Some(reason.into());
+}
+
+fn record_campaign_candidate_generation(
+    campaign: &mut ExperimentCampaign,
+    mode: &str,
+    status: &str,
+    message: &str,
+    run_artifacts: &[AgentRunArtifact],
+) {
+    for artifact in run_artifacts.iter().cloned() {
+        push_run_artifact(&mut campaign.metadata, artifact);
+    }
+    let artifact_run_ids = run_artifacts
+        .iter()
+        .map(|artifact| artifact.run_id.clone())
+        .collect::<Vec<_>>();
+    campaign.metadata = merge_json(
+        &campaign.metadata,
+        &serde_json::json!({
+            "candidate_generation": {
+                "mode": mode,
+                "status": status,
+                "message": message,
+                "updated_at": Utc::now(),
+                "artifact_run_ids": artifact_run_ids,
+            }
+        }),
+    );
+}
+
+fn trial_runner_run_artifact(
+    campaign: &ExperimentCampaign,
+    trial: &ExperimentTrial,
+    completion: &ExperimentRunnerCompletion,
+) -> AgentRunArtifact {
+    let status = match completion.exit_code {
+        Some(0) => AgentRunStatus::Completed,
+        _ => AgentRunStatus::Failed,
+    };
+    let provider_context_refs = [
+        Some(format!("experiment_campaign:{}", campaign.id)),
+        Some(format!("experiment_trial:{}", trial.id)),
+        trial
+            .provider_job_id
+            .as_ref()
+            .map(|value| format!("runner_provider_job:{value}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    AgentRunArtifact::new(
+        "experiment_runner",
+        status,
+        trial.started_at.unwrap_or_else(Utc::now),
+        trial.completed_at,
+    )
+    .with_failure_reason(match status {
+        AgentRunStatus::Failed => completion.summary.clone(),
+        _ => None,
+    })
+    .with_runtime_descriptor(Some(&experiment_runner_runtime_descriptor(
+        trial.runner_backend.slug(),
+    )))
+    .with_prompt_hashes(None, digest_json(&completion.artifact_manifest_json))
+    .with_provider_context_refs(provider_context_refs)
+    .with_metadata(serde_json::json!({
+        "exit_code": completion.exit_code,
+        "runtime_ms": completion.runtime_ms,
+        "summary": completion.summary,
+        "metrics_json": completion.metrics_json,
+        "log_preview_path": completion.log_preview_path,
+    }))
+}
+
 fn research_channel_metadata(
     campaign: &ExperimentCampaign,
     trial_id: Option<Uuid>,
     role: &str,
     target_ids: &[String],
 ) -> serde_json::Value {
-    serde_json::json!({
+    let mut metadata = serde_json::json!({
         "thread_id": RESEARCH_SUBAGENT_THREAD_ID,
         "reinject_result": false,
         USAGE_TRACKING_EXPERIMENT_CAMPAIGN_ID_KEY: campaign.id.to_string(),
         USAGE_TRACKING_EXPERIMENT_TRIAL_ID_KEY: trial_id.map(|value| value.to_string()),
         USAGE_TRACKING_EXPERIMENT_ROLE_KEY: role,
         USAGE_TRACKING_EXPERIMENT_TARGET_IDS_KEY: target_ids.join(","),
-    })
+    });
+    if let Some(worktree_path) = campaign.worktree_path.as_deref()
+        && let Some(object) = metadata.as_object_mut()
+    {
+        object.insert(
+            "tool_base_dir".to_string(),
+            serde_json::json!(worktree_path),
+        );
+        object.insert(
+            "tool_working_dir".to_string(),
+            serde_json::json!(worktree_path),
+        );
+    }
+    metadata
 }
 
 fn parse_json_response<T: DeserializeOwned>(raw: &str) -> ApiResult<T> {
@@ -3204,47 +4007,189 @@ fn parse_json_response<T: DeserializeOwned>(raw: &str) -> ApiResult<T> {
     ))
 }
 
+fn research_subagent_run_artifact(
+    role_name: &str,
+    status: AgentRunStatus,
+    started_at: DateTime<Utc>,
+    system_prompt: &str,
+    task: &str,
+    channel_metadata: &serde_json::Value,
+    allowed_tools: &[String],
+    allowed_skills: &Option<Vec<String>>,
+    response_preview: Option<&str>,
+    failure_reason: Option<&str>,
+) -> AgentRunArtifact {
+    let provider_context_refs = [
+        channel_metadata
+            .get(USAGE_TRACKING_EXPERIMENT_CAMPAIGN_ID_KEY)
+            .and_then(|value| value.as_str())
+            .map(|value| format!("experiment_campaign:{value}")),
+        channel_metadata
+            .get(USAGE_TRACKING_EXPERIMENT_TRIAL_ID_KEY)
+            .and_then(|value| value.as_str())
+            .map(|value| format!("experiment_trial:{value}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    AgentRunArtifact::new(
+        format!("experiment_subagent:{role_name}"),
+        status,
+        started_at,
+        Some(Utc::now()),
+    )
+    .with_failure_reason(failure_reason.map(str::to_string))
+    .with_runtime_descriptor(Some(&subagent_executor_runtime_descriptor()))
+    .with_prompt_hashes(
+        digest_text(system_prompt),
+        digest_json(&serde_json::json!({
+            "task": task,
+            "channel_metadata": channel_metadata,
+            "allowed_tools": allowed_tools,
+            "allowed_skills": allowed_skills,
+        })),
+    )
+    .with_provider_context_refs(provider_context_refs)
+    .with_metadata(serde_json::json!({
+        "role": role_name,
+        "response_preview": response_preview.map(|value| truncate_for_prompt(value, 600)),
+    }))
+}
+
 async fn spawn_research_subagent<T: DeserializeOwned>(
     role_name: &str,
+    owner_user_id: &str,
     task: String,
     system_prompt: String,
     channel_metadata: serde_json::Value,
-) -> ApiResult<T> {
-    let executor = research_subagent_executor().ok_or_else(|| {
-        ApiError::Unavailable("Research subagent executor is not available.".to_string())
+) -> Result<ResearchSubagentOutput<T>, ResearchSubagentError> {
+    let started_at = Utc::now();
+    let executor = research_subagent_executor().ok_or_else(|| ResearchSubagentError {
+        message: "Research subagent executor is not available.".to_string(),
+        run_artifact: research_subagent_run_artifact(
+            role_name,
+            AgentRunStatus::Failed,
+            started_at,
+            &system_prompt,
+            &task,
+            &channel_metadata,
+            &[],
+            &None,
+            None,
+            Some("Research subagent executor is not available."),
+        ),
     })?;
-    let (allowed_tools, allowed_skills) = research_subagent_capabilities(role_name).await?;
+    let (allowed_tools, allowed_skills) =
+        research_subagent_capabilities(role_name)
+            .await
+            .map_err(|error| ResearchSubagentError {
+                message: error.to_string(),
+                run_artifact: research_subagent_run_artifact(
+                    role_name,
+                    AgentRunStatus::Failed,
+                    started_at,
+                    &system_prompt,
+                    &task,
+                    &channel_metadata,
+                    &[],
+                    &None,
+                    None,
+                    Some(&error.to_string()),
+                ),
+            })?;
     let result = executor
         .spawn(
             SubagentSpawnRequest {
                 name: format!("Research {role_name}"),
-                task,
-                system_prompt: Some(system_prompt),
+                task: task.clone(),
+                system_prompt: Some(system_prompt.clone()),
                 model: None,
-                allowed_tools: Some(allowed_tools),
-                allowed_skills,
-                principal_id: Some(DEFAULT_EXPERIMENT_USER_ID.to_string()),
-                actor_id: Some(DEFAULT_EXPERIMENT_USER_ID.to_string()),
+                task_packet: None,
+                memory_mode: None,
+                tool_mode: None,
+                skill_mode: None,
+                tool_profile: None,
+                allowed_tools: Some(allowed_tools.clone()),
+                allowed_skills: allowed_skills.clone(),
+                principal_id: Some(owner_user_id.to_string()),
+                actor_id: Some(owner_user_id.to_string()),
                 agent_workspace_id: None,
                 timeout_secs: Some(300),
                 wait: true,
             },
             RESEARCH_SUBAGENT_CHANNEL,
             &channel_metadata,
-            DEFAULT_EXPERIMENT_USER_ID,
+            owner_user_id,
             None,
             Some(RESEARCH_SUBAGENT_THREAD_ID),
         )
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| ResearchSubagentError {
+            message: e.to_string(),
+            run_artifact: research_subagent_run_artifact(
+                role_name,
+                AgentRunStatus::Failed,
+                started_at,
+                &system_prompt,
+                &task,
+                &channel_metadata,
+                &allowed_tools,
+                &allowed_skills,
+                None,
+                Some(&e.to_string()),
+            ),
+        })?;
     if !result.success {
-        return Err(ApiError::Internal(
-            result
-                .error
-                .unwrap_or_else(|| format!("Research {role_name} failed.")),
-        ));
+        let message = result
+            .error
+            .unwrap_or_else(|| format!("Research {role_name} failed."));
+        return Err(ResearchSubagentError {
+            message: message.clone(),
+            run_artifact: research_subagent_run_artifact(
+                role_name,
+                AgentRunStatus::Failed,
+                started_at,
+                &system_prompt,
+                &task,
+                &channel_metadata,
+                &allowed_tools,
+                &allowed_skills,
+                Some(&result.response),
+                Some(&message),
+            ),
+        });
     }
-    parse_json_response(&result.response)
+    let parsed = parse_json_response(&result.response).map_err(|error| ResearchSubagentError {
+        message: error.to_string(),
+        run_artifact: research_subagent_run_artifact(
+            role_name,
+            AgentRunStatus::Failed,
+            started_at,
+            &system_prompt,
+            &task,
+            &channel_metadata,
+            &allowed_tools,
+            &allowed_skills,
+            Some(&result.response),
+            Some(&error.to_string()),
+        ),
+    })?;
+    let run_artifact = research_subagent_run_artifact(
+        role_name,
+        AgentRunStatus::Completed,
+        started_at,
+        &system_prompt,
+        &task,
+        &channel_metadata,
+        &allowed_tools,
+        &allowed_skills,
+        Some(&result.response),
+        None,
+    );
+    Ok(ResearchSubagentOutput {
+        value: parsed,
+        run_artifact,
+    })
 }
 
 async fn research_subagent_capabilities(
@@ -3308,7 +4253,7 @@ async fn run_planner_subagent(
     campaign: &ExperimentCampaign,
     project: &ExperimentProject,
     trial_id: Option<Uuid>,
-) -> ApiResult<PlannerProposal> {
+) -> Result<ResearchSubagentOutput<PlannerProposal>, ResearchSubagentInvocationError> {
     let trials = store
         .list_experiment_trials(campaign.id)
         .await
@@ -3340,11 +4285,13 @@ async fn run_planner_subagent(
         .to_string();
     spawn_research_subagent(
         "planner",
+        &campaign.owner_user_id,
         task,
         system_prompt,
         research_channel_metadata(campaign, trial_id, "planner", &[]),
     )
     .await
+    .map_err(ResearchSubagentInvocationError::from)
 }
 
 async fn run_mutator_subagent(
@@ -3352,7 +4299,7 @@ async fn run_mutator_subagent(
     project: &ExperimentProject,
     planner: &PlannerProposal,
     trial_id: Option<Uuid>,
-) -> ApiResult<MutatorResult> {
+) -> Result<ResearchSubagentOutput<MutatorResult>, ResearchSubagentInvocationError> {
     let worktree_path = campaign
         .worktree_path
         .as_deref()
@@ -3389,11 +4336,13 @@ async fn run_mutator_subagent(
     let system_prompt = "You are the mutator role for ThinClaw Research. Edit files only inside the provided worktree and allowed paths. Return raw JSON only.".to_string();
     spawn_research_subagent(
         "mutator",
+        &campaign.owner_user_id,
         task,
         system_prompt,
         research_channel_metadata(campaign, trial_id, "mutator", &planner.target_ids),
     )
     .await
+    .map_err(ResearchSubagentInvocationError::from)
 }
 
 async fn run_reviewer_subagent(
@@ -3403,7 +4352,7 @@ async fn run_reviewer_subagent(
     diff_stat: &str,
     diff_preview: &str,
     trial_id: Option<Uuid>,
-) -> ApiResult<ReviewerDecision> {
+) -> Result<ResearchSubagentOutput<ReviewerDecision>, ResearchSubagentInvocationError> {
     let worktree_path = campaign
         .worktree_path
         .as_deref()
@@ -3428,14 +4377,18 @@ async fn run_reviewer_subagent(
     let system_prompt = "You are the reviewer role for ThinClaw Research. Validate scope and benchmark readiness only. Return raw JSON only.".to_string();
     spawn_research_subagent(
         "reviewer",
+        &campaign.owner_user_id,
         task,
         system_prompt,
         research_channel_metadata(campaign, trial_id, "reviewer", &planner.target_ids),
     )
     .await
+    .map_err(ResearchSubagentInvocationError::from)
 }
 
 async fn execute_local_trial(
+    user_id: &str,
+    settings: &Settings,
     project: &ExperimentProject,
     runner: &ExperimentRunnerProfile,
     campaign: &ExperimentCampaign,
@@ -3445,13 +4398,27 @@ async fn execute_local_trial(
         .worktree_path
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Campaign missing worktree_path".to_string()))?;
-    let run_root = Path::new(worktree_root).join(&project.workdir);
-    let run_root = run_root
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(&run_root));
+    let worktree_root = tokio::fs::canonicalize(worktree_root)
+        .await
+        .map_err(|e| ApiError::Internal(format!("failed to resolve campaign worktree: {e}")))?;
+    let workdir_fragment = validate_project_workdir_fragment(&project.workdir)?;
+    let run_root = worktree_root.join(workdir_fragment);
+    let run_root = tokio::fs::canonicalize(&run_root)
+        .await
+        .map_err(|e| ApiError::Internal(format!("failed to resolve campaign workdir: {e}")))?;
+    if !run_root.starts_with(&worktree_root) {
+        return Err(ApiError::InvalidInput(
+            "Project workdir escapes the campaign worktree.".to_string(),
+        ));
+    }
     let started_at = std::time::Instant::now();
-    let log_dir = crate::platform::resolve_data_dir("experiments").join("logs");
+    let experiments_data_dir = crate::platform::resolve_data_dir("experiments");
+    let log_dir = experiments_data_dir.join("logs");
+    let artifact_dir = experiments_data_dir.join("artifacts");
     tokio::fs::create_dir_all(&log_dir)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    tokio::fs::create_dir_all(&artifact_dir)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let log_path = log_dir.join(format!("{}.log", trial.id.simple()));
@@ -3460,29 +4427,87 @@ async fn execute_local_trial(
     trial.started_at = Some(Utc::now());
     trial.updated_at = Utc::now();
 
+    if let Some(config) = agent_env_benchmark_config(runner)? {
+        return execute_agent_env_benchmark_trial(
+            config,
+            &run_root,
+            started_at,
+            &log_path,
+            &artifact_dir,
+            trial,
+        )
+        .await;
+    }
+
+    let env_grants = resolved_runner_env_grants(user_id, runner).await;
+    let backend = experiment_execution_backend(settings, runner);
     let mut log = String::new();
     if let Some(prepare_command) = project.prepare_command.as_deref() {
-        let output = run_shell_command(&run_root, prepare_command, runner).await?;
+        let output = run_experiment_shell_command(
+            Arc::clone(&backend),
+            &run_root,
+            prepare_command,
+            &env_grants,
+        )
+        .await?;
         log.push_str("== prepare ==\n");
-        log.push_str(&output);
+        log.push_str(&output.output);
         log.push('\n');
+        if output.exit_code != 0 {
+            let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
+            tokio::fs::write(&log_path, &log)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            return Ok(ExperimentRunnerCompletion {
+                exit_code: Some(output.exit_code as i32),
+                metrics_json: serde_json::json!({}),
+                summary: Some(format!(
+                    "Local prepare command failed with exit code {}.",
+                    output.exit_code
+                )),
+                runtime_ms: Some(runtime_ms),
+                attributed_cost_usd: None,
+                log_preview_path: Some(log_path.to_string_lossy().to_string()),
+                artifact_manifest_json: serde_json::json!({
+                    "stage": "prepare",
+                    "summary_json_path": run_root.join("summary.json").to_string_lossy(),
+                }),
+            });
+        }
     }
-    let run_output = run_shell_command(&run_root, &project.run_command, runner).await?;
+    let run_output = run_experiment_shell_command(
+        Arc::clone(&backend),
+        &run_root,
+        &project.run_command,
+        &env_grants,
+    )
+    .await?;
     let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
     log.push_str("== run ==\n");
-    log.push_str(&run_output);
+    log.push_str(&run_output.output);
     tokio::fs::write(&log_path, &log)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let summary_path = run_root.join("summary.json");
+    let persisted_summary_path = artifact_dir.join(format!("{}-summary.json", trial.id.simple()));
     let summary_json = if summary_path.exists() {
         let raw = tokio::fs::read_to_string(&summary_path)
             .await
             .unwrap_or_default();
+        tokio::fs::write(&persisted_summary_path, &raw)
+            .await
+            .map_err(|e| {
+                ApiError::Internal(format!("failed to persist local summary.json: {e}"))
+            })?;
         serde_json::from_str::<serde_json::Value>(&raw).unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
+    };
+    let summary_manifest_path = if summary_path.exists() {
+        persisted_summary_path.to_string_lossy().to_string()
+    } else {
+        summary_path.to_string_lossy().to_string()
     };
     let metrics = extract_metrics(
         &project.primary_metric,
@@ -3490,70 +4515,196 @@ async fn execute_local_trial(
         &log,
         &summary_json,
     );
-    let exit_code = parse_exit_code(&run_output);
+    let exit_code = run_output.exit_code as i32;
+    if exit_code != 0 {
+        return Ok(ExperimentRunnerCompletion {
+            exit_code: Some(exit_code),
+            metrics_json: serde_json::json!({}),
+            summary: Some(format!(
+                "Local benchmark command failed with exit code {exit_code}."
+            )),
+            runtime_ms: Some(runtime_ms),
+            attributed_cost_usd: None,
+            log_preview_path: Some(log_path.to_string_lossy().to_string()),
+            artifact_manifest_json: serde_json::json!({
+                "stage": "run",
+                "summary_json_path": summary_manifest_path,
+            }),
+        });
+    }
     Ok(ExperimentRunnerCompletion {
-        exit_code,
+        exit_code: Some(exit_code),
         metrics_json: metrics,
+        summary: Some(format!("Local {} run completed.", backend.kind().as_str())),
+        runtime_ms: Some(runtime_ms),
+        attributed_cost_usd: None,
+        log_preview_path: Some(log_path.to_string_lossy().to_string()),
+        artifact_manifest_json: serde_json::json!({
+            "stage": "run",
+            "summary_json_path": summary_manifest_path,
+        }),
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "benchmark", rename_all = "snake_case")]
+enum AgentEnvBenchmarkConfig {
+    TerminalBench {
+        #[serde(default)]
+        cases: Vec<TerminalBenchCase>,
+    },
+    SkillBench {
+        #[serde(default)]
+        cases: Vec<SkillBenchCase>,
+    },
+}
+
+fn agent_env_benchmark_config(
+    runner: &ExperimentRunnerProfile,
+) -> ApiResult<Option<AgentEnvBenchmarkConfig>> {
+    let source = runner
+        .backend_config
+        .get("agent_env")
+        .or_else(|| runner.backend_config.get("benchmark_config"))
+        .unwrap_or(&runner.backend_config);
+    if source.get("benchmark").is_none() {
+        return Ok(None);
+    }
+    serde_json::from_value(source.clone())
+        .map(Some)
+        .map_err(|err| ApiError::InvalidInput(format!("Invalid AgentEnv benchmark config: {err}")))
+}
+
+async fn execute_agent_env_benchmark_trial(
+    config: AgentEnvBenchmarkConfig,
+    run_root: &Path,
+    started_at: std::time::Instant,
+    log_path: &Path,
+    artifact_dir: &Path,
+    trial: &ExperimentTrial,
+) -> ApiResult<ExperimentRunnerCompletion> {
+    let trajectories = match config {
+        AgentEnvBenchmarkConfig::TerminalBench { cases } => {
+            let cases = cases
+                .into_iter()
+                .map(|mut case| {
+                    if case.cwd.is_none() {
+                        case.cwd = Some(run_root.to_path_buf());
+                    }
+                    case
+                })
+                .collect::<Vec<_>>();
+            let mut runner = EnvRunner::new(TerminalBenchEnv::new(cases))
+                .with_artifact_root(artifact_dir.join("agent_env_runs"));
+            runner
+                .evaluate(1, |_| {
+                    vec![AgentAction::UserMessage {
+                        content: "run terminal_bench".to_string(),
+                    }]
+                })
+                .await
+                .map_err(|err| ApiError::Internal(err.to_string()))?
+        }
+        AgentEnvBenchmarkConfig::SkillBench { cases } => {
+            let mut runner = EnvRunner::new(SkillBenchEnv::new(cases))
+                .with_artifact_root(artifact_dir.join("agent_env_runs"));
+            runner
+                .evaluate(1, |_| {
+                    vec![AgentAction::UserMessage {
+                        content: "run skill_bench".to_string(),
+                    }]
+                })
+                .await
+                .map_err(|err| ApiError::Internal(err.to_string()))?
+        }
+    };
+
+    let runtime_ms = (started_at.elapsed().as_nanos() / 1_000_000) as u64;
+    let score = average_trajectory_score(&trajectories);
+    let trajectory_path =
+        artifact_dir.join(format!("{}-agent-env-trajectory.json", trial.id.simple()));
+    let trajectory_json = serde_json::to_string_pretty(&trajectories)
+        .map_err(|err| ApiError::Internal(err.to_string()))?;
+    tokio::fs::write(&trajectory_path, &trajectory_json)
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))?;
+    let log = render_agent_env_log(&trajectories);
+    tokio::fs::write(log_path, &log)
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))?;
+
+    Ok(ExperimentRunnerCompletion {
+        exit_code: Some(if score >= 1.0 { 0 } else { 1 }),
+        metrics_json: serde_json::json!({
+            "score": score,
+            "episodes": trajectories.len(),
+        }),
         summary: Some(format!(
-            "Local {} run completed.",
-            serde_json::to_string(&runner.backend).unwrap_or_default()
+            "AgentEnv benchmark completed with score {score:.3}."
         )),
         runtime_ms: Some(runtime_ms),
         attributed_cost_usd: None,
         log_preview_path: Some(log_path.to_string_lossy().to_string()),
         artifact_manifest_json: serde_json::json!({
-            "summary_json_path": summary_path.to_string_lossy(),
+            "stage": "agent_env_benchmark",
+            "trajectory_json_path": trajectory_path.to_string_lossy(),
         }),
     })
 }
 
-fn parse_exit_code(output: &str) -> Option<i32> {
-    if output.contains("__THINCLAW_EXIT_CODE__:") {
-        return output
-            .lines()
-            .find_map(|line| line.split("__THINCLAW_EXIT_CODE__:").nth(1))
-            .and_then(|value| value.trim().parse::<i32>().ok());
+fn average_trajectory_score(trajectories: &[Trajectory]) -> f64 {
+    if trajectories.is_empty() {
+        0.0
+    } else {
+        trajectories
+            .iter()
+            .map(|trajectory| trajectory.score)
+            .sum::<f64>()
+            / trajectories.len() as f64
     }
-    Some(0)
 }
 
-#[cfg(target_os = "windows")]
-fn shell_command_invocation(command: &str) -> (&'static str, Vec<String>) {
-    (
-        "cmd",
-        vec![
-            "/V:ON".to_string(),
-            "/C".to_string(),
-            format!("{command} & echo __THINCLAW_EXIT_CODE__:!ERRORLEVEL!"),
-        ],
-    )
+fn render_agent_env_log(trajectories: &[Trajectory]) -> String {
+    let mut log = String::new();
+    for trajectory in trajectories {
+        log.push_str(&format!(
+            "== {} {} score {:.3} ==\n",
+            trajectory.env_name, trajectory.episode_id, trajectory.score
+        ));
+        for step in &trajectory.steps {
+            log.push_str(&format!(
+                "reward={:.3} done={}\n{}\n",
+                step.reward,
+                step.done,
+                step.response.as_deref().unwrap_or_default()
+            ));
+        }
+    }
+    log
 }
 
-#[cfg(not(target_os = "windows"))]
-fn shell_command_invocation(command: &str) -> (&'static str, Vec<String>) {
-    (
-        "sh",
-        vec![
-            "-lc".to_string(),
-            format!("{command}; printf '\\n__THINCLAW_EXIT_CODE__:%s\\n' \"$?\""),
-        ],
-    )
+async fn restore_campaign_worktree_after_trial(
+    campaign: &ExperimentCampaign,
+    restore_commit: Option<&str>,
+) -> Result<(), String> {
+    let Some(worktree_path) = campaign.worktree_path.as_deref() else {
+        return Ok(());
+    };
+
+    if let Some(commit) = restore_commit {
+        git_output(worktree_path, &["reset", "--hard", commit])
+            .await
+            .map_err(|error| format!("failed to reset campaign worktree to {commit}: {error}"))?;
+    }
+
+    git_output_raw(worktree_path, &["clean", "-fd"])
+        .await
+        .map_err(|error| format!("failed to clean campaign worktree: {error}"))?;
+    Ok(())
 }
 
-async fn run_shell_command(
-    cwd: &Path,
-    command: &str,
-    runner: &ExperimentRunnerProfile,
-) -> ApiResult<String> {
-    let env = env_pairs_from_profile(runner);
-    let (shell, args) = shell_command_invocation(command);
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_command_capture(Some(cwd), shell, &arg_refs, &env).await
-}
-
-fn env_pairs_from_profile(runner: &ExperimentRunnerProfile) -> Vec<(String, String)> {
-    runner
-        .env_grants
+fn env_pairs_from_json(env_grants: &serde_json::Value) -> Vec<(String, String)> {
+    env_grants
         .as_object()
         .map(|map| {
             map.iter()
@@ -3565,31 +4716,101 @@ fn env_pairs_from_profile(runner: &ExperimentRunnerProfile) -> Vec<(String, Stri
         .unwrap_or_default()
 }
 
+fn experiment_sandbox_config(settings: &Settings) -> crate::sandbox::SandboxConfig {
+    crate::config::SandboxModeConfig::resolve(settings)
+        .unwrap_or_else(|_| crate::config::SandboxModeConfig {
+            enabled: settings.sandbox.enabled,
+            policy: settings.sandbox.policy.clone(),
+            timeout_secs: settings.sandbox.timeout_secs,
+            memory_limit_mb: settings.sandbox.memory_limit_mb,
+            cpu_shares: settings.sandbox.cpu_shares,
+            image: settings.sandbox.image.clone(),
+            interactive_idle_timeout_secs: settings.sandbox.interactive_idle_timeout_secs,
+            auto_pull_image: settings.sandbox.auto_pull_image,
+            extra_allowed_domains: settings.sandbox.extra_allowed_domains.clone(),
+        })
+        .to_sandbox_config()
+}
+
+fn experiment_execution_backend(
+    settings: &Settings,
+    runner: &ExperimentRunnerProfile,
+) -> Arc<dyn ExecutionBackend> {
+    match runner.backend {
+        ExperimentRunnerBackend::LocalDocker => {
+            let mut sandbox_config = experiment_sandbox_config(settings);
+            sandbox_config.enabled = true;
+            sandbox_config.policy = crate::sandbox::SandboxPolicy::WorkspaceWrite;
+            if let Some(image) = runner
+                .image_or_runtime
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                sandbox_config.image = image.trim().to_string();
+            }
+            DockerSandboxExecutionBackend::from_sandbox(
+                Arc::new(crate::sandbox::SandboxManager::new(sandbox_config)),
+                crate::sandbox::SandboxPolicy::WorkspaceWrite,
+            )
+        }
+        _ => LocalHostExecutionBackend::shared(),
+    }
+}
+
+async fn run_experiment_shell_command(
+    backend: Arc<dyn ExecutionBackend>,
+    cwd: &Path,
+    command: &str,
+    env_grants: &serde_json::Value,
+) -> ApiResult<ExecutionResult> {
+    backend
+        .run_shell(CommandExecutionRequest {
+            command: command.to_string(),
+            workdir: cwd.to_path_buf(),
+            timeout: TokioDuration::from_secs(600),
+            extra_env: env_pairs_from_json(env_grants).into_iter().collect(),
+            allow_network: false,
+        })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))
+}
+
 async fn run_command_capture(
     cwd: Option<&Path>,
     binary: &str,
     args: &[&str],
     env: &[(String, String)],
 ) -> ApiResult<String> {
-    let mut command = Command::new(binary);
-    command.args(args);
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
-    }
-    for (key, value) in env {
-        command.env(key, value);
-    }
-    let output = command
-        .output()
+    let output = LocalHostExecutionBackend::shared()
+        .run_script(ScriptExecutionRequest {
+            program: binary.to_string(),
+            args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            workdir: cwd
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
+            timeout: TokioDuration::from_secs(600),
+            extra_env: env.iter().cloned().collect(),
+            allow_network: true,
+        })
         .await
         .map_err(|e| ApiError::Internal(format!("failed to run {binary}: {e}")))?;
-    let mut text = String::new();
-    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    let mut text = output.stdout.clone();
     if !output.stderr.is_empty() {
         if !text.is_empty() {
             text.push('\n');
         }
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
+        text.push_str(&output.stderr);
+    }
+    if output.exit_code != 0 {
+        return Err(ApiError::Internal(format!(
+            "{binary} exited with status {}{}",
+            output.exit_code,
+            if text.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", text.trim())
+            }
+        )));
     }
     Ok(text)
 }
@@ -3597,6 +4818,10 @@ async fn run_command_capture(
 async fn git_output(cwd: &str, args: &[&str]) -> ApiResult<String> {
     let output = run_command_capture(Some(Path::new(cwd)), "git", args, &[]).await?;
     Ok(output.trim().to_string())
+}
+
+async fn git_output_raw(cwd: &str, args: &[&str]) -> ApiResult<String> {
+    run_command_capture(Some(Path::new(cwd)), "git", args, &[]).await
 }
 
 async fn git_run(cwd: &str, prefix_args: &[&str], extra_args: &[&str]) -> ApiResult<()> {
@@ -3702,6 +4927,8 @@ fn derive_opportunities(
         let rank_score = aggregate_opportunity_score(&aggregate);
         let route_key = aggregate.route_key.clone();
         let logical_role = aggregate.logical_role.clone();
+        let signals =
+            opportunity_signals_for_usage(&aggregate, error_rate, avg_latency_ms, avg_cost_usd);
         let summary = opportunity_summary(
             aggregate.kind,
             aggregate.provider.as_str(),
@@ -3721,6 +4948,10 @@ fn derive_opportunities(
             gpu_requirement: opportunity_gpu_requirement(aggregate.kind, self_hosted),
             suggested_preset: opportunity_preset(aggregate.kind, self_hosted),
             linked_target_id: aggregate.linked_target_id,
+            source: Some("telemetry".to_string()),
+            confidence: Some((0.4 + (aggregate.call_count.min(8) as f64 * 0.05)).clamp(0.4, 0.9)),
+            signals,
+            project_hint: None,
             metadata: serde_json::json!({
                 "usage_class": format!("{:?}", aggregate.class),
                 "call_count": aggregate.call_count,
@@ -3738,6 +4969,411 @@ fn derive_opportunities(
     }
 
     opportunities
+}
+
+#[derive(Debug, Clone)]
+struct OutcomeOpportunityAggregate {
+    kind: ExperimentTargetKind,
+    contract_type: String,
+    artifact_type: Option<String>,
+    artifact_name: Option<String>,
+    routine_id: Option<String>,
+    routine_name: Option<String>,
+    pattern_key: String,
+    count: u32,
+    first_seen: DateTime<Utc>,
+    last_seen: DateTime<Utc>,
+    rank_score: f64,
+    linked_target_id: Option<Uuid>,
+}
+
+fn derive_outcome_opportunities(
+    contracts: &[OutcomeContract],
+    targets: &[ExperimentTarget],
+    limit: usize,
+) -> Vec<ExperimentOpportunity> {
+    let cutoff = Utc::now() - chrono::Duration::days(30);
+    let mut aggregates: HashMap<String, OutcomeOpportunityAggregate> = HashMap::new();
+
+    for contract in contracts.iter().filter(|contract| {
+        contract.final_verdict.as_deref() == Some("negative")
+            && contract.evaluated_at.unwrap_or(contract.updated_at) >= cutoff
+    }) {
+        let Some(kind) = outcome_target_kind(contract) else {
+            continue;
+        };
+        let pattern_key = contract
+            .metadata
+            .get("pattern_key")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "{}:{}:{}",
+                    contract.contract_type, contract.source_kind, contract.source_id
+                )
+            });
+        let artifact_type = contract
+            .metadata
+            .get("artifact_type")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let artifact_name = contract
+            .metadata
+            .get("artifact_name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| outcome_default_artifact_name(contract));
+        let routine_id = contract
+            .metadata
+            .get("routine_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let routine_name = contract
+            .metadata
+            .get("routine_name")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let linked_target_id = find_outcome_linked_target_id(
+            targets,
+            kind,
+            artifact_name.as_deref(),
+            routine_id.as_deref(),
+            &pattern_key,
+        );
+        let evaluated_at = contract.evaluated_at.unwrap_or(contract.updated_at);
+        let aggregate =
+            aggregates
+                .entry(pattern_key.clone())
+                .or_insert_with(|| OutcomeOpportunityAggregate {
+                    kind,
+                    contract_type: contract.contract_type.clone(),
+                    artifact_type: artifact_type.clone(),
+                    artifact_name: artifact_name.clone(),
+                    routine_id: routine_id.clone(),
+                    routine_name: routine_name.clone(),
+                    pattern_key: pattern_key.clone(),
+                    count: 0,
+                    first_seen: evaluated_at,
+                    last_seen: evaluated_at,
+                    rank_score: 0.0,
+                    linked_target_id,
+                });
+        aggregate.count = aggregate.count.saturating_add(1);
+        aggregate.first_seen = aggregate.first_seen.min(evaluated_at);
+        aggregate.last_seen = aggregate.last_seen.max(evaluated_at);
+        if aggregate.linked_target_id.is_none() {
+            aggregate.linked_target_id = linked_target_id;
+        }
+    }
+
+    let mut aggregates: Vec<_> = aggregates.into_values().collect();
+    for aggregate in &mut aggregates {
+        let recency_bonus = ((Utc::now() - aggregate.last_seen).num_days().max(0) as f64).min(14.0);
+        aggregate.rank_score = aggregate.count as f64 * 4.0 - recency_bonus;
+    }
+    aggregates.sort_by(|left, right| {
+        right
+            .rank_score
+            .partial_cmp(&left.rank_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                experiment_target_kind_sort_key(left.kind)
+                    .cmp(experiment_target_kind_sort_key(right.kind))
+            })
+            .then_with(|| left.pattern_key.cmp(&right.pattern_key))
+    });
+
+    aggregates
+        .into_iter()
+        .take(limit.max(1))
+        .map(outcome_aggregate_to_opportunity)
+        .collect()
+}
+
+fn outcome_target_kind(contract: &OutcomeContract) -> Option<ExperimentTargetKind> {
+    match contract.contract_type.as_str() {
+        "turn_usefulness" => Some(ExperimentTargetKind::PromptAsset),
+        "routine_usefulness" => Some(ExperimentTargetKind::ToolPolicy),
+        "tool_durability" => match contract
+            .metadata
+            .get("artifact_type")
+            .and_then(|value| value.as_str())
+        {
+            Some("prompt") => Some(ExperimentTargetKind::PromptAsset),
+            Some("skill") | Some("routine") => Some(ExperimentTargetKind::ToolPolicy),
+            Some("parser") => Some(ExperimentTargetKind::Parser),
+            Some("evaluator") => Some(ExperimentTargetKind::Evaluator),
+            Some("inference") => Some(ExperimentTargetKind::InferenceConfig),
+            Some("serving") => Some(ExperimentTargetKind::ServingConfig),
+            Some("training") => Some(ExperimentTargetKind::TrainingConfig),
+            Some("training_code") | Some("code") => Some(ExperimentTargetKind::TrainingCode),
+            _ if contract.source_kind == "learning_code_proposal" => {
+                Some(ExperimentTargetKind::TrainingCode)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn outcome_default_artifact_name(contract: &OutcomeContract) -> Option<String> {
+    match contract.contract_type.as_str() {
+        "turn_usefulness" => Some(crate::workspace::paths::USER.to_string()),
+        _ => None,
+    }
+}
+
+fn find_outcome_linked_target_id(
+    targets: &[ExperimentTarget],
+    kind: ExperimentTargetKind,
+    artifact_name: Option<&str>,
+    routine_id: Option<&str>,
+    pattern_key: &str,
+) -> Option<Uuid> {
+    targets
+        .iter()
+        .find(|target| {
+            if target.kind != kind {
+                return false;
+            }
+            let asset_id = target
+                .metadata
+                .get("asset_id")
+                .and_then(|value| value.as_str());
+            let target_pattern = target
+                .metadata
+                .get("pattern_key")
+                .and_then(|value| value.as_str());
+            asset_id
+                .zip(artifact_name)
+                .is_some_and(|(left, right)| left == right)
+                || asset_id
+                    .zip(routine_id)
+                    .is_some_and(|(left, right)| left == right)
+                || target_pattern.is_some_and(|value| value == pattern_key)
+        })
+        .map(|target| target.id)
+}
+
+fn outcome_aggregate_to_opportunity(
+    aggregate: OutcomeOpportunityAggregate,
+) -> ExperimentOpportunity {
+    let (summary, project_hint) = outcome_summary_and_project_hint(&aggregate);
+    let id_source = format!("{}|{:?}", aggregate.pattern_key, aggregate.kind);
+    let hash = blake3::hash(id_source.as_bytes()).to_hex().to_string();
+    let signals = outcome_signals(&aggregate);
+    ExperimentOpportunity {
+        id: format!("opp_outcome_{}", &hash[..16]),
+        provider: "outcome_learning".to_string(),
+        model: aggregate
+            .artifact_name
+            .clone()
+            .or_else(|| aggregate.routine_name.clone())
+            .unwrap_or_else(|| "negative pattern".to_string()),
+        route_key: None,
+        logical_role: None,
+        opportunity_type: aggregate.kind,
+        summary,
+        gpu_requirement: outcome_gpu_requirement(aggregate.kind),
+        suggested_preset: outcome_preset(aggregate.kind),
+        linked_target_id: aggregate.linked_target_id,
+        source: Some("outcome_learning".to_string()),
+        confidence: Some((0.45 + aggregate.count.min(5) as f64 * 0.1).clamp(0.45, 0.95)),
+        signals,
+        project_hint: Some(project_hint),
+        metadata: serde_json::json!({
+            "rank_score": aggregate.rank_score,
+            "negative_outcome_count": aggregate.count,
+            "pattern_key": aggregate.pattern_key,
+            "contract_type": aggregate.contract_type,
+            "artifact_type": aggregate.artifact_type,
+            "artifact_name": aggregate.artifact_name,
+            "routine_id": aggregate.routine_id,
+            "routine_name": aggregate.routine_name,
+        }),
+        created_at: aggregate.first_seen,
+        updated_at: aggregate.last_seen,
+    }
+}
+
+fn outcome_summary_and_project_hint(
+    aggregate: &OutcomeOpportunityAggregate,
+) -> (String, serde_json::Value) {
+    match aggregate.kind {
+        ExperimentTargetKind::PromptAsset => {
+            let target = aggregate
+                .artifact_name
+                .clone()
+                .unwrap_or_else(|| crate::workspace::paths::USER.to_string());
+            (
+                format!(
+                    "Use repeated negative outcome signals to benchmark and improve prompt behavior for {}.",
+                    target
+                ),
+                serde_json::json!({
+                    "name": format!("Outcome prompt benchmark for {}", target),
+                    "mutable_paths": [target],
+                    "fixed_paths": ["README.md"],
+                    "metric_name": "outcome_success_rate",
+                    "comparator": "higher_is_better",
+                    "strategy": "Use the repeated negative outcome pattern as a benchmark seed, improve the prompt surface conservatively, and compare against the current baseline."
+                }),
+            )
+        }
+        ExperimentTargetKind::ToolPolicy => {
+            let label = aggregate
+                .routine_name
+                .clone()
+                .or_else(|| aggregate.artifact_name.clone())
+                .unwrap_or_else(|| "tool orchestration".to_string());
+            (
+                format!(
+                    "Investigate repeated negative outcome signals around {} and refine orchestration or notification policy.",
+                    label
+                ),
+                serde_json::json!({
+                    "name": format!("Outcome orchestration benchmark for {}", label),
+                    "mutable_paths": ["src/agent/routine_engine.rs", "src/agent/outcomes.rs"],
+                    "fixed_paths": ["README.md"],
+                    "metric_name": "negative_outcome_rate",
+                    "comparator": "lower_is_better",
+                    "strategy": "Reduce repeated negative outcome patterns without broadening scope, and keep operator-facing behavior benchmarkable."
+                }),
+            )
+        }
+        ExperimentTargetKind::TrainingCode => (
+            "Promote repeated negative durability signals into a benchmarked code-improvement search.".to_string(),
+            serde_json::json!({
+                "name": "Outcome-driven code benchmark",
+                "mutable_paths": aggregate.artifact_name.clone().map(|value| vec![value]).unwrap_or_default(),
+                "fixed_paths": ["README.md"],
+                "metric_name": "regression_rate",
+                "comparator": "lower_is_better",
+                "strategy": "Use repeated negative durability outcomes as the seed benchmark and only mutate the code surface implicated by the pattern."
+            }),
+        ),
+        kind => (
+            format!(
+                "Use repeated negative outcome signals to drive a focused {:?} benchmark.",
+                kind
+            ),
+            serde_json::json!({
+                "name": format!("Outcome-driven {:?} benchmark", kind),
+                "mutable_paths": [],
+                "fixed_paths": ["README.md"],
+                "metric_name": "outcome_success_rate",
+                "comparator": "higher_is_better",
+                "strategy": "Turn repeated negative outcome evidence into a repeatable benchmark and search only the target surface."
+            }),
+        ),
+    }
+}
+
+fn outcome_signals(aggregate: &OutcomeOpportunityAggregate) -> Vec<String> {
+    let mut signals = vec![
+        "outcome-backed evidence".to_string(),
+        format!(
+            "{} negative outcome{}",
+            aggregate.count,
+            if aggregate.count == 1 { "" } else { "s" }
+        ),
+    ];
+    if let Some(artifact_name) = aggregate.artifact_name.as_deref() {
+        signals.push(format!("target {}", artifact_name));
+    }
+    if let Some(routine_name) = aggregate.routine_name.as_deref() {
+        signals.push(format!("routine {}", routine_name));
+    }
+    signals
+}
+
+fn outcome_gpu_requirement(kind: ExperimentTargetKind) -> ExperimentGpuRequirement {
+    match kind {
+        ExperimentTargetKind::TrainingCode | ExperimentTargetKind::TrainingConfig => {
+            ExperimentGpuRequirement::Required
+        }
+        ExperimentTargetKind::InferenceConfig | ExperimentTargetKind::ServingConfig => {
+            ExperimentGpuRequirement::Recommended
+        }
+        _ => ExperimentGpuRequirement::NotNeeded,
+    }
+}
+
+fn outcome_preset(kind: ExperimentTargetKind) -> ExperimentPreset {
+    match kind {
+        ExperimentTargetKind::PromptAsset | ExperimentTargetKind::RoutingPolicy => {
+            ExperimentPreset::HostedPromptRouting
+        }
+        ExperimentTargetKind::RagConfig => ExperimentPreset::RagPipeline,
+        ExperimentTargetKind::ToolPolicy => ExperimentPreset::ToolOrchestration,
+        ExperimentTargetKind::InferenceConfig | ExperimentTargetKind::ServingConfig => {
+            ExperimentPreset::OpenWeightsInferenceTuning
+        }
+        ExperimentTargetKind::TrainingConfig => ExperimentPreset::SelfHostedFinetune,
+        ExperimentTargetKind::TrainingCode => ExperimentPreset::OpenWeightsTrainingCode,
+        ExperimentTargetKind::Evaluator | ExperimentTargetKind::Parser => {
+            ExperimentPreset::AutoresearchSingleFile
+        }
+    }
+}
+
+fn experiment_target_kind_sort_key(kind: ExperimentTargetKind) -> &'static str {
+    match kind {
+        ExperimentTargetKind::PromptAsset => "prompt_asset",
+        ExperimentTargetKind::RoutingPolicy => "routing_policy",
+        ExperimentTargetKind::RagConfig => "rag_config",
+        ExperimentTargetKind::ToolPolicy => "tool_policy",
+        ExperimentTargetKind::Evaluator => "evaluator",
+        ExperimentTargetKind::Parser => "parser",
+        ExperimentTargetKind::InferenceConfig => "inference_config",
+        ExperimentTargetKind::TrainingConfig => "training_config",
+        ExperimentTargetKind::TrainingCode => "training_code",
+        ExperimentTargetKind::ServingConfig => "serving_config",
+    }
+}
+
+fn opportunity_signals_for_usage(
+    aggregate: &OpportunityAggregate,
+    error_rate: f64,
+    avg_latency_ms: Option<f64>,
+    avg_cost_usd: Option<f64>,
+) -> Vec<String> {
+    let mut signals = vec![format!(
+        "{} model call{}",
+        aggregate.call_count,
+        if aggregate.call_count == 1 { "" } else { "s" }
+    )];
+    if error_rate > 0.0 {
+        signals.push(format!("{:.0}% error rate", error_rate * 100.0));
+    }
+    if let Some(avg_latency_ms) = avg_latency_ms {
+        signals.push(format!("{:.0} ms avg latency", avg_latency_ms));
+    }
+    if let Some(avg_cost_usd) = avg_cost_usd {
+        signals.push(format!("${:.4} avg cost", avg_cost_usd));
+    }
+    signals
+}
+
+fn sort_experiment_opportunities(opportunities: &mut [ExperimentOpportunity]) {
+    opportunities.sort_by(|left, right| {
+        let right_score = right
+            .metadata
+            .get("rank_score")
+            .and_then(|value| value.as_f64())
+            .unwrap_or_default();
+        let left_score = left
+            .metadata
+            .get("rank_score")
+            .and_then(|value| value.as_f64())
+            .unwrap_or_default();
+        right_score
+            .partial_cmp(&left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4542,10 +6178,195 @@ fn ensure_unique_target_signature(
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_hourly_rate_usd, shell_command_invocation, summarize_llm_usage};
-    use crate::experiments::{ExperimentModelUsageRecord, ExperimentRunnerBackend};
+    use super::{
+        git_changed_files, mark_run_artifact_failed, provider_hourly_rate_usd,
+        record_campaign_candidate_generation, summarize_llm_usage,
+        validate_project_workdir_fragment,
+    };
+    use crate::agent::subagent_executor::{SubagentConfig, SubagentExecutor};
+    use crate::agent::{AgentRunArtifact, AgentRunStatus};
+    use crate::channels::ChannelManager;
+    use crate::experiments::{
+        ExperimentAutonomyMode, ExperimentCampaign, ExperimentCampaignQueueState,
+        ExperimentCampaignStatus, ExperimentLease, ExperimentLeaseStatus,
+        ExperimentMetricComparator, ExperimentMetricDefinition, ExperimentModelUsageRecord,
+        ExperimentProject, ExperimentProjectStatus, ExperimentRunnerBackend,
+        ExperimentRunnerCompletion, ExperimentRunnerProfile, ExperimentRunnerStatus,
+        ExperimentTrial, ExperimentTrialStatus,
+    };
+    use crate::llm::{
+        ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role,
+        ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    };
+    use crate::tools::ToolRegistry;
+    use crate::tools::builtin::{
+        ApplyPatchTool, ListDirTool, ReadFileTool, SearchFilesTool, WriteFileTool,
+    };
+    use async_trait::async_trait;
     use chrono::Utc;
+    use rust_decimal::Decimal;
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::Arc;
+    use tempfile::TempDir;
     use uuid::Uuid;
+
+    struct AutonomousResearchTestLlm;
+
+    impl AutonomousResearchTestLlm {
+        fn response_for_messages(
+            &self,
+            messages: &[ChatMessage],
+        ) -> (Option<String>, Vec<ToolCall>, FinishReason) {
+            let joined = messages
+                .iter()
+                .map(|message| message.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            if joined.contains("planning role for ThinClaw Research") {
+                return (
+                    Some(
+                        serde_json::json!({
+                            "hypothesis": "Switch app.txt to the candidate configuration to improve score.",
+                            "target_ids": ["app-config"],
+                            "allowed_paths": ["app.txt"],
+                            "expected_metric_direction": "increase",
+                            "mutation_brief": "Rewrite app.txt with the candidate configuration."
+                        })
+                        .to_string(),
+                    ),
+                    Vec::new(),
+                    FinishReason::Stop,
+                );
+            }
+
+            if joined.contains("mutator role for ThinClaw Research") {
+                let wrote_file = messages.iter().any(|message| {
+                    message.role == Role::Tool && message.name.as_deref() == Some("write_file")
+                });
+                if !wrote_file {
+                    return (
+                        None,
+                        vec![ToolCall {
+                            id: "mutator_write_app".to_string(),
+                            name: "write_file".to_string(),
+                            arguments: serde_json::json!({
+                                "path": "app.txt",
+                                "content": "candidate\n",
+                            }),
+                        }],
+                        FinishReason::ToolUse,
+                    );
+                }
+                return (
+                    Some(
+                        serde_json::json!({
+                            "changed_paths": ["app.txt"],
+                            "mutation_summary": "Updated app.txt to the candidate configuration."
+                        })
+                        .to_string(),
+                    ),
+                    Vec::new(),
+                    FinishReason::Stop,
+                );
+            }
+
+            if joined.contains("reviewer role for ThinClaw Research") {
+                return (
+                    Some(
+                        serde_json::json!({
+                            "approved": true,
+                            "scope_ok": true,
+                            "benchmark_ready": true,
+                            "reason": "approved"
+                        })
+                        .to_string(),
+                    ),
+                    Vec::new(),
+                    FinishReason::Stop,
+                );
+            }
+
+            (Some("{}".to_string()), Vec::new(), FinishReason::Stop)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for AutonomousResearchTestLlm {
+        fn model_name(&self) -> &str {
+            "autonomous-research-test"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            let (content, _, finish_reason) = self.response_for_messages(&request.messages);
+            Ok(CompletionResponse {
+                content: content.unwrap_or_default(),
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: None,
+                thinking_content: None,
+                input_tokens: 32,
+                output_tokens: 24,
+                finish_reason,
+                token_capture: None,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            let (content, tool_calls, finish_reason) =
+                self.response_for_messages(&request.messages);
+            Ok(ToolCompletionResponse {
+                content,
+                provider_model: Some(self.model_name().to_string()),
+                cost_usd: None,
+                tool_calls,
+                thinking_content: None,
+                input_tokens: 32,
+                output_tokens: 24,
+                finish_reason,
+                token_capture: None,
+            })
+        }
+    }
+
+    async fn ensure_test_research_subagent_executor() {
+        if super::research_subagent_executor().is_some() {
+            return;
+        }
+
+        let llm = Arc::new(AutonomousResearchTestLlm);
+        let safety = Arc::new(crate::safety::SafetyLayer::new(
+            &crate::config::SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+                redact_pii_in_prompts: true,
+                smart_approval_mode: "off".to_string(),
+                external_scanner_mode: "off".to_string(),
+                external_scanner_path: None,
+            },
+        ));
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register_sync(Arc::new(ReadFileTool::new()));
+        tools.register_sync(Arc::new(WriteFileTool::new()));
+        tools.register_sync(Arc::new(ListDirTool::new()));
+        tools.register_sync(Arc::new(ApplyPatchTool::new()));
+        tools.register_sync(Arc::new(SearchFilesTool::new()));
+
+        let channels = Arc::new(ChannelManager::new());
+        let (executor, _result_rx) =
+            SubagentExecutor::new(llm, safety, tools, channels, SubagentConfig::default());
+        super::register_experiment_subagent_executor(Arc::new(executor));
+    }
 
     #[test]
     fn runpod_cost_is_normalized_from_credits() {
@@ -4621,21 +6442,861 @@ mod tests {
     }
 
     #[test]
-    fn shell_command_invocation_appends_exit_marker_for_host_shell() {
-        let (shell, args) = shell_command_invocation("echo hello");
-        #[cfg(target_os = "windows")]
-        {
-            assert_eq!(shell, "cmd");
-            assert_eq!(args[0], "/V:ON");
-            assert_eq!(args[1], "/C");
-            assert!(args[2].contains("__THINCLAW_EXIT_CODE__:!ERRORLEVEL!"));
+    fn mark_run_artifact_failed_updates_status_and_reason() {
+        let mut artifact = AgentRunArtifact::new(
+            "experiment_subagent:mutator",
+            AgentRunStatus::Completed,
+            Utc::now(),
+            None,
+        );
+        mark_run_artifact_failed(&mut artifact, "no candidate diff");
+        assert_eq!(artifact.status, AgentRunStatus::Failed);
+        assert_eq!(
+            artifact.failure_reason.as_deref(),
+            Some("no candidate diff")
+        );
+        assert!(artifact.completed_at.is_some());
+    }
+
+    #[test]
+    fn record_campaign_candidate_generation_tracks_last_failure_and_artifacts() {
+        let mut campaign = ExperimentCampaign {
+            id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            runner_profile_id: Uuid::new_v4(),
+            owner_user_id: "default".to_string(),
+            status: ExperimentCampaignStatus::Paused,
+            baseline_commit: None,
+            best_commit: None,
+            best_metrics: serde_json::json!({}),
+            experiment_branch: None,
+            remote_ref: None,
+            worktree_path: None,
+            started_at: None,
+            ended_at: None,
+            trial_count: 0,
+            failure_count: 0,
+            pause_reason: None,
+            queue_state: ExperimentCampaignQueueState::NotQueued,
+            queue_position: 0,
+            active_trial_id: None,
+            total_runtime_ms: 0,
+            total_cost_usd: 0.0,
+            total_llm_cost_usd: 0.0,
+            total_runner_cost_usd: 0.0,
+            consecutive_non_improving_trials: 0,
+            max_trials_override: None,
+            gateway_url: None,
+            metadata: serde_json::json!({}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let artifact = AgentRunArtifact::new(
+            "experiment_subagent:planner",
+            AgentRunStatus::Failed,
+            Utc::now(),
+            Some(Utc::now()),
+        )
+        .with_failure_reason(Some("planner failed".to_string()));
+
+        record_campaign_candidate_generation(
+            &mut campaign,
+            "autonomous",
+            "failed",
+            "planner failed",
+            &[artifact.clone()],
+        );
+
+        let artifacts = campaign
+            .metadata
+            .get("run_artifacts")
+            .and_then(|value| value.as_array())
+            .expect("run artifacts should be recorded");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(
+            campaign.metadata["candidate_generation"]["mode"].as_str(),
+            Some("autonomous")
+        );
+        assert_eq!(
+            campaign.metadata["candidate_generation"]["status"].as_str(),
+            Some("failed")
+        );
+        assert_eq!(
+            campaign.metadata["candidate_generation"]["artifact_run_ids"][0].as_str(),
+            Some(artifact.run_id.as_str())
+        );
+    }
+
+    #[test]
+    fn validate_project_workdir_fragment_rejects_parent_traversal() {
+        let error = validate_project_workdir_fragment("../escape")
+            .expect_err("parent traversal should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("Project workdir must stay inside the workspace root")
+        );
+    }
+
+    #[test]
+    fn research_subagent_tool_denylist_blocks_memory_and_session_recall() {
+        for tool_name in ["memory_read", "memory_search", "session_search"] {
+            assert!(
+                super::RESEARCH_SHARED_TOOL_DENYLIST.contains(&tool_name),
+                "{tool_name} should be denied for research subagents"
+            );
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            assert_eq!(shell, "sh");
-            assert_eq!(args[0], "-lc");
-            assert!(args[1].contains("__THINCLAW_EXIT_CODE__"));
-            assert!(args[1].contains("printf"));
+    }
+
+    #[tokio::test]
+    async fn git_changed_files_reports_modified_path() {
+        let repo = TempDir::new().expect("temp repo");
+        git(repo.path(), &["init"]);
+        git(repo.path(), &["config", "user.email", "tests@example.com"]);
+        git(repo.path(), &["config", "user.name", "ThinClaw Tests"]);
+        std::fs::write(repo.path().join("app.txt"), "baseline\n").expect("write app file");
+        git(repo.path(), &["add", "app.txt"]);
+        git(repo.path(), &["commit", "-m", "initial"]);
+        std::fs::write(repo.path().join("app.txt"), "candidate\n").expect("rewrite app file");
+
+        let changed = git_changed_files(&repo.path().to_string_lossy())
+            .await
+            .expect("changed files");
+        assert_eq!(changed, vec!["app.txt".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn git_changed_files_reports_rename_destination_path() {
+        let repo = TempDir::new().expect("temp repo");
+        git(repo.path(), &["init"]);
+        git(repo.path(), &["config", "user.email", "tests@example.com"]);
+        git(repo.path(), &["config", "user.name", "ThinClaw Tests"]);
+        std::fs::write(repo.path().join("before.txt"), "hello\n").expect("write before file");
+        git(repo.path(), &["add", "before.txt"]);
+        git(repo.path(), &["commit", "-m", "initial"]);
+        git(repo.path(), &["mv", "before.txt", "after.txt"]);
+
+        let changed = git_changed_files(&repo.path().to_string_lossy())
+            .await
+            .expect("changed files");
+        assert_eq!(changed, vec!["after.txt".to_string()]);
+    }
+
+    #[test]
+    fn ready_project_status_requires_non_empty_mutable_paths_and_command() {
+        let now = Utc::now();
+        let project = ExperimentProject {
+            id: Uuid::new_v4(),
+            name: "demo".to_string(),
+            workspace_path: ".".to_string(),
+            git_remote_name: "origin".to_string(),
+            base_branch: "main".to_string(),
+            preset: Default::default(),
+            strategy_prompt: "test".to_string(),
+            workdir: ".".to_string(),
+            prepare_command: None,
+            run_command: "echo ok".to_string(),
+            mutable_paths: vec!["src".to_string()],
+            fixed_paths: Vec::new(),
+            primary_metric: ExperimentMetricDefinition::default(),
+            secondary_metrics: Vec::new(),
+            comparison_policy: Default::default(),
+            stop_policy: Default::default(),
+            default_runner_profile_id: None,
+            promotion_mode: "manual".to_string(),
+            autonomy_mode: Default::default(),
+            status: ExperimentProjectStatus::Draft,
+            created_at: now,
+            updated_at: now,
+        };
+        assert_eq!(
+            super::ready_project_status(&project),
+            ExperimentProjectStatus::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_campaign_baseline_runs_local_docker_trial_end_to_end() {
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.enabled = true;
+        let sandbox =
+            crate::sandbox::SandboxManager::new(super::experiment_sandbox_config(&settings));
+        if !sandbox.is_available().await {
+            eprintln!("skipping docker-backed experiment test because sandbox is unavailable");
+            return;
         }
+
+        let (store, _guard) = crate::testing::test_db().await;
+        let repo = TempDir::new().expect("temp repo");
+        git(repo.path(), &["init"]);
+        git(repo.path(), &["checkout", "-b", "main"]);
+        git(repo.path(), &["config", "user.email", "tests@example.com"]);
+        git(repo.path(), &["config", "user.name", "ThinClaw Tests"]);
+        std::fs::write(repo.path().join("app.txt"), "baseline\n").expect("write repo file");
+        git(repo.path(), &["add", "app.txt"]);
+        git(repo.path(), &["commit", "-m", "initial"]);
+
+        let now = Utc::now();
+        let project = ExperimentProject {
+            id: Uuid::new_v4(),
+            name: "docker-baseline".to_string(),
+            workspace_path: repo.path().to_string_lossy().to_string(),
+            git_remote_name: "origin".to_string(),
+            base_branch: "main".to_string(),
+            preset: Default::default(),
+            strategy_prompt: "Validate baseline execution".to_string(),
+            workdir: ".".to_string(),
+            prepare_command: None,
+            run_command: "printf '{\"score\":1}\\n' > summary.json && echo benchmark-ok"
+                .to_string(),
+            mutable_paths: vec!["app.txt".to_string()],
+            fixed_paths: Vec::new(),
+            primary_metric: ExperimentMetricDefinition {
+                name: "score".to_string(),
+                regex: None,
+                json_path: Some("score".to_string()),
+                comparator: ExperimentMetricComparator::HigherIsBetter,
+            },
+            secondary_metrics: Vec::new(),
+            comparison_policy: Default::default(),
+            stop_policy: Default::default(),
+            default_runner_profile_id: None,
+            promotion_mode: "manual".to_string(),
+            autonomy_mode: Default::default(),
+            status: ExperimentProjectStatus::Ready,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_project(&project)
+            .await
+            .expect("store project");
+
+        let runner = ExperimentRunnerProfile {
+            id: Uuid::new_v4(),
+            name: "local-docker".to_string(),
+            backend: ExperimentRunnerBackend::LocalDocker,
+            backend_config: serde_json::json!({}),
+            image_or_runtime: Some("alpine:3.20".to_string()),
+            gpu_requirements: serde_json::json!({}),
+            env_grants: serde_json::json!({}),
+            secret_references: Vec::new(),
+            cache_policy: serde_json::json!({}),
+            status: ExperimentRunnerStatus::Validated,
+            readiness_class: crate::experiments::ExperimentRunnerReadinessClass::LaunchReady,
+            launch_eligible: true,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_runner_profile(&runner)
+            .await
+            .expect("store runner");
+
+        let campaign_id = Uuid::new_v4();
+        let worktree_path = super::experiments_worktree_path(&project.workspace_path, campaign_id);
+        let campaign = ExperimentCampaign {
+            id: campaign_id,
+            project_id: project.id,
+            runner_profile_id: runner.id,
+            owner_user_id: "owner-a".to_string(),
+            status: ExperimentCampaignStatus::PendingBaseline,
+            baseline_commit: None,
+            best_commit: None,
+            best_metrics: serde_json::json!({}),
+            experiment_branch: Some(format!(
+                "codex/experiments/{}",
+                super::short_id(campaign_id)
+            )),
+            remote_ref: None,
+            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+            started_at: Some(now),
+            ended_at: None,
+            trial_count: 0,
+            failure_count: 0,
+            pause_reason: Some("Pending baseline launch.".to_string()),
+            queue_state: ExperimentCampaignQueueState::NotQueued,
+            queue_position: 0,
+            active_trial_id: None,
+            total_runtime_ms: 0,
+            total_cost_usd: 0.0,
+            total_llm_cost_usd: 0.0,
+            total_runner_cost_usd: 0.0,
+            consecutive_non_improving_trials: 0,
+            max_trials_override: None,
+            gateway_url: None,
+            metadata: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_campaign(&campaign)
+            .await
+            .expect("store campaign");
+
+        let response = super::launch_campaign_baseline(
+            &store, "owner-a", &settings, &project, &runner, campaign,
+        )
+        .await
+        .expect("launch baseline");
+
+        let trial = response.trial.expect("trial should be recorded");
+        assert_eq!(trial.exit_code, Some(0));
+        assert_eq!(trial.metrics_json["score"], 1.0);
+        let worktree_path = Path::new(
+            response
+                .campaign
+                .worktree_path
+                .as_deref()
+                .expect("worktree path"),
+        );
+        let summary_path = Path::new(
+            trial.artifact_manifest_json["summary_json_path"]
+                .as_str()
+                .expect("summary json path"),
+        );
+        assert!(summary_path.exists(), "summary.json should exist");
+        assert!(
+            !summary_path.starts_with(worktree_path),
+            "summary artifact should be persisted outside the campaign worktree"
+        );
+        let run_log =
+            std::fs::read_to_string(trial.log_preview_path.as_deref().expect("log preview path"))
+                .expect("read run log");
+        assert!(
+            run_log.contains("benchmark-ok"),
+            "unexpected run log: {run_log}"
+        );
+        assert!(worktree_path.exists(), "campaign worktree should exist");
+        assert!(
+            super::git_changed_files(&worktree_path.to_string_lossy())
+                .await
+                .expect("list changed files after baseline")
+                .is_empty(),
+            "baseline run should restore the campaign worktree to a clean state"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_env_terminal_bench_completion_writes_metrics_and_artifact() {
+        let dir = TempDir::new().expect("tempdir");
+        let run_root = dir.path().join("run");
+        let artifact_dir = dir.path().join("artifacts");
+        std::fs::create_dir_all(&run_root).expect("run root");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact root");
+        let log_path = dir.path().join("bench.log");
+        let now = Utc::now();
+        let trial = ExperimentTrial {
+            id: Uuid::new_v4(),
+            campaign_id: Uuid::new_v4(),
+            sequence: 1,
+            candidate_commit: None,
+            parent_best_commit: None,
+            status: ExperimentTrialStatus::Running,
+            runner_backend: ExperimentRunnerBackend::LocalDocker,
+            exit_code: None,
+            metrics_json: serde_json::json!({}),
+            summary: None,
+            decision_reason: None,
+            artifact_manifest_json: serde_json::json!({}),
+            log_preview_path: None,
+            reviewer_decision: None,
+            runtime_ms: None,
+            attributed_cost_usd: None,
+            llm_cost_usd: None,
+            runner_cost_usd: None,
+            hypothesis: None,
+            mutation_summary: None,
+            provider_job_id: None,
+            provider_job_metadata: serde_json::json!({}),
+            started_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let completion = super::execute_agent_env_benchmark_trial(
+            super::AgentEnvBenchmarkConfig::TerminalBench {
+                cases: vec![crate::agent::env::TerminalBenchCase {
+                    name: "echo".to_string(),
+                    command: "printf agent-env-ok".to_string(),
+                    cwd: None,
+                    expected_stdout_contains: vec!["agent-env-ok".to_string()],
+                    expected_exit_code: Some(0),
+                    timeout_secs: 5,
+                }],
+            },
+            &run_root,
+            std::time::Instant::now(),
+            &log_path,
+            &artifact_dir,
+            &trial,
+        )
+        .await
+        .expect("agent env benchmark completion");
+
+        assert_eq!(completion.exit_code, Some(0));
+        assert_eq!(completion.metrics_json["score"], 1.0);
+        assert_eq!(
+            completion.artifact_manifest_json["stage"],
+            serde_json::json!("agent_env_benchmark")
+        );
+        let trajectory_path = Path::new(
+            completion.artifact_manifest_json["trajectory_json_path"]
+                .as_str()
+                .expect("trajectory path"),
+        );
+        assert!(trajectory_path.exists());
+        let log = std::fs::read_to_string(log_path).expect("read log");
+        assert!(log.contains("agent-env-ok"));
+    }
+
+    #[tokio::test]
+    async fn agent_env_skill_bench_completion_writes_metrics_and_artifact() {
+        let dir = TempDir::new().expect("tempdir");
+        let run_root = dir.path().join("run");
+        let artifact_dir = dir.path().join("artifacts");
+        std::fs::create_dir_all(&run_root).expect("run root");
+        std::fs::create_dir_all(&artifact_dir).expect("artifact root");
+        let log_path = dir.path().join("skill-bench.log");
+        let now = Utc::now();
+        let trial = ExperimentTrial {
+            id: Uuid::new_v4(),
+            campaign_id: Uuid::new_v4(),
+            sequence: 1,
+            candidate_commit: None,
+            parent_best_commit: None,
+            status: ExperimentTrialStatus::Running,
+            runner_backend: ExperimentRunnerBackend::LocalDocker,
+            exit_code: None,
+            metrics_json: serde_json::json!({}),
+            summary: None,
+            decision_reason: None,
+            artifact_manifest_json: serde_json::json!({}),
+            log_preview_path: None,
+            reviewer_decision: None,
+            runtime_ms: None,
+            attributed_cost_usd: None,
+            llm_cost_usd: None,
+            runner_cost_usd: None,
+            hypothesis: None,
+            mutation_summary: None,
+            provider_job_id: None,
+            provider_job_metadata: serde_json::json!({}),
+            started_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let completion = super::execute_agent_env_benchmark_trial(
+            super::AgentEnvBenchmarkConfig::SkillBench {
+                cases: vec![crate::agent::env::SkillBenchCase {
+                    name: "minimal-skill".to_string(),
+                    skill_content: "# Skill\n\nUse this skill carefully.".to_string(),
+                    required_substrings: vec!["carefully".to_string()],
+                }],
+            },
+            &run_root,
+            std::time::Instant::now(),
+            &log_path,
+            &artifact_dir,
+            &trial,
+        )
+        .await
+        .expect("agent env skill benchmark completion");
+
+        assert_eq!(completion.exit_code, Some(0));
+        assert_eq!(completion.metrics_json["score"], 1.0);
+        assert_eq!(
+            completion.artifact_manifest_json["stage"],
+            serde_json::json!("agent_env_benchmark")
+        );
+        let trajectory_path = Path::new(
+            completion.artifact_manifest_json["trajectory_json_path"]
+                .as_str()
+                .expect("trajectory path"),
+        );
+        assert!(trajectory_path.exists());
+        let trajectory_json =
+            std::fs::read_to_string(trajectory_path).expect("read trajectory json");
+        assert!(trajectory_json.contains("skill_bench"));
+        let log = std::fs::read_to_string(log_path).expect("read log");
+        assert!(log.contains("minimal-skill"));
+    }
+
+    #[tokio::test]
+    async fn autonomous_campaign_runs_planner_mutator_reviewer_and_docker_trial_end_to_end() {
+        let mut settings = crate::settings::Settings::default();
+        settings.sandbox.enabled = true;
+        let sandbox =
+            crate::sandbox::SandboxManager::new(super::experiment_sandbox_config(&settings));
+        if !sandbox.is_available().await {
+            eprintln!(
+                "skipping autonomous docker-backed experiment test because sandbox is unavailable"
+            );
+            return;
+        }
+
+        ensure_test_research_subagent_executor().await;
+
+        let (store, _guard) = crate::testing::test_db().await;
+        let repo = TempDir::new().expect("temp repo");
+        git(repo.path(), &["init"]);
+        git(repo.path(), &["checkout", "-b", "main"]);
+        git(repo.path(), &["config", "user.email", "tests@example.com"]);
+        git(repo.path(), &["config", "user.name", "ThinClaw Tests"]);
+        std::fs::write(repo.path().join("app.txt"), "baseline\n").expect("write repo file");
+        git(repo.path(), &["add", "app.txt"]);
+        git(repo.path(), &["commit", "-m", "initial"]);
+
+        let now = Utc::now();
+        let project = ExperimentProject {
+            id: Uuid::new_v4(),
+            name: "autonomous-docker".to_string(),
+            workspace_path: repo.path().to_string_lossy().to_string(),
+            git_remote_name: "origin".to_string(),
+            base_branch: "main".to_string(),
+            preset: Default::default(),
+            strategy_prompt: "Autonomously improve app.txt".to_string(),
+            workdir: ".".to_string(),
+            prepare_command: None,
+            run_command: "if grep -q candidate app.txt; then printf '{\"score\":2}\\n' > summary.json && echo improved; else printf '{\"score\":1}\\n' > summary.json && echo baseline; fi".to_string(),
+            mutable_paths: vec!["app.txt".to_string()],
+            fixed_paths: Vec::new(),
+            primary_metric: ExperimentMetricDefinition {
+                name: "score".to_string(),
+                regex: None,
+                json_path: Some("score".to_string()),
+                comparator: ExperimentMetricComparator::HigherIsBetter,
+            },
+            secondary_metrics: Vec::new(),
+            comparison_policy: Default::default(),
+            stop_policy: Default::default(),
+            default_runner_profile_id: None,
+            promotion_mode: "manual".to_string(),
+            autonomy_mode: ExperimentAutonomyMode::Autonomous,
+            status: ExperimentProjectStatus::Ready,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_project(&project)
+            .await
+            .expect("store project");
+
+        let runner = ExperimentRunnerProfile {
+            id: Uuid::new_v4(),
+            name: "local-docker".to_string(),
+            backend: ExperimentRunnerBackend::LocalDocker,
+            backend_config: serde_json::json!({}),
+            image_or_runtime: Some("alpine:3.20".to_string()),
+            gpu_requirements: serde_json::json!({}),
+            env_grants: serde_json::json!({}),
+            secret_references: Vec::new(),
+            cache_policy: serde_json::json!({}),
+            status: ExperimentRunnerStatus::Validated,
+            readiness_class: crate::experiments::ExperimentRunnerReadinessClass::LaunchReady,
+            launch_eligible: true,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_runner_profile(&runner)
+            .await
+            .expect("store runner");
+
+        let campaign_id = Uuid::new_v4();
+        let worktree_path = super::experiments_worktree_path(&project.workspace_path, campaign_id);
+        let campaign = ExperimentCampaign {
+            id: campaign_id,
+            project_id: project.id,
+            runner_profile_id: runner.id,
+            owner_user_id: "owner-a".to_string(),
+            status: ExperimentCampaignStatus::PendingBaseline,
+            baseline_commit: None,
+            best_commit: None,
+            best_metrics: serde_json::json!({}),
+            experiment_branch: Some(format!(
+                "codex/experiments/{}",
+                super::short_id(campaign_id)
+            )),
+            remote_ref: None,
+            worktree_path: Some(worktree_path.to_string_lossy().to_string()),
+            started_at: Some(now),
+            ended_at: None,
+            trial_count: 0,
+            failure_count: 0,
+            pause_reason: Some("Pending baseline launch.".to_string()),
+            queue_state: ExperimentCampaignQueueState::NotQueued,
+            queue_position: 0,
+            active_trial_id: None,
+            total_runtime_ms: 0,
+            total_cost_usd: 0.0,
+            total_llm_cost_usd: 0.0,
+            total_runner_cost_usd: 0.0,
+            consecutive_non_improving_trials: 0,
+            max_trials_override: None,
+            gateway_url: None,
+            metadata: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_campaign(&campaign)
+            .await
+            .expect("store campaign");
+
+        let baseline_response = super::launch_campaign_baseline(
+            &store, "owner-a", &settings, &project, &runner, campaign,
+        )
+        .await
+        .expect("launch baseline");
+        let baseline_trial = baseline_response.trial.expect("baseline trial");
+        assert_eq!(baseline_trial.metrics_json["score"], 1.0);
+
+        let mut active_campaign = baseline_response.campaign;
+        assert!(
+            super::git_changed_files(
+                active_campaign
+                    .worktree_path
+                    .as_deref()
+                    .expect("campaign worktree path"),
+            )
+            .await
+            .expect("list changed files after baseline")
+            .is_empty(),
+            "baseline run should leave the campaign worktree clean before autonomous mutation"
+        );
+        super::launch_next_trial_if_ready(
+            &store,
+            "owner-a",
+            &settings,
+            &project,
+            &runner,
+            &mut active_campaign,
+        )
+        .await
+        .expect("autonomous follow-up trial should succeed");
+
+        let trials = store
+            .list_experiment_trials(active_campaign.id)
+            .await
+            .expect("list trials");
+        assert_eq!(
+            trials.len(),
+            2,
+            "unexpected trial count; campaign_status={:?}; pause_reason={:?}; metadata={}",
+            active_campaign.status,
+            active_campaign.pause_reason,
+            active_campaign.metadata
+        );
+
+        let autonomous_trial = trials.last().expect("autonomous trial");
+        assert_eq!(autonomous_trial.sequence, 2);
+        assert_eq!(autonomous_trial.status, ExperimentTrialStatus::Accepted);
+        assert_eq!(autonomous_trial.metrics_json["score"], 2.0);
+        assert_eq!(
+            autonomous_trial.reviewer_decision.as_deref(),
+            Some("approved")
+        );
+        assert_eq!(
+            autonomous_trial.mutation_summary.as_deref(),
+            Some("Updated app.txt to the candidate configuration.")
+        );
+        assert_ne!(
+            autonomous_trial.candidate_commit,
+            baseline_trial.candidate_commit
+        );
+
+        let run_artifacts = autonomous_trial
+            .artifact_manifest_json
+            .get("run_artifacts")
+            .and_then(|value| value.as_array())
+            .expect("run artifacts should be present");
+        let sources = run_artifacts
+            .iter()
+            .filter_map(|artifact| artifact.get("source").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>();
+        assert!(sources.contains(&"experiment_subagent:planner"));
+        assert!(sources.contains(&"experiment_subagent:mutator"));
+        assert!(sources.contains(&"experiment_subagent:reviewer"));
+        assert!(sources.contains(&"experiment_runner"));
+
+        assert_eq!(active_campaign.best_metrics["score"], 2.0);
+        assert!(
+            super::git_changed_files(
+                active_campaign
+                    .worktree_path
+                    .as_deref()
+                    .expect("campaign worktree path"),
+            )
+            .await
+            .expect("list changed files after autonomous trial")
+            .is_empty(),
+            "autonomous trial should also leave the campaign worktree clean"
+        );
+    }
+
+    #[test]
+    fn normalize_trial_completion_adds_default_stage() {
+        let completion = ExperimentRunnerCompletion {
+            exit_code: Some(0),
+            metrics_json: serde_json::json!({}),
+            summary: Some("ok".to_string()),
+            runtime_ms: Some(42),
+            attributed_cost_usd: None,
+            log_preview_path: None,
+            artifact_manifest_json: serde_json::Value::Null,
+        };
+
+        let normalized = super::normalize_trial_completion(completion);
+        assert_eq!(
+            normalized
+                .artifact_manifest_json
+                .get("stage")
+                .and_then(|value| value.as_str()),
+            Some("complete")
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_trial_terminal_rejects_repeated_completed_lease() {
+        let (store, _guard) = crate::testing::test_db().await;
+        let now = Utc::now();
+        let project = ExperimentProject {
+            id: Uuid::new_v4(),
+            name: "demo".to_string(),
+            workspace_path: ".".to_string(),
+            git_remote_name: "origin".to_string(),
+            base_branch: "main".to_string(),
+            preset: Default::default(),
+            strategy_prompt: "demo".to_string(),
+            workdir: ".".to_string(),
+            prepare_command: None,
+            run_command: "echo ok".to_string(),
+            mutable_paths: vec!["src".to_string()],
+            fixed_paths: Vec::new(),
+            primary_metric: ExperimentMetricDefinition::default(),
+            secondary_metrics: Vec::new(),
+            comparison_policy: Default::default(),
+            stop_policy: Default::default(),
+            default_runner_profile_id: None,
+            promotion_mode: "manual".to_string(),
+            autonomy_mode: Default::default(),
+            status: ExperimentProjectStatus::Ready,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut campaign = ExperimentCampaign {
+            id: Uuid::new_v4(),
+            project_id: project.id,
+            runner_profile_id: Uuid::new_v4(),
+            owner_user_id: "owner-a".to_string(),
+            status: ExperimentCampaignStatus::Running,
+            baseline_commit: None,
+            best_commit: None,
+            best_metrics: serde_json::json!({}),
+            experiment_branch: None,
+            remote_ref: None,
+            worktree_path: None,
+            started_at: Some(now),
+            ended_at: None,
+            trial_count: 1,
+            failure_count: 0,
+            pause_reason: None,
+            queue_state: ExperimentCampaignQueueState::Active,
+            queue_position: 0,
+            active_trial_id: Some(Uuid::new_v4()),
+            total_runtime_ms: 0,
+            total_cost_usd: 0.0,
+            total_llm_cost_usd: 0.0,
+            total_runner_cost_usd: 0.0,
+            consecutive_non_improving_trials: 0,
+            max_trials_override: None,
+            gateway_url: None,
+            metadata: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        };
+        let mut trial = ExperimentTrial {
+            id: Uuid::new_v4(),
+            campaign_id: campaign.id,
+            sequence: 1,
+            candidate_commit: None,
+            parent_best_commit: None,
+            status: ExperimentTrialStatus::Running,
+            runner_backend: ExperimentRunnerBackend::GenericRemoteRunner,
+            exit_code: None,
+            metrics_json: serde_json::json!({}),
+            summary: None,
+            decision_reason: None,
+            artifact_manifest_json: serde_json::json!({}),
+            log_preview_path: None,
+            reviewer_decision: None,
+            runtime_ms: None,
+            attributed_cost_usd: None,
+            llm_cost_usd: None,
+            runner_cost_usd: None,
+            hypothesis: None,
+            mutation_summary: None,
+            provider_job_id: None,
+            provider_job_metadata: serde_json::json!({}),
+            started_at: Some(now),
+            completed_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut lease = ExperimentLease {
+            id: Uuid::new_v4(),
+            campaign_id: campaign.id,
+            trial_id: trial.id,
+            runner_profile_id: campaign.runner_profile_id,
+            status: ExperimentLeaseStatus::Completed,
+            token_hash: "hash".to_string(),
+            job_payload: serde_json::json!({}),
+            credentials_payload: serde_json::json!({}),
+            expires_at: now,
+            claimed_at: Some(now),
+            completed_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        };
+        let completion = ExperimentRunnerCompletion {
+            exit_code: Some(0),
+            metrics_json: serde_json::json!({}),
+            summary: Some("done".to_string()),
+            runtime_ms: Some(1),
+            attributed_cost_usd: None,
+            log_preview_path: None,
+            artifact_manifest_json: serde_json::json!({}),
+        };
+
+        let error = super::complete_trial_terminal(
+            &store,
+            &project,
+            &mut campaign,
+            &mut trial,
+            Some(&mut lease),
+            completion,
+        )
+        .await
+        .expect_err("completed lease should reject repeated completion");
+
+        match error {
+            crate::api::error::ApiError::InvalidInput(message) => {
+                assert!(message.contains("already recorded"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    fn git(repo: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("git command should start");
+        assert!(status.success(), "git {:?} failed with {:?}", args, status);
     }
 }

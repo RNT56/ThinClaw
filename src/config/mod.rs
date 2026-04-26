@@ -9,6 +9,7 @@ mod agent;
 mod builder;
 mod channels;
 mod database;
+mod desktop_autonomy;
 mod embeddings;
 mod experiments;
 pub mod formats;
@@ -39,12 +40,16 @@ use crate::settings::Settings;
 
 // Re-export all public types so `crate::config::FooConfig` continues to work.
 pub use self::agent::AgentConfig;
+pub(crate) use self::agent::resolve_personality_pack_from_settings;
 pub use self::builder::BuilderModeConfig;
+#[cfg(feature = "nostr")]
+pub use self::channels::NostrConfig;
 pub use self::channels::{
-    ChannelsConfig, CliConfig, DiscordChannelConfig, GatewayConfig, HttpConfig, NostrConfig,
-    SignalConfig, SlackChannelConfig, TelegramConfig,
+    BlueBubblesChannelConfig, ChannelsConfig, CliConfig, DiscordChannelConfig, GatewayConfig,
+    HttpConfig, SignalConfig, SlackChannelConfig, TelegramConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
+pub use self::desktop_autonomy::DesktopAutonomyConfig;
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::experiments::ExperimentsConfig;
 pub use self::heartbeat::HeartbeatConfig;
@@ -64,15 +69,18 @@ pub use self::tunnel::{
     TunnelConfig, TunnelProviderConfig,
 };
 pub use self::wasm::WasmConfig;
-pub use self::webchat::{WebChatConfig, WebChatTheme};
+pub use self::webchat::{
+    ResolvedWebSkin, WebChatBootstrap, WebChatConfig, WebChatPresentation, WebChatTheme,
+    WebSkinCatalogEntry,
+};
 
-/// Thread-safe overlay for secrets injected from the keychain/secrets store.
+/// Thread-safe overlay for legacy runtime-injected values.
 ///
 /// Used by `inject_all_secrets_from_store()` and `refresh_secrets()` to make
-/// API keys available to `optional_env()` without unsafe `set_var` calls.
+/// Runtime-only values available to `optional_env()` without unsafe `set_var` calls.
 ///
-/// Uses `RwLock` (not `OnceLock`) so secrets can be updated at runtime via
-/// `refresh_secrets()` without requiring a full restart.
+/// Stored secrets are intentionally not preloaded here. Runtime paths must
+/// request the one credential they need through the encrypted `SecretsStore`.
 static INJECTED_VARS: LazyLock<RwLock<HashMap<String, String>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -92,7 +100,7 @@ static SYNCED_OAUTH_VARS: LazyLock<RwLock<HashMap<String, String>>> =
 /// ThinClaw's config resolvers **without** unsafe `std::env::set_var()` calls.
 ///
 /// `optional_env()` checks this overlay FIRST (highest priority), then falls
-/// through to `INJECTED_VARS` (secrets), then to real env vars.
+/// through to `INJECTED_VARS` (legacy runtime overlay), then to real env vars.
 ///
 /// Lifecycle: populated on engine `start()`, cleared on engine `stop()`.
 static BRIDGE_VARS: LazyLock<RwLock<HashMap<String, String>>> =
@@ -182,12 +190,14 @@ pub struct Config {
     pub tunnel: TunnelConfig,
     pub channels: ChannelsConfig,
     pub agent: AgentConfig,
+    pub desktop_autonomy: DesktopAutonomyConfig,
     pub safety: SafetyConfig,
     pub wasm: WasmConfig,
     pub secrets: SecretsConfig,
     pub builder: BuilderModeConfig,
     pub heartbeat: HeartbeatConfig,
     pub hygiene: HygieneConfig,
+    pub extensions: crate::settings::ExtensionsSettings,
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
@@ -230,7 +240,7 @@ impl Config {
         // Overlay TOML config file (values win over DB settings)
         Self::apply_toml_overlay(&mut db_settings, toml_path)?;
 
-        Self::build(&db_settings).await
+        Self::build(&db_settings, true).await
     }
 
     /// Load configuration from environment variables only (no database).
@@ -245,9 +255,23 @@ impl Config {
         Self::from_env_with_toml(None).await
     }
 
+    /// Build config from explicit settings in tests without mutating process env.
+    #[cfg(test)]
+    pub(crate) async fn from_test_settings(settings: &Settings) -> Result<Self, ConfigError> {
+        Self::build(settings, false).await
+    }
+
     /// Load from env with an optional TOML config file overlay.
     pub async fn from_env_with_toml(
         toml_path: Option<&std::path::Path>,
+    ) -> Result<Self, ConfigError> {
+        Self::from_env_with_toml_options(toml_path, true).await
+    }
+
+    /// Load from env with an optional TOML config file overlay and optional DB resolution.
+    pub async fn from_env_with_toml_options(
+        toml_path: Option<&std::path::Path>,
+        resolve_database: bool,
     ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_thinclaw_env();
@@ -256,7 +280,7 @@ impl Config {
         // Overlay TOML config file (values win over JSON settings)
         Self::apply_toml_overlay(&mut settings, toml_path)?;
 
-        Self::build(&settings).await
+        Self::build(&settings, resolve_database).await
     }
 
     /// Load and merge a TOML config file into settings.
@@ -300,20 +324,26 @@ impl Config {
     }
 
     /// Build config from settings (shared by from_env and from_db).
-    async fn build(settings: &Settings) -> Result<Self, ConfigError> {
+    async fn build(settings: &Settings, resolve_database: bool) -> Result<Self, ConfigError> {
         Ok(Self {
-            database: DatabaseConfig::resolve()?,
+            database: if resolve_database {
+                DatabaseConfig::resolve()?
+            } else {
+                DatabaseConfig::disabled()
+            },
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
             tunnel: TunnelConfig::resolve(settings)?,
             channels: ChannelsConfig::resolve(settings)?,
             agent: AgentConfig::resolve(settings)?,
+            desktop_autonomy: DesktopAutonomyConfig::resolve(settings)?,
             safety: SafetyConfig::resolve(settings)?,
             wasm: WasmConfig::resolve(settings)?,
-            secrets: SecretsConfig::resolve().await?,
+            secrets: SecretsConfig::resolve(settings).await?,
             builder: BuilderModeConfig::resolve()?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
             hygiene: HygieneConfig::resolve()?,
+            extensions: settings.extensions.clone(),
             routines: RoutineConfig::resolve(settings)?,
             sandbox: SandboxModeConfig::resolve(settings)?,
             claude_code: ClaudeCodeConfig::resolve(settings)?,
@@ -330,93 +360,18 @@ impl Config {
     }
 }
 
-const EXTRA_SECRET_ENV_MAPPINGS: &[(&str, &str)] = &[
-    ("HTTP_WEBHOOK_SECRET", "http_webhook_secret"),
-    ("DISCORD_BOT_TOKEN", "discord_bot_token"),
-    ("SLACK_BOT_TOKEN", "slack_bot_token"),
-    ("SLACK_APP_TOKEN", "slack_app_token"),
-    ("TUNNEL_NGROK_TOKEN", "tunnel_ngrok_token"),
-    ("TUNNEL_CF_TOKEN", "tunnel_cf_token"),
-];
-
 async fn collect_injected_secrets(
-    secrets: &dyn crate::secrets::SecretsStore,
-    user_id: &str,
+    _secrets: &dyn crate::secrets::SecretsStore,
+    _user_id: &str,
 ) -> HashMap<String, String> {
-    let mut injected = HashMap::new();
-
-    // Dynamically inject keys for ALL known providers from the catalog.
-    // Each catalog entry has a `secret_name` (SecretsStore key) and
-    // `env_key_name` (env var the config resolver reads).
-    let catalog = crate::config::provider_catalog::catalog();
-    for (slug, endpoint) in catalog {
-        match secrets.get_decrypted(user_id, endpoint.secret_name).await {
-            Ok(decrypted) => {
-                injected.insert(
-                    endpoint.env_key_name.to_string(),
-                    decrypted.expose().to_string(),
-                );
-                tracing::debug!(
-                    "Loaded secret for provider '{}' (env: {})",
-                    slug,
-                    endpoint.env_key_name
-                );
-            }
-            Err(_) => {
-                // Also try the provider slug directly (e.g., "groq" as secret name)
-                if endpoint.secret_name != *slug
-                    && let Ok(decrypted) = secrets.get_decrypted(user_id, slug).await
-                {
-                    injected.insert(
-                        endpoint.env_key_name.to_string(),
-                        decrypted.expose().to_string(),
-                    );
-                    tracing::debug!(
-                        "Loaded secret for provider '{}' via slug (env: {})",
-                        slug,
-                        endpoint.env_key_name
-                    );
-                }
-            }
-        }
-    }
-
-    // Legacy generic compatible key (used by openrouter and custom LLM)
-    if !injected.contains_key("LLM_API_KEY")
-        && let Ok(decrypted) = secrets
-            .get_decrypted(user_id, "llm_compatible_api_key")
-            .await
-    {
-        injected.insert("LLM_API_KEY".to_string(), decrypted.expose().to_string());
-        tracing::debug!("Loaded legacy llm_compatible_api_key for LLM_API_KEY");
-    }
-
-    for (env_var, secret_name) in [
-        ("BEDROCK_API_KEY", "llm_bedrock_api_key"),
-        ("BEDROCK_PROXY_API_KEY", "llm_bedrock_proxy_api_key"),
-    ] {
-        if let Ok(decrypted) = secrets.get_decrypted(user_id, secret_name).await {
-            injected.insert(env_var.to_string(), decrypted.expose().to_string());
-            tracing::debug!("Loaded secret for {}", env_var);
-        }
-    }
-
-    for (env_var, secret_name) in EXTRA_SECRET_ENV_MAPPINGS {
-        if let Ok(decrypted) = secrets.get_decrypted(user_id, secret_name).await {
-            injected.insert((*env_var).to_string(), decrypted.expose().to_string());
-            tracing::debug!("Loaded secret for {}", env_var);
-        }
-    }
-
-    injected
+    HashMap::new()
 }
 
-/// Load runtime secrets from the encrypted secrets store into a thread-safe overlay.
+/// Clear the legacy injected-secret overlay.
 ///
-/// This bridges the gap between secrets stored during onboarding and the
-/// env-var-based resolution in config resolvers. Values in the overlay
-/// are checked by `optional_env()` BEFORE `std::env::var()`, so keychain
-/// and database-backed secrets take priority over stale values in `.env` files.
+/// Stored secrets are now resolved by scoped runtime callers through
+/// `SecretsStore::get_for_injection`; this function remains for older reload
+/// call sites so they drop any pre-hardening overlay values.
 pub async fn inject_all_secrets_from_store(
     secrets: &dyn crate::secrets::SecretsStore,
     user_id: &str,
@@ -425,7 +380,7 @@ pub async fn inject_all_secrets_from_store(
     let count = injected.len();
     update_injected_vars(injected);
     tracing::info!(
-        "Secret injection complete: {} key(s) loaded into overlay",
+        "Secret overlay refresh complete: {} legacy key(s) loaded",
         count
     );
 }
@@ -477,8 +432,8 @@ pub fn clear_synced_oauth_vars() {
     }
 }
 
-/// Merge specific values into the injected secret overlay without replacing the
-/// rest of the runtime-secret map.
+/// Merge specific values into the legacy injected runtime overlay without
+/// replacing the rest of the map.
 ///
 /// This is used by hot-reload paths such as external OAuth credential syncing,
 /// where a subset of provider credentials may update independently of the main
@@ -497,12 +452,11 @@ pub fn merge_injected_vars(vars: HashMap<String, String>) -> usize {
     count
 }
 
-/// Reload secrets from the store and update the overlay.
+/// Reload stored secrets and clear the legacy overlay.
 ///
-/// This is the zero-downtime secret refresh API. When a user updates an API
-/// key in Scrappy's UI, Scrappy writes it to the SecretsStore and then calls
-/// this function. ThinClaw re-reads all secrets, updates the injected vars
-/// overlay, and the next config resolution picks up the new keys.
+/// Runtime credential consumers now resolve individual secrets directly through
+/// `SecretsStore::get_for_injection`. This compatibility function keeps reload
+/// callers clearing stale overlay values from earlier versions.
 ///
 /// Returns the number of secrets that were (re)loaded.
 pub async fn refresh_secrets(secrets: &dyn crate::secrets::SecretsStore, user_id: &str) -> usize {
@@ -515,12 +469,49 @@ pub async fn refresh_secrets(secrets: &dyn crate::secrets::SecretsStore, user_id
     count
 }
 
+async fn provider_secret_from_store(
+    user_id: &str,
+    secret_name: &str,
+    secrets: Option<&Arc<dyn SecretsStore + Send + Sync>>,
+) -> Option<String> {
+    if let Some(store) = secrets
+        && let Ok(secret) = store
+            .get_for_injection(
+                user_id,
+                secret_name,
+                crate::secrets::SecretAccessContext::new(
+                    "config.secret_resolver",
+                    "provider_credential",
+                ),
+            )
+            .await
+    {
+        let value = secret.expose().trim().to_string();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn provider_secret_from_os_secure_store(secret_name: &str) -> Option<String> {
+    if let Some(value) = crate::platform::secure_store::get_api_key(secret_name).await
+        && !value.trim().is_empty()
+    {
+        return Some(value);
+    }
+
+    None
+}
+
 /// Resolve a provider credential using the same precedence as the WebUI and runtime.
 ///
 /// Resolution order:
 /// 1. Env/overlay (`optional_env`)
-/// 2. OS secure store
-/// 3. Encrypted secrets store
+/// 2. On macOS: encrypted secrets store
+/// 3. On other platforms: OS secure store, then encrypted secrets store
 /// 4. Provider-specific legacy env aliases
 pub async fn resolve_provider_secret_value(
     user_id: &str,
@@ -534,19 +525,19 @@ pub async fn resolve_provider_secret_value(
         return Some(value);
     }
 
-    if let Some(value) = crate::platform::secure_store::get_api_key(secret_name).await
-        && !value.trim().is_empty()
-    {
+    #[cfg(target_os = "macos")]
+    if let Some(value) = provider_secret_from_store(user_id, secret_name, secrets).await {
         return Some(value);
     }
 
-    if let Some(store) = secrets
-        && let Ok(secret) = store.get_decrypted(user_id, secret_name).await
-    {
-        let value = secret.expose().trim().to_string();
-        if !value.is_empty() {
-            return Some(value);
-        }
+    #[cfg(not(target_os = "macos"))]
+    if let Some(value) = provider_secret_from_os_secure_store(secret_name).await {
+        return Some(value);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    if let Some(value) = provider_secret_from_store(user_id, secret_name, secrets).await {
+        return Some(value);
     }
 
     match env_key {

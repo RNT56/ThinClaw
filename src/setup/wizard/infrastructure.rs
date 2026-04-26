@@ -15,7 +15,9 @@ use tokio_postgres::NoTls;
 
 use crate::secrets::SecretsCrypto;
 use crate::settings::KeySource;
-use crate::setup::prompts::{confirm, input, print_error, print_info, print_success, select_one};
+use crate::setup::prompts::{
+    confirm, input, print_blank_line, print_error, print_info, print_success, select_one,
+};
 #[cfg(feature = "libsql")]
 use crate::setup::prompts::{optional_input, secret_input};
 
@@ -25,6 +27,142 @@ use super::{SetupError, SetupWizard};
 use super::helpers::mask_password_in_url;
 
 impl SetupWizard {
+    pub(super) async fn auto_configure_quick_runtime_defaults(&mut self) -> Result<(), SetupError> {
+        self.selected_profile = self
+            .config
+            .profile
+            .unwrap_or(super::OnboardingProfile::BuilderAndCoding);
+        self.apply_profile_defaults();
+        self.settings.user_timezone = Some(crate::timezone::detect_system_timezone().to_string());
+        self.settings.webchat_theme = "system".to_string();
+        self.settings.webchat_show_branding = false;
+        self.settings.observability_backend = "none".to_string();
+        self.settings.routines_enabled = true;
+        self.settings.skills_enabled = true;
+        self.settings.heartbeat.enabled = false;
+        self.auto_configure_database().await?;
+        self.auto_configure_security().await?;
+        Ok(())
+    }
+
+    async fn auto_configure_database(&mut self) -> Result<(), SetupError> {
+        #[cfg(feature = "postgres")]
+        if let Some(url) = self
+            .settings
+            .database_url
+            .clone()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+            .filter(|value| !value.trim().is_empty())
+        {
+            self.settings.database_backend = Some("postgres".to_string());
+            self.test_database_connection_postgres(&url).await?;
+            self.run_migrations_postgres().await?;
+            self.settings.database_url = Some(url);
+            return Ok(());
+        }
+
+        #[cfg(feature = "libsql")]
+        {
+            self.settings.database_backend = Some("libsql".to_string());
+            let path = self
+                .settings
+                .libsql_path
+                .clone()
+                .or_else(|| std::env::var("LIBSQL_PATH").ok())
+                .unwrap_or_else(|| {
+                    crate::config::default_libsql_path()
+                        .to_string_lossy()
+                        .into()
+                });
+            let turso_url = self
+                .settings
+                .libsql_url
+                .clone()
+                .or_else(|| std::env::var("LIBSQL_URL").ok());
+            let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
+            self.test_database_connection_libsql(
+                &path,
+                turso_url.as_deref(),
+                turso_token.as_deref(),
+            )
+            .await?;
+            self.run_migrations_libsql().await?;
+            self.settings.libsql_path = Some(path);
+            self.settings.libsql_url = turso_url;
+            return Ok(());
+        }
+
+        #[allow(unreachable_code)]
+        Err(SetupError::Database(
+            "No database backend available for quick setup".to_string(),
+        ))
+    }
+
+    async fn auto_configure_security(&mut self) -> Result<(), SetupError> {
+        if let Ok(env_key) = std::env::var("SECRETS_MASTER_KEY")
+            && !env_key.trim().is_empty()
+        {
+            self.secrets_crypto = Some(Arc::new(
+                SecretsCrypto::new(SecretString::from(env_key.clone()))
+                    .map_err(|e| SetupError::Config(e.to_string()))?,
+            ));
+            self.generated_env_master_key = Some(env_key);
+            self.settings.secrets_master_key_source = KeySource::Env;
+            self.settings.secrets.master_key_source = crate::settings::SecretsMasterKeySource::Env;
+            self.settings.secrets.allow_env_master_key = true;
+            return Ok(());
+        }
+
+        if let Ok(keychain_key_bytes) = crate::platform::secure_store::get_master_key().await {
+            let key_hex: String = keychain_key_bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            self.secrets_crypto = Some(Arc::new(
+                SecretsCrypto::new(SecretString::from(key_hex))
+                    .map_err(|e| SetupError::Config(e.to_string()))?,
+            ));
+            self.settings.secrets_master_key_source = KeySource::Keychain;
+            self.settings.secrets.master_key_source =
+                crate::settings::SecretsMasterKeySource::OsSecureStore;
+            self.settings.secrets.allow_env_master_key = false;
+            return Ok(());
+        }
+
+        let key = crate::platform::secure_store::generate_master_key();
+        if crate::platform::secure_store::store_master_key(&key)
+            .await
+            .is_ok()
+        {
+            let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
+            self.secrets_crypto = Some(Arc::new(
+                SecretsCrypto::new(SecretString::from(key_hex))
+                    .map_err(|e| SetupError::Config(e.to_string()))?,
+            ));
+            self.settings.secrets_master_key_source = KeySource::Keychain;
+            self.settings.secrets.master_key_source =
+                crate::settings::SecretsMasterKeySource::OsSecureStore;
+            self.settings.secrets.allow_env_master_key = false;
+            return Ok(());
+        }
+
+        let key_hex = crate::platform::secure_store::generate_master_key_hex();
+        // SAFETY: onboarding performs this env mutation during single-threaded bootstrap
+        // before the runtime starts using the generated fallback key elsewhere.
+        unsafe {
+            std::env::set_var("SECRETS_MASTER_KEY", &key_hex);
+        }
+        self.secrets_crypto = Some(Arc::new(
+            SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                .map_err(|e| SetupError::Config(e.to_string()))?,
+        ));
+        self.generated_env_master_key = Some(key_hex);
+        self.settings.secrets_master_key_source = KeySource::Env;
+        self.settings.secrets.master_key_source = crate::settings::SecretsMasterKeySource::Env;
+        self.settings.secrets.allow_env_master_key = true;
+        Ok(())
+    }
+
     pub(super) async fn step_database(&mut self) -> Result<(), SetupError> {
         // When both features are compiled, let the user choose.
         // If DATABASE_BACKEND is already set in the environment, respect it.
@@ -66,6 +204,11 @@ impl SetupWizard {
                         "Recommended: libSQL unless you already need shared PostgreSQL infrastructure.",
                     );
                 }
+                super::OnboardingProfile::RemoteServer | super::OnboardingProfile::PiOsLite64 => {
+                    print_success(
+                        "Recommended: libSQL local file. Remote/headless hosts should avoid requiring a separate database before the service starts.",
+                    );
+                }
                 super::OnboardingProfile::CustomAdvanced => {
                     print_info(
                         "Custom / Advanced leaves this open: libSQL is simpler, while PostgreSQL fits existing shared infrastructure.",
@@ -73,7 +216,7 @@ impl SetupWizard {
                 }
             }
             print_info("Which database backend would you like to use?");
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             let options = &[
                 "PostgreSQL  - requires a running server",
@@ -136,10 +279,10 @@ impl SetupWizard {
             }
         }
 
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info("Enter your PostgreSQL connection URL.");
         print_info("Example: postgres://user:password@host:port/database");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         loop {
             let url = input("Database URL").map_err(SetupError::Io)?;
@@ -224,10 +367,10 @@ impl SetupWizard {
             }
         }
 
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info("ThinClaw uses libSQL, an embedded SQLite database.");
         print_info("No external database server is required.");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let path_input = optional_input(
             "Database file path",
@@ -238,14 +381,14 @@ impl SetupWizard {
         let db_path = path_input.unwrap_or(default_path_str.clone());
 
         // Ask about Turso cloud sync
-        println!();
+        crate::setup::prompts::print_blank_line();
         let use_turso =
             confirm("Add Turso cloud sync (remote replica)?", false).map_err(SetupError::Io)?;
 
         let (turso_url, turso_token) = if use_turso {
             print_info("Enter your Turso database URL and auth token.");
             print_info("Example: libsql://your-db.turso.io");
-            println!();
+            crate::setup::prompts::print_blank_line();
 
             let url = input("Turso URL").map_err(SetupError::Io)?;
             if url.is_empty() {
@@ -388,7 +531,7 @@ impl SetupWizard {
             "Recommended: use the {secure_store} for local installs."
         ));
         print_info("Use environment mode only when your deployment already supplies secrets.");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         // Check current configuration
         let env_key_exists = std::env::var("SECRETS_MASTER_KEY").is_ok();
@@ -396,6 +539,8 @@ impl SetupWizard {
         if env_key_exists {
             print_info("Found SECRETS_MASTER_KEY in the environment.");
             self.settings.secrets_master_key_source = KeySource::Env;
+            self.settings.secrets.master_key_source = crate::settings::SecretsMasterKeySource::Env;
+            self.settings.secrets.allow_env_master_key = true;
             print_success("Security configured (env var)");
             return Ok(());
         }
@@ -424,6 +569,9 @@ impl SetupWizard {
                 .map_err(SetupError::Io)?
             {
                 self.settings.secrets_master_key_source = KeySource::Keychain;
+                self.settings.secrets.master_key_source =
+                    crate::settings::SecretsMasterKeySource::OsSecureStore;
+                self.settings.secrets.allow_env_master_key = false;
                 print_success(&format!("Security configured ({secure_store})"));
                 return Ok(());
             }
@@ -433,10 +581,10 @@ impl SetupWizard {
         }
 
         // Offer options
-        println!();
+        crate::setup::prompts::print_blank_line();
         print_info("The secrets master key encrypts sensitive data like API tokens.");
         print_info("Choose where to store it:");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let options = [
             "OS secure store (recommended for local installs)",
@@ -466,6 +614,9 @@ impl SetupWizard {
                 ));
 
                 self.settings.secrets_master_key_source = KeySource::Keychain;
+                self.settings.secrets.master_key_source =
+                    crate::settings::SecretsMasterKeySource::OsSecureStore;
+                self.settings.secrets.allow_env_master_key = false;
                 print_success(&format!(
                     "Master key generated and saved to the {secure_store}"
                 ));
@@ -474,14 +625,14 @@ impl SetupWizard {
                 // Env var mode
                 print_info("Generate a key and add it to your environment:");
                 let key_hex = crate::platform::secure_store::generate_master_key_hex();
-                println!();
+                print_blank_line();
                 if cfg!(target_os = "windows") {
-                    println!("  setx SECRETS_MASTER_KEY {}", key_hex);
-                    println!("  $env:SECRETS_MASTER_KEY = \"{}\"", key_hex);
+                    print_info(&format!("setx SECRETS_MASTER_KEY {}", key_hex));
+                    print_info(&format!("$env:SECRETS_MASTER_KEY = \"{}\"", key_hex));
                 } else {
-                    println!("  export SECRETS_MASTER_KEY={}", key_hex);
+                    print_info(&format!("export SECRETS_MASTER_KEY={}", key_hex));
                 }
-                println!();
+                print_blank_line();
                 if cfg!(target_os = "windows") {
                     print_info("Add this to your PowerShell profile or .env file.");
                 } else {
@@ -489,10 +640,16 @@ impl SetupWizard {
                 }
 
                 self.settings.secrets_master_key_source = KeySource::Env;
+                self.settings.secrets.master_key_source =
+                    crate::settings::SecretsMasterKeySource::Env;
+                self.settings.secrets.allow_env_master_key = true;
                 print_success("Configured for environment storage");
             }
             _ => {
                 self.settings.secrets_master_key_source = KeySource::None;
+                self.settings.secrets.master_key_source =
+                    crate::settings::SecretsMasterKeySource::None;
+                self.settings.secrets.allow_env_master_key = false;
                 print_info(
                     "Secrets features are disabled. Channel tokens must be set through environment variables.",
                 );

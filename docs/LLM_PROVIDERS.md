@@ -11,6 +11,25 @@ It also includes a few runtime conveniences that matter in real deployments:
 - automatic live runtime reload when those watched credentials change
 - Anthropic-compatible prompt caching hints when the active provider supports them
 
+## Quick Start (Recommended)
+
+The fastest way to get started is [OpenRouter](https://openrouter.ai) — one API
+key gives you access to 300+ models from Anthropic, OpenAI, Google, Meta, and
+more.
+
+1. Get a key at [openrouter.ai/keys](https://openrouter.ai/keys)
+2. Add to your `.env`:
+
+```env
+OPENROUTER_API_KEY=sk-or-...
+```
+
+3. Run `thinclaw onboard` — OpenRouter is the first (recommended) option.
+
+That's it. ThinClaw auto-resolves the base URL, default model, and routing
+configuration. You can add direct provider keys later for lower latency or
+cost optimization.
+
 ## Provider Overview
 
 ### Native Backends
@@ -19,7 +38,7 @@ These providers have dedicated `LLM_BACKEND` values with first-class support:
 
 | Provider | `LLM_BACKEND` | API Key Env | Default Model |
 |---|---|---|---|
-| [Anthropic](#anthropic) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` |
+| [Anthropic](#anthropic) | `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-4-7` |
 | [OpenAI](#openai) | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
 | [Google Gemini](#google-gemini) | `gemini` | `GEMINI_API_KEY` | `gemini-3.1-flash` |
 | [Tinfoil](#tinfoil) | `tinfoil` | `TINFOIL_API_KEY` | `kimi-k2-5` |
@@ -74,13 +93,13 @@ LLM_BACKEND=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Popular models: `claude-sonnet-4-20250514`, `claude-opus-4-5`, `claude-haiku-4-5`
+Popular models: `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`
 
 Optional overrides:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-20250514` | Model override |
+| `ANTHROPIC_MODEL` | `claude-opus-4-7` | Model override |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com/v1` | For proxies |
 
 ---

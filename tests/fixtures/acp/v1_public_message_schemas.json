@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agentclientprotocol.com/protocol/schema#thinclaw-public-message-fixtures",
+  "description": "ThinClaw ACP v1 public message fixture schemas derived from the published ACP schema documentation.",
+  "$defs": {
+    "jsonRpcResponseEnvelope": {
+      "type": "object",
+      "required": ["jsonrpc", "id"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": {}
+      },
+      "additionalProperties": true
+    },
+    "jsonRpcNotificationEnvelope": {
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "type": "string" },
+        "params": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "sessionModeState": {
+      "type": "object",
+      "required": ["currentModeId", "availableModes"],
+      "properties": {
+        "currentModeId": { "type": "string" },
+        "availableModes": { "type": "array" }
+      },
+      "additionalProperties": true
+    },
+    "contentBlock": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": ["text", "resource", "resource_link"]
+        }
+      },
+      "additionalProperties": true
+    },
+    "stopReason": {
+      "enum": [
+        "end_turn",
+        "max_tokens",
+        "max_turn_requests",
+        "refusal",
+        "cancelled"
+      ]
+    }
+  },
+  "schemas": {
+    "initializeResponse": {
+      "allOf": [{ "$ref": "#/$defs/jsonRpcResponseEnvelope" }],
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "result": {
+          "type": "object",
+          "required": [
+            "protocolVersion",
+            "agentCapabilities",
+            "agentInfo",
+            "authMethods"
+          ],
+          "properties": {
+            "protocolVersion": { "const": 1 },
+            "agentCapabilities": {
+              "type": "object",
+              "required": [
+                "loadSession",
+                "promptCapabilities",
+                "mcpCapabilities",
+                "sessionCapabilities"
+              ]
+            },
+            "agentInfo": {
+              "type": "object",
+              "required": ["name", "version"]
+            },
+            "authMethods": { "type": "array" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "newSessionResponse": {
+      "allOf": [{ "$ref": "#/$defs/jsonRpcResponseEnvelope" }],
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "result": {
+          "type": "object",
+          "required": ["sessionId"],
+          "properties": {
+            "sessionId": { "type": "string", "minLength": 1 },
+            "modes": { "$ref": "#/$defs/sessionModeState" },
+            "configOptions": { "type": "array" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "listSessionsResponse": {
+      "allOf": [{ "$ref": "#/$defs/jsonRpcResponseEnvelope" }],
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "result": {
+          "type": "object",
+          "required": ["sessions"],
+          "properties": {
+            "sessions": { "type": "array" },
+            "nextCursor": {
+              "anyOf": [{ "type": "string" }, { "type": "null" }]
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "loadSessionResponse": {
+      "allOf": [{ "$ref": "#/$defs/jsonRpcResponseEnvelope" }],
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "result": {
+          "type": "object",
+          "properties": {
+            "modes": { "$ref": "#/$defs/sessionModeState" },
+            "configOptions": { "type": "array" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "promptResponse": {
+      "type": "object",
+      "required": ["stopReason"],
+      "properties": {
+        "stopReason": { "$ref": "#/$defs/stopReason" }
+      },
+      "additionalProperties": true
+    },
+    "sessionUpdateNotification": {
+      "allOf": [{ "$ref": "#/$defs/jsonRpcNotificationEnvelope" }],
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "method": { "const": "session/update" },
+        "params": {
+          "type": "object",
+          "required": ["sessionId", "update"],
+          "properties": {
+            "sessionId": { "type": "string", "minLength": 1 },
+            "update": {
+              "type": "object",
+              "required": ["sessionUpdate"],
+              "properties": {
+                "sessionUpdate": {
+                  "enum": [
+                    "user_message_chunk",
+                    "agent_message_chunk",
+                    "agent_thought_chunk",
+                    "tool_call",
+                    "tool_call_update",
+                    "current_mode_update",
+                    "config_option_update",
+                    "session_info_update",
+                    "plan",
+                    "usage_update"
+                  ]
+                },
+                "content": { "$ref": "#/$defs/contentBlock" }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "requestPermission": {
+      "allOf": [{ "$ref": "#/$defs/jsonRpcNotificationEnvelope" }],
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "method": { "const": "session/request_permission" },
+        "params": {
+          "type": "object",
+          "required": ["sessionId", "toolCall", "options"],
+          "properties": {
+            "sessionId": { "type": "string", "minLength": 1 },
+            "toolCall": { "type": "object" },
+            "options": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["optionId", "name", "kind"]
+              }
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

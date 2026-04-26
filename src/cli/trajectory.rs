@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use clap::Subcommand;
 use serde::Serialize;
 
-use crate::agent::learning::{TrajectoryLogger, TrajectoryOutcome, TrajectoryTurnRecord};
+use crate::agent::learning::{
+    TrajectoryLogger, TrajectoryOutcome, TrajectoryTurnRecord, TrajectoryTurnStatus,
+};
+use crate::agent::{AgentRunArtifact, AgentRunArtifactLogger};
 
 /// Minimal trajectory archive commands.
 #[derive(Subcommand, Debug, Clone)]
@@ -32,10 +35,11 @@ pub enum TrajectoryCommand {
 /// Run a trajectory command.
 pub async fn run_trajectory_command(cmd: TrajectoryCommand) -> anyhow::Result<()> {
     let logger = TrajectoryLogger::new();
+    let artifact_logger = AgentRunArtifactLogger::new();
 
     match cmd {
         TrajectoryCommand::Export { format, output } => {
-            let records = sort_records(logger.load_records()?)?;
+            let records = sort_records(load_archive_records(&logger, &artifact_logger)?)?;
             let payload = render_export(&records, &format)?;
             if let Some(output) = output {
                 if let Some(parent) = output.parent() {
@@ -51,12 +55,137 @@ pub async fn run_trajectory_command(cmd: TrajectoryCommand) -> anyhow::Result<()
             }
         }
         TrajectoryCommand::Stats => {
-            let stats = logger.stats()?;
+            let stats = summarize_records(
+                logger.log_root().to_path_buf(),
+                &load_archive_records(&logger, &artifact_logger)?,
+            );
             print_stats(&stats);
         }
     }
 
     Ok(())
+}
+
+fn load_archive_records(
+    legacy_logger: &TrajectoryLogger,
+    artifact_logger: &AgentRunArtifactLogger,
+) -> anyhow::Result<Vec<TrajectoryTurnRecord>> {
+    let mut records = legacy_logger.load_records()?;
+    records.extend(
+        artifact_logger
+            .load_records()?
+            .into_iter()
+            .filter_map(trajectory_record_from_artifact),
+    );
+    Ok(records)
+}
+
+fn trajectory_record_from_artifact(artifact: AgentRunArtifact) -> Option<TrajectoryTurnRecord> {
+    let session_id = artifact.session_id?;
+    let thread_id = artifact.thread_id?;
+    let user_id = artifact.user_id?;
+    let actor_id = artifact.actor_id?;
+    let channel = artifact.channel?;
+    let conversation_scope_id = artifact.conversation_scope_id?;
+    let conversation_kind = artifact.conversation_kind?;
+    let turn_number = artifact.turn_number?;
+    let user_message = artifact.user_message?;
+
+    let turn_status = match artifact.status {
+        crate::agent::AgentRunStatus::Completed => TrajectoryTurnStatus::Completed,
+        crate::agent::AgentRunStatus::Failed => TrajectoryTurnStatus::Failed,
+        crate::agent::AgentRunStatus::Interrupted => TrajectoryTurnStatus::Interrupted,
+    };
+    let outcome = match turn_status {
+        TrajectoryTurnStatus::Completed => TrajectoryOutcome::Success,
+        TrajectoryTurnStatus::Failed => TrajectoryOutcome::Failure,
+        TrajectoryTurnStatus::Interrupted | TrajectoryTurnStatus::Processing => {
+            TrajectoryOutcome::Neutral
+        }
+    };
+
+    let llm_provider = artifact
+        .metadata
+        .get("llm_provider")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let llm_model = artifact
+        .metadata
+        .get("llm_model")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    Some(TrajectoryTurnRecord {
+        session_id,
+        thread_id,
+        user_id,
+        actor_id,
+        channel,
+        conversation_scope_id,
+        conversation_kind,
+        external_thread_id: artifact.external_thread_id,
+        turn_number,
+        user_message,
+        assistant_response: artifact.assistant_response,
+        tool_calls: artifact.tool_calls,
+        started_at: artifact.started_at,
+        completed_at: artifact.completed_at,
+        turn_status,
+        outcome,
+        failure_reason: artifact.failure_reason,
+        execution_backend: artifact.execution_backend,
+        llm_provider,
+        llm_model,
+        prompt_snapshot_hash: artifact.prompt_snapshot_hash,
+        ephemeral_overlay_hash: artifact.ephemeral_overlay_hash,
+        provider_context_refs: artifact.provider_context_refs,
+        user_feedback: None,
+        assessment: None,
+    })
+}
+
+fn summarize_records(
+    log_root: std::path::PathBuf,
+    records: &[TrajectoryTurnRecord],
+) -> crate::agent::learning::TrajectoryStats {
+    let mut session_ids = std::collections::BTreeSet::new();
+    let mut first_seen: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut last_seen: Option<chrono::DateTime<chrono::Utc>> = None;
+    let mut success_count = 0usize;
+    let mut failure_count = 0usize;
+    let mut neutral_count = 0usize;
+
+    for record in records {
+        session_ids.insert(record.session_id);
+        let effective_ts = record.completed_at.unwrap_or(record.started_at);
+        first_seen = Some(
+            first_seen.map_or(effective_ts, |current: chrono::DateTime<chrono::Utc>| {
+                current.min(effective_ts)
+            }),
+        );
+        last_seen = Some(
+            last_seen.map_or(effective_ts, |current: chrono::DateTime<chrono::Utc>| {
+                current.max(effective_ts)
+            }),
+        );
+        match record.effective_assessment().outcome {
+            TrajectoryOutcome::Success => success_count += 1,
+            TrajectoryOutcome::Failure => failure_count += 1,
+            TrajectoryOutcome::Neutral => neutral_count += 1,
+        }
+    }
+
+    crate::agent::learning::TrajectoryStats {
+        log_root,
+        file_count: 0,
+        record_count: records.len(),
+        session_count: session_ids.len(),
+        first_seen,
+        last_seen,
+        success_count,
+        failure_count,
+        neutral_count,
+    }
 }
 
 fn render_export(records: &[TrajectoryTurnRecord], format: &str) -> anyhow::Result<String> {
@@ -126,10 +255,18 @@ fn record_export_metadata(record: &TrajectoryTurnRecord) -> serde_json::Value {
         "thread_id": record.thread_id,
         "turn_number": record.turn_number,
         "channel": record.channel,
+        "turn_status": record.turn_status,
         "outcome": assessment.outcome,
         "score": assessment.score,
         "assessment_source": assessment.source,
         "feedback": record.user_feedback,
+        "failure_reason": record.failure_reason,
+        "execution_backend": record.execution_backend,
+        "llm_provider": record.llm_provider,
+        "llm_model": record.llm_model,
+        "prompt_snapshot_hash": record.prompt_snapshot_hash,
+        "ephemeral_overlay_hash": record.ephemeral_overlay_hash,
+        "provider_context_refs": record.provider_context_refs,
     })
 }
 
@@ -270,7 +407,7 @@ fn sort_records(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::learning::{TrajectoryAssessment, TrajectoryOutcome};
+    use crate::agent::learning::{TrajectoryAssessment, TrajectoryOutcome, TrajectoryTurnStatus};
     use uuid::Uuid;
 
     #[test]
@@ -301,7 +438,15 @@ mod tests {
                 tool_calls: vec![],
                 started_at: now,
                 completed_at: Some(now),
+                turn_status: TrajectoryTurnStatus::Completed,
                 outcome: TrajectoryOutcome::Success,
+                failure_reason: None,
+                execution_backend: Some("interactive_chat".into()),
+                llm_provider: None,
+                llm_model: None,
+                prompt_snapshot_hash: None,
+                ephemeral_overlay_hash: None,
+                provider_context_refs: Vec::new(),
                 user_feedback: None,
                 assessment: Some(TrajectoryAssessment {
                     outcome: TrajectoryOutcome::Success,
@@ -325,7 +470,15 @@ mod tests {
                 tool_calls: vec![],
                 started_at: now,
                 completed_at: Some(now),
+                turn_status: TrajectoryTurnStatus::Completed,
                 outcome: TrajectoryOutcome::Success,
+                failure_reason: None,
+                execution_backend: Some("interactive_chat".into()),
+                llm_provider: None,
+                llm_model: None,
+                prompt_snapshot_hash: None,
+                ephemeral_overlay_hash: None,
+                provider_context_refs: Vec::new(),
                 user_feedback: None,
                 assessment: Some(TrajectoryAssessment {
                     outcome: TrajectoryOutcome::Success,
@@ -362,7 +515,15 @@ mod tests {
                 tool_calls: vec![],
                 started_at: now,
                 completed_at: Some(now),
+                turn_status: TrajectoryTurnStatus::Completed,
                 outcome: TrajectoryOutcome::Success,
+                failure_reason: None,
+                execution_backend: Some("interactive_chat".into()),
+                llm_provider: None,
+                llm_model: None,
+                prompt_snapshot_hash: None,
+                ephemeral_overlay_hash: None,
+                provider_context_refs: Vec::new(),
                 user_feedback: None,
                 assessment: Some(TrajectoryAssessment {
                     outcome: TrajectoryOutcome::Success,
@@ -401,7 +562,15 @@ mod tests {
                     tool_calls: vec![],
                     started_at: now,
                     completed_at: Some(now),
+                    turn_status: TrajectoryTurnStatus::Completed,
                     outcome: TrajectoryOutcome::Success,
+                    failure_reason: None,
+                    execution_backend: Some("interactive_chat".into()),
+                    llm_provider: None,
+                    llm_model: None,
+                    prompt_snapshot_hash: None,
+                    ephemeral_overlay_hash: None,
+                    provider_context_refs: Vec::new(),
                     user_feedback: None,
                     assessment: Some(TrajectoryAssessment {
                         outcome: TrajectoryOutcome::Success,
@@ -425,7 +594,15 @@ mod tests {
                     tool_calls: vec![],
                     started_at: now,
                     completed_at: Some(now),
+                    turn_status: TrajectoryTurnStatus::Failed,
                     outcome: TrajectoryOutcome::Failure,
+                    failure_reason: Some("synthetic failure".into()),
+                    execution_backend: Some("interactive_chat".into()),
+                    llm_provider: None,
+                    llm_model: None,
+                    prompt_snapshot_hash: None,
+                    ephemeral_overlay_hash: None,
+                    provider_context_refs: Vec::new(),
                     user_feedback: None,
                     assessment: Some(TrajectoryAssessment {
                         outcome: TrajectoryOutcome::Failure,

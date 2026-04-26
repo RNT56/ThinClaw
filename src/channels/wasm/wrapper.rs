@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::{TimeZone, Utc};
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -57,6 +58,7 @@ use crate::pairing::PairingStore;
 use crate::safety::LeakDetector;
 use crate::tools::wasm::LogLevel;
 use crate::tools::wasm::WasmResourceLimiter;
+use crate::tools::wasm::WorkspaceReader;
 
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
@@ -66,6 +68,27 @@ wasmtime::component::bindgen!({
         // Use our own store data type
     },
 });
+
+/// A single tool lifecycle event accumulated during a turn.
+///
+/// Collected while processing and flushed as a single summary
+/// message before the response is sent (debug mode only).
+#[derive(Debug, Clone)]
+enum ToolEventEntry {
+    /// Tool execution started.
+    Started { name: String },
+    /// Tool execution completed (success or failure).
+    Completed { name: String, success: bool },
+    /// Tool returned a result preview.
+    Result { preview: String },
+}
+
+/// Escape HTML entities for safe embedding in Telegram HTML messages.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
 
 /// Store data for WASM channel execution.
 ///
@@ -170,6 +193,10 @@ impl ChannelStoreData {
         }
         result
     }
+
+    fn leak_detector(&self) -> LeakDetector {
+        LeakDetector::with_exact_values(self.credentials.values().cloned())
+    }
 }
 
 // Implement WasiView to provide WASI context and resource table
@@ -224,16 +251,21 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             "WASM http_request called"
         );
 
-        // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN} with actual token)
-        let injected_url = self.inject_credentials(&url, "url");
+        let leak_detector = self.leak_detector();
+        let raw_headers: std::collections::HashMap<String, String> =
+            serde_json::from_str(&headers_json).unwrap_or_default();
+        let raw_header_vec: Vec<(String, String)> = raw_headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
 
-        // Log whether injection happened (without revealing the token)
-        let url_changed = injected_url != url;
-        tracing::info!(url_changed = url_changed, "URL after credential injection");
+        leak_detector
+            .scan_http_request(&url, &raw_header_vec, body.as_deref())
+            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
-        // Check if HTTP is allowed for this URL
+        // Check if HTTP is allowed before credential injection.
         self.host_state
-            .check_http_allowed(&injected_url, &method)
+            .check_http_allowed(&url, &method)
             .map_err(|e| {
                 tracing::error!(error = %e, "HTTP not allowed");
                 format!("HTTP not allowed: {}", e)
@@ -245,11 +277,15 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             format!("Rate limit exceeded: {}", e)
         })?;
 
-        // Parse headers and inject credentials into header values
-        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
-        let raw_headers: std::collections::HashMap<String, String> =
-            serde_json::from_str(&headers_json).unwrap_or_default();
+        // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN} with actual token)
+        let injected_url = self.inject_credentials(&url, "url");
 
+        // Log whether injection happened (without revealing the token)
+        let url_changed = injected_url != url;
+        tracing::info!(url_changed = url_changed, "URL after credential injection");
+
+        // Inject credentials into header values
+        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
         let headers: std::collections::HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
@@ -270,16 +306,6 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         );
 
         let url = injected_url;
-        let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
-
         // Get the max response size from capabilities (default 10MB).
         let max_response_bytes = self
             .host_state
@@ -379,7 +405,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                     max_response
                 ));
             }
-            let body = body.to_vec();
+            let mut body = body.to_vec();
 
             tracing::info!(
                 status = status,
@@ -399,9 +425,12 @@ impl near::agent::channel_host::Host for ChannelStoreData {
 
             // Leak detection on response body (best-effort)
             if let Ok(body_str) = std::str::from_utf8(&body) {
-                leak_detector
+                let cleaned = leak_detector
                     .scan_and_clean(body_str)
                     .map_err(|e| format!("Potential secret leak in response: {}", e))?;
+                if cleaned != body_str {
+                    body = cleaned.into_bytes();
+                }
             }
 
             Ok(near::agent::channel_host::HttpResponse {
@@ -578,6 +607,16 @@ pub struct WasmChannel {
     /// Configured via TELEGRAM_STREAM_MODE env var or DB setting. Default: None.
     /// Wrapped in RwLock for runtime hot-reload via WebUI settings.
     stream_mode: std::sync::RwLock<StreamMode>,
+
+    /// When true, forward verbose status events (tool calls, subagent
+    /// lifecycle, canvas actions) to the channel. When false (default),
+    /// these events are silently suppressed to keep chat clean. Toggle
+    /// at runtime via `/debug`.
+    debug_mode: std::sync::RwLock<bool>,
+
+    /// Accumulated tool events for batched delivery in debug mode.
+    /// Flushed as a single formatted summary before each response.
+    pending_tool_events: tokio::sync::RwLock<Vec<ToolEventEntry>>,
 }
 
 impl WasmChannel {
@@ -608,6 +647,15 @@ impl WasmChannel {
             StreamMode::None
         };
 
+        // Use disk-backed workspace store so WASM channel state (e.g.,
+        // Telegram managed topic registry) survives process restarts.
+        let workspace_persist_path = crate::platform::state_paths()
+            .channels_dir
+            .join(format!("{}.workspace.json", &name));
+        let workspace_store = Arc::new(ChannelWorkspaceStore::with_persistence(
+            workspace_persist_path,
+        ));
+
         Self {
             name,
             runtime,
@@ -625,8 +673,10 @@ impl WasmChannel {
             credentials: Arc::new(RwLock::new(HashMap::new())),
             typing_task: RwLock::new(None),
             pairing_store,
-            workspace_store: Arc::new(ChannelWorkspaceStore::new()),
+            workspace_store,
             stream_mode: std::sync::RwLock::new(stream_mode),
+            debug_mode: std::sync::RwLock::new(false),
+            pending_tool_events: tokio::sync::RwLock::new(Vec::new()),
         }
     }
 
@@ -671,6 +721,111 @@ impl WasmChannel {
             .insert(name.to_string(), value);
     }
 
+    /// Flush accumulated tool events as a single formatted summary message.
+    ///
+    /// Called at the start of `respond()` so the tool activity block appears
+    /// before the final response.  Does nothing if the accumulator is empty.
+    async fn flush_tool_events(&self, metadata: &serde_json::Value) {
+        let events: Vec<ToolEventEntry> = {
+            let mut guard = self.pending_tool_events.write().await;
+            if guard.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *guard)
+        };
+
+        // Build a grouped, single-message summary.
+        //
+        // Format (Telegram HTML):
+        //   🔧 <b>Tool Activity</b>
+        //   ✅ web_search
+        //      "query text…"
+        //   ✅ read_file
+        //      main.rs (1,234 chars)
+        //   ❌ list_dir — failed
+        //   ─────────────
+        //   3 calls · 2✅ 1❌
+
+        let mut lines: Vec<String> = vec!["🔧 <b>Tool Activity</b>".to_string()];
+
+        // Walk through events in order, emitting one visual block per tool
+        let mut succeeded = 0u32;
+        let mut failed = 0u32;
+        let mut total_calls = 0u32;
+
+        for event in &events {
+            match event {
+                ToolEventEntry::Started { name } => {
+                    // We'll render the tool line when we see the Completed event.
+                    // If we never get a Completed (edge case), the Started is
+                    // just informational.  We track it for ordering context.
+                    let _ = name; // used below via Completed
+                }
+                ToolEventEntry::Completed { name, success } => {
+                    total_calls += 1;
+                    let icon = if *success { "✅" } else { "❌" };
+                    let suffix = if *success { "" } else { " — failed" };
+                    lines.push(format!(
+                        "{} <code>{}</code>{}",
+                        icon,
+                        html_escape(name),
+                        suffix
+                    ));
+                    if *success {
+                        succeeded += 1;
+                    } else {
+                        failed += 1;
+                    }
+                }
+                ToolEventEntry::Result { preview } => {
+                    if !preview.is_empty() {
+                        // Truncate long results
+                        let display: String = if preview.chars().count() > 120 {
+                            let truncated: String = preview.chars().take(117).collect();
+                            format!("{}…", truncated)
+                        } else {
+                            preview.clone()
+                        };
+                        lines.push(format!("   <i>{}</i>", html_escape(&display)));
+                    }
+                }
+            }
+        }
+
+        // Footer
+        if total_calls > 0 {
+            lines.push("───────────────".to_string());
+            let mut footer_parts = vec![format!(
+                "{} call{}",
+                total_calls,
+                if total_calls == 1 { "" } else { "s" }
+            )];
+            if succeeded > 0 {
+                footer_parts.push(format!("{}✅", succeeded));
+            }
+            if failed > 0 {
+                footer_parts.push(format!("{}❌", failed));
+            }
+            lines.push(footer_parts.join(" · "));
+        }
+
+        let summary = lines.join("\n");
+
+        // Send as a single message via on_respond (not on_status, which
+        // would go through the WASM status handler and might be dropped)
+        let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
+        if let Err(e) = self
+            .call_on_respond(uuid::Uuid::new_v4(), &summary, None, &metadata_json)
+            .await
+        {
+            tracing::debug!(
+                channel = %self.name,
+                error = %e,
+                "Failed to send tool summary (best-effort)"
+            );
+        }
+    }
+
     /// Get a snapshot of credentials for use in callbacks.
     pub async fn get_credentials(&self) -> HashMap<String, String> {
         self.credentials.read().await.clone()
@@ -689,6 +844,61 @@ impl WasmChannel {
     /// Get the registered endpoints.
     pub async fn endpoints(&self) -> Vec<RegisteredEndpoint> {
         self.endpoints.read().await.clone()
+    }
+
+    fn registered_endpoints_from_config(&self, config: &ChannelConfig) -> Vec<RegisteredEndpoint> {
+        let mut endpoints = Vec::new();
+
+        for endpoint in &config.http_endpoints {
+            if !self.capabilities.is_path_allowed(&endpoint.path) {
+                tracing::warn!(
+                    channel = %self.name,
+                    path = %endpoint.path,
+                    "HTTP endpoint path not allowed by capabilities"
+                );
+                continue;
+            }
+
+            endpoints.push(RegisteredEndpoint {
+                channel_name: self.name.clone(),
+                path: endpoint.path.clone(),
+                methods: endpoint.methods.clone(),
+                require_secret: endpoint.require_secret,
+            });
+        }
+
+        endpoints
+    }
+
+    async fn cache_channel_config(&self, config: &ChannelConfig) {
+        *self.channel_config.write().await = Some(config.clone());
+        *self.endpoints.write().await = self.registered_endpoints_from_config(config);
+    }
+
+    async fn ensure_on_start_config(
+        &self,
+        force_refresh: bool,
+    ) -> Result<ChannelConfig, WasmChannelError> {
+        if !force_refresh && let Some(existing) = self.channel_config.read().await.clone() {
+            return Ok(existing);
+        }
+
+        let config = self.call_on_start().await?;
+        self.cache_channel_config(&config).await;
+        Ok(config)
+    }
+
+    /// Prime and cache the on_start configuration without starting the channel.
+    ///
+    /// This lets the host register the actual webhook endpoints before the
+    /// HTTP server starts, while keeping `start()` idempotent.
+    pub async fn prime_on_start_config(&self) -> Result<ChannelConfig, WasmChannelError> {
+        self.ensure_on_start_config(false).await
+    }
+
+    /// Force a fresh on_start call and replace the cached config/endpoints.
+    pub async fn refresh_on_start_config(&self) -> Result<ChannelConfig, WasmChannelError> {
+        self.ensure_on_start_config(true).await
     }
 
     /// Inject the workspace store as the reader into a capabilities clone.
@@ -854,7 +1064,10 @@ impl WasmChannel {
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
-        let config_json = self.config_json.read().await.clone();
+        let config_json = self.apply_telegram_runtime_state(
+            self.config_json.read().await.clone(),
+            &self.load_runtime_state(),
+        );
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
@@ -1190,11 +1403,12 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         // Prepare response data
         let message_id_str = message_id.to_string();
@@ -1254,8 +1468,12 @@ impl WasmChannel {
                     });
                 }
 
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                // Commit pending workspace writes to the persistent store
+                // so state mutations from on_respond survive restarts.
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
                 tracing::info!("on_respond WASM execution completed successfully");
                 Ok(((), host_state))
             })
@@ -1303,11 +1521,12 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         let wit_update = status_to_wit(status, metadata);
 
@@ -1326,6 +1545,13 @@ impl WasmChannel {
                 channel_iface
                     .call_on_status(&mut store, &wit_update)
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
+
+                let mut host_state =
+                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                // Commit pending workspace writes to the persistent store
+                // so state mutations from on_status survive restarts.
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
 
                 Ok(())
             })
@@ -1364,6 +1590,7 @@ impl WasmChannel {
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
         credentials: &RwLock<HashMap<String, String>>,
+        workspace_store: &Arc<ChannelWorkspaceStore>,
         pairing_store: Arc<PairingStore>,
         timeout: Duration,
         wit_update: wit_channel::StatusUpdate,
@@ -1374,9 +1601,10 @@ impl WasmChannel {
 
         let runtime = Arc::clone(runtime);
         let prepared = Arc::clone(prepared);
-        let capabilities = capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(capabilities, workspace_store);
         let credentials_snapshot = credentials.read().await.clone();
         let channel_name_owned = channel_name.to_string();
+        let workspace_store = Arc::clone(workspace_store);
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
@@ -1393,6 +1621,13 @@ impl WasmChannel {
                 channel_iface
                     .call_on_status(&mut store, &wit_update)
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
+
+                let mut host_state =
+                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                // Commit pending workspace writes to the persistent store for
+                // background typing/status callbacks.
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
 
                 Ok(())
             })
@@ -1474,6 +1709,7 @@ impl WasmChannel {
                 let prepared = Arc::clone(&self.prepared);
                 let capabilities = self.capabilities.clone();
                 let credentials = self.credentials.clone();
+                let workspace_store = self.workspace_store.clone();
                 let pairing_store = self.pairing_store.clone();
                 let callback_timeout = self.runtime.config().callback_timeout;
                 let wit_update = status_to_wit(&status, metadata);
@@ -1494,6 +1730,7 @@ impl WasmChannel {
                             &prepared,
                             &capabilities,
                             &credentials,
+                            &workspace_store,
                             pairing_store.clone(),
                             callback_timeout,
                             wit_update_clone,
@@ -1604,8 +1841,64 @@ impl WasmChannel {
                     );
                 }
             }
+            StatusUpdate::ToolStarted { name, .. } => {
+                // Accumulate in debug mode; suppress entirely in standard mode.
+                let is_debug = self.debug_mode.read().map(|g| *g).unwrap_or(false);
+                if is_debug {
+                    self.pending_tool_events
+                        .write()
+                        .await
+                        .push(ToolEventEntry::Started { name: name.clone() });
+                }
+            }
+            StatusUpdate::ToolCompleted { name, success, .. } => {
+                let is_debug = self.debug_mode.read().map(|g| *g).unwrap_or(false);
+                if is_debug {
+                    self.pending_tool_events
+                        .write()
+                        .await
+                        .push(ToolEventEntry::Completed {
+                            name: name.clone(),
+                            success: *success,
+                        });
+                }
+            }
+            StatusUpdate::ToolResult { preview, .. } => {
+                let is_debug = self.debug_mode.read().map(|g| *g).unwrap_or(false);
+                if is_debug {
+                    self.pending_tool_events
+                        .write()
+                        .await
+                        .push(ToolEventEntry::Result {
+                            preview: preview.clone(),
+                        });
+                }
+            }
+            // Sub-agent lifecycle: debug-only (noisy orchestration detail).
+            StatusUpdate::SubagentSpawned { .. }
+            | StatusUpdate::SubagentProgress { .. }
+            | StatusUpdate::SubagentCompleted { .. } => {
+                let is_debug = self.debug_mode.read().map(|g| *g).unwrap_or(false);
+                if is_debug {
+                    let _ = self.call_on_status(&status, metadata).await;
+                } else {
+                    tracing::trace!(
+                        channel = %self.name,
+                        "Suppressed subagent status (enable /debug to show)"
+                    );
+                }
+            }
+            // Canvas actions: debug-only (UI panels have no chat equivalent).
+            StatusUpdate::CanvasAction(_) => {
+                let is_debug = self.debug_mode.read().map(|g| *g).unwrap_or(false);
+                if is_debug {
+                    let _ = self.call_on_status(&status, metadata).await;
+                }
+            }
+            // Lifecycle markers are internal bookkeeping, never user-facing.
+            StatusUpdate::LifecycleStart { .. } | StatusUpdate::LifecycleEnd { .. } => {}
             _ => {
-                // Intermediate progress status: keep any existing typing task alive.
+                // Other intermediate progress status: keep any existing typing task alive.
                 if let Err(e) = self.call_on_status(&status, metadata).await {
                     tracing::debug!(
                         channel = %self.name,
@@ -1956,6 +2249,627 @@ impl WasmChannel {
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct TelegramWebhookInfoEnvelope {
+    ok: bool,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    result: Option<TelegramWebhookInfo>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TelegramWebhookInfo {
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    pending_update_count: u64,
+    #[serde(default)]
+    last_error_date: Option<i64>,
+    #[serde(default)]
+    last_error_message: Option<String>,
+}
+
+const TELEGRAM_POLLING_OVERRIDE: &str = "polling";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PersistedChannelRuntimeState {
+    #[serde(default)]
+    transport_override: Option<String>,
+    #[serde(default)]
+    fallback_from_webhook_url: Option<String>,
+}
+
+impl WasmChannel {
+    fn runtime_state_path(&self) -> std::path::PathBuf {
+        crate::platform::state_paths()
+            .channels_dir
+            .join(format!("{}.runtime.json", self.name))
+    }
+
+    fn load_runtime_state(&self) -> PersistedChannelRuntimeState {
+        let path = self.runtime_state_path();
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            return PersistedChannelRuntimeState::default();
+        };
+
+        serde_json::from_str(&content).unwrap_or_else(|error| {
+            tracing::warn!(
+                channel = %self.name,
+                path = %path.display(),
+                error = %error,
+                "Failed to parse persisted channel runtime state, ignoring"
+            );
+            PersistedChannelRuntimeState::default()
+        })
+    }
+
+    fn save_runtime_state(
+        &self,
+        state: &PersistedChannelRuntimeState,
+    ) -> Result<(), std::io::Error> {
+        let path = self.runtime_state_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let serialized = serde_json::to_vec_pretty(state)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let tmp_path = path.with_extension("runtime.json.tmp");
+        std::fs::write(&tmp_path, serialized)?;
+        std::fs::rename(&tmp_path, &path)?;
+        Ok(())
+    }
+
+    fn clear_runtime_state(&self) {
+        let path = self.runtime_state_path();
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                channel = %self.name,
+                path = %path.display(),
+                error = %error,
+                "Failed to clear persisted channel runtime state"
+            );
+        }
+    }
+
+    fn telegram_webhook_url_from_tunnel_url(tunnel_url: &str) -> String {
+        format!("{}/webhook/telegram", tunnel_url.trim_end_matches('/'))
+    }
+
+    fn tunnel_url_from_config(config_json: &str) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(config_json)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("tunnel_url")
+                    .and_then(|entry| entry.as_str())
+                    .map(|value| value.trim().to_string())
+            })
+            .filter(|value| !value.is_empty())
+    }
+
+    fn apply_telegram_runtime_state(
+        &self,
+        config_json: String,
+        state: &PersistedChannelRuntimeState,
+    ) -> String {
+        if state.transport_override.as_deref() != Some(TELEGRAM_POLLING_OVERRIDE) {
+            return config_json;
+        }
+
+        let current_webhook_url = Self::tunnel_url_from_config(&config_json)
+            .map(|url| Self::telegram_webhook_url_from_tunnel_url(&url));
+        if let (Some(expected_previous), Some(current)) = (
+            state.fallback_from_webhook_url.as_deref(),
+            current_webhook_url.as_deref(),
+        ) && expected_previous != current
+        {
+            tracing::info!(
+                channel = %self.name,
+                previous = %expected_previous,
+                current = %current,
+                "Telegram webhook URL changed, clearing persisted polling fallback"
+            );
+            self.clear_runtime_state();
+            return config_json;
+        }
+
+        let mut value = serde_json::from_str::<serde_json::Value>(&config_json)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        if !value.is_object() {
+            value = serde_json::json!({});
+        }
+        let object = value
+            .as_object_mut()
+            .expect("fallback configuration should be a JSON object");
+        object.insert(
+            "transport_override".to_string(),
+            serde_json::Value::String(TELEGRAM_POLLING_OVERRIDE.to_string()),
+        );
+        object.insert("tunnel_url".to_string(), serde_json::Value::Null);
+
+        serde_json::to_string(&value).unwrap_or(config_json)
+    }
+
+    fn read_workspace_state(&self, path: &str) -> Option<String> {
+        self.workspace_store
+            .read(&self.capabilities.prefix_workspace_path(path))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
+    fn read_workspace_state_u64(&self, path: &str) -> Option<u64> {
+        self.read_workspace_state(path)?.parse::<u64>().ok()
+    }
+
+    fn iso_timestamp_from_millis(millis: Option<u64>) -> Option<String> {
+        let millis = millis?;
+        let millis = i64::try_from(millis).ok()?;
+        Utc.timestamp_millis_opt(millis)
+            .single()
+            .map(|ts| ts.to_rfc3339())
+    }
+
+    fn iso_timestamp_from_seconds(seconds: Option<i64>) -> Option<String> {
+        let seconds = seconds?;
+        Utc.timestamp_opt(seconds, 0)
+            .single()
+            .map(|ts| ts.to_rfc3339())
+    }
+
+    async fn telegram_live_webhook_info(&self) -> Result<Option<TelegramWebhookInfo>, String> {
+        let bot_token = self
+            .credentials
+            .read()
+            .await
+            .get("TELEGRAM_BOT_TOKEN")
+            .cloned()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "Missing TELEGRAM_BOT_TOKEN".to_string())?;
+
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|error| format!("Failed to build Telegram client: {}", error))?;
+        let response = client
+            .get(format!(
+                "https://api.telegram.org/bot{}/getWebhookInfo",
+                bot_token
+            ))
+            .send()
+            .await
+            .map_err(|error| format!("getWebhookInfo request failed: {}", error))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("Failed to read getWebhookInfo response: {}", error))?;
+        if !status.is_success() {
+            return Err(format!("getWebhookInfo returned {}: {}", status, body));
+        }
+
+        let envelope: TelegramWebhookInfoEnvelope = serde_json::from_str(&body)
+            .map_err(|error| format!("Failed to parse getWebhookInfo: {}", error))?;
+        if !envelope.ok {
+            return Err(envelope
+                .description
+                .unwrap_or_else(|| "Telegram webhook lookup failed".to_string()));
+        }
+        Ok(envelope.result)
+    }
+
+    fn telegram_polling_unhealthy_reason(
+        now_ms: u64,
+        last_poll_success_ms: Option<u64>,
+        last_poll_started_ms: Option<u64>,
+        last_poll_error: Option<&str>,
+        poll_stale_after_ms: u64,
+    ) -> Option<String> {
+        match last_poll_success_ms {
+            Some(last_success_ms)
+                if now_ms.saturating_sub(last_success_ms) > poll_stale_after_ms =>
+            {
+                Some(match last_poll_error {
+                    Some(error) if !error.trim().is_empty() => {
+                        format!("polling stalled: {}", error.trim())
+                    }
+                    _ => "polling stalled with no recent successful poll".to_string(),
+                })
+            }
+            None if last_poll_started_ms.is_none() => {
+                Some("polling has not started yet".to_string())
+            }
+            None => last_poll_error
+                .filter(|error| !error.trim().is_empty())
+                .map(|error| format!("polling has not completed successfully: {}", error.trim())),
+            _ => None,
+        }
+    }
+
+    fn telegram_webhook_unhealthy_reason(
+        now_ms: u64,
+        expected_webhook_url: Option<&str>,
+        registered_webhook_url: Option<&str>,
+        last_webhook_register_error: Option<&str>,
+        registered_webhook_error: Option<&str>,
+        pending_updates: Option<u64>,
+        last_webhook_register_ms: Option<u64>,
+        last_inbound_ms: Option<u64>,
+    ) -> Option<String> {
+        if let Some(error) = last_webhook_register_error.filter(|error| !error.trim().is_empty()) {
+            return Some(format!("webhook registration failed: {}", error.trim()));
+        }
+
+        if let Some(error) = registered_webhook_error.filter(|error| !error.trim().is_empty()) {
+            return Some(format!("Telegram webhook error: {}", error.trim()));
+        }
+
+        match (expected_webhook_url, registered_webhook_url) {
+            (Some(expected), Some(registered)) if expected != registered => {
+                return Some(format!(
+                    "webhook URL mismatch (expected {}, registered {})",
+                    expected, registered
+                ));
+            }
+            (Some(_), None) => {
+                return Some("Telegram webhook is not registered".to_string());
+            }
+            (None, _) => {
+                return Some("missing expected webhook URL".to_string());
+            }
+            _ => {}
+        }
+
+        let pending_updates = pending_updates.unwrap_or(0);
+        if pending_updates == 0 {
+            return None;
+        }
+
+        let pending_backlog_stale_after_ms = 90_000;
+        if let Some(last_inbound_ms) = last_inbound_ms {
+            if now_ms.saturating_sub(last_inbound_ms) > pending_backlog_stale_after_ms {
+                return Some(format!(
+                    "Telegram has {} pending webhook update(s) but inbound delivery is stalled",
+                    pending_updates
+                ));
+            }
+            return None;
+        }
+
+        let registration_grace_ms = 30_000;
+        let registered_long_enough = last_webhook_register_ms
+            .map(|registered_at| now_ms.saturating_sub(registered_at) > registration_grace_ms)
+            .unwrap_or(true);
+        if registered_long_enough {
+            return Some(format!(
+                "Telegram has {} pending webhook update(s) but ThinClaw has not received any inbound webhook events",
+                pending_updates
+            ));
+        }
+
+        None
+    }
+
+    async fn telegram_diagnostics_payload(&self) -> serde_json::Value {
+        let runtime_state = self.load_runtime_state();
+        let config_snapshot =
+            serde_json::from_str::<serde_json::Value>(&self.config_json.read().await.clone())
+                .unwrap_or_else(|_| serde_json::json!({}));
+        let transport_preference = config_snapshot
+            .get("transport_preference")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let transport_reason = config_snapshot
+            .get("transport_reason")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let host_tunnel_url = config_snapshot
+            .get("host_tunnel_url")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let host_webhook_capable = config_snapshot
+            .get("host_webhook_capable")
+            .and_then(|value| value.as_bool());
+        let host_transport_reason = config_snapshot
+            .get("host_transport_reason")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let transport_mode = self
+            .read_workspace_state("state/transport_mode")
+            .unwrap_or_else(|| "unknown".to_string());
+        let expected_webhook_url = self.read_workspace_state("state/expected_webhook_url");
+        let last_webhook_register_ms =
+            self.read_workspace_state_u64("state/last_webhook_register_at");
+        let last_webhook_register_at = Self::iso_timestamp_from_millis(last_webhook_register_ms);
+        let last_poll_started_at = Self::iso_timestamp_from_millis(
+            self.read_workspace_state_u64("state/last_poll_started_at"),
+        );
+        let last_poll_success_at = Self::iso_timestamp_from_millis(
+            self.read_workspace_state_u64("state/last_poll_success_at"),
+        );
+        let last_inbound_at =
+            Self::iso_timestamp_from_millis(self.read_workspace_state_u64("state/last_inbound_at"));
+        let last_webhook_register_error =
+            self.read_workspace_state("state/last_webhook_register_error");
+        let last_poll_error = self.read_workspace_state("state/last_poll_error");
+        let last_transport_error = self.read_workspace_state("state/last_transport_error");
+        let last_update_id = self
+            .read_workspace_state("state/last_emitted_update_id")
+            .and_then(|value| value.parse::<i64>().ok());
+
+        let mut registered_webhook_url = None;
+        let mut registered_webhook_error = None;
+        let mut registered_webhook_error_at = None;
+        let mut pending_updates = None;
+
+        if transport_mode == "webhook" {
+            match self.telegram_live_webhook_info().await {
+                Ok(Some(info)) => {
+                    registered_webhook_url =
+                        (!info.url.trim().is_empty()).then(|| info.url.trim().to_string());
+                    registered_webhook_error = info
+                        .last_error_message
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty());
+                    registered_webhook_error_at =
+                        Self::iso_timestamp_from_seconds(info.last_error_date);
+                    pending_updates = Some(info.pending_update_count);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    registered_webhook_error = Some(error);
+                }
+            }
+        }
+
+        let last_inbound_ms = self.read_workspace_state_u64("state/last_inbound_at");
+        let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+        let poll_interval_ms = self
+            .channel_config
+            .read()
+            .await
+            .as_ref()
+            .and_then(|config| config.poll.as_ref().map(|poll| u64::from(poll.interval_ms)))
+            .unwrap_or(5_000);
+        let poll_stale_after_ms = poll_interval_ms.saturating_mul(6).max(90_000);
+        let last_poll_success_ms = self.read_workspace_state_u64("state/last_poll_success_at");
+        let last_poll_started_ms = self.read_workspace_state_u64("state/last_poll_started_at");
+
+        let unhealthy_reason = if self.message_tx.read().await.is_none() {
+            Some("transport not started".to_string())
+        } else if transport_mode == "polling" {
+            Self::telegram_polling_unhealthy_reason(
+                now_ms,
+                last_poll_success_ms,
+                last_poll_started_ms,
+                last_poll_error.as_deref(),
+                poll_stale_after_ms,
+            )
+        } else if transport_mode == "webhook" {
+            Self::telegram_webhook_unhealthy_reason(
+                now_ms,
+                expected_webhook_url.as_deref(),
+                registered_webhook_url.as_deref(),
+                last_webhook_register_error.as_deref(),
+                registered_webhook_error.as_deref(),
+                pending_updates,
+                last_webhook_register_ms,
+                last_inbound_ms,
+            )
+        } else {
+            None
+        };
+
+        serde_json::json!({
+            "transport_mode": transport_mode,
+            "transport_preference": transport_preference,
+            "transport_reason": transport_reason,
+            "transport_override": runtime_state.transport_override,
+            "fallback_from_webhook_url": runtime_state.fallback_from_webhook_url,
+            "host_tunnel_url": host_tunnel_url,
+            "host_webhook_capable": host_webhook_capable,
+            "host_transport_reason": host_transport_reason,
+            "expected_webhook_url": expected_webhook_url,
+            "registered_webhook_url": registered_webhook_url,
+            "registered_webhook_error": registered_webhook_error,
+            "registered_webhook_error_at": registered_webhook_error_at,
+            "pending_update_count": pending_updates,
+            "last_webhook_register_at": last_webhook_register_at,
+            "last_webhook_register_error": last_webhook_register_error,
+            "last_poll_started_at": last_poll_started_at,
+            "last_poll_success_at": last_poll_success_at,
+            "last_poll_error": last_poll_error,
+            "last_inbound_at": last_inbound_at,
+            "last_transport_error": last_transport_error,
+            "last_update_id": last_update_id,
+            "unhealthy_reason": unhealthy_reason,
+        })
+    }
+
+    fn arm_telegram_polling_fallback(&self, diagnostics: &serde_json::Value) {
+        if self.name != "telegram" {
+            return;
+        }
+
+        let transport_mode = diagnostics
+            .get("transport_mode")
+            .and_then(|value| value.as_str())
+            .map(str::trim);
+        let unhealthy_reason = diagnostics
+            .get("unhealthy_reason")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if transport_mode != Some("webhook") || unhealthy_reason.is_none() {
+            return;
+        }
+
+        let mut state = self.load_runtime_state();
+        if state.transport_override.as_deref() == Some(TELEGRAM_POLLING_OVERRIDE) {
+            return;
+        }
+
+        state.transport_override = Some(TELEGRAM_POLLING_OVERRIDE.to_string());
+        state.fallback_from_webhook_url = diagnostics
+            .get("expected_webhook_url")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        match self.save_runtime_state(&state) {
+            Ok(()) => {
+                tracing::warn!(
+                    channel = %self.name,
+                    reason = %unhealthy_reason.unwrap_or("unknown"),
+                    expected_webhook_url = ?state.fallback_from_webhook_url,
+                    "Telegram webhook unhealthy; forcing polling fallback on next restart"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    channel = %self.name,
+                    error = %error,
+                    "Failed to persist Telegram polling fallback state"
+                );
+            }
+        }
+    }
+
+    // ── Telegram outbound media attachments ─────────────────────────
+
+    /// Send outbound media attachments to a Telegram chat.
+    ///
+    /// Uses the Telegram Bot API directly (bypassing the WASM sandbox),
+    /// matching the pattern used by `send_draft` and `delete_message`.
+    /// Each attachment is sent via the appropriate endpoint based on media
+    /// type: `sendPhoto` for images, `sendAudio` for audio, `sendVideo`
+    /// for video, and `sendDocument` for everything else.
+    ///
+    /// Failures are logged but do not abort the response (best-effort).
+    async fn send_telegram_attachments(
+        &self,
+        chat_id: i64,
+        message_thread_id: Option<i64>,
+        attachments: &[crate::media::MediaContent],
+    ) {
+        if self.name != "telegram" || attachments.is_empty() {
+            return;
+        }
+
+        // Get bot token from credentials
+        let creds = self.credentials.read().await;
+        let token = match creds.get("TELEGRAM_BOT_TOKEN").cloned() {
+            Some(t) => t,
+            None => {
+                tracing::debug!("send_telegram_attachments: no TELEGRAM_BOT_TOKEN, skipping");
+                return;
+            }
+        };
+        drop(creds);
+
+        let client = reqwest::Client::new();
+
+        for attachment in attachments {
+            use crate::media::MediaType;
+
+            // Pick the right Telegram API endpoint based on media type
+            let (api_method, field_name) = match attachment.media_type {
+                MediaType::Image => ("sendPhoto", "photo"),
+                MediaType::Audio => ("sendAudio", "audio"),
+                MediaType::Video => ("sendVideo", "video"),
+                // PDFs, documents, unknown — all go through sendDocument
+                _ => ("sendDocument", "document"),
+            };
+
+            let url = format!("https://api.telegram.org/bot{}/{}", token, api_method);
+
+            let filename = attachment
+                .filename
+                .as_deref()
+                .unwrap_or("attachment")
+                .to_string();
+
+            let file_part = match reqwest::multipart::Part::bytes(attachment.data.clone())
+                .file_name(filename.clone())
+                .mime_str(&attachment.mime_type)
+            {
+                Ok(part) => part,
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %self.name,
+                        error = %e,
+                        mime = %attachment.mime_type,
+                        "Telegram: invalid MIME for attachment, skipping"
+                    );
+                    continue;
+                }
+            };
+
+            let mut form = reqwest::multipart::Form::new()
+                .text("chat_id", chat_id.to_string())
+                .part(field_name, file_part);
+
+            if let Some(thread_id) = message_thread_id {
+                form = form.text("message_thread_id", thread_id.to_string());
+            }
+
+            match client
+                .post(&url)
+                .multipart(form)
+                .timeout(Duration::from_secs(120))
+                .send()
+                .await
+            {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        tracing::info!(
+                            channel = %self.name,
+                            chat_id = chat_id,
+                            method = api_method,
+                            filename = %filename,
+                            size = attachment.data.len(),
+                            "Telegram: attachment sent successfully"
+                        );
+                    } else {
+                        let status = resp.status();
+                        let body = resp.text().await.unwrap_or_default();
+                        tracing::warn!(
+                            channel = %self.name,
+                            chat_id = chat_id,
+                            method = api_method,
+                            status = %status,
+                            body = %body,
+                            "Telegram: attachment send returned error"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %self.name,
+                        chat_id = chat_id,
+                        method = api_method,
+                        error = %e,
+                        "Telegram: attachment HTTP request failed"
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn default_wasm_channel_formatting_hints(channel_name: &str) -> Option<String> {
     match channel_name {
         "telegram" => Some(
@@ -1996,39 +2910,14 @@ impl Channel for WasmChannel {
         let (shutdown_tx, _shutdown_rx) = oneshot::channel();
         *self.shutdown_tx.write().await = Some(shutdown_tx);
 
-        // Call on_start to get configuration
-        let config = self
-            .call_on_start()
-            .await
-            .map_err(|e| ChannelError::StartupFailed {
-                name: self.name.clone(),
-                reason: e.to_string(),
-            })?;
-
-        // Store the config
-        *self.channel_config.write().await = Some(config.clone());
-
-        // Register HTTP endpoints
-        let mut endpoints = Vec::new();
-        for endpoint in &config.http_endpoints {
-            // Validate path is allowed
-            if !self.capabilities.is_path_allowed(&endpoint.path) {
-                tracing::warn!(
-                    channel = %self.name,
-                    path = %endpoint.path,
-                    "HTTP endpoint path not allowed by capabilities"
-                );
-                continue;
-            }
-
-            endpoints.push(RegisteredEndpoint {
-                channel_name: self.name.clone(),
-                path: endpoint.path.clone(),
-                methods: endpoint.methods.clone(),
-                require_secret: endpoint.require_secret,
-            });
-        }
-        *self.endpoints.write().await = endpoints;
+        // Call on_start to get configuration, unless we already primed it.
+        let config =
+            self.ensure_on_start_config(false)
+                .await
+                .map_err(|e| ChannelError::StartupFailed {
+                    name: self.name.clone(),
+                    reason: e.to_string(),
+                })?;
 
         // Start polling if configured
         if let Some(poll_config) = &config.poll
@@ -2067,16 +2956,34 @@ impl Channel for WasmChannel {
         // Stop the typing indicator, we're about to send the actual response
         self.cancel_typing_task().await;
 
+        // Flush accumulated tool events as a single summary message before the response.
+        self.flush_tool_events(&msg.metadata).await;
+
         // Check if there's a pending synchronous response waiter
         if let Some(tx) = self.pending_responses.write().await.remove(&msg.id) {
             let _ = tx.send(response.content.clone());
         }
 
-        // Call WASM on_respond
-        // IMPORTANT: Use the ORIGINAL message's metadata, not the response's metadata.
-        // The original metadata contains channel-specific routing info (e.g., Telegram chat_id)
-        // that the WASM channel needs to send the reply to the correct destination.
-        let metadata_json = serde_json::to_string(&msg.metadata).unwrap_or_default();
+        // Send outbound media attachments directly via Telegram API
+        // (before the text response, so files arrive first)
+        if !response.attachments.is_empty() {
+            let chat_id = msg.metadata.get("chat_id").and_then(|v| v.as_i64());
+            let message_thread_id = msg
+                .metadata
+                .get("message_thread_id")
+                .and_then(|v| v.as_i64());
+            if let Some(chat_id) = chat_id {
+                self.send_telegram_attachments(chat_id, message_thread_id, &response.attachments)
+                    .await;
+            }
+        }
+
+        // Merge original routing metadata with any response-specific overrides.
+        // Response metadata wins on conflicts, and outbound attachments are
+        // tunneled through `response_attachments` for WASM channels.
+        let metadata_json =
+            serde_json::to_string(&merged_response_metadata(&msg.metadata, &response))
+                .unwrap_or_default();
         self.call_on_respond(
             msg.id,
             &response.content,
@@ -2114,6 +3021,13 @@ impl Channel for WasmChannel {
             mode = ?mode,
             "Stream mode updated at runtime"
         );
+    }
+
+    async fn update_runtime_config(
+        &self,
+        updates: std::collections::HashMap<String, serde_json::Value>,
+    ) {
+        self.update_config(updates).await;
     }
 
     async fn send_draft(
@@ -2386,7 +3300,23 @@ impl Channel for WasmChannel {
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
-        // Check if we have an active message sender
+        if self.name == "telegram" {
+            let diagnostics = self.telegram_diagnostics_payload().await;
+            self.arm_telegram_polling_fallback(&diagnostics);
+            if diagnostics
+                .get("unhealthy_reason")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some()
+            {
+                return Err(ChannelError::HealthCheckFailed {
+                    name: self.name.clone(),
+                });
+            }
+            return Ok(());
+        }
+
         if self.message_tx.read().await.is_some() {
             Ok(())
         } else {
@@ -2394,6 +3324,21 @@ impl Channel for WasmChannel {
                 name: self.name.clone(),
             })
         }
+    }
+
+    async fn diagnostics(&self) -> Option<serde_json::Value> {
+        if self.name == "telegram" {
+            Some(self.telegram_diagnostics_payload().await)
+        } else {
+            None
+        }
+    }
+
+    async fn reset_connection_state(&self) -> Result<(), ChannelError> {
+        if self.name == "telegram" {
+            self.clear_runtime_state();
+        }
+        Ok(())
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
@@ -2424,6 +3369,41 @@ impl Channel for WasmChannel {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        if self.name == "whatsapp" {
+            let metadata = merged_response_metadata(&serde_json::Value::Null, &response);
+            let has_route = metadata
+                .get("phone_number_id")
+                .and_then(|value| value.as_str())
+                .is_some()
+                && metadata
+                    .get("recipient_phone")
+                    .and_then(|value| value.as_str())
+                    .is_some();
+
+            if has_route {
+                let metadata_json = serde_json::to_string(&metadata).unwrap_or_default();
+                return self
+                    .call_on_respond(
+                        uuid::Uuid::new_v4(),
+                        &response.content,
+                        response.thread_id.as_deref(),
+                        &metadata_json,
+                    )
+                    .await
+                    .map_err(|e| ChannelError::SendFailed {
+                        name: self.name.clone(),
+                        reason: format!("broadcast via on_respond: {}", e),
+                    });
+            }
+
+            tracing::warn!(
+                channel = %self.name,
+                user_id = %user_id,
+                "WASM broadcast: WhatsApp requires explicit route metadata"
+            );
+            return Ok(());
+        }
+
         // For WASM channels, broadcast routes through on_respond with a
         // synthetic metadata containing the user_id as the chat_id.
         // This works because on_respond just needs chat_id to know where
@@ -2443,15 +3423,23 @@ impl Channel for WasmChannel {
             }
         };
 
+        // Send outbound media attachments directly via Telegram API
+        if !response.attachments.is_empty() {
+            self.send_telegram_attachments(chat_id, None, &response.attachments)
+                .await;
+        }
+
         // Build minimal metadata that on_respond can parse.
         // message_id=0 means "don't reply to a specific message".
-        let metadata = serde_json::json!({
+        let base_metadata = serde_json::json!({
             "chat_id": chat_id,
             "message_id": 0,
             "user_id": chat_id,
             "is_private": true,
         });
-        let metadata_json = serde_json::to_string(&metadata).unwrap_or_default();
+        let metadata_json =
+            serde_json::to_string(&merged_response_metadata(&base_metadata, &response))
+                .unwrap_or_default();
 
         tracing::info!(
             channel = %self.name,
@@ -2487,6 +3475,26 @@ impl Channel for WasmChannel {
             name: self.name.clone(),
             reason: format!("broadcast via on_respond: {}", e),
         })
+    }
+
+    async fn toggle_debug_mode(&self) -> bool {
+        let new_state = match self.debug_mode.write() {
+            Ok(mut g) => {
+                *g = !*g;
+                *g
+            }
+            Err(e) => {
+                let mut g = e.into_inner();
+                *g = !*g;
+                *g
+            }
+        };
+        tracing::info!(
+            channel = %self.name,
+            debug_mode = new_state,
+            "Debug mode toggled"
+        );
+        new_state
     }
 }
 
@@ -2570,6 +3578,13 @@ impl Channel for SharedWasmChannel {
         self.inner.set_stream_mode(mode).await
     }
 
+    async fn update_runtime_config(
+        &self,
+        updates: std::collections::HashMap<String, serde_json::Value>,
+    ) {
+        self.inner.update_runtime_config(updates).await
+    }
+
     async fn send_draft(
         &self,
         draft: &DraftReplyState,
@@ -2590,6 +3605,14 @@ impl Channel for SharedWasmChannel {
         self.inner.health_check().await
     }
 
+    async fn diagnostics(&self) -> Option<serde_json::Value> {
+        self.inner.diagnostics().await
+    }
+
+    async fn reset_connection_state(&self) -> Result<(), ChannelError> {
+        self.inner.reset_connection_state().await
+    }
+
     async fn shutdown(&self) -> Result<(), ChannelError> {
         self.inner.shutdown().await
     }
@@ -2600,6 +3623,10 @@ impl Channel for SharedWasmChannel {
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
         self.inner.broadcast(user_id, response).await
+    }
+
+    async fn toggle_debug_mode(&self) -> bool {
+        self.inner.toggle_debug_mode().await
     }
 }
 
@@ -2710,6 +3737,35 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
                 metadata_json,
             }
         }
+        StatusUpdate::Plan { entries } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!(
+                "[plan] {}",
+                serde_json::to_string(entries).unwrap_or_default()
+            ),
+            metadata_json,
+        },
+        StatusUpdate::Usage {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            model,
+        } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Status,
+            message: format!(
+                "[usage] {} input + {} output tokens{}{}",
+                input_tokens,
+                output_tokens,
+                cost_usd
+                    .map(|cost| format!(", ${cost:.6}"))
+                    .unwrap_or_default(),
+                model
+                    .as_deref()
+                    .map(|model| format!(" ({model})"))
+                    .unwrap_or_default()
+            ),
+            metadata_json,
+        },
         StatusUpdate::ApprovalNeeded {
             request_id,
             tool_name,
@@ -2737,6 +3793,7 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             instructions,
             auth_url,
             setup_url,
+            ..
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::AuthRequired,
             message: {
@@ -2760,6 +3817,7 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             extension_name,
             success,
             message,
+            ..
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::AuthCompleted,
             message: format!(
@@ -2809,6 +3867,7 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             agent_id,
             name,
             task,
+            ..
         } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::Status,
             message: format!(
@@ -2903,6 +3962,61 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+fn metadata_object(
+    value: &serde_json::Value,
+    fallback_key: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => map.clone(),
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => {
+            let mut map = serde_json::Map::new();
+            map.insert(fallback_key.to_string(), other.clone());
+            map
+        }
+    }
+}
+
+fn serialize_response_attachments(
+    attachments: &[crate::media::MediaContent],
+) -> Option<serde_json::Value> {
+    if attachments.is_empty() {
+        return None;
+    }
+
+    use base64::Engine;
+
+    Some(serde_json::Value::Array(
+        attachments
+            .iter()
+            .map(|attachment| {
+                serde_json::json!({
+                    "mime_type": attachment.mime_type,
+                    "filename": attachment.filename,
+                    "data": base64::engine::general_purpose::STANDARD.encode(&attachment.data),
+                })
+            })
+            .collect(),
+    ))
+}
+
+fn merged_response_metadata(
+    original_metadata: &serde_json::Value,
+    response: &OutgoingResponse,
+) -> serde_json::Value {
+    let mut merged = metadata_object(original_metadata, "original_metadata");
+
+    for (key, value) in metadata_object(&response.metadata, "response_metadata") {
+        merged.insert(key, value);
+    }
+
+    if let Some(serialized_attachments) = serialize_response_attachments(&response.attachments) {
+        merged.insert("response_attachments".to_string(), serialized_attachments);
+    }
+
+    serde_json::Value::Object(merged)
+}
+
 impl HttpResponse {
     /// Create an OK response.
     pub fn ok() -> Self {
@@ -2939,6 +4053,7 @@ impl HttpResponse {
 mod tests {
     use std::sync::Arc;
 
+    use super::merged_response_metadata;
     use crate::channels::Channel;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::runtime::{
@@ -3615,6 +4730,15 @@ mod tests {
                 agent_id: "agent-1".to_string(),
                 name: "Researcher".to_string(),
                 task: "Check brave search".to_string(),
+                task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                    objective: "Check brave search".to_string(),
+                    ..Default::default()
+                },
+                allowed_tools: vec![],
+                allowed_skills: vec![],
+                memory_mode: "provided_context_only".to_string(),
+                tool_mode: "explicit_only".to_string(),
+                skill_mode: "explicit_only".to_string(),
             },
             &metadata,
         );
@@ -3673,6 +4797,15 @@ mod tests {
                 response: "Done".to_string(),
                 duration_ms: 1850,
                 iterations: 3,
+                task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                    objective: "Check brave search".to_string(),
+                    ..Default::default()
+                },
+                allowed_tools: vec![],
+                allowed_skills: vec![],
+                memory_mode: "provided_context_only".to_string(),
+                tool_mode: "explicit_only".to_string(),
+                skill_mode: "explicit_only".to_string(),
             },
             &metadata,
         );
@@ -3705,6 +4838,11 @@ mod tests {
                 instructions: Some("Paste your token".to_string()),
                 auth_url: Some("https://example.com/auth".to_string()),
                 setup_url: None,
+                auth_mode: "manual_token".to_string(),
+                auth_status: "awaiting_token".to_string(),
+                shared_auth_provider: None,
+                missing_scopes: Vec::new(),
+                thread_id: None,
             },
             &metadata,
         );
@@ -3852,6 +4990,11 @@ mod tests {
                 extension_name: "weather".to_string(),
                 success: true,
                 message: "Token saved".to_string(),
+                auth_mode: Some("manual_token".to_string()),
+                auth_status: Some("authenticated".to_string()),
+                shared_auth_provider: None,
+                missing_scopes: Vec::new(),
+                thread_id: None,
             },
             &metadata,
         );
@@ -3874,6 +5017,11 @@ mod tests {
                 extension_name: "weather".to_string(),
                 success: false,
                 message: "Invalid token".to_string(),
+                auth_mode: None,
+                auth_status: None,
+                shared_auth_provider: None,
+                missing_scopes: Vec::new(),
+                thread_id: None,
             },
             &metadata,
         );
@@ -4120,6 +5268,89 @@ mod tests {
 
         let input = "should not match anything";
         assert_eq!(store.redact_credentials(input), input);
+    }
+
+    #[test]
+    fn test_telegram_webhook_pending_updates_without_inbound_is_unhealthy() {
+        let reason = WasmChannel::telegram_webhook_unhealthy_reason(
+            200_000,
+            Some("https://example.test/webhook/telegram"),
+            Some("https://example.test/webhook/telegram"),
+            None,
+            None,
+            Some(3),
+            Some(0),
+            None,
+        );
+
+        assert_eq!(
+            reason.as_deref(),
+            Some(
+                "Telegram has 3 pending webhook update(s) but ThinClaw has not received any inbound webhook events"
+            )
+        );
+    }
+
+    #[test]
+    fn test_telegram_webhook_recent_registration_allows_grace_period() {
+        let reason = WasmChannel::telegram_webhook_unhealthy_reason(
+            20_000,
+            Some("https://example.test/webhook/telegram"),
+            Some("https://example.test/webhook/telegram"),
+            None,
+            None,
+            Some(2),
+            Some(0),
+            None,
+        );
+
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn test_telegram_webhook_recent_inbound_with_pending_updates_stays_healthy() {
+        let reason = WasmChannel::telegram_webhook_unhealthy_reason(
+            100_000,
+            Some("https://example.test/webhook/telegram"),
+            Some("https://example.test/webhook/telegram"),
+            None,
+            None,
+            Some(1),
+            Some(0),
+            Some(40_000),
+        );
+
+        assert!(reason.is_none());
+    }
+
+    #[test]
+    fn test_merged_response_metadata_overrides_and_includes_attachments() {
+        let original = serde_json::json!({
+            "chat_id": 42,
+            "message_id": "orig",
+            "keep": true,
+        });
+        let response = crate::channels::OutgoingResponse {
+            content: "hello".to_string(),
+            thread_id: None,
+            metadata: serde_json::json!({
+                "message_id": "override",
+                "extra": "value",
+            }),
+            attachments: vec![
+                crate::media::MediaContent::new(vec![1, 2, 3], "image/png")
+                    .with_filename("reply.png"),
+            ],
+        };
+
+        let merged = merged_response_metadata(&original, &response);
+
+        assert_eq!(merged["chat_id"], 42);
+        assert_eq!(merged["message_id"], "override");
+        assert_eq!(merged["extra"], "value");
+        assert_eq!(merged["response_attachments"][0]["mime_type"], "image/png");
+        assert_eq!(merged["response_attachments"][0]["filename"], "reply.png");
+        assert_eq!(merged["response_attachments"][0]["data"], "AQID");
     }
 
     /// Verify that WASM HTTP host functions work using a dedicated

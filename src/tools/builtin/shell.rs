@@ -47,19 +47,22 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 
 use crate::config::SafetyConfig;
 use crate::config::helpers::optional_env;
 use crate::context::JobContext;
 use crate::safety::{ApprovalDecision, SmartApprovalMode, SmartApprover};
 use crate::sandbox::{SandboxManager, SandboxPolicy};
+#[cfg(test)]
+use crate::tools::execution_backend::MAX_CAPTURED_OUTPUT_SIZE;
+use crate::tools::execution_backend::{
+    CommandExecutionRequest, DockerSandboxExecutionBackend, ExecutionBackend, ExecutionBackendKind,
+    ExecutionResult, LocalHostExecutionBackend,
+};
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
@@ -67,8 +70,8 @@ use crate::tools::tool::{
 // Security validation — constants, blocked patterns, injection detection
 use super::shell_security::{
     DANGEROUS_PATTERNS, ExternalCommandScanner, ExternalScanVerdict, ExternalScannerMode,
-    SAFE_ENV_VARS, check_safe_bins, check_safe_bins_forced, classify_hard_block,
-    detect_path_escape, normalize_command,
+    check_safe_bins, check_safe_bins_forced, classify_hard_block, detect_path_escape,
+    normalize_command,
 };
 #[cfg(test)]
 use super::shell_security::{contains_shell_pipe, extract_binary_name, has_command_token};
@@ -77,15 +80,19 @@ pub use super::shell_security::{
     detect_command_injection, detect_library_injection, requires_explicit_approval,
 };
 
-/// Maximum output size before truncation (64KB).
-const MAX_OUTPUT_SIZE: usize = 64 * 1024;
-
 /// Default command timeout.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 static SMART_APPROVER: OnceLock<Arc<SmartApprover>> = OnceLock::new();
 static SMART_APPROVAL_CACHE: LazyLock<Mutex<HashMap<String, ApprovalDecision>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(feature = "acp")]
+fn acp_session_id(ctx: &JobContext) -> Option<&str> {
+    ctx.metadata
+        .get("acp_session_id")
+        .and_then(serde_json::Value::as_str)
+}
 
 /// Shell command execution tool.
 pub struct ShellTool {
@@ -97,6 +104,8 @@ pub struct ShellTool {
     allow_dangerous: bool,
     /// Optional sandbox manager for Docker execution.
     sandbox: Option<Arc<SandboxManager>>,
+    /// Shared local execution backend.
+    local_backend: Arc<dyn ExecutionBackend>,
     /// Sandbox policy to use when sandbox is available.
     sandbox_policy: SandboxPolicy,
     /// If set, restrict commands to operate within this directory.
@@ -136,6 +145,7 @@ impl ShellTool {
             timeout: DEFAULT_TIMEOUT,
             allow_dangerous: false,
             sandbox: None,
+            local_backend: LocalHostExecutionBackend::shared(),
             sandbox_policy: SandboxPolicy::ReadOnly,
             base_dir: None,
             smart_approval_mode_override: None,
@@ -296,159 +306,38 @@ impl ShellTool {
         decision
     }
 
-    /// Execute a command through the sandbox.
-    async fn execute_sandboxed(
-        &self,
-        sandbox: &SandboxManager,
-        cmd: &str,
-        workdir: &Path,
-        timeout: Duration,
-    ) -> Result<(String, i64), ToolError> {
-        // Override sandbox config timeout if needed
-        let result = tokio::time::timeout(timeout, async {
-            sandbox
-                .execute_with_policy(
-                    cmd,
-                    workdir,
-                    self.sandbox_policy,
-                    std::collections::HashMap::new(),
-                )
-                .await
-        })
-        .await;
-
-        match result {
-            Ok(Ok(output)) => {
-                let combined = truncate_output(&output.output);
-                Ok((combined, output.exit_code))
-            }
-            Ok(Err(e)) => Err(ToolError::ExecutionFailed(format!("Sandbox error: {}", e))),
-            Err(_) => Err(ToolError::Timeout(timeout)),
+    fn active_backend(&self) -> Arc<dyn ExecutionBackend> {
+        if let Some(ref sandbox) = self.sandbox
+            && (sandbox.is_initialized() || sandbox.config().enabled)
+        {
+            return DockerSandboxExecutionBackend::from_sandbox(
+                Arc::clone(sandbox),
+                self.sandbox_policy,
+            );
         }
+        Arc::clone(&self.local_backend)
     }
 
-    /// Execute a command directly (fallback when sandbox unavailable).
-    async fn execute_direct(
-        &self,
-        cmd: &str,
-        workdir: &PathBuf,
-        timeout: Duration,
-        extra_env: &HashMap<String, String>,
-    ) -> Result<(String, i32), ToolError> {
-        // Build command
-        let mut command = if cfg!(target_os = "windows") {
-            let mut c = Command::new("cmd");
-            c.args(["/C", cmd]);
-            c
-        } else {
-            let mut c = Command::new("sh");
-            c.args(["-c", cmd]);
-            c
-        };
+    fn metadata_path(ctx: &JobContext, key: &str) -> Option<PathBuf> {
+        ctx.metadata
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(PathBuf::from)
+    }
 
-        // Scrub environment to prevent secret leakage (CWE-200).
-        // Only forward known-safe variables; everything else (API keys,
-        // session tokens, credentials) is stripped from child processes.
-        command.env_clear();
-        for var in SAFE_ENV_VARS {
-            if let Ok(val) = std::env::var(var) {
-                command.env(var, val);
-            }
-        }
-
-        // Inject extra environment variables (e.g., credentials fetched by the
-        // worker runtime) on top of the scrubbed base. These are explicitly
-        // provided by the orchestrator and are safe to forward.
-        command.envs(extra_env);
-
-        command
-            .current_dir(workdir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        // Spawn process
-        let mut child = command
-            .spawn()
-            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to spawn command: {}", e)))?;
-
-        // Drain stdout/stderr concurrently with wait() to prevent deadlocks.
-        // If we call wait() without draining the pipes and the child's output
-        // exceeds the OS pipe buffer (64KB Linux, 16KB macOS), the child blocks
-        // on write and wait() never returns.
-        let stdout_handle = child.stdout.take();
-        let stderr_handle = child.stderr.take();
-
-        let result = tokio::time::timeout(timeout, async {
-            let stdout_fut = async {
-                if let Some(mut out) = stdout_handle {
-                    let mut buf = Vec::new();
-                    (&mut out)
-                        .take(MAX_OUTPUT_SIZE as u64)
-                        .read_to_end(&mut buf)
-                        .await
-                        .ok();
-                    // Drain any remaining output so the child does not block
-                    tokio::io::copy(&mut out, &mut tokio::io::sink()).await.ok();
-                    String::from_utf8_lossy(&buf).to_string()
-                } else {
-                    String::new()
-                }
-            };
-
-            let stderr_fut = async {
-                if let Some(mut err) = stderr_handle {
-                    let mut buf = Vec::new();
-                    (&mut err)
-                        .take(MAX_OUTPUT_SIZE as u64)
-                        .read_to_end(&mut buf)
-                        .await
-                        .ok();
-                    tokio::io::copy(&mut err, &mut tokio::io::sink()).await.ok();
-                    String::from_utf8_lossy(&buf).to_string()
-                } else {
-                    String::new()
-                }
-            };
-
-            let (stdout, stderr, wait_result) = tokio::join!(stdout_fut, stderr_fut, child.wait());
-            let status = wait_result?;
-
-            // Combine output
-            let output = if stderr.is_empty() {
-                stdout
-            } else if stdout.is_empty() {
-                stderr
-            } else {
-                format!("{}\n\n--- stderr ---\n{}", stdout, stderr)
-            };
-
-            Ok::<_, std::io::Error>((output, status.code().unwrap_or(-1)))
-        })
-        .await;
-
-        match result {
-            Ok(Ok((output, code))) => Ok((truncate_output(&output), code)),
-            Ok(Err(e)) => Err(ToolError::ExecutionFailed(format!(
-                "Command execution failed: {}",
-                e
-            ))),
-            Err(_) => {
-                // Timeout - try to kill the process
-                let _ = child.kill().await;
-                Err(ToolError::Timeout(timeout))
-            }
-        }
+    fn effective_base_dir(&self, ctx: &JobContext) -> Option<PathBuf> {
+        Self::metadata_path(ctx, "tool_base_dir").or_else(|| self.base_dir.clone())
     }
 
     /// Execute a command, using sandbox if available.
     async fn execute_command(
         &self,
+        ctx: &JobContext,
         cmd: &str,
         workdir: Option<&str>,
         timeout: Option<u64>,
         extra_env: &HashMap<String, String>,
-    ) -> Result<(String, i64), ToolError> {
+    ) -> Result<ExecutionResult, ToolError> {
         // Check for blocked commands
         if let Some(reason) = self.is_blocked(cmd) {
             return Err(ToolError::NotAuthorized(format!(
@@ -489,7 +378,8 @@ impl ShellTool {
         // 1. Safe bins allowlist (auto-enabled)
         // 2. Workdir validation
         // 3. Command path scanning
-        if let Some(ref base) = self.base_dir {
+        let effective_base_dir = self.effective_base_dir(ctx);
+        if let Some(ref base) = effective_base_dir {
             let base_canonical = base.canonicalize().unwrap_or_else(|_| base.clone());
 
             // Auto-enable safe bins when sandboxed
@@ -524,6 +414,7 @@ impl ShellTool {
         // Determine working directory
         let cwd = workdir
             .map(PathBuf::from)
+            .or_else(|| Self::metadata_path(ctx, "tool_working_dir"))
             .or_else(|| self.working_dir.clone())
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
@@ -592,21 +483,63 @@ impl ShellTool {
             }
         }
 
-        // Use sandbox if configured; fail-closed (never silently fall through
-        // to unsandboxed execution when sandbox was intended).
-        if let Some(ref sandbox) = self.sandbox
-            && (sandbox.is_initialized() || sandbox.config().enabled)
-        {
-            return self
-                .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration)
-                .await;
+        #[cfg(feature = "acp")]
+        if let Some(session_id) = acp_session_id(ctx) {
+            let cwd_string = cwd.display().to_string();
+            let acp_start = std::time::Instant::now();
+            match crate::channels::acp::client_execute_terminal(
+                session_id,
+                cmd,
+                Some(&cwd_string),
+                timeout_duration,
+                extra_env,
+            )
+            .await
+            {
+                Ok(Some(execution)) => {
+                    let mut runtime_capabilities = vec!["terminal".to_string()];
+                    if execution.truncated {
+                        runtime_capabilities.push("output_truncated".to_string());
+                    }
+                    if execution.signal.is_some() {
+                        runtime_capabilities.push("signal".to_string());
+                    }
+                    return Ok(ExecutionResult {
+                        stdout: execution.output.clone(),
+                        stderr: execution.signal.unwrap_or_default(),
+                        output: execution.output,
+                        exit_code: execution.exit_code.unwrap_or(-1),
+                        backend: ExecutionBackendKind::LocalHost,
+                        runtime:
+                            crate::tools::execution_backend::RuntimeDescriptor::logical_surface(
+                                "acp_client_terminal",
+                                "client_terminal",
+                                "acp",
+                                runtime_capabilities,
+                                None::<String>,
+                            ),
+                        duration: acp_start.elapsed(),
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(ToolError::ExternalService(format!(
+                        "ACP terminal execution failed: {error}"
+                    )));
+                }
+            }
         }
 
-        // Only execute directly when no sandbox was configured at all.
-        let (output, code) = self
-            .execute_direct(cmd, &cwd, timeout_duration, extra_env)
-            .await?;
-        Ok((output, code as i64))
+        let backend = self.active_backend();
+        backend
+            .run_shell(CommandExecutionRequest {
+                command: cmd.to_string(),
+                workdir: cwd,
+                timeout: timeout_duration,
+                extra_env: extra_env.clone(),
+                allow_network: false,
+            })
+            .await
     }
 }
 
@@ -694,18 +627,24 @@ impl Tool for ShellTool {
         let timeout = params.get("timeout").and_then(|v| v.as_u64());
 
         let start = std::time::Instant::now();
-        let (output, exit_code) = self
-            .execute_command(command, workdir, timeout, &ctx.extra_env)
+        let result = self
+            .execute_command(ctx, command, workdir, timeout, &ctx.extra_env)
             .await?;
         let duration = start.elapsed();
-
-        let sandboxed = self.sandbox.is_some();
+        let sandboxed = result.backend == ExecutionBackendKind::DockerSandbox;
 
         let result = serde_json::json!({
-            "output": output,
-            "exit_code": exit_code,
-            "success": exit_code == 0,
-            "sandboxed": sandboxed
+            "output": result.output,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.exit_code,
+            "success": result.exit_code == 0,
+            "sandboxed": sandboxed,
+            "execution_backend": result.backend.as_str(),
+            "runtime_family": result.runtime.runtime_family,
+            "runtime_mode": result.runtime.runtime_mode,
+            "runtime_capabilities": result.runtime.runtime_capabilities,
+            "network_isolation": result.runtime.network_isolation,
         });
 
         Ok(ToolOutput::success(result, duration))
@@ -805,23 +744,6 @@ impl Tool for ShellTool {
 
     fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
         Some(crate::tools::tool::ToolRateLimitConfig::new(30, 300))
-    }
-}
-
-/// Truncate output to fit within limits (UTF-8 safe).
-fn truncate_output(s: &str) -> String {
-    if s.len() <= MAX_OUTPUT_SIZE {
-        s.to_string()
-    } else {
-        let half = MAX_OUTPUT_SIZE / 2;
-        let head_end = crate::util::floor_char_boundary(s, half);
-        let tail_start = crate::util::floor_char_boundary(s, s.len() - half);
-        format!(
-            "{}\n\n... [truncated {} bytes] ...\n\n{}",
-            &s[..head_end],
-            s.len() - MAX_OUTPUT_SIZE,
-            &s[tail_start..]
-        )
     }
 }
 
@@ -1022,15 +944,8 @@ mod tests {
         }
     }
 
-    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn test_external_scanner_blocks_before_smart_approval() {
-        let _env_guard = lock_env();
-        unsafe {
-            std::env::set_var("SAFETY_SMART_APPROVAL_MODE", "smart");
-            std::env::set_var("SAFETY_SMART_APPROVAL_TEST_RESPONSE", "APPROVE");
-        }
-
         let dir = tempfile::tempdir().unwrap();
         let scanner_path = dir.path().join(if cfg!(windows) {
             "scanner.cmd"
@@ -1041,13 +956,13 @@ mod tests {
         if cfg!(windows) {
             std::fs::write(
                 &scanner_path,
-                "@echo off\r\necho {\"verdict\":\"dangerous\",\"reason\":\"scripted deny\",\"diagnostics\":[]}\r\n",
+                "@echo off\r\nmore >NUL\r\necho {\"verdict\":\"dangerous\",\"reason\":\"scripted deny\",\"diagnostics\":[]}\r\n",
             )
             .unwrap();
         } else {
             std::fs::write(
                 &scanner_path,
-                "#!/bin/sh\necho '{\"verdict\":\"dangerous\",\"reason\":\"scripted deny\",\"diagnostics\":[]}'\n",
+                "#!/bin/sh\ncat >/dev/null\necho '{\"verdict\":\"dangerous\",\"reason\":\"scripted deny\",\"diagnostics\":[]}'\n",
             )
             .unwrap();
             #[cfg(unix)]
@@ -1059,8 +974,30 @@ mod tests {
             }
         }
 
-        let tool = ShellTool::new()
-            .with_external_scanner(ExternalScannerMode::FailClosed, Some(scanner_path));
+        let tool = ShellTool::new().with_safety_config(&SafetyConfig {
+            smart_approval_mode: "smart".to_string(),
+            external_scanner_mode: "fail_closed".to_string(),
+            external_scanner_path: Some(scanner_path),
+            ..SafetyConfig::default()
+        });
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        tool.store_smart_decision(
+            SmartApprovalMode::Smart,
+            "sudo echo approve",
+            &cwd,
+            ApprovalDecision::Approve,
+        );
+        let scanner_report = tool
+            .external_scanner
+            .as_ref()
+            .expect("scanner should be configured")
+            .scan("sudo echo approve")
+            .await;
+        assert_eq!(
+            scanner_report.verdict,
+            ExternalScanVerdict::Dangerous,
+            "test scanner should produce a dangerous verdict: {scanner_report:?}"
+        );
         let ctx = JobContext::default();
 
         let result = tool
@@ -1071,11 +1008,6 @@ mod tests {
             matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("External scanner blocked")),
             "Expected external scanner block, got: {result:?}"
         );
-
-        unsafe {
-            std::env::remove_var("SAFETY_SMART_APPROVAL_TEST_RESPONSE");
-            std::env::remove_var("SAFETY_SMART_APPROVAL_MODE");
-        }
     }
 
     #[tokio::test]
@@ -1448,7 +1380,7 @@ mod tests {
             .unwrap();
 
         let output = result.result.get("output").unwrap().as_str().unwrap();
-        assert_eq!(output.len(), MAX_OUTPUT_SIZE);
+        assert_eq!(output.len(), MAX_CAPTURED_OUTPUT_SIZE);
         assert_eq!(result.result.get("exit_code").unwrap().as_i64().unwrap(), 0);
     }
 

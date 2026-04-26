@@ -1026,6 +1026,7 @@ impl Channel for SignalChannel {
             instructions,
             auth_url,
             setup_url,
+            ..
         } = &status
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
@@ -1047,6 +1048,7 @@ impl Channel for SignalChannel {
             extension_name,
             success,
             message: msg,
+            ..
         } = &status
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
@@ -1268,11 +1270,14 @@ fn signal_attachment_dir() -> Option<std::path::PathBuf> {
                 return Some(candidate);
             }
         }
-        return Some(home.join("AppData/Roaming/signal-cli/attachments"));
+        Some(home.join("AppData/Roaming/signal-cli/attachments"))
     }
 
-    // Fallback: try the Linux path anyway (it may be created later)
-    Some(linux_path)
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Fallback: try the Linux path anyway (it may be created later)
+        Some(linux_path)
+    }
 }
 
 /// Long-running SSE listener that reconnects with exponential backoff.
@@ -1882,6 +1887,71 @@ mod tests {
             SignalChannel::parse_recipient_target("+abc123"),
             RecipientTarget::Group("+abc123".to_string())
         );
+    }
+
+    #[test]
+    fn is_e164_detects_valid_and_invalid() {
+        assert!(SignalChannel::is_e164("+1234567890"));
+        assert!(!SignalChannel::is_e164("+123456"));
+        assert!(!SignalChannel::is_e164("1234567890"));
+        assert!(!SignalChannel::is_e164("abc"));
+    }
+
+    #[test]
+    fn conversation_key_helpers() {
+        assert_eq!(SignalChannel::conversation_kind(false), "direct");
+        assert_eq!(SignalChannel::conversation_kind(true), "group");
+        assert_eq!(
+            SignalChannel::conversation_scope_id(true, "+111", "stable", Some("group-1")),
+            "signal:group:group-1"
+        );
+        assert_eq!(
+            SignalChannel::conversation_scope_id(false, "+111", "stable", Some("group-1")),
+            "signal:direct:stable"
+        );
+        assert_eq!(
+            SignalChannel::external_conversation_key(true, "+111", "stable", Some("group-1")),
+            "signal://group/group-1"
+        );
+        assert_eq!(
+            SignalChannel::external_conversation_key(false, "+111", "stable", Some("group-1")),
+            "signal://direct/stable"
+        );
+    }
+
+    #[test]
+    fn build_rpc_params_static_respects_fields() {
+        let direct = SignalChannel::build_rpc_params_static(
+            "http://127.0.0.1:8686",
+            "acct",
+            &RecipientTarget::Direct("+111".into()),
+            Some("hello"),
+        );
+        assert_eq!(direct["recipient"], serde_json::json!(["+111"]));
+        assert_eq!(direct["account"], "acct");
+        assert_eq!(direct["message"], "hello");
+
+        let group = SignalChannel::build_rpc_params_static(
+            "http://127.0.0.1:8686",
+            "acct",
+            &RecipientTarget::Group("group-1".into()),
+            None,
+        );
+        assert_eq!(group["groupId"], "group-1");
+        assert_eq!(group["account"], "acct");
+        assert!(group.get("message").is_none());
+    }
+
+    #[test]
+    fn redact_url_removes_auth() {
+        let redacted = SignalChannel::redact_url("https://user:password@example.com/api/v1/rpc");
+        assert!(redacted.contains("**REDACTED**"));
+        assert!(!redacted.contains("password"));
+    }
+
+    #[test]
+    fn redact_url_invalid_url() {
+        assert_eq!(SignalChannel::redact_url("not a url"), "<invalid-url>");
     }
 
     #[test]

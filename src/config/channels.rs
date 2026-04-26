@@ -11,10 +11,14 @@ use crate::settings::Settings;
 #[derive(Debug, Clone)]
 pub struct ChannelsConfig {
     pub cli: CliConfig,
+    pub acp_enabled: bool,
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
+    #[cfg(feature = "nostr")]
     pub nostr: Option<NostrConfig>,
+    #[cfg(not(feature = "nostr"))]
+    pub nostr: Option<()>,
     pub telegram: Option<TelegramConfig>,
     pub slack: Option<SlackChannelConfig>,
     pub discord: Option<DiscordChannelConfig>,
@@ -23,6 +27,8 @@ pub struct ChannelsConfig {
     pub imessage: Option<IMessageChannelConfig>,
     #[cfg(target_os = "macos")]
     pub apple_mail: Option<AppleMailChannelConfig>,
+    /// BlueBubbles iMessage bridge (cross-platform — any OS).
+    pub bluebubbles: Option<BlueBubblesChannelConfig>,
     /// Directory containing WASM channel modules (default: ~/.thinclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -31,6 +37,8 @@ pub struct ChannelsConfig {
     pub telegram_owner_id: Option<i64>,
     /// Telegram stream mode fallback for Wasm Channel.
     pub telegram_stream_mode: Option<String>,
+    /// Telegram transport mode fallback for Wasm Channel.
+    pub telegram_transport_mode: String,
     /// Telegram subagent session mode fallback for Wasm Channel.
     pub telegram_subagent_session_mode: String,
     /// Discord stream mode fallback for Wasm Channel.
@@ -104,15 +112,19 @@ pub struct SignalConfig {
     pub ignore_stories: bool,
 }
 
-/// Nostr channel configuration (NIP-04 encrypted DMs via nostr-sdk).
+/// Nostr channel configuration.
+#[cfg(feature = "nostr")]
 #[derive(Debug, Clone)]
 pub struct NostrConfig {
     /// Nostr private key in hex or bech32 (nsec) format.
     pub private_key: secrecy::SecretString,
     /// Relay URLs to connect to.
     pub relays: Vec<String>,
-    /// Public keys (hex or npub) allowed to interact with the bot.
-    /// Empty list denies all senders. `*` allows everyone.
+    /// Canonical owner public key (hex) authorized to control the agent over DMs.
+    pub owner_pubkey: Option<String>,
+    /// Whether non-owner DMs may be read via the Nostr tool.
+    pub social_dm_enabled: bool,
+    /// Deprecated legacy allow-from entries kept only for migration/warnings.
     pub allow_from: Vec<String>,
 }
 
@@ -142,10 +154,15 @@ impl ChannelsConfig {
             None
         };
 
-        let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", true)?;
+        let gateway_enabled = parse_bool_env(
+            "GATEWAY_ENABLED",
+            settings.channels.gateway_enabled.unwrap_or(true),
+        )?;
         let gateway = if gateway_enabled {
             Some(GatewayConfig {
-                host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),
+                host: optional_env("GATEWAY_HOST")?
+                    .or(settings.channels.gateway_host.clone())
+                    .unwrap_or_else(|| "127.0.0.1".to_string()),
                 port: optional_env("GATEWAY_PORT")?
                     .map(|s| {
                         s.parse::<u16>().map_err(|e| ConfigError::InvalidValue {
@@ -228,16 +245,21 @@ impl ChannelsConfig {
 
         let cli_enabled = optional_env("CLI_ENABLED")?
             .map(|s| s.to_lowercase() != "false" && s != "0")
+            .or(settings.channels.cli_enabled)
             .unwrap_or(true);
 
         Ok(Self {
             cli: CliConfig {
                 enabled: cli_enabled,
             },
+            acp_enabled: parse_bool_env("ACP_ENABLED", settings.channels.acp_enabled)?,
             http,
             gateway,
             signal,
-            nostr: Self::resolve_nostr()?,
+            #[cfg(feature = "nostr")]
+            nostr: Self::resolve_nostr(settings)?,
+            #[cfg(not(feature = "nostr"))]
+            nostr: None,
             wasm_channels_dir: optional_env("WASM_CHANNELS_DIR")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_channels_dir),
@@ -252,6 +274,10 @@ impl ChannelsConfig {
                 .or(settings.channels.telegram_owner_id),
             telegram_stream_mode: optional_env("TELEGRAM_STREAM_MODE")?
                 .or(settings.channels.telegram_stream_mode.clone()),
+            telegram_transport_mode: normalize_telegram_transport_mode(
+                optional_env("TELEGRAM_TRANSPORT_MODE")?
+                    .unwrap_or_else(|| settings.channels.telegram_transport_mode.clone()),
+            ),
             telegram_subagent_session_mode: normalize_telegram_subagent_session_mode(
                 optional_env("TELEGRAM_SUBAGENT_SESSION_MODE")?
                     .unwrap_or_else(|| settings.channels.telegram_subagent_session_mode.clone()),
@@ -266,15 +292,22 @@ impl ChannelsConfig {
             imessage: Self::resolve_imessage()?,
             #[cfg(target_os = "macos")]
             apple_mail: Self::resolve_apple_mail(settings)?,
+            bluebubbles: Self::resolve_bluebubbles(settings)?,
         })
     }
 
-    fn resolve_nostr() -> Result<Option<NostrConfig>, ConfigError> {
+    #[cfg(feature = "nostr")]
+    pub(crate) fn resolve_nostr(settings: &Settings) -> Result<Option<NostrConfig>, ConfigError> {
+        let enabled = parse_bool_env("NOSTR_ENABLED", settings.channels.nostr_enabled)?;
         let private_key =
             match optional_env("NOSTR_PRIVATE_KEY")?.or(optional_env("NOSTR_SECRET_KEY")?) {
                 Some(k) => secrecy::SecretString::from(k),
                 None => return Ok(None),
             };
+
+        if !enabled {
+            return Ok(None);
+        }
 
         let relays = optional_env("NOSTR_RELAYS")?
             .map(|s| {
@@ -291,7 +324,8 @@ impl ChannelsConfig {
                 ]
             });
 
-        let allow_from = optional_env("NOSTR_ALLOW_FROM")?
+        let allow_from: Vec<String> = optional_env("NOSTR_ALLOW_FROM")?
+            .or(settings.channels.nostr_allow_from.clone())
             .map(|s| {
                 s.split(',')
                     .map(|e| e.trim().to_string())
@@ -300,9 +334,46 @@ impl ChannelsConfig {
             })
             .unwrap_or_default();
 
+        let owner_pubkey = optional_env("NOSTR_OWNER_PUBKEY")?
+            .or(settings.channels.nostr_owner_pubkey.clone())
+            .map(|raw| {
+                crate::channels::nostr_runtime::normalize_public_key(&raw).map_err(|message| {
+                    ConfigError::InvalidValue {
+                        key: "NOSTR_OWNER_PUBKEY".to_string(),
+                        message,
+                    }
+                })
+            })
+            .transpose()?;
+
+        let owner_pubkey = match owner_pubkey {
+            Some(owner) => Some(owner),
+            None if allow_from.len() == 1
+                && allow_from.first().is_some_and(|entry| entry != "*") =>
+            {
+                let migrated = crate::channels::nostr_runtime::normalize_public_key(&allow_from[0])
+                    .map_err(|message| ConfigError::InvalidValue {
+                        key: "NOSTR_ALLOW_FROM".to_string(),
+                        message,
+                    })?;
+                tracing::warn!(
+                    "NOSTR_ALLOW_FROM is deprecated for command authorization; treating its single entry as NOSTR_OWNER_PUBKEY"
+                );
+                Some(migrated)
+            }
+            None => None,
+        };
+
+        let social_dm_enabled = parse_bool_env(
+            "NOSTR_SOCIAL_DM_ENABLED",
+            settings.channels.nostr_social_dm_enabled,
+        )?;
+
         Ok(Some(NostrConfig {
             private_key,
             relays,
+            owner_pubkey,
+            social_dm_enabled,
             allow_from,
         }))
     }
@@ -409,6 +480,20 @@ fn normalize_telegram_subagent_session_mode(value: impl AsRef<str>) -> String {
     }
 }
 
+fn normalize_telegram_transport_mode(value: impl AsRef<str>) -> String {
+    match value.as_ref().trim().to_ascii_lowercase().as_str() {
+        "" | "auto" | "automatic" | "webhook" => "auto".to_string(),
+        "polling" | "poll" | "off" | "disabled" => "polling".to_string(),
+        other => {
+            tracing::warn!(
+                value = %other,
+                "Unknown Telegram transport mode; falling back to auto"
+            );
+            "auto".to_string()
+        }
+    }
+}
+
 /// iMessage channel configuration (macOS only).
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
@@ -450,6 +535,28 @@ pub struct GmailChannelConfig {
     pub label_filters: Vec<String>,
     /// Maximum message body size in bytes.
     pub max_message_size_bytes: usize,
+}
+
+/// BlueBubbles iMessage bridge configuration (cross-platform).
+///
+/// Connects to a BlueBubbles server running on a Mac to send/receive
+/// iMessages over REST API + webhooks. Works on any platform.
+#[derive(Debug, Clone)]
+pub struct BlueBubblesChannelConfig {
+    /// BlueBubbles server URL (e.g. "http://192.168.1.50:1234").
+    pub server_url: String,
+    /// Server password for API authentication.
+    pub password: SecretString,
+    /// Webhook listen host (default: "127.0.0.1").
+    pub webhook_host: String,
+    /// Webhook listen port (default: 8645).
+    pub webhook_port: u16,
+    /// Webhook URL path (default: "/bluebubbles-webhook").
+    pub webhook_path: String,
+    /// Allowed phone numbers / email addresses (empty = allow all).
+    pub allow_from: Vec<String>,
+    /// Whether to send read receipts (requires Private API on the server).
+    pub send_read_receipts: bool,
 }
 
 impl ChannelsConfig {
@@ -637,6 +744,78 @@ impl ChannelsConfig {
         }))
     }
 
+    fn resolve_bluebubbles(
+        settings: &Settings,
+    ) -> Result<Option<BlueBubblesChannelConfig>, ConfigError> {
+        let enabled = if settings.channels.bluebubbles_enabled {
+            true
+        } else {
+            parse_bool_env("BLUEBUBBLES_ENABLED", false)?
+        };
+        if !enabled {
+            return Ok(None);
+        }
+
+        let server_url = optional_env("BLUEBUBBLES_SERVER_URL")?
+            .or(settings.channels.bluebubbles_server_url.clone())
+            .ok_or(ConfigError::InvalidValue {
+                key: "BLUEBUBBLES_SERVER_URL".to_string(),
+                message: "BLUEBUBBLES_SERVER_URL is required when BLUEBUBBLES_ENABLED=true"
+                    .to_string(),
+            })?;
+
+        let password = optional_env("BLUEBUBBLES_PASSWORD")?
+            .or(settings.channels.bluebubbles_password.clone())
+            .ok_or(ConfigError::InvalidValue {
+                key: "BLUEBUBBLES_PASSWORD".to_string(),
+                message: "BLUEBUBBLES_PASSWORD is required when BLUEBUBBLES_ENABLED=true"
+                    .to_string(),
+            })?;
+
+        let webhook_host = optional_env("BLUEBUBBLES_WEBHOOK_HOST")?
+            .or(settings.channels.bluebubbles_webhook_host.clone())
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+
+        let webhook_port: u16 = optional_env("BLUEBUBBLES_WEBHOOK_PORT")?
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e: std::num::ParseIntError| ConfigError::InvalidValue {
+                key: "BLUEBUBBLES_WEBHOOK_PORT".to_string(),
+                message: format!("must be an integer: {e}"),
+            })?
+            .or(settings.channels.bluebubbles_webhook_port)
+            .unwrap_or(8645);
+
+        let webhook_path = optional_env("BLUEBUBBLES_WEBHOOK_PATH")?
+            .or(settings.channels.bluebubbles_webhook_path.clone())
+            .unwrap_or_else(|| "/bluebubbles-webhook".to_string());
+
+        let allow_from = optional_env("BLUEBUBBLES_ALLOW_FROM")?
+            .or(settings.channels.bluebubbles_allow_from.clone())
+            .map(|s| {
+                s.split(',')
+                    .map(|e| e.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let send_read_receipts = optional_env("BLUEBUBBLES_SEND_READ_RECEIPTS")?
+            .map(|s| s.to_lowercase() == "true" || s == "1")
+            .or(settings.channels.bluebubbles_send_read_receipts)
+            .unwrap_or(true);
+
+        Ok(Some(BlueBubblesChannelConfig {
+            server_url,
+            password: SecretString::from(password),
+            webhook_host,
+            webhook_port,
+            webhook_path,
+            allow_from,
+            send_read_receipts,
+        }))
+    }
+
     fn resolve_gmail() -> Result<Option<GmailChannelConfig>, ConfigError> {
         let enabled = parse_bool_env("GMAIL_ENABLED", false)?;
         if !enabled {
@@ -703,34 +882,93 @@ impl ChannelsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "nostr")]
     use crate::config::helpers::lock_env;
+    #[cfg(feature = "nostr")]
     use secrecy::ExposeSecret;
 
+    #[cfg(feature = "nostr")]
     fn clear_nostr_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
+            std::env::remove_var("NOSTR_ENABLED");
             std::env::remove_var("NOSTR_PRIVATE_KEY");
             std::env::remove_var("NOSTR_SECRET_KEY");
             std::env::remove_var("NOSTR_RELAYS");
+            std::env::remove_var("NOSTR_OWNER_PUBKEY");
+            std::env::remove_var("NOSTR_SOCIAL_DM_ENABLED");
             std::env::remove_var("NOSTR_ALLOW_FROM");
         }
     }
 
     #[test]
+    #[cfg(feature = "nostr")]
     fn resolve_nostr_accepts_secret_key_alias() {
         let _guard = lock_env();
         clear_nostr_env();
 
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
+            std::env::set_var("NOSTR_ENABLED", "true");
             std::env::set_var("NOSTR_SECRET_KEY", "nsec_test_alias");
         }
 
-        let nostr = ChannelsConfig::resolve_nostr()
+        let nostr = ChannelsConfig::resolve_nostr(&Settings::default())
             .expect("nostr resolution should succeed")
             .expect("nostr config should exist");
 
         assert_eq!(nostr.private_key.expose_secret(), "nsec_test_alias");
+
+        clear_nostr_env();
+    }
+
+    #[test]
+    #[cfg(feature = "nostr")]
+    fn resolve_nostr_honors_enabled_flag() {
+        let _guard = lock_env();
+        clear_nostr_env();
+
+        unsafe {
+            std::env::set_var(
+                "NOSTR_PRIVATE_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            );
+            std::env::set_var("NOSTR_ENABLED", "false");
+        }
+
+        let nostr = ChannelsConfig::resolve_nostr(&Settings::default())
+            .expect("nostr resolution should succeed");
+        assert!(nostr.is_none());
+
+        clear_nostr_env();
+    }
+
+    #[test]
+    #[cfg(feature = "nostr")]
+    fn resolve_nostr_migrates_single_legacy_allow_from_entry_to_owner() {
+        let _guard = lock_env();
+        clear_nostr_env();
+
+        unsafe {
+            std::env::set_var(
+                "NOSTR_PRIVATE_KEY",
+                "0000000000000000000000000000000000000000000000000000000000000001",
+            );
+            std::env::set_var("NOSTR_ENABLED", "true");
+            std::env::set_var(
+                "NOSTR_ALLOW_FROM",
+                "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            );
+        }
+
+        let nostr = ChannelsConfig::resolve_nostr(&Settings::default())
+            .expect("nostr resolution should succeed")
+            .expect("nostr config should exist");
+
+        assert_eq!(
+            nostr.owner_pubkey.as_deref(),
+            Some("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+        );
 
         clear_nostr_env();
     }
@@ -757,5 +995,15 @@ mod tests {
             normalize_telegram_subagent_session_mode("mystery"),
             "temp_topic"
         );
+    }
+
+    #[test]
+    fn normalize_telegram_transport_mode_accepts_aliases() {
+        assert_eq!(normalize_telegram_transport_mode("auto"), "auto");
+        assert_eq!(normalize_telegram_transport_mode("automatic"), "auto");
+        assert_eq!(normalize_telegram_transport_mode("webhook"), "auto");
+        assert_eq!(normalize_telegram_transport_mode("poll"), "polling");
+        assert_eq!(normalize_telegram_transport_mode("disabled"), "polling");
+        assert_eq!(normalize_telegram_transport_mode("mystery"), "auto");
     }
 }

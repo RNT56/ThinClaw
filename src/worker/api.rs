@@ -29,17 +29,35 @@ pub struct StatusUpdate {
 }
 
 /// Job description fetched from orchestrator.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobDescription {
     pub title: String,
     pub description: String,
     pub project_dir: Option<String>,
+    #[serde(default)]
+    pub principal_id: Option<String>,
+    #[serde(default)]
+    pub actor_id: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub allowed_skills: Option<Vec<String>>,
+    #[serde(default)]
+    pub tool_profile: Option<String>,
+    #[serde(default)]
+    pub interactive: bool,
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
 }
 
 /// Completion result from the orchestrator (proxied from the real LLM).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyCompletionRequest {
     pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub context_documents: Vec<String>,
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -59,6 +77,8 @@ pub struct ProxyCompletionResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub context_documents: Vec<String>,
     pub tools: Vec<ToolDefinition>,
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
@@ -80,6 +100,10 @@ pub struct ProxyToolCompletionResponse {
 /// Completion result for the worker to report when done.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CompletionReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub success: bool,
     pub message: Option<String>,
     pub iterations: u32,
@@ -95,7 +119,8 @@ pub struct JobEventPayload {
 /// Response from the prompt polling endpoint.
 #[derive(Debug, Deserialize)]
 pub struct PromptResponse {
-    pub content: String,
+    #[serde(default)]
+    pub content: Option<String>,
     #[serde(default)]
     pub done: bool,
 }
@@ -216,6 +241,7 @@ impl WorkerHttpClient {
     ) -> Result<CompletionResponse, WorkerError> {
         let proxy_req = ProxyCompletionRequest {
             messages: request.messages.clone(),
+            context_documents: request.context_documents.clone(),
             model: request.model.clone(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
@@ -234,6 +260,7 @@ impl WorkerHttpClient {
             input_tokens: proxy_resp.input_tokens,
             output_tokens: proxy_resp.output_tokens,
             finish_reason: parse_finish_reason(&proxy_resp.finish_reason),
+            token_capture: None,
         })
     }
 
@@ -244,6 +271,7 @@ impl WorkerHttpClient {
     ) -> Result<ToolCompletionResponse, WorkerError> {
         let proxy_req = ProxyToolCompletionRequest {
             messages: request.messages.clone(),
+            context_documents: request.context_documents.clone(),
             tools: request.tools.clone(),
             model: request.model.clone(),
             max_tokens: request.max_tokens,
@@ -264,6 +292,7 @@ impl WorkerHttpClient {
             input_tokens: proxy_resp.input_tokens,
             output_tokens: proxy_resp.output_tokens,
             finish_reason: parse_finish_reason(&proxy_resp.finish_reason),
+            token_capture: None,
         })
     }
 

@@ -17,27 +17,27 @@ use thinclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, DiscordChannel, GatewayChannel, HttpChannel, NostrChannel, ReplChannel,
-        SignalChannel, WebhookServer, WebhookServerConfig,
+        ChannelManager, DiscordChannel, GatewayChannel, HttpChannel, ReplChannel, SignalChannel,
+        TuiChannel, WebhookServer, WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
     },
     cli::{
         Cli, Command, run_channels_command, run_gateway_command, run_identity_command,
-        run_mcp_command, run_pairing_command, run_reset_command, run_status_command,
-        run_tool_command, run_trajectory_command,
+        run_mcp_command, run_pairing_command, run_reset_command, run_secrets_command,
+        run_status_command, run_tool_command, run_trajectory_command,
     },
     config::Config,
-    hooks::bootstrap_hooks,
     pairing::PairingStore,
 };
 
 use thinclaw::channels::GmailChannel;
 #[cfg(target_os = "macos")]
 use thinclaw::channels::IMessageChannel;
+use thinclaw::channels::{BlueBubblesChannel, BlueBubblesConfig};
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-use thinclaw::setup::{SetupConfig, SetupWizard};
+use thinclaw::setup::{SetupConfig, SetupWizard, UiMode};
 
 use main_helpers::*;
 
@@ -75,9 +75,83 @@ fn relaunch_current_process() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        return std::thread::Builder::new()
+            .name("thinclaw-main".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(run_async_main)?
+            .join()
+            .map_err(|_| anyhow::anyhow!("ThinClaw main thread panicked"))?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        run_async_main()
+    }
+}
+
+fn run_async_main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(Box::pin(async_main()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeEntryMode {
+    Default,
+    Cli,
+    Tui,
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn runtime_entry_mode_from_ui_mode(ui_mode: UiMode) -> RuntimeEntryMode {
+    match ui_mode {
+        UiMode::Tui => RuntimeEntryMode::Tui,
+        UiMode::Cli | UiMode::Auto => RuntimeEntryMode::Cli,
+    }
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn setup_config_for_onboard_command(
+    skip_auth: bool,
+    channels_only: bool,
+    guide_topic: Option<thinclaw::setup::GuideTopic>,
+    ui_mode: UiMode,
+    profile: Option<thinclaw::setup::OnboardingProfile>,
+) -> SetupConfig {
+    SetupConfig {
+        skip_auth,
+        channels_only,
+        guide_topic,
+        ui_mode,
+        profile,
+        pause_after_completion: false,
+    }
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+fn setup_config_for_startup_onboarding(runtime_entry_mode: RuntimeEntryMode) -> SetupConfig {
+    let ui_mode = match runtime_entry_mode {
+        RuntimeEntryMode::Tui => UiMode::Tui,
+        RuntimeEntryMode::Cli => UiMode::Cli,
+        RuntimeEntryMode::Default => UiMode::Auto,
+    };
+
+    SetupConfig {
+        ui_mode,
+        ..SetupConfig::default()
+    }
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let mut runtime_entry_mode = match cli.command {
+        Some(Command::Tui) => RuntimeEntryMode::Tui,
+        _ => RuntimeEntryMode::Default,
+    };
 
     // Handle non-agent commands first (they don't need full setup)
     match &cli.command {
@@ -116,23 +190,29 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::WindowsServiceRuntime { home }) => {
             return thinclaw::service::run_windows_service_dispatcher(home.clone());
         }
-        Some(Command::Doctor) => {
+        Some(Command::Doctor { profile }) => {
             init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
-            return thinclaw::cli::run_doctor_command().await;
+            return thinclaw::cli::run_doctor_command((*profile).into()).await;
         }
-        Some(Command::Status) => {
+        Some(Command::Status { profile }) => {
             init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
-            return run_status_command().await;
+            return run_status_command((*profile).into()).await;
         }
         Some(Command::Reset(reset_cmd)) => {
             init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return run_reset_command(reset_cmd.clone()).await;
+        }
+        Some(Command::Secrets(secrets_cmd)) => {
+            init_cli_tracing(cli.debug);
+            let _ = dotenvy::dotenv();
+            thinclaw::bootstrap::load_thinclaw_env();
+            return run_secrets_command(secrets_cmd.clone()).await;
         }
         Some(Command::Cron(cron_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -211,27 +291,36 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Onboard {
             skip_auth,
             channels_only,
+            guide,
             ui,
+            profile,
         }) => {
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
 
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
-                let config = SetupConfig {
-                    skip_auth: *skip_auth,
-                    channels_only: *channels_only,
-                    ui_mode: *ui,
-                };
+                let config = setup_config_for_onboard_command(
+                    *skip_auth,
+                    *channels_only,
+                    *guide,
+                    *ui,
+                    *profile,
+                );
                 let mut wizard = SetupWizard::with_config(config);
                 wizard.run().await?;
+                if wizard.should_continue_to_runtime() {
+                    runtime_entry_mode = runtime_entry_mode_from_ui_mode(wizard.runtime_ui_mode());
+                } else {
+                    return Ok(());
+                }
             }
             #[cfg(not(any(feature = "postgres", feature = "libsql")))]
             {
-                let _ = (skip_auth, channels_only, ui);
+                let _ = (skip_auth, channels_only, guide, ui, profile);
                 eprintln!("Onboarding wizard requires the 'postgres' or 'libsql' feature.");
+                return Ok(());
             }
-            return Ok(());
         }
         Some(Command::Agents(agent_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -282,11 +371,25 @@ async fn main() -> anyhow::Result<()> {
             )
             .await;
         }
+        Some(Command::AutonomyShadowCanary { manifest }) => {
+            init_cli_tracing(cli.debug);
+            let _ = dotenvy::dotenv();
+            thinclaw::bootstrap::load_thinclaw_env();
+            let report = thinclaw::desktop_autonomy::run_shadow_canary_entrypoint(manifest)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!(
+                "{}",
+                serde_json::to_string(&report)
+                    .map_err(|e| anyhow::anyhow!("failed to encode canary report: {}", e))?
+            );
+            return Ok(());
+        }
         Some(Command::Update(update_cmd)) => {
             init_cli_tracing(cli.debug);
             return thinclaw::cli::run_update_command(update_cmd.clone()).await;
         }
-        None | Some(Command::Run) => {
+        None | Some(Command::Run) | Some(Command::Tui) => {
             // Continue to run agent
         }
     }
@@ -301,17 +404,19 @@ async fn main() -> anyhow::Result<()> {
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
     if !cli.no_onboard
-        && let Some(reason) = check_onboard_needed()
+        && let Some(reason) = check_onboard_needed(cli.config.as_deref(), cli.no_db)
     {
         println!("Onboarding needed: {}", reason);
         println!();
-        let mut wizard = SetupWizard::new();
+        let mut wizard =
+            SetupWizard::with_config(setup_config_for_startup_onboarding(runtime_entry_mode));
         wizard.run().await?;
+        runtime_entry_mode = runtime_entry_mode_from_ui_mode(wizard.runtime_ui_mode());
     }
 
     // Load initial config from env + disk + optional TOML (before DB is available)
     let toml_path = cli.config.as_deref();
-    let config = match Config::from_env_with_toml(toml_path).await {
+    let config = match Config::from_env_with_toml_options(toml_path, !cli.no_db).await {
         Ok(c) => c,
         Err(thinclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
@@ -325,12 +430,18 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
 
+    let local_runtime_requested = match runtime_entry_mode {
+        RuntimeEntryMode::Cli => true,
+        RuntimeEntryMode::Tui => false,
+        RuntimeEntryMode::Default => config.channels.cli.enabled,
+    };
+
     #[cfg_attr(not(feature = "repl"), allow(unused_mut))]
     let mut quiet_startup_spinner = if should_show_quiet_startup_spinner(
         cli.should_run_agent(),
         cli.debug,
         cli.message.is_some(),
-        config.channels.cli.enabled,
+        local_runtime_requested,
         std::env::var_os("RUST_LOG").is_some(),
         std::io::stdin().is_terminal(),
         std::io::stdout().is_terminal(),
@@ -372,6 +483,8 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    #[cfg(feature = "docker-sandbox")]
+    let runtime_secrets_store = components.secrets_store.clone();
     let config = components.config;
 
     // ── Tunnel setup ───────────────────────────────────────────────────
@@ -384,6 +497,9 @@ async fn main() -> anyhow::Result<()> {
     // ── Orchestrator / container job manager ────────────────────────────
 
     // Proactive Docker detection
+    let phase_start = std::time::Instant::now();
+    // Docker status is used in feature-gated blocks (docker-sandbox, repl boot screen).
+    #[allow(unused_variables)]
     let docker_status = if config.sandbox.enabled {
         let detection = thinclaw::sandbox::check_docker().await;
         match detection.status {
@@ -392,13 +508,13 @@ async fn main() -> anyhow::Result<()> {
             }
             thinclaw::sandbox::DockerStatus::NotInstalled => {
                 tracing::warn!(
-                    "Docker is not installed -- sandbox disabled for this session. {}",
+                    "Docker is not installed -- sandbox features pending. {}",
                     detection.platform.install_hint()
                 );
             }
             thinclaw::sandbox::DockerStatus::NotRunning => {
                 tracing::warn!(
-                    "Docker is installed but not running -- sandbox disabled for this session. {}",
+                    "Docker is installed but not running -- sandbox features will activate when Docker starts. {}",
                     detection.platform.start_hint()
                 );
             }
@@ -408,10 +524,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         thinclaw::sandbox::DockerStatus::Disabled
     };
+    tracing::info!(
+        elapsed_ms = phase_start.elapsed().as_millis(),
+        "Startup phase: docker detection"
+    );
 
     let job_event_tx: Option<
         tokio::sync::broadcast::Sender<(uuid::Uuid, thinclaw::channels::web::types::SseEvent)>,
-    > = if config.sandbox.enabled && docker_status.is_ok() {
+    > = if config.sandbox.enabled {
         let (tx, _) = tokio::sync::broadcast::channel(256);
         Some(tx)
     } else {
@@ -422,98 +542,121 @@ async fn main() -> anyhow::Result<()> {
         uuid::Uuid,
         std::collections::VecDeque<thinclaw::orchestrator::api::PendingPrompt>,
     >::new()));
+    #[cfg(feature = "docker-sandbox")]
+    let mut orchestrator_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
 
     #[cfg(feature = "docker-sandbox")]
-    let container_job_manager: Option<Arc<ContainerJobManager>> =
-        if config.sandbox.enabled && docker_status.is_ok() {
-            let token_store = TokenStore::new();
+    let container_job_manager: Option<Arc<ContainerJobManager>> = if config.sandbox.enabled {
+        let token_store = TokenStore::new();
 
-            // Resolve Claude Code API key: env var > OS secure store > (OAuth fallback in config)
-            let claude_code_api_key = match std::env::var("ANTHROPIC_API_KEY").ok() {
-                Some(key) => Some(key),
-                None => {
-                    // Check the OS secure store for the API key stored by the wizard
-                    thinclaw::platform::secure_store::get_api_key(
-                        thinclaw::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
-                    )
-                    .await
-                }
-            };
+        // On macOS, prefer the encrypted secrets store and treat the OS keychain
+        // as the root trust anchor (master key) plus a legacy migration fallback.
+        let claude_code_api_key = resolve_container_provider_api_key(
+            "default",
+            "ANTHROPIC_API_KEY",
+            "llm_anthropic_api_key",
+            "anthropic",
+            thinclaw::platform::secure_store::CLAUDE_CODE_API_KEY_ACCOUNT,
+            &runtime_secrets_store,
+        )
+        .await;
 
-            let codex_code_api_key = match std::env::var("OPENAI_API_KEY").ok() {
-                Some(key) => Some(key),
-                None => {
-                    thinclaw::platform::secure_store::get_api_key(
-                        thinclaw::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
-                    )
-                    .await
-                }
-            };
+        let codex_code_api_key = resolve_container_provider_api_key(
+            "default",
+            "OPENAI_API_KEY",
+            "llm_openai_api_key",
+            "openai",
+            thinclaw::platform::secure_store::CODEX_CODE_API_KEY_ACCOUNT,
+            &runtime_secrets_store,
+        )
+        .await;
 
-            let job_config = ContainerJobConfig {
-                image: config.sandbox.image.clone(),
-                memory_limit_mb: config.sandbox.memory_limit_mb,
-                cpu_shares: config.sandbox.cpu_shares,
-                orchestrator_port: 50051,
-                claude_code_api_key,
-                claude_code_oauth_token: thinclaw::config::ClaudeCodeConfig::extract_oauth_token(),
-                claude_code_enabled: config.claude_code.enabled,
-                claude_code_model: config.claude_code.model.clone(),
-                claude_code_max_turns: config.claude_code.max_turns,
-                claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
-                claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
-                codex_code_api_key,
-                codex_code_enabled: config.codex_code.enabled,
-                codex_code_model: config.codex_code.model.clone(),
-                codex_code_memory_limit_mb: config.codex_code.memory_limit_mb,
-                codex_code_home_dir: config.codex_code.home_dir.clone(),
-            };
-            let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+        let job_config = ContainerJobConfig {
+            image: config.sandbox.image.clone(),
+            memory_limit_mb: config.sandbox.memory_limit_mb,
+            cpu_shares: config.sandbox.cpu_shares,
+            orchestrator_port: 50051,
+            claude_code_api_key,
+            claude_code_oauth_token: thinclaw::config::ClaudeCodeConfig::extract_oauth_token(),
+            claude_code_enabled: config.claude_code.enabled,
+            claude_code_model: config.claude_code.model.clone(),
+            claude_code_max_turns: config.claude_code.max_turns,
+            claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
+            claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+            codex_code_api_key,
+            codex_code_enabled: config.codex_code.enabled,
+            codex_code_model: config.codex_code.model.clone(),
+            codex_code_memory_limit_mb: config.codex_code.memory_limit_mb,
+            codex_code_home_dir: config.codex_code.home_dir.clone(),
+            interactive_idle_timeout_secs: config.sandbox.interactive_idle_timeout_secs,
+        };
+        let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
-            // Clean up orphan containers from a previous process crash
-            // (fire-and-forget — never blocks startup)
-            {
-                let jm_cleanup = Arc::clone(&jm);
-                tokio::spawn(async move {
-                    jm_cleanup.cleanup_orphan_containers().await;
-                });
-            }
-
-            // Start the orchestrator internal API in the background
-            let orchestrator_state = OrchestratorState {
-                llm: components.llm.clone(),
-                job_manager: Arc::clone(&jm),
-                token_store,
-                job_event_tx: job_event_tx.clone(),
-                prompt_queue: Arc::clone(&prompt_queue),
-                store: components.db.clone(),
-                secrets_store: components.secrets_store.clone(),
-                user_id: "default".to_string(),
-            };
-
+        // Clean up orphan containers from a previous process crash
+        // (fire-and-forget — never blocks startup)
+        {
+            let jm_cleanup = Arc::clone(&jm);
             tokio::spawn(async move {
-                if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
-                    tracing::error!("Orchestrator API failed: {}", e);
-                }
+                jm_cleanup.cleanup_orphan_containers().await;
             });
+        }
 
-            if config.claude_code.enabled {
+        // Start the orchestrator internal API in the background
+        let orchestrator_state = OrchestratorState {
+            llm: components.llm.clone(),
+            job_manager: Arc::clone(&jm),
+            token_store,
+            job_event_tx: job_event_tx.clone(),
+            prompt_queue: Arc::clone(&prompt_queue),
+            store: components.db.clone(),
+            secrets_store: runtime_secrets_store.clone(),
+        };
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        orchestrator_shutdown_tx = Some(shutdown_tx);
+        tokio::spawn(async move {
+            if let Err(e) =
+                OrchestratorApi::start_with_shutdown(orchestrator_state, 50051, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+            {
+                tracing::error!("Orchestrator API failed: {}", e);
+            }
+        });
+
+        if config.claude_code.enabled {
+            if docker_status.is_ok() {
                 tracing::info!(
                     "Claude Code sandbox mode available (model: {}, max_turns: {})",
                     config.claude_code.model,
                     config.claude_code.max_turns
                 );
+            } else {
+                tracing::info!(
+                    "Claude Code sandbox mode configured (model: {}, max_turns: {}) — will activate when Docker starts",
+                    config.claude_code.model,
+                    config.claude_code.max_turns
+                );
             }
-            if config.codex_code.enabled {
+        }
+        if config.codex_code.enabled {
+            if docker_status.is_ok() {
                 tracing::info!(
                     "Codex sandbox mode available (model: {})",
                     config.codex_code.model
                 );
+            } else {
+                tracing::info!(
+                    "Codex sandbox mode configured (model: {}) — will activate when Docker starts",
+                    config.codex_code.model
+                );
             }
-            Some(jm)
-        } else {
-            None
-        };
+        }
+        Some(jm)
+    } else {
+        None
+    };
 
     #[cfg(not(feature = "docker-sandbox"))]
     let _container_job_manager: Option<std::sync::Arc<std::convert::Infallible>> = None;
@@ -522,6 +665,23 @@ async fn main() -> anyhow::Result<()> {
 
     let channels = Arc::new(ChannelManager::new());
     let mut channel_names: Vec<String> = Vec::new();
+    #[cfg(feature = "nostr")]
+    let mut nostr_channel: Option<thinclaw::channels::NostrChannel> = None;
+    #[cfg(feature = "nostr")]
+    let mut nostr_runtime = None;
+
+    #[cfg(feature = "nostr")]
+    if let Some(ref nostr_config) = config.channels.nostr {
+        match thinclaw::channels::NostrChannel::new(nostr_config.clone()) {
+            Ok(channel) => {
+                nostr_runtime = Some(channel.runtime());
+                nostr_channel = Some(channel);
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "Failed to initialize Nostr runtime");
+            }
+        }
+    }
     let mut loaded_wasm_channel_names: Vec<String> = Vec::new();
     #[allow(clippy::type_complexity)]
     let mut wasm_channel_runtime_state: Option<(
@@ -532,24 +692,33 @@ async fn main() -> anyhow::Result<()> {
         std::path::PathBuf,
     )> = None;
 
-    // Create CLI channel
-    let repl_channel = if let Some(ref msg) = cli.message {
-        Some(ReplChannel::with_message(msg.clone()))
-    } else if config.channels.cli.enabled {
-        let repl = ReplChannel::new();
-        repl.suppress_banner();
-        Some(repl)
+    if let Some(ref msg) = cli.message {
+        channels
+            .add(Box::new(ReplChannel::with_message(msg.clone())))
+            .await;
+        tracing::info!("Single message mode");
     } else {
-        None
-    };
-
-    if let Some(repl) = repl_channel {
-        channels.add(Box::new(repl)).await;
-        if cli.message.is_some() {
-            tracing::info!("Single message mode");
-        } else {
-            channel_names.push("repl".to_string());
-            tracing::info!("REPL mode enabled");
+        match runtime_entry_mode {
+            RuntimeEntryMode::Tui => {
+                channels.add(Box::new(TuiChannel::new())).await;
+                channel_names.push("tui".to_string());
+                tracing::info!("Full-screen TUI mode enabled");
+            }
+            RuntimeEntryMode::Cli => {
+                let repl = ReplChannel::new();
+                repl.suppress_banner();
+                channels.add(Box::new(repl)).await;
+                channel_names.push("repl".to_string());
+                tracing::info!("REPL mode enabled");
+            }
+            RuntimeEntryMode::Default if config.channels.cli.enabled => {
+                let repl = ReplChannel::new();
+                repl.suppress_banner();
+                channels.add(Box::new(repl)).await;
+                channel_names.push("repl".to_string());
+                tracing::info!("REPL mode enabled");
+            }
+            RuntimeEntryMode::Default => {}
         }
     }
 
@@ -604,23 +773,24 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Add Nostr channel if configured and not CLI-only mode.
+    #[cfg(feature = "nostr")]
     if !cli.cli_only
+        && let Some(nostr_channel) = nostr_channel.take()
         && let Some(ref nostr_config) = config.channels.nostr
     {
-        match NostrChannel::new(nostr_config.clone()) {
-            Ok(nostr_channel) => {
-                channel_names.push("nostr".to_string());
-                channels.add(Box::new(nostr_channel)).await;
-                tracing::info!(relays = nostr_config.relays.len(), "Nostr channel enabled");
-                if nostr_config.allow_from.is_empty() {
-                    tracing::info!(
-                        "Nostr channel allow_from is empty — accepting messages from all senders."
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to initialize Nostr channel");
-            }
+        channel_names.push("nostr".to_string());
+        channels.add(Box::new(nostr_channel)).await;
+        tracing::info!(
+            relays = nostr_config.relays.len(),
+            owner_pubkey = ?nostr_config.owner_pubkey,
+            control_ready = nostr_config.owner_pubkey.is_some(),
+            social_dm_enabled = nostr_config.social_dm_enabled,
+            "Nostr channel enabled"
+        );
+        if nostr_config.owner_pubkey.is_none() {
+            tracing::warn!(
+                "Nostr channel has no owner pubkey configured — inbound commands are denied until NOSTR_OWNER_PUBKEY is set"
+            );
         }
     }
 
@@ -714,6 +884,29 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Add BlueBubbles iMessage bridge if configured and not CLI-only mode.
+    // Cross-platform — works on any OS with a BlueBubbles server on a Mac.
+    if !cli.cli_only
+        && let Some(ref bb_config) = config.channels.bluebubbles
+    {
+        let channel_config = BlueBubblesConfig::from(bb_config);
+        match BlueBubblesChannel::init(channel_config).await {
+            Ok(bb_channel) => {
+                channel_names.push("bluebubbles".to_string());
+                channels.add(Box::new(bb_channel)).await;
+                tracing::info!("BlueBubbles iMessage channel enabled (webhook mode)");
+                if bb_config.allow_from.is_empty() {
+                    tracing::warn!(
+                        "BlueBubbles channel has empty allow_from list — ALL messages will be accepted."
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize BlueBubbles channel");
+            }
+        }
+    }
+
     // Add Gmail channel if configured and not CLI-only mode.
     if !cli.cli_only
         && let Some(ref gmail_config) = config.channels.gmail
@@ -790,8 +983,8 @@ async fn main() -> anyhow::Result<()> {
     let webhook_server: Option<Arc<tokio::sync::Mutex<WebhookServer>>> = if !webhook_routes
         .is_empty()
     {
-        let addr =
-            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        let addr = webhook_server_addr
+            .unwrap_or_else(|| std::net::SocketAddr::from(([127, 0, 0, 1], 8080)));
         if addr.ip().is_unspecified() {
             tracing::warn!(
                 "Webhook server is binding to {} — it will be reachable from all network interfaces. \
@@ -851,6 +1044,7 @@ async fn main() -> anyhow::Result<()> {
                             content: text,
                             thread_id,
                             metadata: serde_json::Value::Null,
+                            attachments: Vec::new(),
                         },
                     )
                     .await
@@ -861,56 +1055,75 @@ async fn main() -> anyhow::Result<()> {
         },
     )));
 
-    let active_tool_names = components.tools.list().await;
+    #[cfg(feature = "nostr")]
+    if let Some(runtime) = nostr_runtime {
+        components
+            .tools
+            .register_sync(Arc::new(thinclaw::tools::builtin::NostrActionsTool::new(
+                runtime,
+            )));
+        tracing::info!("Registered nostr_actions tool");
+    }
 
-    let hook_bootstrap = bootstrap_hooks(
-        &components.hooks,
-        components.workspace.as_ref(),
-        &config.wasm.tools_dir,
-        &config.channels.wasm_channels_dir,
-        &active_tool_names,
-        &loaded_wasm_channel_names,
-        &components.dev_loaded_tool_names,
-    )
-    .await;
-    tracing::info!(
-        bundled = hook_bootstrap.bundled_hooks,
-        plugin = hook_bootstrap.plugin_hooks,
-        workspace = hook_bootstrap.workspace_hooks,
-        outbound_webhooks = hook_bootstrap.outbound_webhooks,
-        errors = hook_bootstrap.errors,
-        "Lifecycle hooks initialized"
-    );
+    // NOTE: bootstrap_hooks() is already called inside AppBuilder::build_all()
+    // (app.rs). Do NOT call it again here — that would double-register bundled
+    // hooks and emit a spurious "Replacing existing hook" WARN.
 
     // Create session manager (shared between agent and web gateway)
     let session_manager =
         Arc::new(thinclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
 
+    #[cfg(feature = "docker-sandbox")]
+    let sandbox_children = Some(Arc::new(thinclaw::sandbox_jobs::SandboxChildRegistry::new(
+        thinclaw::sandbox_jobs::SandboxJobController::new(
+            components.db.clone(),
+            container_job_manager.clone(),
+            job_event_tx.clone(),
+            if config.sandbox.enabled {
+                Some(Arc::clone(&prompt_queue))
+            } else {
+                None
+            },
+        ),
+    )));
+    #[cfg(not(feature = "docker-sandbox"))]
+    let sandbox_children = None;
+    let shared_context_manager = Arc::clone(&components.context_manager);
+    let shared_db = components.db.clone();
+    let shared_secrets_store = components.secrets_store.clone();
+    let inject_sender = channels.inject_sender();
+    #[cfg(feature = "docker-sandbox")]
+    let shared_prompt_queue = if config.sandbox.enabled {
+        Some(Arc::clone(&prompt_queue))
+    } else {
+        None
+    };
+
     // Register job tools (sandbox deps auto-injected when container_job_manager is available)
     #[cfg(feature = "docker-sandbox")]
     components.tools.register_job_tools(
-        Arc::clone(&components.context_manager),
+        Arc::clone(&shared_context_manager),
         container_job_manager.clone(),
-        components.db.clone(),
+        shared_db.clone(),
+        None,
         job_event_tx.clone(),
-        Some(channels.inject_sender()),
-        if config.sandbox.enabled {
-            Some(Arc::clone(&prompt_queue))
-        } else {
-            None
-        },
-        components.secrets_store.clone(),
+        Some(inject_sender.clone()),
+        shared_prompt_queue.clone(),
+        sandbox_children.clone(),
+        shared_secrets_store.clone(),
     );
 
     #[cfg(not(feature = "docker-sandbox"))]
     components.tools.register_job_tools(
-        Arc::clone(&components.context_manager),
+        Arc::clone(&shared_context_manager),
         None,
-        components.db.clone(),
+        shared_db.clone(),
+        None,
         job_event_tx.clone(),
-        Some(channels.inject_sender()),
+        Some(inject_sender.clone()),
         None,
-        components.secrets_store.clone(),
+        None,
+        shared_secrets_store.clone(),
     );
 
     // ── Gateway channel ────────────────────────────────────────────────
@@ -933,6 +1146,7 @@ async fn main() -> anyhow::Result<()> {
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
         gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&components.tools));
+        gw = gw.with_context_manager(Arc::clone(&shared_context_manager));
         if let Some(ref ext_mgr) = components.extension_manager {
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
@@ -951,6 +1165,12 @@ async fn main() -> anyhow::Result<()> {
         }
         if let Some(ref sc) = components.skill_catalog {
             gw = gw.with_skill_catalog(Arc::clone(sc));
+        }
+        if let Some(ref hub) = components.skill_remote_hub {
+            gw = gw.with_skill_remote_hub(hub.clone());
+        }
+        if let Some(ref quarantine) = components.skill_quarantine {
+            gw = gw.with_skill_quarantine(Arc::clone(quarantine));
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
         gw = gw.with_cost_tracker(Arc::clone(&components.cost_tracker));
@@ -984,14 +1204,17 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        let gateway_token_url = format!(
+            "http://{}:{}/?token={}",
+            gw_config.host,
+            gw_config.port,
+            gw.auth_token()
+        );
+        thinclaw::tui::set_runtime_gateway_url_override(Some(gateway_token_url.clone()));
+
         #[cfg(feature = "repl")]
         {
-            gateway_url = Some(format!(
-                "http://{}:{}/?token={}",
-                gw_config.host,
-                gw_config.port,
-                gw.auth_token()
-            ));
+            gateway_url = Some(gateway_token_url);
         }
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
@@ -1009,7 +1232,10 @@ async fn main() -> anyhow::Result<()> {
     // ── Boot screen ────────────────────────────────────────────────────
 
     #[cfg(feature = "repl")]
-    if config.channels.cli.enabled && cli.message.is_none() {
+    if local_runtime_requested
+        && runtime_entry_mode != RuntimeEntryMode::Tui
+        && cli.message.is_none()
+    {
         if let Some(mut spinner) = quiet_startup_spinner.take() {
             spinner.stop();
         }
@@ -1084,11 +1310,12 @@ async fn main() -> anyhow::Result<()> {
     let mut wasm_watcher_state: Option<(
         Arc<thinclaw::channels::wasm::WasmChannelLoader>,
         std::path::PathBuf,
+        Arc<thinclaw::channels::wasm::WasmChannelRouter>,
     )> = None;
 
     if let Some((rt, ps, router, loader, channels_dir)) = wasm_channel_runtime_state.take() {
         // Always capture for the watcher — it works without an extension manager.
-        wasm_watcher_state = Some((Arc::clone(&loader), channels_dir));
+        wasm_watcher_state = Some((Arc::clone(&loader), channels_dir, Arc::clone(&router)));
 
         // Wire the runtime into the extension manager if available.
         if let Some(ref ext_mgr) = components.extension_manager {
@@ -1098,7 +1325,7 @@ async fn main() -> anyhow::Result<()> {
                     rt,
                     ps,
                     router,
-                    config.channels.telegram_owner_id,
+                    thinclaw::channels::wasm::WasmChannelHostConfig::from_config(&config),
                 )
                 .await;
             tracing::info!("Channel runtime wired into extension manager for hot-activation");
@@ -1135,6 +1362,14 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(runtime),
             Arc::clone(&components.tools),
         );
+        loader = loader.with_tool_invoker(Arc::new(
+            thinclaw::tools::execution::HostMediatedToolInvoker::new(
+                Arc::clone(&components.tools),
+                Arc::clone(&components.safety),
+                thinclaw::tools::ToolExecutionLane::WorkerRuntime,
+                thinclaw::tools::ToolProfile::ExplicitOnly,
+            ),
+        ));
         if let Some(ref secrets) = components.secrets_store {
             loader = loader.with_secrets_store(Arc::clone(secrets));
         }
@@ -1274,10 +1509,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── WASM channel hot-reload watcher ─────────────────────────────────
-    if let Some((loader, channels_dir)) = wasm_watcher_state {
+    if let Some((loader, channels_dir, wasm_router)) = wasm_watcher_state {
         use thinclaw::channels::wasm::channel_watcher::ChannelWatcher;
 
-        let watcher = ChannelWatcher::new(channels_dir, loader, Arc::clone(&channels));
+        let mut watcher = ChannelWatcher::new(channels_dir, loader, Arc::clone(&channels))
+            .with_webhook_router(wasm_router)
+            .with_host_config(
+                thinclaw::channels::wasm::WasmChannelHostConfig::from_config(&config),
+            );
+        if let Some(ref secrets_store) = components.secrets_store {
+            watcher = watcher.with_secrets_store(Arc::clone(secrets_store), "default");
+        }
         watcher.seed_from_dir().await;
         watcher.start().await;
         tracing::info!(
@@ -1305,7 +1547,10 @@ async fn main() -> anyhow::Result<()> {
             components.safety.clone(),
             components.tools.clone(),
             channels.clone(),
-            thinclaw::agent::SubagentConfig::default(),
+            thinclaw::agent::SubagentConfig {
+                default_tool_profile: config.agent.subagent_tool_profile,
+                ..thinclaw::agent::SubagentConfig::default()
+            },
         );
 
         // Wire store + SSE + cost tracker for routine run finalization by subagents
@@ -1423,9 +1668,19 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&components.llm),
         components.cheap_llm.as_ref().map(Arc::clone),
     );
-    components
-        .tools
-        .register_advisor_tool(components.llm_runtime.status().routing_mode);
+    components.llm_runtime.set_advisor_ready_callback({
+        let tools = Arc::clone(&components.tools);
+        move |advisor_ready| {
+            if advisor_ready {
+                tools.register_advisor_tool(true);
+            } else if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let tools = Arc::clone(&tools);
+                handle.spawn(async move {
+                    tools.reconcile_advisor_tool_readiness(false).await;
+                });
+            }
+        }
+    });
 
     // ── Agent registry (persistent multi-agent management) ──────────────
     //
@@ -1550,6 +1805,7 @@ async fn main() -> anyhow::Result<()> {
         routing_policy: Some(components.routing_policy),
         model_override: Some(model_override),
         restart_requested: Arc::clone(&restart_requested),
+        sandbox_children: sandbox_children.clone(),
     };
 
     let agent = Agent::new(
@@ -1559,9 +1815,39 @@ async fn main() -> anyhow::Result<()> {
         Some(config.heartbeat.clone()),
         Some(config.hygiene.clone()),
         Some(config.routines.clone()),
-        Some(components.context_manager),
+        Some(Arc::clone(&shared_context_manager)),
         Some(session_manager),
     );
+
+    #[cfg(feature = "docker-sandbox")]
+    agent.scheduler().tools().register_job_tools(
+        Arc::clone(&shared_context_manager),
+        container_job_manager.clone(),
+        shared_db.clone(),
+        Some(Arc::clone(agent.scheduler())),
+        job_event_tx.clone(),
+        Some(inject_sender.clone()),
+        shared_prompt_queue.clone(),
+        sandbox_children.clone(),
+        shared_secrets_store.clone(),
+    );
+
+    #[cfg(not(feature = "docker-sandbox"))]
+    agent.scheduler().tools().register_job_tools(
+        Arc::clone(&shared_context_manager),
+        None,
+        shared_db.clone(),
+        Some(Arc::clone(agent.scheduler())),
+        job_event_tx.clone(),
+        Some(inject_sender.clone()),
+        None,
+        None,
+        shared_secrets_store.clone(),
+    );
+
+    if let Some(ref gw_state) = gateway_state {
+        *gw_state.scheduler.write().await = Some(Arc::clone(agent.scheduler()));
+    }
 
     agent.run().await?;
 
@@ -1578,6 +1864,11 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(ref server) = webhook_server {
         server.lock().await.shutdown().await;
+    }
+
+    #[cfg(feature = "docker-sandbox")]
+    if let Some(tx) = orchestrator_shutdown_tx.take() {
+        let _ = tx.send(());
     }
 
     #[cfg(feature = "tunnel")]
@@ -1605,4 +1896,49 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(any(feature = "postgres", feature = "libsql"))]
+    #[test]
+    fn test_cli_guide_onboarding_keeps_runtime_handoff_enabled() {
+        let config = setup_config_for_onboard_command(
+            false,
+            false,
+            Some(thinclaw::setup::GuideTopic::Menu),
+            UiMode::Cli,
+            None,
+        );
+
+        assert_eq!(config.guide_topic, Some(thinclaw::setup::GuideTopic::Menu));
+        assert!(!config.pause_after_completion);
+    }
+
+    #[cfg(any(feature = "postgres", feature = "libsql"))]
+    #[test]
+    fn test_startup_onboarding_preserves_explicit_tui_intent() {
+        let config = setup_config_for_startup_onboarding(RuntimeEntryMode::Tui);
+
+        assert_eq!(config.ui_mode, UiMode::Tui);
+    }
+
+    #[cfg(any(feature = "postgres", feature = "libsql"))]
+    #[test]
+    fn test_runtime_entry_mode_follows_resolved_wizard_ui() {
+        assert_eq!(
+            runtime_entry_mode_from_ui_mode(UiMode::Tui),
+            RuntimeEntryMode::Tui
+        );
+        assert_eq!(
+            runtime_entry_mode_from_ui_mode(UiMode::Cli),
+            RuntimeEntryMode::Cli
+        );
+        assert_eq!(
+            runtime_entry_mode_from_ui_mode(UiMode::Auto),
+            RuntimeEntryMode::Cli
+        );
+    }
 }

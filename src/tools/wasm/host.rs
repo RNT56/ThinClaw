@@ -22,6 +22,7 @@
 //!                          (sanitized, no secrets)
 //! ```
 
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::tools::wasm::capabilities::Capabilities;
@@ -82,6 +83,10 @@ pub struct HostState {
     http_request_count: u32,
     /// Tool invoke count for rate limiting within this execution.
     tool_invoke_count: u32,
+    /// Secret names confirmed to exist for this execution.
+    available_secret_names: HashSet<String>,
+    /// Whether secret presence should be enforced in addition to allowlist checks.
+    enforce_secret_presence: bool,
 }
 
 impl std::fmt::Debug for HostState {
@@ -108,6 +113,8 @@ impl HostState {
             user_id: None,
             http_request_count: 0,
             tool_invoke_count: 0,
+            available_secret_names: HashSet::new(),
+            enforce_secret_presence: false,
         }
     }
 
@@ -121,7 +128,16 @@ impl HostState {
             user_id: Some(user_id.into()),
             http_request_count: 0,
             tool_invoke_count: 0,
+            available_secret_names: HashSet::new(),
+            enforce_secret_presence: false,
         }
+    }
+
+    /// Attach the set of secret names that are actually present for this run.
+    pub fn with_available_secret_names(mut self, names: HashSet<String>) -> Self {
+        self.available_secret_names = names;
+        self.enforce_secret_presence = true;
+        self
     }
 
     /// Create a minimal host state with no capabilities.
@@ -246,8 +262,13 @@ impl HostState {
             None => return false,
         };
 
-        // Check if name is allowed
-        capability.is_allowed(name)
+        if !capability.is_allowed(name) {
+            return false;
+        }
+        if !self.enforce_secret_presence {
+            return true;
+        }
+        self.available_secret_names.contains(name)
     }
 
     /// Check if HTTP capability is available for a given URL and method.
@@ -380,6 +401,7 @@ fn validate_workspace_path(path: &str) -> Result<(), WasmError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
 
     use crate::tools::wasm::capabilities::{
@@ -550,16 +572,22 @@ mod tests {
             ..Default::default()
         };
 
-        let state = HostState::new(capabilities);
+        let available = HashSet::from([
+            "openai_key".to_string(),
+            "exact_name".to_string(),
+            "not_allowed".to_string(),
+        ]);
+        let state = HostState::new(capabilities).with_available_secret_names(available);
 
-        // Glob match
+        // Glob match + exists
         assert!(state.secret_exists("openai_key"));
-        assert!(state.secret_exists("openai_org"));
+        // Allowed pattern but not present
+        assert!(!state.secret_exists("openai_org"));
 
-        // Exact match
+        // Exact match + exists
         assert!(state.secret_exists("exact_name"));
 
-        // Not allowed
+        // Not allowed even if present
         assert!(!state.secret_exists("stripe_key"));
     }
 

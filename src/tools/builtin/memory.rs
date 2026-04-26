@@ -22,7 +22,7 @@ use crate::context::JobContext;
 use crate::db::Database;
 use crate::identity::ConversationKind as IdentityConversationKind;
 use crate::llm::LlmProvider;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolMetadata, ToolOutput, ToolRouteIntent, require_str};
 use crate::workspace::{SearchConfig, Workspace, paths};
 
 /// Files the LLM may only APPEND to — never fully overwrite.
@@ -38,7 +38,7 @@ const DELETE_PROTECTED_FILES: &[&str] = &[paths::IDENTITY];
 /// Files the agent may FULLY REWRITE (replace entire content, append: false).
 ///
 /// IDENTITY.md remains writable through memory_write because prompt_manage
-/// intentionally excludes it in V1.
+/// intentionally excludes it.
 const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] = &[paths::IDENTITY];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +109,8 @@ fn resolve_memory_write_path(ctx: &JobContext, target: &str) -> (String, bool) {
         .metadata
         .get("actor_id")
         .or_else(|| ctx.metadata.get("actor"))
-        .and_then(|v| v.as_str());
+        .and_then(|v| v.as_str())
+        .or(ctx.actor_id.as_deref());
     let direct_actor = job_conversation_kind(&ctx.metadata) == IdentityConversationKind::Direct
         && actor_id.is_some();
 
@@ -123,6 +124,7 @@ fn resolve_memory_write_path(ctx: &JobContext, target: &str) -> (String, bool) {
             && (bare_target.eq_ignore_ascii_case("memory")
                 || bare_target.eq_ignore_ascii_case(paths::MEMORY)
                 || bare_target.eq_ignore_ascii_case(paths::USER)
+                || bare_target.eq_ignore_ascii_case("profile")
                 || bare_target.eq_ignore_ascii_case(paths::PROFILE)) =>
         {
             let actor_id = actor_id.expect("checked is_some above");
@@ -202,6 +204,10 @@ impl Tool for MemorySearchTool {
             },
             "required": ["query"]
         })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::authoritative(ToolRouteIntent::MemoryRecall)
     }
 
     async fn execute(
@@ -333,17 +339,49 @@ impl SessionSearchTool {
     async fn recent_conversation_metadata(
         &self,
         principal_id: &str,
+        actor_id: &str,
         channel: Option<&str>,
+        direct_scope: bool,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, ToolError> {
-        let Some(channel) = channel else {
-            return Ok(Vec::new());
+        let recent = if direct_scope && channel.is_none() {
+            self.store
+                .list_actor_conversations_for_recall(principal_id, actor_id, false, limit as i64)
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Transcript listing failed: {}", e))
+                })?
+        } else {
+            let Some(channel) = channel else {
+                return Ok(Vec::new());
+            };
+            let recent = self
+                .store
+                .list_conversations_with_preview(principal_id, channel, limit as i64)
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("Transcript listing failed: {}", e))
+                })?;
+            if direct_scope {
+                recent
+                    .into_iter()
+                    .filter(|conversation| {
+                        conversation.conversation_kind == crate::history::ConversationKind::Direct
+                            && match conversation
+                                .actor_id
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                            {
+                                Some(conversation_actor_id) => conversation_actor_id == actor_id,
+                                None => actor_id == principal_id,
+                            }
+                    })
+                    .collect()
+            } else {
+                recent
+            }
         };
-        let recent = self
-            .store
-            .list_conversations_with_preview(principal_id, channel, limit as i64)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Transcript listing failed: {}", e)))?;
         Ok(recent
             .into_iter()
             .map(|conversation| {
@@ -375,6 +413,7 @@ impl Tool for SessionSearchTool {
     fn description(&self) -> &str {
         "Search DB-backed conversation transcripts for prior messages, decisions, and workflow history. \
          Use before answering questions about prior work or repeated conversations. \
+         In direct chats this follows the actor's linked history across channels by default. \
          This searches conversation history only, not workspace documents."
     }
 
@@ -395,12 +434,12 @@ impl Tool for SessionSearchTool {
                 },
                 "include_current_thread": {
                     "type": "boolean",
-                    "description": "If true, constrain search to the current thread when thread metadata is available.",
+                    "description": "If true, constrain search to the current thread when thread metadata is available. In direct chats the default is false so linked history can be searched.",
                     "default": true
                 },
                 "all_channels": {
                     "type": "boolean",
-                    "description": "If true, search all channels for this actor/user scope. If false (default), search is limited to the current channel.",
+                    "description": "If true, search all channels for this actor/user scope. In direct chats linked cross-channel history is searched by default.",
                     "default": false
                 },
                 "summarize_sessions": {
@@ -411,6 +450,10 @@ impl Tool for SessionSearchTool {
             },
             "required": ["query"]
         })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::authoritative(ToolRouteIntent::TranscriptHistory)
     }
 
     async fn execute(
@@ -425,14 +468,15 @@ impl Tool for SessionSearchTool {
             .and_then(|v| v.as_u64())
             .unwrap_or(8)
             .clamp(1, 25) as usize;
+        let direct_scope = job_conversation_kind(&ctx.metadata) == IdentityConversationKind::Direct;
         let include_current_thread = params
             .get("include_current_thread")
             .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+            .unwrap_or(!direct_scope);
         let all_channels = params
             .get("all_channels")
             .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+            .unwrap_or(direct_scope);
 
         let (principal_id, actor_id, _include_group_history, _conversation_id) =
             self.current_scope_filters(ctx);
@@ -463,7 +507,9 @@ impl Tool for SessionSearchTool {
             let recent = self
                 .recent_conversation_metadata(
                     &principal_id,
+                    &actor_id,
                     channel_filter.as_deref(),
+                    direct_scope,
                     result_limit,
                 )
                 .await?;
@@ -521,12 +567,19 @@ impl Tool for SessionSearchTool {
 /// across sessions: decisions, preferences, facts, lessons learned.
 pub struct MemoryWriteTool {
     workspace: Arc<Workspace>,
+    orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
 }
 
 impl MemoryWriteTool {
     /// Create a new memory write tool.
-    pub fn new(workspace: Arc<Workspace>) -> Self {
-        Self { workspace }
+    pub fn new(
+        workspace: Arc<Workspace>,
+        orchestrator: Option<Arc<crate::agent::learning::LearningOrchestrator>>,
+    ) -> Self {
+        Self {
+            workspace,
+            orchestrator,
+        }
     }
 }
 
@@ -541,7 +594,7 @@ impl Tool for MemoryWriteTool {
          Use for facts, decisions, preferences, or lessons to remember across sessions. \
          Targets: 'memory' (MEMORY.md, long-term facts), 'daily_log' (timestamped notes), \
          'heartbeat' (HEARTBEAT.md checklist), and 'IDENTITY.md'. \
-         For SOUL.md / AGENTS.md / USER.md use prompt_manage instead of memory_write. \
+         For SOUL.md / SOUL.local.md / AGENTS.md / USER.md use prompt_manage instead of memory_write. \
          or a custom path. In direct DMs, memory/user/profile writes default to the actor overlay; \
          prefix with 'shared:' to force the household root. \
          ALWAYS write well-structured markdown: use ## headers for sections, bullet points, \
@@ -609,8 +662,8 @@ impl Tool for MemoryWriteTool {
             if !append {
                 return Err(ToolError::NotAuthorized(format!(
                     "'{}' is append-only. Add an '## Update' section with your changes \
-                     instead of overwriting. To fully restructure SOUL.md / AGENTS.md / \
-                     USER.md, use those targets with append: false.",
+                     instead of overwriting. To fully restructure SOUL.md / SOUL.local.md / \
+                     AGENTS.md / USER.md, use prompt_manage instead.",
                     target,
                 )));
             }
@@ -628,8 +681,8 @@ impl Tool for MemoryWriteTool {
             return Ok(ToolOutput::success(output, start.elapsed()));
         }
 
-        // SOUL.md / AGENTS.md / USER.md must be mutated through prompt_manage.
-        if [paths::SOUL, paths::AGENTS, paths::USER]
+        // SOUL.md / SOUL.local.md / AGENTS.md / USER.md must be mutated through prompt_manage.
+        if [paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER]
             .iter()
             .any(|p| file_name.eq_ignore_ascii_case(p))
         {
@@ -747,6 +800,22 @@ impl Tool for MemoryWriteTool {
             "content_length": content.len(),
         });
 
+        if let Some(orchestrator) = self.orchestrator.as_ref() {
+            let orchestrator = Arc::clone(orchestrator);
+            let user_id = ctx.user_id.clone();
+            let payload = serde_json::json!({
+                "tool": "memory_write",
+                "path": path,
+                "append": append,
+                "content_preview": content.chars().take(240).collect::<String>(),
+            });
+            tokio::spawn(async move {
+                orchestrator
+                    .mirror_workspace_write(&user_id, &payload)
+                    .await;
+            });
+        }
+
         Ok(ToolOutput::success(output, start.elapsed()))
     }
 
@@ -783,11 +852,7 @@ impl Tool for MemoryReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file from the workspace memory (database-backed storage). \
-         Use this to read files shown by memory_tree. NOT for local filesystem files \
-         (use read_file for those). Works with identity files, heartbeat checklist, \
-         memory, daily logs, or any custom workspace path. \
-         Returns empty content (not an error) if the file does not exist yet."
+        "Read a durable ThinClaw memory file. `SOUL.md` reads the canonical home soul in THINCLAW_HOME; `SOUL.local.md` and other files read workspace memory. Returns empty content (not an error) if the file does not exist yet."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -813,6 +878,10 @@ impl Tool for MemoryReadTool {
         })
     }
 
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::authoritative(ToolRouteIntent::MemoryRecall)
+    }
+
     async fn execute(
         &self,
         params: serde_json::Value,
@@ -822,6 +891,55 @@ impl Tool for MemoryReadTool {
         let workspace = workspace_for_ctx(&self.workspace, ctx);
 
         let path = require_str(&params, "path")?;
+
+        if path.eq_ignore_ascii_case(paths::SOUL) {
+            let content = match crate::identity::soul_store::read_home_soul() {
+                Ok(content) => content,
+                Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
+                    let output = serde_json::json!({
+                        "path": path,
+                        "content": "",
+                        "word_count": 0,
+                        "exists": false,
+                    });
+                    return Ok(ToolOutput::success(output, start.elapsed()));
+                }
+                Err(e) => return Err(ToolError::ExecutionFailed(format!("Read failed: {}", e))),
+            };
+
+            let total_lines = content.lines().count();
+            let sliced = if params.get("start_line").is_some() || params.get("num_lines").is_some()
+            {
+                let start_line = params
+                    .get("start_line")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1)
+                    .max(1) as usize;
+                let num_lines = params
+                    .get("num_lines")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as usize);
+                let lines: Vec<&str> = content.lines().collect();
+                let from = (start_line - 1).min(lines.len());
+                let to = match num_lines {
+                    Some(n) => (from + n).min(lines.len()),
+                    None => lines.len(),
+                };
+                lines[from..to].join("\n")
+            } else {
+                content.clone()
+            };
+
+            let output = serde_json::json!({
+                "path": path,
+                "content": sliced,
+                "word_count": sliced.split_whitespace().count(),
+                "total_lines": total_lines,
+                "updated_at": serde_json::Value::Null,
+                "exists": true,
+            });
+            return Ok(ToolOutput::success(output, start.elapsed()));
+        }
 
         // Graceful degradation: missing file → empty content, not an error.
         // Matches openclaw memory_get: { text: "", path } on ENOENT.
@@ -1043,7 +1161,7 @@ impl Tool for MemoryDeleteTool {
     fn description(&self) -> &str {
         "Delete a file from workspace memory (database-backed storage). \
          Cannot delete IDENTITY.md (append to it instead). \
-         SOUL.md / AGENTS.md / USER.md can be fully rewritten with prompt_manage \
+         SOUL.md / SOUL.local.md / AGENTS.md / USER.md can be fully rewritten with prompt_manage \
          rather than deleted. \
          Primary use-case: memory_delete('BOOTSTRAP.md') after the identity ritual completes."
     }
@@ -1071,28 +1189,87 @@ impl Tool for MemoryDeleteTool {
 
         let path = require_str(&params, "path")?;
 
-        // Only IDENTITY.md is delete-protected.
-        // SOUL/AGENTS/USER should be restructured with prompt_manage instead.
+        // IDENTITY.md is delete-protected.
+        // SOUL/SOUL.local/AGENTS/USER should be restructured with prompt_manage instead.
         let normalized = path.trim_start_matches('/');
+        if [paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER]
+            .iter()
+            .any(|p| normalized.eq_ignore_ascii_case(p))
+        {
+            return Err(ToolError::NotAuthorized(format!(
+                "'{}' cannot be deleted. Use prompt_manage to rewrite or refine prompt-managed identity files.",
+                path
+            )));
+        }
+
         if DELETE_PROTECTED_FILES
             .iter()
             .any(|p| normalized.eq_ignore_ascii_case(p))
         {
             return Err(ToolError::NotAuthorized(format!(
                 "'{}' cannot be deleted. Use memory_write to edit identity content. \
-                 To restructure SOUL.md / AGENTS.md / USER.md entirely, use \
+                 To restructure SOUL.md / SOUL.local.md / AGENTS.md / USER.md entirely, use \
                  prompt_manage instead of deleting.",
                 path
             )));
         }
 
-        workspace
-            .delete(path)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Delete failed: {}", e)))?;
-
-        // If BOOTSTRAP.md was deleted, notify the bridge to update frontend state.
         let is_bootstrap = normalized.eq_ignore_ascii_case(crate::workspace::paths::BOOTSTRAP);
+        if is_bootstrap {
+            // Keep a non-empty completion sentinel so workspace seeding does not
+            // recreate BOOTSTRAP.md on next startup.
+            workspace
+                .write(
+                    crate::workspace::paths::BOOTSTRAP,
+                    "<!-- bootstrap completed -->",
+                )
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!(
+                        "Failed to finalize BOOTSTRAP.md completion: {}",
+                        e
+                    ))
+                })?;
+
+            if workspace.user_id() != "default" {
+                let default_workspace = workspace.scoped_clone("default", workspace.agent_id());
+                let should_finalize_default = match default_workspace
+                    .read(crate::workspace::paths::BOOTSTRAP)
+                    .await
+                {
+                    Ok(doc) => !crate::agent::heartbeat::is_effectively_empty(&doc.content),
+                    Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => false,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to inspect default BOOTSTRAP.md while finalizing bootstrap: {}",
+                            e
+                        );
+                        false
+                    }
+                };
+
+                if should_finalize_default
+                    && let Err(e) = default_workspace
+                        .write(
+                            crate::workspace::paths::BOOTSTRAP,
+                            "<!-- bootstrap completed -->",
+                        )
+                        .await
+                {
+                    tracing::warn!(
+                        "Failed to mirror BOOTSTRAP.md completion into default workspace: {}",
+                        e
+                    );
+                }
+            }
+        } else {
+            workspace
+                .delete(path)
+                .await
+                .map_err(|e| ToolError::ExecutionFailed(format!("Delete failed: {}", e)))?;
+        }
+
+        // If BOOTSTRAP.md was completed, notify the bridge to update frontend state.
         if is_bootstrap && let Some(ref tx) = self.sse_sender {
             let _ = tx.send(crate::channels::web::types::SseEvent::BootstrapCompleted);
             tracing::info!("[memory_delete] Emitted BootstrapCompleted SSE event");
@@ -1148,7 +1325,7 @@ mod tests {
     #[test]
     fn test_memory_write_schema() {
         let workspace = make_test_workspace();
-        let tool = MemoryWriteTool::new(workspace);
+        let tool = MemoryWriteTool::new(workspace, None);
 
         assert_eq!(tool.name(), "memory_write");
 
@@ -1212,6 +1389,18 @@ mod tests {
         let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "shared:memory");
         assert!(!is_actor_scoped);
         assert_eq!(path, "MEMORY.md");
+    }
+
+    #[test]
+    fn test_memory_write_uses_job_actor_without_metadata_actor_id() {
+        let mut ctx = JobContext::with_user_and_actor("default", "actor-456", "chat", "test");
+        ctx.metadata = serde_json::json!({
+            "conversation_kind": "direct"
+        });
+
+        let (path, is_actor_scoped) = resolve_memory_write_path(&ctx, "profile");
+        assert!(is_actor_scoped);
+        assert_eq!(path, "actors/actor-456/context/profile.json");
     }
 }
 
@@ -1306,5 +1495,109 @@ mod session_search_smoke_tests {
                 .is_some()
         );
         assert!(summarizer.calls() >= 1);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_completion_also_finalizes_default_workspace() {
+        let (db, _guard) = crate::testing::test_db().await;
+        let base_workspace = Arc::new(Workspace::new_with_db("default", Arc::clone(&db)));
+        base_workspace
+            .seed_if_empty(Some("ThinClaw"), Some("balanced"))
+            .await
+            .expect("seed default workspace");
+
+        let user_workspace = base_workspace.scoped_clone("user-42", None);
+        user_workspace
+            .seed_if_empty(Some("ThinClaw"), Some("balanced"))
+            .await
+            .expect("seed user workspace");
+
+        let tool = MemoryDeleteTool::new(Arc::clone(&base_workspace));
+        let ctx = JobContext::with_user("user-42", "chat", "bootstrap-finish");
+        tool.execute(
+            serde_json::json!({
+                "path": crate::workspace::paths::BOOTSTRAP
+            }),
+            &ctx,
+        )
+        .await
+        .expect("memory_delete should finalize bootstrap");
+
+        let user_bootstrap = user_workspace
+            .read(crate::workspace::paths::BOOTSTRAP)
+            .await
+            .expect("user bootstrap should still exist as sentinel");
+        let default_bootstrap = base_workspace
+            .read(crate::workspace::paths::BOOTSTRAP)
+            .await
+            .expect("default bootstrap should still exist as sentinel");
+
+        assert_eq!(user_bootstrap.content, "<!-- bootstrap completed -->");
+        assert_eq!(default_bootstrap.content, "<!-- bootstrap completed -->");
+    }
+
+    #[tokio::test]
+    async fn session_search_direct_defaults_to_cross_channel_actor_history() {
+        let (db, _guard) = crate::testing::test_db().await;
+
+        let telegram_conversation = db
+            .create_conversation("telegram", "user-1", Some("tg-thread"))
+            .await
+            .expect("create telegram conversation");
+        db.update_conversation_identity(
+            telegram_conversation,
+            Some("user-1"),
+            Some("user-1"),
+            Some(crate::identity::scope_id_from_key("principal:user-1")),
+            crate::history::ConversationKind::Direct,
+            Some("telegram://direct/user-1"),
+        )
+        .await
+        .expect("set telegram identity");
+        db.add_conversation_message(telegram_conversation, "user", "telegram ping from mobile")
+            .await
+            .expect("insert telegram message");
+
+        let gateway_conversation = db
+            .create_conversation("gateway", "user-1", Some("gateway-thread"))
+            .await
+            .expect("create gateway conversation");
+        db.update_conversation_identity(
+            gateway_conversation,
+            Some("user-1"),
+            Some("user-1"),
+            Some(crate::identity::scope_id_from_key("principal:user-1")),
+            crate::history::ConversationKind::Direct,
+            Some("gateway://direct/user-1/actor/user-1/thread/gateway-thread"),
+        )
+        .await
+        .expect("set gateway identity");
+        db.add_conversation_message(gateway_conversation, "user", "local web note")
+            .await
+            .expect("insert gateway message");
+
+        let mut ctx = make_ctx();
+        ctx.metadata = serde_json::json!({
+            "channel": "gateway",
+            "thread_id": "gateway-thread",
+            "conversation_kind": "direct",
+        });
+
+        let tool = SessionSearchTool::new(Arc::clone(&db));
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "query": "telegram ping"
+                }),
+                &ctx,
+            )
+            .await
+            .expect("session_search should succeed");
+
+        let first = output.result["results"]
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("expected at least one result");
+        assert_eq!(first["channel"], serde_json::json!("telegram"));
     }
 }

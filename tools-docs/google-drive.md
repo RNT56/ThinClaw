@@ -7,10 +7,10 @@
 Uses **Google OAuth 2.0** (shared credentials with all Google tools).
 
 ```bash
-thinclaw tool auth gmail
+thinclaw tool auth google-drive
 ```
 
-Authenticate once with any Google tool that uses the shared token. `thinclaw tool auth gmail` is the current documented path.
+Authenticate once with any installed Google tool that uses the shared token. Re-running auth later upgrades the shared credential if you install more Google tools and need additional scopes.
 
 ### Secret Name
 

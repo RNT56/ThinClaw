@@ -19,6 +19,7 @@ pub use store::{
     ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationScope,
     ConversationSummary, JobEventRecord, LearningArtifactVersion, LearningCandidate,
     LearningCodeProposal, LearningEvaluation, LearningEvent, LearningFeedbackRecord,
-    LearningRollbackRecord, LinkedConversationRecall, LlmCallRecord, SandboxJobRecord,
-    SandboxJobSummary, SessionSearchHit, SettingRow,
+    LearningRollbackRecord, LinkedConversationRecall, LlmCallRecord, OutcomeContract,
+    OutcomeContractQuery, OutcomeEvaluatorHealth, OutcomeObservation, OutcomePendingUser,
+    OutcomeSummaryStats, SandboxJobRecord, SandboxJobSummary, SessionSearchHit, SettingRow,
 };

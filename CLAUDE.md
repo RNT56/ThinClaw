@@ -4,7 +4,7 @@ This file is the maintainer-facing map for ThinClaw. It is intentionally high-le
 
 ## What ThinClaw Is
 
-ThinClaw is a Rust-based, self-hosted personal agent runtime. It can run:
+ThinClaw is a Rust-based, self-hosted personal agent. It can run:
 
 - as a standalone binary
 - as a long-running service with the web gateway
@@ -13,6 +13,7 @@ ThinClaw is a Rust-based, self-hosted personal agent runtime. It can run:
 The system combines:
 
 - a multi-session agent runtime
+- a named cross-surface identity with personality packs and temporary session overlays
 - multiple operator-facing surfaces: CLI, web gateway, and channels
 - hybrid extensibility through native Rust, WASM, and MCP
 - layered safety controls around tools, secrets, network access, and external content
@@ -30,8 +31,12 @@ Use these as the current documentation authority before updating surrounding doc
 
 | Topic | Canonical Doc |
 |---|---|
+| Identity packs and session personality | `docs/IDENTITY_AND_PERSONALITY.md` |
+| Memory, continuity, and growth vocabulary | `docs/MEMORY_AND_GROWTH.md` |
+| Research, experiments, and remote runners | `docs/RESEARCH_AND_EXPERIMENTS.md` |
+| Terminal commands (`thinclaw run`, etc.) | `docs/CLI_REFERENCE.md` |
+| Shared surface command vocabulary | `docs/SURFACES_AND_COMMANDS.md` |
 | Setup and onboarding | `src/setup/README.md` |
-| Boot and runtime flow | `Agent_flow.md` |
 | Deployment and remote access | `docs/DEPLOYMENT.md` |
 | Channel architecture | `docs/CHANNEL_ARCHITECTURE.md` |
 | Extension architecture | `docs/EXTENSION_SYSTEM.md` |
@@ -40,6 +45,7 @@ Use these as the current documentation authority before updating surrounding doc
 | Security and network model | `src/NETWORK_SECURITY.md` |
 | LLM provider catalog | `src/config/provider_catalog.rs` |
 | LLM provider user guide | `docs/LLM_PROVIDERS.md` |
+| Build profiles and feature flags | `docs/BUILD_PROFILES.md` |
 | Feature-tracking changes | `FEATURE_PARITY.md` |
 
 When these docs disagree with broad overview docs, code and canonical docs win.
@@ -70,7 +76,7 @@ At a high level:
 3. The runtime wires operator surfaces and background systems around the session manager and dispatcher.
 4. The agent handles interactive work, background work, and external events through the same core runtime.
 
-For a deeper walkthrough, use `Agent_flow.md`.
+For a deeper walkthrough of startup and workspace shaping, use `src/setup/README.md`, `src/workspace/README.md`, and the agent/runtime modules directly.
 
 ## Current Architecture Notes
 
@@ -107,6 +113,13 @@ cargo build --release --features bundled-wasm
 ./scripts/build-all.sh
 ```
 
+Temporary dev note:
+
+- If Docker Desktop stops answering during local Postgres work, check host disk pressure first with `df -h /System/Volumes/Data`. On this machine, Docker failed to start because the host disk was nearly full and Docker backend logging hit `no space left on device`.
+- The fastest recovery so far was: remove large local build artifacts first (especially repo `target*` directories), then fully restart Docker Desktop by killing stale `com.docker.backend` / `com.docker.virtualization` processes and relaunching the app.
+- After Docker comes back, verify with `docker version`, `docker ps`, and then rerun the Postgres-targeted test commands instead of assuming the daemon is healthy.
+- A fresh local `pgvector/pgvector:pg17` container is enough for `db_contract` and `schema_divergence`, but broader Postgres-backed integration tests like `workspace_integration` also need the repo migrations applied first. Mirror CI by applying `migrations/V*.sql` into `thinclaw_test` before treating workspace/search failures as a product bug.
+
 ## Documentation Rules
 
 - Keep `README.md` as the front door, not the full manual.
@@ -118,6 +131,8 @@ cargo build --release --features bundled-wasm
 ## Common Update Triggers
 
 - If you change onboarding, update `src/setup/README.md` and any user-facing setup references.
+- If you change identity packs, `/personality`, memory/growth surfaces, or cross-surface vocabulary, update `docs/IDENTITY_AND_PERSONALITY.md`, `docs/MEMORY_AND_GROWTH.md`, and `docs/SURFACES_AND_COMMANDS.md`.
+- If you change experiments, research projects, runners, or GPU cloud flows, update `docs/RESEARCH_AND_EXPERIMENTS.md`.
 - If you change delivery architecture, update `docs/CHANNEL_ARCHITECTURE.md` and the affected channel guides.
 - If you change channel formatting behavior, update the owning native channel or WASM channel manifest first, then update `docs/CHANNEL_ARCHITECTURE.md` if the operator-facing behavior changed.
 - If you change extension flows, update `docs/EXTENSION_SYSTEM.md`, `src/tools/README.md`, and any affected tool docs.

@@ -252,6 +252,57 @@ CREATE INDEX IF NOT EXISTS idx_learning_code_proposals_user_status_created
 CREATE INDEX IF NOT EXISTS idx_learning_code_proposals_status
     ON learning_code_proposals(status);
 
+CREATE TABLE IF NOT EXISTS outcome_contracts (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    actor_id TEXT,
+    channel TEXT,
+    thread_id TEXT,
+    source_kind TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    contract_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    summary TEXT,
+    due_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    final_verdict TEXT,
+    final_score REAL,
+    evaluation_details TEXT NOT NULL DEFAULT '{}',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    dedupe_key TEXT NOT NULL,
+    claimed_at TEXT,
+    evaluated_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_contracts_dedupe_key
+    ON outcome_contracts(dedupe_key);
+CREATE INDEX IF NOT EXISTS idx_outcome_contracts_status_due
+    ON outcome_contracts(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_outcome_contracts_user_actor_thread_status
+    ON outcome_contracts(user_id, actor_id, thread_id, status);
+CREATE INDEX IF NOT EXISTS idx_outcome_contracts_source
+    ON outcome_contracts(source_kind, source_id);
+
+CREATE TABLE IF NOT EXISTS outcome_observations (
+    id TEXT PRIMARY KEY,
+    contract_id TEXT NOT NULL REFERENCES outcome_contracts(id) ON DELETE CASCADE,
+    observation_kind TEXT NOT NULL,
+    polarity TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 0,
+    summary TEXT,
+    evidence TEXT NOT NULL DEFAULT '{}',
+    fingerprint TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outcome_observations_contract_fingerprint
+    ON outcome_observations(contract_id, fingerprint);
+CREATE INDEX IF NOT EXISTS idx_outcome_observations_contract_observed_at
+    ON outcome_observations(contract_id, observed_at DESC);
+
 -- ==================== Experiments ====================
 
 CREATE TABLE IF NOT EXISTS experiment_runner_profiles (
@@ -265,6 +316,8 @@ CREATE TABLE IF NOT EXISTS experiment_runner_profiles (
     secret_references TEXT NOT NULL DEFAULT '[]',
     cache_policy TEXT NOT NULL DEFAULT '{}',
     status TEXT NOT NULL DEFAULT 'draft',
+    readiness_class TEXT NOT NULL DEFAULT 'manual_only',
+    launch_eligible INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -304,6 +357,7 @@ CREATE TABLE IF NOT EXISTS experiment_campaigns (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES experiment_projects(id) ON DELETE CASCADE,
     runner_profile_id TEXT NOT NULL REFERENCES experiment_runner_profiles(id) ON DELETE RESTRICT,
+    owner_user_id TEXT NOT NULL DEFAULT 'default',
     status TEXT NOT NULL DEFAULT 'pending_baseline',
     baseline_commit TEXT,
     best_commit TEXT,
@@ -523,6 +577,7 @@ CREATE TABLE IF NOT EXISTS agent_jobs (
     total_tokens_used INTEGER NOT NULL DEFAULT 0,
     max_tokens INTEGER NOT NULL DEFAULT 0,
     metadata TEXT NOT NULL DEFAULT '{}',
+    credential_grants TEXT NOT NULL DEFAULT '[]',
     transitions TEXT NOT NULL DEFAULT '[]',
     repair_attempts INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -731,6 +786,13 @@ CREATE TABLE IF NOT EXISTS secrets (
     encrypted_value BLOB NOT NULL,
     key_salt BLOB NOT NULL,
     provider TEXT,
+    encryption_version INTEGER NOT NULL DEFAULT 2,
+    key_version INTEGER NOT NULL DEFAULT 1,
+    cipher TEXT NOT NULL DEFAULT 'aes-256-gcm',
+    kdf TEXT NOT NULL DEFAULT 'hkdf-sha256',
+    aad_version INTEGER NOT NULL DEFAULT 1,
+    created_by TEXT,
+    rotated_at TEXT,
     expires_at TEXT,
     last_used_at TEXT,
     usage_count INTEGER NOT NULL DEFAULT 0,
@@ -740,6 +802,19 @@ CREATE TABLE IF NOT EXISTS secrets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_secrets_user ON secrets(user_id);
+
+CREATE TABLE IF NOT EXISTS secret_key_versions (
+    version INTEGER PRIMARY KEY,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    retired_at TEXT
+);
+
+INSERT OR IGNORE INTO secret_key_versions (version, status)
+VALUES (1, 'active');
+
+CREATE INDEX IF NOT EXISTS idx_secret_key_versions_status
+    ON secret_key_versions(status);
 
 -- ==================== WASM Tools ====================
 
@@ -886,11 +961,13 @@ CREATE TABLE IF NOT EXISTS routines (
     notify_on_success INTEGER NOT NULL DEFAULT 0,
     notify_on_failure INTEGER NOT NULL DEFAULT 1,
     notify_on_attention INTEGER NOT NULL DEFAULT 1,
+    policy_config TEXT NOT NULL DEFAULT '{}',
     state TEXT NOT NULL DEFAULT '{}',
     last_run_at TEXT,
     next_fire_at TEXT,
     run_count INTEGER NOT NULL DEFAULT 0,
     consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    config_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (user_id, actor_id, name)
@@ -906,6 +983,7 @@ CREATE TABLE IF NOT EXISTS routine_runs (
     routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
     trigger_type TEXT NOT NULL,
     trigger_detail TEXT,
+    trigger_key TEXT,
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at TEXT,
     status TEXT NOT NULL DEFAULT 'running',
@@ -916,6 +994,93 @@ CREATE TABLE IF NOT EXISTS routine_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_routine_runs_routine ON routine_runs(routine_id);
+CREATE INDEX IF NOT EXISTS idx_routine_runs_routine_trigger_key
+    ON routine_runs(routine_id, trigger_key);
+
+CREATE TABLE IF NOT EXISTS routine_event_inbox (
+    id TEXT PRIMARY KEY,
+    principal_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    event_type TEXT NOT NULL DEFAULT 'message',
+    raw_sender_id TEXT NOT NULL,
+    conversation_scope_id TEXT NOT NULL,
+    stable_external_conversation_key TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    diagnostics TEXT NOT NULL DEFAULT '{}',
+    claimed_by TEXT,
+    claimed_at TEXT,
+    lease_expires_at TEXT,
+    processed_at TEXT,
+    error_message TEXT,
+    matched_routines INTEGER NOT NULL DEFAULT 0,
+    fired_routines INTEGER NOT NULL DEFAULT 0,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_routine_event_inbox_status_created
+    ON routine_event_inbox(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_routine_event_inbox_claimed_at
+    ON routine_event_inbox(claimed_at);
+CREATE INDEX IF NOT EXISTS idx_routine_event_inbox_actor_created
+    ON routine_event_inbox(principal_id, actor_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_routine_event_inbox_idempotency
+    ON routine_event_inbox(idempotency_key);
+
+CREATE TABLE IF NOT EXISTS routine_event_evaluations (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL REFERENCES routine_event_inbox(id) ON DELETE CASCADE,
+    routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+    decision TEXT NOT NULL,
+    reason TEXT,
+    details TEXT NOT NULL DEFAULT '{}',
+    sequence_num INTEGER NOT NULL DEFAULT 0,
+    channel TEXT NOT NULL,
+    content_preview TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(event_id, routine_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_routine_event_evaluations_routine_created
+    ON routine_event_evaluations(routine_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_routine_event_evaluations_event
+    ON routine_event_evaluations(event_id, sequence_num ASC);
+
+CREATE TABLE IF NOT EXISTS routine_trigger_queue (
+    id TEXT PRIMARY KEY,
+    routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+    trigger_kind TEXT NOT NULL,
+    trigger_label TEXT,
+    due_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    decision TEXT,
+    active_key TEXT,
+    idempotency_key TEXT NOT NULL,
+    claimed_by TEXT,
+    claimed_at TEXT,
+    lease_expires_at TEXT,
+    processed_at TEXT,
+    error_message TEXT,
+    diagnostics TEXT NOT NULL DEFAULT '{}',
+    coalesced_count INTEGER NOT NULL DEFAULT 0,
+    backlog_collapsed INTEGER NOT NULL DEFAULT 0,
+    routine_config_version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_routine_trigger_queue_active_key
+    ON routine_trigger_queue(active_key);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_routine_trigger_queue_idempotency
+    ON routine_trigger_queue(idempotency_key);
+CREATE INDEX IF NOT EXISTS idx_routine_trigger_queue_status_due
+    ON routine_trigger_queue(status, due_at ASC);
+CREATE INDEX IF NOT EXISTS idx_routine_trigger_queue_routine_created
+    ON routine_trigger_queue(routine_id, created_at DESC);
 
 -- ==================== Settings ====================
 
@@ -1010,6 +1175,7 @@ CREATE TABLE IF NOT EXISTS agent_workspaces (
     trigger_keywords TEXT NOT NULL DEFAULT '[]',
     allowed_tools TEXT,
     allowed_skills TEXT,
+    tool_profile TEXT,
     is_default INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1038,6 +1204,58 @@ pub struct LibsqlColumnUpgrade {
 /// bring pre-V10/V11 tables up to date.  Each is run individually so that
 /// "duplicate column" errors (column already present) can be safely ignored.
 pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
+    // ── V23: secret key-version metadata ───────────────────────────────
+    LibsqlColumnUpgrade {
+        version: 23,
+        description: "Create secret key versions metadata table",
+        sql: "CREATE TABLE IF NOT EXISTS secret_key_versions (version INTEGER PRIMARY KEY, status TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), retired_at TEXT)",
+    },
+    LibsqlColumnUpgrade {
+        version: 23,
+        description: "Initialize active secret key version",
+        sql: "INSERT OR IGNORE INTO secret_key_versions (version, status) VALUES (1, 'active')",
+    },
+    LibsqlColumnUpgrade {
+        version: 23,
+        description: "Index secret key version status",
+        sql: "CREATE INDEX IF NOT EXISTS idx_secret_key_versions_status ON secret_key_versions(status)",
+    },
+    // ── V22: secrets hardening metadata ─────────────────────────────────
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret encryption version",
+        sql: "ALTER TABLE secrets ADD COLUMN encryption_version INTEGER NOT NULL DEFAULT 1",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret key version",
+        sql: "ALTER TABLE secrets ADD COLUMN key_version INTEGER NOT NULL DEFAULT 1",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret cipher metadata",
+        sql: "ALTER TABLE secrets ADD COLUMN cipher TEXT NOT NULL DEFAULT 'aes-256-gcm'",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret KDF metadata",
+        sql: "ALTER TABLE secrets ADD COLUMN kdf TEXT NOT NULL DEFAULT 'hkdf-sha256'",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret AAD version",
+        sql: "ALTER TABLE secrets ADD COLUMN aad_version INTEGER NOT NULL DEFAULT 0",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret creator metadata",
+        sql: "ALTER TABLE secrets ADD COLUMN created_by TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 22,
+        description: "Add secret rotation timestamp",
+        sql: "ALTER TABLE secrets ADD COLUMN rotated_at TEXT",
+    },
     // ── V11: conversations ──────────────────────────────────────────────
     LibsqlColumnUpgrade {
         version: 11,
@@ -1154,6 +1372,11 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         description: "Add allowed skills/workspace restrictions",
         sql: "ALTER TABLE agent_workspaces ADD COLUMN allowed_skills TEXT",
     },
+    LibsqlColumnUpgrade {
+        version: 14,
+        description: "Add tool profile/workspace restrictions",
+        sql: "ALTER TABLE agent_workspaces ADD COLUMN tool_profile TEXT",
+    },
     // ── V11: memory_chunks embedding parity ─────────────────────────────
     LibsqlColumnUpgrade {
         version: 11,
@@ -1175,6 +1398,16 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         version: 16,
         description: "Add autonomy mode to experiment projects",
         sql: "ALTER TABLE experiment_projects ADD COLUMN autonomy_mode TEXT NOT NULL DEFAULT 'autonomous'",
+    },
+    LibsqlColumnUpgrade {
+        version: 17,
+        description: "Add readiness class to experiment runners",
+        sql: "ALTER TABLE experiment_runner_profiles ADD COLUMN readiness_class TEXT NOT NULL DEFAULT 'manual_only'",
+    },
+    LibsqlColumnUpgrade {
+        version: 17,
+        description: "Add launch eligibility to experiment runners",
+        sql: "ALTER TABLE experiment_runner_profiles ADD COLUMN launch_eligible INTEGER NOT NULL DEFAULT 0",
     },
     LibsqlColumnUpgrade {
         version: 16,
@@ -1317,6 +1550,113 @@ pub const UPGRADES: &[LibsqlColumnUpgrade] = &[
         description: "Add model usage campaign lookup index",
         sql: "CREATE INDEX IF NOT EXISTS idx_experiment_model_usage_campaign ON experiment_model_usage_records(json_extract(metadata, '$.experiment_campaign_id'), created_at DESC)",
     },
+    LibsqlColumnUpgrade {
+        version: 18,
+        description: "Add campaign owner user id",
+        sql: "ALTER TABLE experiment_campaigns ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT 'default'",
+    },
+    LibsqlColumnUpgrade {
+        version: 19,
+        description: "Add sandbox credential grants column",
+        sql: "ALTER TABLE agent_jobs ADD COLUMN credential_grants TEXT NOT NULL DEFAULT '[]'",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine policy config column",
+        sql: "ALTER TABLE routines ADD COLUMN policy_config TEXT NOT NULL DEFAULT '{}'",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine config version column",
+        sql: "ALTER TABLE routines ADD COLUMN config_version INTEGER NOT NULL DEFAULT 1",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine run trigger key column",
+        sql: "ALTER TABLE routine_runs ADD COLUMN trigger_key TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine event type column",
+        sql: "ALTER TABLE routine_event_inbox ADD COLUMN event_type TEXT NOT NULL DEFAULT 'message'",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine event idempotency key column",
+        sql: "ALTER TABLE routine_event_inbox ADD COLUMN idempotency_key TEXT NOT NULL DEFAULT ''",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine event lease expiry column",
+        sql: "ALTER TABLE routine_event_inbox ADD COLUMN lease_expires_at TEXT",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine event attempt count column",
+        sql: "ALTER TABLE routine_event_inbox ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine event evaluation details column",
+        sql: "ALTER TABLE routine_event_evaluations ADD COLUMN details TEXT NOT NULL DEFAULT '{}'",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Create routine trigger queue table",
+        sql: r#"
+            CREATE TABLE IF NOT EXISTS routine_trigger_queue (
+                id TEXT PRIMARY KEY,
+                routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+                trigger_kind TEXT NOT NULL,
+                trigger_label TEXT,
+                due_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                decision TEXT,
+                active_key TEXT,
+                idempotency_key TEXT NOT NULL,
+                claimed_by TEXT,
+                claimed_at TEXT,
+                lease_expires_at TEXT,
+                processed_at TEXT,
+                error_message TEXT,
+                diagnostics TEXT NOT NULL DEFAULT '{}',
+                coalesced_count INTEGER NOT NULL DEFAULT 0,
+                backlog_collapsed INTEGER NOT NULL DEFAULT 0,
+                routine_config_version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        "#,
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine run trigger key index",
+        sql: "CREATE INDEX IF NOT EXISTS idx_routine_runs_routine_trigger_key ON routine_runs(routine_id, trigger_key)",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine event idempotency index",
+        sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_routine_event_inbox_idempotency ON routine_event_inbox(idempotency_key)",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine trigger queue active key index",
+        sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_routine_trigger_queue_active_key ON routine_trigger_queue(active_key)",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine trigger queue idempotency index",
+        sql: "CREATE UNIQUE INDEX IF NOT EXISTS idx_routine_trigger_queue_idempotency ON routine_trigger_queue(idempotency_key)",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine trigger queue status index",
+        sql: "CREATE INDEX IF NOT EXISTS idx_routine_trigger_queue_status_due ON routine_trigger_queue(status, due_at ASC)",
+    },
+    LibsqlColumnUpgrade {
+        version: 21,
+        description: "Add routine trigger queue routine index",
+        sql: "CREATE INDEX IF NOT EXISTS idx_routine_trigger_queue_routine_created ON routine_trigger_queue(routine_id, created_at DESC)",
+    },
 ];
 
 /// Idempotent data repairs for legacy libSQL databases.
@@ -1364,6 +1704,13 @@ pub const DATA_REPAIRS: &[&str] = &[
        OR actor_id = 'default'
     "#,
     r#"
+    UPDATE agent_jobs
+    SET credential_grants = COALESCE(NULLIF(description, ''), '[]')
+    WHERE source = 'sandbox'
+      AND (credential_grants IS NULL OR credential_grants = '' OR credential_grants = '[]')
+      AND description LIKE '[%'
+    "#,
+    r#"
     UPDATE routines
     SET actor_id = CASE
             WHEN actor_id IS NULL OR actor_id = '' OR actor_id = 'default'
@@ -1373,6 +1720,17 @@ pub const DATA_REPAIRS: &[&str] = &[
     WHERE actor_id IS NULL
        OR actor_id = ''
        OR actor_id = 'default'
+    "#,
+    r#"
+    UPDATE routine_event_inbox
+    SET idempotency_key = COALESCE(NULLIF(idempotency_key, ''), id),
+        event_type = COALESCE(NULLIF(event_type, ''), 'message'),
+        attempt_count = COALESCE(attempt_count, 0)
+    WHERE idempotency_key IS NULL
+       OR idempotency_key = ''
+       OR event_type IS NULL
+       OR event_type = ''
+       OR attempt_count IS NULL
     "#,
     r#"
     UPDATE memory_chunks
@@ -1395,6 +1753,7 @@ mod tests {
     fn schema_includes_learning_tables() {
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS learning_events"));
         assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS learning_code_proposals"));
+        assert!(SCHEMA.contains("CREATE TABLE IF NOT EXISTS outcome_contracts"));
         assert!(SCHEMA.contains("conversation_messages_fts"));
     }
 

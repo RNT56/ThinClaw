@@ -9,15 +9,24 @@ warn = "#F4C468"
 bad = "#FF8080"
 header = "#6AA6FF"
 prompt_symbol = "›"
-ascii_art = [
-  '        .--------------------------------------.',
-  '       /  []  []  []  []  []  []  []  []       \',
-  '      |==========================================|',
-  '      |  NAV  COMMS  MAP  TOOLS  MEMORY  STATUS  |',
-  '      |__________________________________________|',
-  '           HUMANIST FLIGHT DECK ONLINE',
+hero_art = [
+  '      ╭─╮      ',
+  '   ╭──┤◈├──╮   ',
+  '  ╭╯╲ ╰┬╯ ╱╰╮  ',
+  '  │ ╰╮ │ ╭╯ │  ',
+  '  │ ╭╯ │ ╰╮ │  ',
+  '  ╰╮│  │  │╭╯  ',
+  '   ││ ╱╳╲ ││   ',
+  '   ││ ╲╳╱ ││   ',
+  '   │╰─╮█╭─╯│   ',
+  '   ╰──╯█╰──╯   ',
+  '       ║       ',
 ]
-tool_emojis = { shell = "🛠", browser = "🛰", memory = "🧠", search_files = "🗂", todo = "📋", subagent = "🧭" }
+tool_emojis = { shell = "⌘", browser = "◉", memory = "▣", search_files = "⌕", todo = "☰", subagent = "⟁" }
+border_style = "rounded"
+header_alignment = "left"
+status_gradient = true
+spinner_style = "braille"
 
 [web]
 aura_primary = "#6AA6FF"

@@ -34,7 +34,10 @@ use uuid::Uuid;
 use crate::agent::learning::{
     ImprovementClass, LearningEvent as RuntimeLearningEvent, LearningOrchestrator, RiskTier,
 };
-use crate::agent::routine::RunStatus;
+use crate::agent::routine::{
+    RunStatus, routine_state_has_runtime_advance_for_run, routine_state_with_runtime_advance,
+};
+use crate::agent::routine_engine::persist_routine_runtime_update;
 use crate::channels::web::types::SseEvent;
 use crate::channels::{ChannelManager, StatusUpdate};
 use crate::config::SkillsConfig;
@@ -44,7 +47,7 @@ use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
 use crate::safety::SafetyLayer;
 use crate::skills::{LoadedSkill, SkillRegistry, prefilter_skills};
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
 use crate::workspace::Workspace;
 
 /// Maximum tool iterations for a sub-agent (less than the main agent).
@@ -144,6 +147,8 @@ pub struct SubagentConfig {
     pub allow_nested: bool,
     /// Maximum tool iterations per sub-agent.
     pub max_tool_iterations: usize,
+    /// Default execution profile for delegated sub-agents.
+    pub default_tool_profile: ToolProfile,
 }
 
 impl Default for SubagentConfig {
@@ -153,6 +158,7 @@ impl Default for SubagentConfig {
             default_timeout_secs: DEFAULT_TIMEOUT_SECS,
             allow_nested: false,
             max_tool_iterations: SUBAGENT_MAX_ITERATIONS,
+            default_tool_profile: ToolProfile::ExplicitOnly,
         }
     }
 }
@@ -178,6 +184,7 @@ fn extract_subagent_message(arguments: &serde_json::Value) -> Option<String> {
 fn with_subagent_thread_metadata(
     metadata: &serde_json::Value,
     parent_thread_id: &str,
+    channel_name: &str,
 ) -> serde_json::Value {
     let mut merged = if metadata.is_object() {
         metadata.clone()
@@ -186,6 +193,10 @@ fn with_subagent_thread_metadata(
     };
 
     if let Some(object) = merged.as_object_mut() {
+        object.insert(
+            "channel".to_string(),
+            serde_json::Value::String(channel_name.to_string()),
+        );
         object.insert(
             "thread_id".to_string(),
             serde_json::Value::String(parent_thread_id.to_string()),
@@ -320,6 +331,21 @@ pub struct SubagentSpawnRequest {
     pub system_prompt: Option<String>,
     /// Optional model override for the sub-agent.
     pub model: Option<String>,
+    /// Structured task packet used as the canonical bounded assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_packet: Option<SubagentTaskPacket>,
+    /// How the sub-agent may source memory/context beyond the provided task packet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mode: Option<SubagentMemoryMode>,
+    /// Tool gating policy for the sub-agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_mode: Option<SubagentToolMode>,
+    /// Skill gating policy for the sub-agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_mode: Option<SubagentSkillMode>,
+    /// Optional execution profile override for the sub-agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_profile: Option<ToolProfile>,
     /// Optional list of allowed tool names. If None, all tools are available.
     pub allowed_tools: Option<Vec<String>>,
     /// Optional list of allowed skill names. If None, all skills remain visible.
@@ -340,6 +366,243 @@ pub struct SubagentSpawnRequest {
     /// If false, return immediately and re-inject the result on completion.
     #[serde(default)]
     pub wait: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentMemoryMode {
+    #[default]
+    ProvidedContextOnly,
+    GrantedToolsOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentToolMode {
+    #[default]
+    ExplicitOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentSkillMode {
+    #[default]
+    ExplicitOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubagentProvidedContext {
+    pub title: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SubagentTaskPacket {
+    pub objective: String,
+    #[serde(default)]
+    pub todos: Vec<String>,
+    #[serde(default)]
+    pub acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub provided_context: Vec<SubagentProvidedContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_summary: Option<String>,
+}
+
+impl SubagentSpawnRequest {
+    pub fn normalize_strict(
+        &mut self,
+        inherited_tools: Option<&[String]>,
+        inherited_skills: Option<&[String]>,
+        default_tool_profile: ToolProfile,
+    ) {
+        let objective = self
+            .task_packet
+            .as_ref()
+            .map(|packet| packet.objective.trim().to_string())
+            .filter(|objective| !objective.is_empty())
+            .unwrap_or_else(|| self.task.trim().to_string());
+
+        let packet = self
+            .task_packet
+            .get_or_insert_with(SubagentTaskPacket::default);
+        packet.objective = objective.clone();
+        packet.todos.retain(|item| !item.trim().is_empty());
+        packet
+            .acceptance_criteria
+            .retain(|item| !item.trim().is_empty());
+        packet.constraints.retain(|item| !item.trim().is_empty());
+        packet
+            .provided_context
+            .retain(|item| !item.title.trim().is_empty() || !item.content.trim().is_empty());
+        if packet
+            .parent_summary
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            packet.parent_summary = None;
+        }
+
+        self.task = objective;
+        self.memory_mode = Some(self.memory_mode.clone().unwrap_or_default());
+        self.tool_mode = Some(self.tool_mode.clone().unwrap_or_default());
+        self.skill_mode = Some(self.skill_mode.clone().unwrap_or_default());
+        self.tool_profile = Some(self.tool_profile.unwrap_or(default_tool_profile));
+
+        let requested_tools = self.allowed_tools.take();
+        let normalized_tools = normalize_capability_allowlist(inherited_tools, requested_tools);
+        self.allowed_tools = if inherited_tools.is_some()
+            || self.tool_profile == Some(ToolProfile::ExplicitOnly)
+            || !normalized_tools.is_empty()
+        {
+            Some(normalized_tools)
+        } else {
+            None
+        };
+        self.allowed_skills = Some(normalize_capability_allowlist(
+            inherited_skills,
+            self.allowed_skills.take(),
+        ));
+    }
+
+    pub fn task_packet(&self) -> SubagentTaskPacket {
+        let mut packet = self.task_packet.clone().unwrap_or_default();
+        if packet.objective.trim().is_empty() {
+            packet.objective = self.task.clone();
+        }
+        packet
+    }
+}
+
+fn normalize_capability_allowlist(
+    inherited: Option<&[String]>,
+    requested: Option<Vec<String>>,
+) -> Vec<String> {
+    let mut merged = match (inherited, requested) {
+        (Some(inherited), Some(requested)) => {
+            let inherited: std::collections::HashSet<&str> =
+                inherited.iter().map(String::as_str).collect();
+            requested
+                .into_iter()
+                .filter(|name| inherited.contains(name.as_str()))
+                .collect::<Vec<_>>()
+        }
+        (Some(inherited), None) => inherited.to_vec(),
+        (None, Some(requested)) => requested,
+        (None, None) => Vec::new(),
+    };
+    merged.sort();
+    merged.dedup();
+    merged
+}
+
+fn subagent_memory_tool_names() -> &'static [&'static str] {
+    &[
+        "session_search",
+        "memory_search",
+        "memory_read",
+        "external_memory_recall",
+        "external_memory_status",
+    ]
+}
+
+fn filter_tools_for_memory_mode(
+    tools: Vec<String>,
+    memory_mode: &SubagentMemoryMode,
+) -> Vec<String> {
+    if *memory_mode == SubagentMemoryMode::GrantedToolsOnly {
+        return tools;
+    }
+
+    let blocked: std::collections::HashSet<&str> =
+        subagent_memory_tool_names().iter().copied().collect();
+    tools
+        .into_iter()
+        .filter(|tool| !blocked.contains(tool.as_str()))
+        .collect()
+}
+
+fn subagent_memory_mode_label(mode: &SubagentMemoryMode) -> &'static str {
+    match mode {
+        SubagentMemoryMode::ProvidedContextOnly => "provided_context_only",
+        SubagentMemoryMode::GrantedToolsOnly => "granted_tools_only",
+    }
+}
+
+fn subagent_tool_mode_label(mode: &SubagentToolMode) -> &'static str {
+    match mode {
+        SubagentToolMode::ExplicitOnly => "explicit_only",
+    }
+}
+
+fn subagent_skill_mode_label(mode: &SubagentSkillMode) -> &'static str {
+    match mode {
+        SubagentSkillMode::ExplicitOnly => "explicit_only",
+    }
+}
+
+fn render_task_packet(packet: &SubagentTaskPacket) -> String {
+    let mut sections = vec![format!("Objective: {}", packet.objective.trim())];
+
+    if !packet.todos.is_empty() {
+        sections.push(format!(
+            "Todos:\n{}",
+            packet
+                .todos
+                .iter()
+                .map(|item| format!("- {}", item.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    if !packet.acceptance_criteria.is_empty() {
+        sections.push(format!(
+            "Acceptance Criteria:\n{}",
+            packet
+                .acceptance_criteria
+                .iter()
+                .map(|item| format!("- {}", item.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    if !packet.constraints.is_empty() {
+        sections.push(format!(
+            "Constraints:\n{}",
+            packet
+                .constraints
+                .iter()
+                .map(|item| format!("- {}", item.trim()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+
+    if !packet.provided_context.is_empty() {
+        sections.push(format!(
+            "Provided Context:\n{}",
+            packet
+                .provided_context
+                .iter()
+                .map(|item| format!("### {}\n{}", item.title.trim(), item.content.trim()))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        ));
+    }
+
+    if let Some(summary) = packet
+        .parent_summary
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        sections.push(format!("Parent Summary:\n{}", summary.trim()));
+    }
+
+    sections.join("\n\n")
 }
 
 /// The sub-agent executor manages sub-agent lifecycle.
@@ -472,13 +735,14 @@ impl SubagentExecutor {
     /// re-injects the result through the `result_tx` channel on completion.
     pub async fn spawn(
         &self,
-        request: SubagentSpawnRequest,
+        mut request: SubagentSpawnRequest,
         channel_name: &str,
         channel_metadata: &serde_json::Value,
         parent_user_id: &str,
         parent_identity: Option<&ResolvedIdentity>,
         parent_thread_id: Option<&str>,
     ) -> Result<SubagentResult, Error> {
+        request.normalize_strict(None, None, self.config.default_tool_profile);
         let id = Uuid::new_v4();
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let heartbeat_cancel_tx = cancel_tx.clone();
@@ -545,6 +809,13 @@ impl SubagentExecutor {
 
         let name = request.name.clone();
         let task = request.task.clone();
+        let task_packet = request.task_packet();
+        let memory_mode = request.memory_mode.clone().unwrap_or_default();
+        let tool_mode = request.tool_mode.clone().unwrap_or_default();
+        let skill_mode = request.skill_mode.clone().unwrap_or_default();
+        let tool_profile = request
+            .tool_profile
+            .unwrap_or(self.config.default_tool_profile);
 
         // Clone shared deps for the spawned task
         let llm = if let Some(model_spec) = request.model.as_ref() {
@@ -559,7 +830,10 @@ impl SubagentExecutor {
         let tools = self.tools.clone();
         let channels = self.channels.clone();
         let ch_name = channel_name.to_string();
-        let allowed = request.allowed_tools.clone();
+        let allowed = Some(filter_tools_for_memory_mode(
+            request.allowed_tools.clone().unwrap_or_default(),
+            &memory_mode,
+        ));
         let allowed_skills = request.allowed_skills.clone();
         let result_tx = self.result_tx.clone();
         let principal_id = request.principal_id.clone();
@@ -581,10 +855,17 @@ impl SubagentExecutor {
                     .map(str::to_string)
             })
             .unwrap_or_else(|| "agent:main".to_string());
-        let ch_meta = with_subagent_thread_metadata(channel_metadata, &parent_thread_id);
+        let ch_meta =
+            with_subagent_thread_metadata(channel_metadata, &parent_thread_id, channel_name);
 
         let agent_name = name.clone();
         let agent_task = task.clone();
+        let event_task_packet = task_packet.clone();
+        let event_allowed_tools = allowed.clone().unwrap_or_default();
+        let event_allowed_skills = allowed_skills.clone().unwrap_or_default();
+        let event_memory_mode = subagent_memory_mode_label(&memory_mode).to_string();
+        let event_tool_mode = subagent_tool_mode_label(&tool_mode).to_string();
+        let event_skill_mode = subagent_skill_mode_label(&skill_mode).to_string();
 
         // Clone store + sse_tx + cost_tracker for routine finalization inside spawned task
         let store_for_task = self.store.clone();
@@ -599,6 +880,12 @@ impl SubagentExecutor {
                     agent_id: id.to_string(),
                     name: agent_name.clone(),
                     task: agent_task.clone(),
+                    task_packet: event_task_packet.clone(),
+                    allowed_tools: event_allowed_tools.clone(),
+                    allowed_skills: event_allowed_skills.clone(),
+                    memory_mode: event_memory_mode.clone(),
+                    tool_mode: event_tool_mode.clone(),
+                    skill_mode: event_skill_mode.clone(),
                 },
                 &ch_meta,
             )
@@ -609,6 +896,7 @@ impl SubagentExecutor {
         let join_handle = tokio::spawn(async move {
             let start = Instant::now();
             let (activity_tx, activity_rx) = watch::channel(Instant::now());
+            let store_for_subagent_loop = store_for_task.clone();
             let heartbeat = SubagentHeartbeat::spawn(
                 channels.clone(),
                 ch_name.clone(),
@@ -637,9 +925,15 @@ impl SubagentExecutor {
                     max_iterations,
                     allowed.as_deref(),
                     allowed_skills.as_deref(),
+                    &task_packet,
+                    &memory_mode,
+                    &tool_mode,
+                    &skill_mode,
+                    tool_profile,
                     principal_id.as_deref(),
                     actor_id.as_deref(),
                     agent_workspace_id,
+                    store_for_subagent_loop,
                     workspace,
                     skill_registry,
                     skills_config,
@@ -666,6 +960,12 @@ impl SubagentExecutor {
                                 response: response.clone(),
                                 duration_ms: elapsed.as_millis() as u64,
                                 iterations,
+                                task_packet: event_task_packet.clone(),
+                                allowed_tools: event_allowed_tools.clone(),
+                                allowed_skills: event_allowed_skills.clone(),
+                                memory_mode: event_memory_mode.clone(),
+                                tool_mode: event_tool_mode.clone(),
+                                skill_mode: event_skill_mode.clone(),
                             },
                             &ch_meta,
                         )
@@ -693,6 +993,12 @@ impl SubagentExecutor {
                                 response: err_msg.clone(),
                                 duration_ms: elapsed.as_millis() as u64,
                                 iterations: 0,
+                                task_packet: event_task_packet.clone(),
+                                allowed_tools: event_allowed_tools.clone(),
+                                allowed_skills: event_allowed_skills.clone(),
+                                memory_mode: event_memory_mode.clone(),
+                                tool_mode: event_tool_mode.clone(),
+                                skill_mode: event_skill_mode.clone(),
                             },
                             &ch_meta,
                         )
@@ -719,6 +1025,12 @@ impl SubagentExecutor {
                                 response: "Timed out".to_string(),
                                 duration_ms: elapsed.as_millis() as u64,
                                 iterations: 0,
+                                task_packet: event_task_packet.clone(),
+                                allowed_tools: event_allowed_tools.clone(),
+                                allowed_skills: event_allowed_skills.clone(),
+                                memory_mode: event_memory_mode.clone(),
+                                tool_mode: event_tool_mode.clone(),
+                                skill_mode: event_skill_mode.clone(),
                             },
                             &ch_meta,
                         )
@@ -847,6 +1159,83 @@ impl SubagentExecutor {
                             success = %subagent_result.success,
                             "Finalized routine run from subagent"
                         );
+                    }
+
+                    let routine_actor = parent_identity
+                        .as_ref()
+                        .map(|identity| identity.actor_id.as_str())
+                        .or(actor_id.as_deref())
+                        .unwrap_or(parent_user_id.as_str());
+                    let routine = ch_meta
+                        .get("routine_id")
+                        .and_then(|value| value.as_str())
+                        .and_then(|value| Uuid::parse_str(value).ok());
+                    let mut resolved_routine = None;
+                    if let Some(routine_id) = routine
+                        && let Ok(Some(found)) = store.get_routine(routine_id).await
+                        && found.user_id == parent_user_id
+                        && found.owner_actor_id() == routine_actor
+                    {
+                        resolved_routine = Some(found);
+                    }
+                    if resolved_routine.is_none()
+                        && let Ok(Some(found)) = store
+                            .get_routine_by_name_for_actor(
+                                &parent_user_id,
+                                routine_actor,
+                                routine_name,
+                            )
+                            .await
+                    {
+                        resolved_routine = Some(found);
+                    }
+                    if let Some(routine) = resolved_routine {
+                        let completed_at = chrono::Utc::now();
+                        let runtime_already_advanced =
+                            routine_state_has_runtime_advance_for_run(&routine.state, run_id);
+                        let next_fire_at = if runtime_already_advanced {
+                            routine.next_fire_at
+                        } else {
+                            crate::agent::routine::next_fire_for_routine(
+                                &routine,
+                                None,
+                                completed_at,
+                            )
+                            .unwrap_or(routine.next_fire_at)
+                        };
+                        let run_count = if runtime_already_advanced {
+                            routine.run_count
+                        } else {
+                            routine.run_count + 1
+                        };
+                        let consecutive_failures = if run_status == RunStatus::Failed {
+                            routine.consecutive_failures + 1
+                        } else {
+                            0
+                        };
+                        let state = routine_state_with_runtime_advance(
+                            &routine.state,
+                            run_id,
+                            completed_at,
+                        );
+                        if let Err(error) = persist_routine_runtime_update(
+                            store,
+                            routine.id,
+                            completed_at,
+                            next_fire_at,
+                            run_count,
+                            consecutive_failures,
+                            &state,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                routine = %routine.name,
+                                run_id = %run_id_str,
+                                "Failed to update routine runtime after subagent finalization: {}",
+                                error
+                            );
+                        }
                     }
                 }
 
@@ -1046,9 +1435,15 @@ async fn run_subagent_loop(
     max_iterations: usize,
     allowed_tools: Option<&[String]>,
     allowed_skills: Option<&[String]>,
+    task_packet: &SubagentTaskPacket,
+    memory_mode: &SubagentMemoryMode,
+    tool_mode: &SubagentToolMode,
+    skill_mode: &SubagentSkillMode,
+    tool_profile: ToolProfile,
     principal_id: Option<&str>,
     actor_id: Option<&str>,
     agent_workspace_id: Option<Uuid>,
+    store: Option<Arc<dyn crate::db::Database>>,
     workspace: Option<Arc<Workspace>>,
     skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
     skills_config: Option<SkillsConfig>,
@@ -1094,11 +1489,32 @@ async fn run_subagent_loop(
                 serde_json::json!(allowed_skills),
             );
         }
+        metadata.insert(
+            "tool_profile".to_string(),
+            serde_json::json!(tool_profile.as_str()),
+        );
     }
+
+    let provider_tool_extensions = if let Some(store) = store {
+        let orchestrator =
+            LearningOrchestrator::new(store, workspace.clone(), skill_registry.clone());
+        let active_tools = orchestrator
+            .provider_tool_extensions(&job_ctx.user_id)
+            .await;
+        match (memory_mode, allowed_tools) {
+            (SubagentMemoryMode::GrantedToolsOnly, Some(allowed_tools)) => active_tools
+                .into_iter()
+                .filter(|tool_name| allowed_tools.iter().any(|allowed| allowed == tool_name))
+                .collect(),
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
 
     let combined_system_prompt = build_subagent_system_prompt(
         system_prompt,
-        task,
+        task_packet,
         channel_name,
         &job_ctx.metadata,
         principal_id,
@@ -1107,12 +1523,18 @@ async fn run_subagent_loop(
         workspace,
         skill_registry,
         skills_config,
+        allowed_tools,
         allowed_skills,
+        memory_mode,
+        tool_mode,
+        skill_mode,
+        tool_profile,
         &safety,
         agent_id,
     )
     .await;
     let model_name = llm.active_model_name();
+    let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
     let mut reasoning = Reasoning::new(llm, safety.clone())
         .with_system_prompt(combined_system_prompt)
         .with_model_name(model_name);
@@ -1146,11 +1568,26 @@ async fn run_subagent_loop(
 
         let ctx = ReasoningContext {
             messages: context_messages.clone(),
+            context_documents: Vec::new(),
             available_tools: if force_text {
                 vec![]
             } else {
+                let defs = tools
+                    .tool_definitions_for_capabilities(
+                        allowed_tools,
+                        allowed_skills,
+                        Some(&provider_tool_extensions),
+                    )
+                    .await;
+                let defs =
+                    tool_policies.filter_tool_definitions_for_metadata(defs, &job_ctx.metadata);
                 tools
-                    .tool_definitions_for_capabilities(allowed_tools, allowed_skills)
+                    .filter_tool_definitions_for_execution_profile(
+                        defs,
+                        ToolExecutionLane::Subagent,
+                        tool_profile,
+                        &job_ctx.metadata,
+                    )
                     .await
             },
             job_description: None,
@@ -1250,37 +1687,49 @@ async fn run_subagent_loop(
                         .await;
                     touch_subagent_activity(&activity_tx);
 
-                    if !crate::tools::ToolRegistry::tool_name_allowed_by_metadata(
-                        &job_ctx.metadata,
-                        &tc.name,
-                    ) {
-                        let warning =
-                            format!("Tool '{}' is not allowed for this delegated task", tc.name);
-                        let _ = channels
-                            .send_status(
-                                channel_name,
-                                StatusUpdate::SubagentProgress {
-                                    agent_id: agent_id.to_string(),
-                                    message: subagent_tool_warning_message(&tc.name, &warning),
-                                    category: "warning".to_string(),
-                                },
-                                channel_metadata,
-                            )
-                            .await;
-                        touch_subagent_activity(&activity_tx);
-                        context_messages.push(ChatMessage::tool_result(
-                            &tc.id,
-                            &tc.name,
-                            format!("Error: {}", warning),
-                        ));
-                        continue;
-                    }
-
-                    // Execute normal tool
-                    let tool = match tools.get(&tc.name).await {
-                        Some(t) => t,
-                        None => {
-                            let warning = format!("Tool '{}' is unavailable", tc.name);
+                    let prepared = match execution::prepare_tool_call(
+                        execution::ToolPrepareRequest {
+                            tools: &tools,
+                            safety: &safety,
+                            job_ctx: &job_ctx,
+                            tool_name: &tc.name,
+                            params: &tc.arguments,
+                            lane: ToolExecutionLane::Subagent,
+                            default_profile: tool_profile,
+                            profile_override: None,
+                            approval_mode: execution::ToolApprovalMode::Autonomous,
+                            hooks: None,
+                        },
+                    )
+                    .await
+                    {
+                        Ok(execution::ToolPrepareOutcome::Ready(prepared)) => prepared,
+                        Ok(execution::ToolPrepareOutcome::NeedsApproval(_)) => {
+                            let warning = format!(
+                                "Tool '{}' requires explicit approval and cannot run in this delegated context",
+                                tc.name
+                            );
+                            let _ = channels
+                                .send_status(
+                                    channel_name,
+                                    StatusUpdate::SubagentProgress {
+                                        agent_id: agent_id.to_string(),
+                                        message: subagent_tool_warning_message(&tc.name, &warning),
+                                        category: "warning".to_string(),
+                                    },
+                                    channel_metadata,
+                                )
+                                .await;
+                            touch_subagent_activity(&activity_tx);
+                            context_messages.push(ChatMessage::tool_result(
+                                &tc.id,
+                                &tc.name,
+                                format!("Error: {}", warning),
+                            ));
+                            continue;
+                        }
+                        Err(err) => {
+                            let warning = err.to_string();
                             let _ = channels
                                 .send_status(
                                     channel_name,
@@ -1302,59 +1751,28 @@ async fn run_subagent_loop(
                         }
                     };
 
-                    let tool_timeout = tool.execution_timeout();
-                    let result = tokio::time::timeout(
-                        tool_timeout,
-                        tool.execute(tc.arguments.clone(), &job_ctx),
-                    )
-                    .await;
-
-                    let result_str = match result {
-                        Ok(Ok(output)) => {
-                            // Convert serde_json::Value to string for the tool result
-                            let raw = match &output.result {
-                                serde_json::Value::String(s) => s.clone(),
-                                other => other.to_string(),
-                            };
-                            let sanitized = safety.sanitize_tool_output(&tc.name, &raw);
-                            sanitized.content
-                        }
-                        Ok(Err(e)) => {
-                            let error = format!("{}", e);
-                            let _ = channels
-                                .send_status(
-                                    channel_name,
-                                    StatusUpdate::SubagentProgress {
-                                        agent_id: agent_id.to_string(),
-                                        message: subagent_tool_warning_message(&tc.name, &error),
-                                        category: "warning".to_string(),
-                                    },
-                                    channel_metadata,
-                                )
-                                .await;
-                            touch_subagent_activity(&activity_tx);
-                            format!("Error: {}", error)
-                        }
-                        Err(_) => {
-                            let timeout_message = format!("Tool '{}' timed out", tc.name);
-                            let _ = channels
-                                .send_status(
-                                    channel_name,
-                                    StatusUpdate::SubagentProgress {
-                                        agent_id: agent_id.to_string(),
-                                        message: subagent_tool_warning_message(
-                                            &tc.name,
-                                            &timeout_message,
-                                        ),
-                                        category: "warning".to_string(),
-                                    },
-                                    channel_metadata,
-                                )
-                                .await;
-                            touch_subagent_activity(&activity_tx);
-                            format!("Error: {}", timeout_message)
-                        }
-                    };
+                    let result_str =
+                        match execution::execute_tool_call(&prepared, &safety, &job_ctx).await {
+                            Ok(output) => output.sanitized_content,
+                            Err(err) => {
+                                let warning = err.to_string();
+                                let _ = channels
+                                    .send_status(
+                                        channel_name,
+                                        StatusUpdate::SubagentProgress {
+                                            agent_id: agent_id.to_string(),
+                                            message: subagent_tool_warning_message(
+                                                &tc.name, &warning,
+                                            ),
+                                            category: "warning".to_string(),
+                                        },
+                                        channel_metadata,
+                                    )
+                                    .await;
+                                touch_subagent_activity(&activity_tx);
+                                format!("Error: {}", warning)
+                            }
+                        };
 
                     context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, result_str));
                 }
@@ -1370,7 +1788,7 @@ async fn run_subagent_loop(
 
 async fn build_subagent_system_prompt(
     base_system_prompt: &str,
-    task: &str,
+    task_packet: &SubagentTaskPacket,
     channel_name: &str,
     channel_metadata: &serde_json::Value,
     principal_id: &str,
@@ -1379,7 +1797,12 @@ async fn build_subagent_system_prompt(
     workspace: Option<Arc<Workspace>>,
     skill_registry: Option<Arc<RwLock<SkillRegistry>>>,
     skills_config: Option<SkillsConfig>,
+    allowed_tools: Option<&[String]>,
     allowed_skills: Option<&[String]>,
+    memory_mode: &SubagentMemoryMode,
+    tool_mode: &SubagentToolMode,
+    skill_mode: &SubagentSkillMode,
+    tool_profile: ToolProfile,
     safety: &SafetyLayer,
     agent_id: &str,
 ) -> String {
@@ -1401,9 +1824,54 @@ async fn build_subagent_system_prompt(
     }
 
     sections.push(format!("## Sub-agent Mission\n\n{base_system_prompt}"));
+    sections.push(format!(
+        "## Task Packet\n\n{}",
+        render_task_packet(task_packet)
+    ));
+    sections.push(format!(
+        "## Operating Contract\n\n\
+         - Use the supplied task packet as the primary source of truth.\n\
+         - Do not assume access to the parent agent's broader memory, transcript history, or personal context.\n\
+         - Do not browse or search for additional context unless the parent explicitly granted the necessary tools.\n\
+         - If the packet is insufficient, ask the parent for what is missing instead of widening scope.\n\
+         - Complete the bounded assignment against the acceptance criteria and todos.\n\n\
+         Memory mode: `{}`\n\
+         Tool mode: `{}`\n\
+         Tool profile: `{}`\n\
+         Skill mode: `{}`\n\
+         Explicit tool grants: {}\n\
+         Explicit skill grants: {}",
+        subagent_memory_mode_label(memory_mode),
+        subagent_tool_mode_label(tool_mode),
+        tool_profile.as_str(),
+        subagent_skill_mode_label(skill_mode),
+        allowed_tools
+            .map(|items| {
+                if items.is_empty() {
+                    "none".to_string()
+                } else {
+                    items.join(", ")
+                }
+            })
+            .unwrap_or_else(|| "none".to_string()),
+        allowed_skills
+            .map(|items| {
+                if items.is_empty() {
+                    "none".to_string()
+                } else {
+                    items.join(", ")
+                }
+            })
+            .unwrap_or_else(|| "none".to_string()),
+    ));
 
-    if let Some(skill_context) =
-        build_subagent_skill_context(skill_registry, skills_config, task, allowed_skills).await
+    if let Some(skill_context) = build_subagent_skill_context(
+        skill_registry,
+        skills_config,
+        &task_packet.objective,
+        allowed_skills,
+    )
+    .await
     {
         sections.push(format!("## Skills\n{skill_context}"));
     }
@@ -1428,13 +1896,7 @@ async fn build_subagent_workspace_prompt(
         base_workspace
     };
 
-    let conversation_kind = match channel_metadata
-        .get("conversation_kind")
-        .and_then(|value| value.as_str())
-    {
-        Some("group" | "channel" | "supergroup") => ConversationKind::Group,
-        _ => ConversationKind::Direct,
-    };
+    let conversation_kind = ConversationKind::Group;
     let thread_key = channel_metadata
         .get("thread_id")
         .and_then(|value| value.as_str())
@@ -1629,6 +2091,11 @@ mod tests {
             task: "do something".to_string(),
             system_prompt: None,
             model: None,
+            task_packet: None,
+            memory_mode: None,
+            tool_mode: None,
+            skill_mode: None,
+            tool_profile: None,
             allowed_tools: None,
             allowed_skills: None,
             principal_id: None,
@@ -1649,6 +2116,11 @@ mod tests {
             task: "Find papers about AI".to_string(),
             system_prompt: None,
             model: None,
+            task_packet: None,
+            memory_mode: None,
+            tool_mode: None,
+            skill_mode: None,
+            tool_profile: None,
             allowed_tools: Some(vec!["http".to_string(), "read_file".to_string()]),
             allowed_skills: None,
             principal_id: None,
@@ -1673,9 +2145,79 @@ mod tests {
         assert_eq!(request.name, "test");
         assert!(request.system_prompt.is_none());
         assert!(request.model.is_none());
+        assert!(request.task_packet.is_none());
         assert!(request.allowed_tools.is_none());
         assert!(request.timeout_secs.is_none());
         assert!(!request.wait);
+    }
+
+    #[test]
+    fn normalize_strict_inherits_parent_tool_and_skill_ceilings() {
+        let mut request = SubagentSpawnRequest {
+            name: "researcher".to_string(),
+            task: "Inspect the repo".to_string(),
+            system_prompt: None,
+            model: None,
+            task_packet: None,
+            memory_mode: None,
+            tool_mode: None,
+            skill_mode: None,
+            tool_profile: None,
+            allowed_tools: None,
+            allowed_skills: None,
+            principal_id: None,
+            actor_id: None,
+            agent_workspace_id: None,
+            timeout_secs: None,
+            wait: false,
+        };
+
+        request.normalize_strict(
+            Some(&["time".to_string(), "json".to_string()]),
+            Some(&["github".to_string(), "openai-docs".to_string()]),
+            ToolProfile::Restricted,
+        );
+
+        assert_eq!(
+            request.allowed_tools,
+            Some(vec!["json".to_string(), "time".to_string()])
+        );
+        assert_eq!(
+            request.allowed_skills,
+            Some(vec!["github".to_string(), "openai-docs".to_string()])
+        );
+        assert_eq!(request.tool_profile, Some(ToolProfile::Restricted));
+    }
+
+    #[test]
+    fn normalize_strict_intersects_requested_tools_with_parent_ceiling() {
+        let mut request = SubagentSpawnRequest {
+            name: "researcher".to_string(),
+            task: "Inspect the repo".to_string(),
+            system_prompt: None,
+            model: None,
+            task_packet: None,
+            memory_mode: None,
+            tool_mode: None,
+            skill_mode: None,
+            tool_profile: None,
+            allowed_tools: Some(vec!["json".to_string(), "shell".to_string()]),
+            allowed_skills: Some(vec!["github".to_string(), "skill-creator".to_string()]),
+            principal_id: None,
+            actor_id: None,
+            agent_workspace_id: None,
+            timeout_secs: None,
+            wait: false,
+        };
+
+        request.normalize_strict(
+            Some(&["time".to_string(), "json".to_string()]),
+            Some(&["github".to_string(), "openai-docs".to_string()]),
+            ToolProfile::Restricted,
+        );
+
+        assert_eq!(request.allowed_tools, Some(vec!["json".to_string()]));
+        assert_eq!(request.allowed_skills, Some(vec!["github".to_string()]));
     }
 
     #[test]
@@ -1701,7 +2243,7 @@ mod tests {
     #[test]
     fn with_subagent_thread_metadata_inserts_thread_id_for_non_object_metadata() {
         let metadata = serde_json::json!("legacy");
-        let merged = with_subagent_thread_metadata(&metadata, "thread-123");
+        let merged = with_subagent_thread_metadata(&metadata, "thread-123", "web");
 
         assert_eq!(merged["thread_id"], serde_json::json!("thread-123"));
     }
@@ -1712,7 +2254,7 @@ mod tests {
             "thread_id": "stale-thread",
             "channel": "web"
         });
-        let merged = with_subagent_thread_metadata(&metadata, "thread-fresh");
+        let merged = with_subagent_thread_metadata(&metadata, "thread-fresh", "web");
 
         assert_eq!(merged["thread_id"], serde_json::json!("thread-fresh"));
         assert_eq!(merged["channel"], serde_json::json!("web"));
@@ -1808,8 +2350,11 @@ mod tests {
         channels.add(Box::new(channel)).await;
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
-        let (activity_tx, activity_rx) =
-            watch::channel(Instant::now() - SUBAGENT_HEARTBEAT_INTERVAL);
+        let (activity_tx, activity_rx) = watch::channel(
+            Instant::now()
+                .checked_sub(SUBAGENT_HEARTBEAT_INTERVAL)
+                .unwrap_or_else(Instant::now),
+        );
 
         let heartbeat = SubagentHeartbeat::spawn(
             Arc::clone(&channels),
@@ -1870,6 +2415,11 @@ mod tests {
                     task: "say done".to_string(),
                     system_prompt: None,
                     model: None,
+                    task_packet: None,
+                    memory_mode: None,
+                    tool_mode: None,
+                    skill_mode: None,
+                    tool_profile: None,
                     allowed_tools: None,
                     allowed_skills: None,
                     principal_id: None,

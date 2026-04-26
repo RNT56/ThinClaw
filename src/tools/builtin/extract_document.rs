@@ -9,6 +9,7 @@ use crate::context::JobContext;
 use crate::document_extraction::extractors;
 use crate::document_extraction::{MAX_DOCUMENT_SIZE, MAX_EXTRACTED_TEXT_LEN};
 use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput};
+use crate::tools::url_guard::{OutboundUrlGuardOptions, validate_outbound_url};
 
 /// Tool that lets the agent extract text from documents.
 ///
@@ -23,9 +24,9 @@ impl Tool for ExtractDocumentTool {
     }
 
     fn description(&self) -> &str {
-        "Extract text content from a document file. Supports PDF, DOCX, PPTX, XLSX, \
-         and plain text formats (TXT, CSV, JSON, XML, Markdown, code). \
-         Provide either a URL to fetch or base64-encoded data with a MIME type."
+        "Extract text from document files such as PDF, DOCX, PPTX, XLSX, and plain-text \
+         formats. Use this when the user gives you a document and you need readable text \
+         before summarizing, searching, or analyzing its contents."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -123,13 +124,28 @@ impl Tool for ExtractDocumentTool {
 
 /// Fetch a document from a URL.
 async fn fetch_document(url: &str) -> Result<(Vec<u8>, String), ToolError> {
+    let guard_options = OutboundUrlGuardOptions {
+        require_https: false,
+        upgrade_http_to_https: false,
+        allowlist: Vec::new(),
+    };
+    let guarded_url = validate_outbound_url(url, &guard_options)?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.error("too many redirects")
+            } else if validate_outbound_url(attempt.url().as_str(), &guard_options).is_ok() {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
         .build()
         .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {e}")))?;
 
     let response = client
-        .get(url)
+        .get(guarded_url.clone())
         .header("User-Agent", "ThinClaw/1.0")
         .send()
         .await
@@ -148,7 +164,7 @@ async fn fetch_document(url: &str) -> Result<(Vec<u8>, String), ToolError> {
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_string())
-        .unwrap_or_else(|| guess_mime_from_url(url));
+        .unwrap_or_else(|| guess_mime_from_url(guarded_url.as_str()));
 
     let bytes = response
         .bytes()

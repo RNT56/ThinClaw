@@ -43,7 +43,7 @@ impl Tunnel for TailscaleTunnel {
         } else {
             let output = tokio::time::timeout(
                 tokio::time::Duration::from_secs(10),
-                Command::new("tailscale")
+                Command::new(crate::tunnel::resolve_binary("tailscale"))
                     .args(["status", "--json"])
                     .output(),
             )
@@ -51,10 +51,25 @@ impl Tunnel for TailscaleTunnel {
             .map_err(|_| anyhow::anyhow!("tailscale status --json timed out after 10s"))??;
 
             if !output.status.success() {
-                bail!(
-                    "tailscale status failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
+                let stderr = String::from_utf8_lossy(&output.stderr);
+
+                // Detect the known macOS App Store CLI issue: the binary at
+                // /Applications/Tailscale.app/Contents/MacOS/Tailscale crashes
+                // with a BundleIdentifier error when spawned from another process.
+                if stderr.contains("BundleIdentifier") || stderr.contains("Fatal error") {
+                    bail!(
+                        "The Tailscale CLI crashed with a macOS bundle identity error. \
+                         This happens when the App Store version's CLI is spawned from \
+                         another process.\n\n\
+                         Fix: install the standalone Tailscale CLI via Homebrew:\n\
+                         \n  brew install tailscale\n\n\
+                         The Homebrew CLI works alongside the Tailscale app and does not \
+                         have this crash. After installing, restart ThinClaw.\n\n\
+                         ThinClaw will use polling mode for now (Telegram messages ~5s delay)."
+                    );
+                }
+
+                bail!("tailscale status failed: {}", stderr);
             }
 
             let status: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -77,8 +92,37 @@ impl Tunnel for TailscaleTunnel {
 
         let target = format!("http://{local_host}:{local_port}");
 
+        // Reset any stale serve/funnel configuration from a previous run.
+        // Without this, `tailscale funnel` fails with "listener already exists
+        // for port 443" if ThinClaw was killed without a clean shutdown.
+        let ts_bin = crate::tunnel::resolve_binary("tailscale");
+        tracing::debug!("Resetting stale tailscale {subcommand} config before start");
+        let reset_output = Command::new(&ts_bin)
+            .args([subcommand, "reset"])
+            .output()
+            .await;
+        if let Ok(ref out) = reset_output
+            && !out.status.success()
+        {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // version warnings are harmless — only log real failures
+            let real_errors: Vec<&str> = stderr
+                .lines()
+                .filter(|l| !l.contains("client version") && !l.contains("Warning:"))
+                .collect();
+            if !real_errors.is_empty() {
+                tracing::warn!(
+                    "tailscale {subcommand} reset returned non-zero: {}",
+                    real_errors.join("; ")
+                );
+            }
+        }
+
+        // Brief pause after reset to let the daemon settle
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
         // Spawn the tailscale serve/funnel process
-        let mut child = Command::new("tailscale")
+        let mut child = Command::new(&ts_bin)
             .args([subcommand, &target])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -113,11 +157,37 @@ impl Tunnel for TailscaleTunnel {
                         stderr_msg = stdout_msg;
                     }
                 }
-                let detail = if stderr_msg.is_empty() {
+
+                // Filter out version mismatch warnings (non-fatal, noisy)
+                let filtered: Vec<&str> = stderr_msg
+                    .lines()
+                    .filter(|l| {
+                        !l.starts_with("Warning: client version")
+                            && !l.contains("!= tailscaled server version")
+                    })
+                    .collect();
+                // Log version warning separately if present
+                if filtered.len() < stderr_msg.lines().count() {
+                    tracing::warn!(
+                        "Tailscale client/server version mismatch detected (non-fatal). \
+                         Run 'brew upgrade tailscale' to sync versions."
+                    );
+                }
+                let detail = if filtered.is_empty() {
                     format!("exit code: {}", exit_status)
                 } else {
-                    stderr_msg
+                    filtered.join("\n")
                 };
+
+                // Check for "listener already exists" — suggest reset
+                if detail.contains("listener already exists") {
+                    bail!(
+                        "tailscale {subcommand} failed: a stale listener is blocking port 443.\n\
+                         \n\
+                         Fix: run 'tailscale {subcommand} reset' then restart ThinClaw."
+                    );
+                }
+
                 bail!(
                     "tailscale {subcommand} failed to start: {detail}\n\
                      \n\
@@ -153,7 +223,7 @@ impl Tunnel for TailscaleTunnel {
 
     async fn stop(&self) -> Result<()> {
         let subcommand = if self.funnel { "funnel" } else { "serve" };
-        if let Err(e) = Command::new("tailscale")
+        if let Err(e) = Command::new(crate::tunnel::resolve_binary("tailscale"))
             .args([subcommand, "reset"])
             .output()
             .await

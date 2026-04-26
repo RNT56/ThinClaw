@@ -173,11 +173,11 @@ impl Store {
             INSERT INTO experiment_runner_profiles (
                 id, name, backend, backend_config, image_or_runtime,
                 gpu_requirements, env_grants, secret_references,
-                cache_policy, status, created_at, updated_at
+                cache_policy, status, readiness_class, launch_eligible, created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8,
-                $9, $10, $11, $12
+                $9, $10, $11, $12, $13, $14
             )
             "#,
             &[
@@ -191,6 +191,8 @@ impl Store {
                 &serde_json::json!(profile.secret_references),
                 &profile.cache_policy,
                 &status_json(profile.status),
+                &status_json(profile.readiness_class),
+                &profile.launch_eligible,
                 &profile.created_at,
                 &profile.updated_at,
             ],
@@ -244,7 +246,9 @@ impl Store {
                 secret_references = $8,
                 cache_policy = $9,
                 status = $10,
-                updated_at = $11
+                readiness_class = $11,
+                launch_eligible = $12,
+                updated_at = $13
             WHERE id = $1
             "#,
             &[
@@ -258,6 +262,8 @@ impl Store {
                 &serde_json::json!(profile.secret_references),
                 &profile.cache_policy,
                 &status_json(profile.status),
+                &status_json(profile.readiness_class),
+                &profile.launch_eligible,
                 &profile.updated_at,
             ],
         )
@@ -292,7 +298,7 @@ impl Store {
         conn.execute(
             r#"
             INSERT INTO experiment_campaigns (
-                id, project_id, runner_profile_id, status,
+                id, project_id, runner_profile_id, owner_user_id, status,
                 baseline_commit, best_commit, best_metrics, experiment_branch,
                 remote_ref, worktree_path, started_at, ended_at,
                 trial_count, failure_count, pause_reason, queue_state,
@@ -301,19 +307,20 @@ impl Store {
                 max_trials_override, gateway_url, metadata,
                 created_at, updated_at, total_llm_cost_usd, total_runner_cost_usd
             ) VALUES (
-                $1, $2, $3, $4,
-                $5, $6, $7, $8,
-                $9, $10, $11, $12,
-                $13, $14, $15, $16,
-                $17, $18, $19, $20,
-                $21, $22, $23, $24,
-                $25, $26, $27, $28
+                $1, $2, $3, $4, $5,
+                $6, $7, $8, $9,
+                $10, $11, $12, $13,
+                $14, $15, $16, $17,
+                $18, $19, $20, $21,
+                $22, $23, $24, $25,
+                $26, $27, $28, $29
             )
             "#,
             &[
                 &campaign.id,
                 &campaign.project_id,
                 &campaign.runner_profile_id,
+                &campaign.owner_user_id,
                 &status_json(campaign.status),
                 &campaign.baseline_commit,
                 &campaign.best_commit,
@@ -356,6 +363,21 @@ impl Store {
         row.map(|row| row_to_experiment_campaign(&row)).transpose()
     }
 
+    pub async fn get_experiment_campaign_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentCampaign>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT * FROM experiment_campaigns WHERE id = $1 AND owner_user_id = $2",
+                &[&id, &owner_user_id],
+            )
+            .await?;
+        row.map(|row| row_to_experiment_campaign(&row)).transpose()
+    }
+
     pub async fn list_experiment_campaigns(
         &self,
     ) -> Result<Vec<ExperimentCampaign>, DatabaseError> {
@@ -364,6 +386,20 @@ impl Store {
             .query(
                 "SELECT * FROM experiment_campaigns ORDER BY created_at DESC",
                 &[],
+            )
+            .await?;
+        rows.iter().map(row_to_experiment_campaign).collect()
+    }
+
+    pub async fn list_experiment_campaigns_for_owner(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentCampaign>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT * FROM experiment_campaigns WHERE owner_user_id = $1 ORDER BY created_at DESC",
+                &[&owner_user_id],
             )
             .await?;
         rows.iter().map(row_to_experiment_campaign).collect()
@@ -387,36 +423,38 @@ impl Store {
             UPDATE experiment_campaigns SET
                 project_id = $2,
                 runner_profile_id = $3,
-                status = $4,
-                baseline_commit = $5,
-                best_commit = $6,
-                best_metrics = $7,
-                experiment_branch = $8,
-                remote_ref = $9,
-                worktree_path = $10,
-                started_at = $11,
-                ended_at = $12,
-                trial_count = $13,
-                failure_count = $14,
-                pause_reason = $15,
-                queue_state = $16,
-                queue_position = $17,
-                active_trial_id = $18,
-                total_runtime_ms = $19,
-                total_cost_usd = $20,
-                consecutive_non_improving_trials = $21,
-                max_trials_override = $22,
-                gateway_url = $23,
-                metadata = $24,
-                updated_at = $25,
-                total_llm_cost_usd = $26,
-                total_runner_cost_usd = $27
+                owner_user_id = $4,
+                status = $5,
+                baseline_commit = $6,
+                best_commit = $7,
+                best_metrics = $8,
+                experiment_branch = $9,
+                remote_ref = $10,
+                worktree_path = $11,
+                started_at = $12,
+                ended_at = $13,
+                trial_count = $14,
+                failure_count = $15,
+                pause_reason = $16,
+                queue_state = $17,
+                queue_position = $18,
+                active_trial_id = $19,
+                total_runtime_ms = $20,
+                total_cost_usd = $21,
+                consecutive_non_improving_trials = $22,
+                max_trials_override = $23,
+                gateway_url = $24,
+                metadata = $25,
+                updated_at = $26,
+                total_llm_cost_usd = $27,
+                total_runner_cost_usd = $28
             WHERE id = $1
             "#,
             &[
                 &campaign.id,
                 &campaign.project_id,
                 &campaign.runner_profile_id,
+                &campaign.owner_user_id,
                 &status_json(campaign.status),
                 &campaign.baseline_commit,
                 &campaign.best_commit,
@@ -520,6 +558,25 @@ impl Store {
         row.map(|row| row_to_experiment_trial(&row)).transpose()
     }
 
+    pub async fn get_experiment_trial_for_owner(
+        &self,
+        id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Option<ExperimentTrial>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT t.* FROM experiment_trials t
+                INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
+                WHERE t.id = $1 AND c.owner_user_id = $2
+                "#,
+                &[&id, &owner_user_id],
+            )
+            .await?;
+        row.map(|row| row_to_experiment_trial(&row)).transpose()
+    }
+
     pub async fn list_experiment_trials(
         &self,
         campaign_id: Uuid,
@@ -529,6 +586,26 @@ impl Store {
             .query(
                 "SELECT * FROM experiment_trials WHERE campaign_id = $1 ORDER BY sequence ASC",
                 &[&campaign_id],
+            )
+            .await?;
+        rows.iter().map(row_to_experiment_trial).collect()
+    }
+
+    pub async fn list_experiment_trials_for_owner(
+        &self,
+        campaign_id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentTrial>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT t.* FROM experiment_trials t
+                INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
+                WHERE t.campaign_id = $1 AND c.owner_user_id = $2
+                ORDER BY t.sequence ASC
+                "#,
+                &[&campaign_id, &owner_user_id],
             )
             .await?;
         rows.iter().map(row_to_experiment_trial).collect()
@@ -650,6 +727,27 @@ impl Store {
             .query(
                 "SELECT * FROM experiment_artifact_refs WHERE trial_id = $1 ORDER BY created_at ASC",
                 &[&trial_id],
+            )
+            .await?;
+        rows.iter().map(row_to_experiment_artifact).collect()
+    }
+
+    pub async fn list_experiment_artifacts_for_owner(
+        &self,
+        trial_id: Uuid,
+        owner_user_id: &str,
+    ) -> Result<Vec<ExperimentArtifactRef>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT a.* FROM experiment_artifact_refs a
+                INNER JOIN experiment_trials t ON t.id = a.trial_id
+                INNER JOIN experiment_campaigns c ON c.id = t.campaign_id
+                WHERE a.trial_id = $1 AND c.owner_user_id = $2
+                ORDER BY a.created_at ASC
+                "#,
+                &[&trial_id, &owner_user_id],
             )
             .await?;
         rows.iter().map(row_to_experiment_artifact).collect()
@@ -1053,6 +1151,13 @@ fn row_to_experiment_runner_profile(
         secret_references: from_json_value(row.try_get("secret_references")?)?,
         cache_policy: row.try_get("cache_policy")?,
         status: from_json_value(row.try_get("status")?)?,
+        readiness_class: row
+            .try_get::<_, serde_json::Value>("readiness_class")
+            .ok()
+            .map(from_json_value)
+            .transpose()?
+            .unwrap_or(crate::experiments::ExperimentRunnerReadinessClass::ManualOnly),
+        launch_eligible: row.try_get("launch_eligible").unwrap_or(false),
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
@@ -1066,6 +1171,9 @@ fn row_to_experiment_campaign(
         id: row.try_get("id")?,
         project_id: row.try_get("project_id")?,
         runner_profile_id: row.try_get("runner_profile_id")?,
+        owner_user_id: row
+            .try_get("owner_user_id")
+            .unwrap_or_else(|_| "default".to_string()),
         status: from_json_value(row.try_get("status")?)?,
         baseline_commit: row.try_get("baseline_commit")?,
         best_commit: row.try_get("best_commit")?,

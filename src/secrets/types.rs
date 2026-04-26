@@ -10,6 +10,12 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const CURRENT_ENCRYPTION_VERSION: i32 = 2;
+pub const CURRENT_KEY_VERSION: i32 = 1;
+pub const CURRENT_CIPHER: &str = "aes-256-gcm";
+pub const CURRENT_KDF: &str = "hkdf-sha256";
+pub const CURRENT_AAD_VERSION: i32 = 1;
+
 /// A stored secret with encrypted value.
 ///
 /// The plaintext is never stored; only the encrypted form exists in the database.
@@ -24,6 +30,21 @@ pub struct Secret {
     pub key_salt: Vec<u8>,
     /// Optional provider hint (e.g., "openai", "stripe").
     pub provider: Option<String>,
+    /// Encryption metadata version. Version 1 rows are legacy and intentionally
+    /// rejected by the v2 decrypt path.
+    pub encryption_version: i32,
+    /// Version of the master key used to encrypt this row.
+    pub key_version: i32,
+    /// Cipher identifier for operator diagnostics and future migrations.
+    pub cipher: String,
+    /// KDF identifier for operator diagnostics and future migrations.
+    pub kdf: String,
+    /// AAD format version used when encrypting this row.
+    pub aad_version: i32,
+    /// Human/system actor that created the current ciphertext.
+    pub created_by: Option<String>,
+    /// Last time this row was re-encrypted by master-key rotation.
+    pub rotated_at: Option<DateTime<Utc>>,
     /// When this secret expires (None = never).
     pub expires_at: Option<DateTime<Utc>>,
     /// Last time this secret was used for injection.
@@ -43,6 +64,13 @@ impl fmt::Debug for Secret {
             .field("encrypted_value", &"[REDACTED]")
             .field("key_salt", &"[REDACTED]")
             .field("provider", &self.provider)
+            .field("encryption_version", &self.encryption_version)
+            .field("key_version", &self.key_version)
+            .field("cipher", &self.cipher)
+            .field("kdf", &self.kdf)
+            .field("aad_version", &self.aad_version)
+            .field("created_by", &self.created_by)
+            .field("rotated_at", &self.rotated_at)
             .field("expires_at", &self.expires_at)
             .field("last_used_at", &self.last_used_at)
             .field("usage_count", &self.usage_count)
@@ -58,6 +86,26 @@ impl fmt::Debug for Secret {
 pub struct SecretRef {
     pub name: String,
     pub provider: Option<String>,
+    #[serde(default)]
+    pub encryption_version: i32,
+    #[serde(default)]
+    pub key_version: i32,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_used_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub usage_count: i64,
+}
+
+/// Result of a local encrypted master-key rotation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MasterKeyRotationReport {
+    pub old_key_version: i32,
+    pub new_key_version: i32,
+    pub rotated_secrets: usize,
 }
 
 impl SecretRef {
@@ -65,6 +113,12 @@ impl SecretRef {
         Self {
             name: name.into(),
             provider: None,
+            encryption_version: CURRENT_ENCRYPTION_VERSION,
+            key_version: CURRENT_KEY_VERSION,
+            created_at: None,
+            updated_at: None,
+            last_used_at: None,
+            usage_count: 0,
         }
     }
 
@@ -159,6 +213,9 @@ pub enum SecretError {
 
     #[error("Keychain error: {0}")]
     KeychainError(String),
+
+    #[error("Legacy secret requires re-entry: {0}")]
+    LegacySecret(String),
 }
 
 /// Parameters for creating a new secret.
@@ -168,6 +225,7 @@ pub struct CreateSecretParams {
     pub value: SecretString,
     pub provider: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
+    pub created_by: Option<String>,
 }
 
 impl CreateSecretParams {
@@ -177,6 +235,7 @@ impl CreateSecretParams {
             value: SecretString::from(value.into()),
             provider: None,
             expires_at: None,
+            created_by: None,
         }
     }
 
@@ -189,6 +248,70 @@ impl CreateSecretParams {
         self.expires_at = Some(expires_at);
         self
     }
+
+    pub fn with_created_by(mut self, created_by: impl Into<String>) -> Self {
+        self.created_by = Some(created_by.into());
+        self
+    }
+}
+
+/// Context required when plaintext is exposed for a runtime operation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretAccessContext {
+    /// Component requesting access, e.g. "provider_vault", "llm.discovery", "wasm.http".
+    pub caller: String,
+    /// Why plaintext is needed.
+    pub purpose: String,
+    /// Optional target host receiving the credential.
+    pub target_host: Option<String>,
+    /// Optional target path receiving the credential.
+    pub target_path: Option<String>,
+    /// Authentication source authorizing this request.
+    pub auth_source: Option<String>,
+}
+
+impl SecretAccessContext {
+    pub fn new(caller: impl Into<String>, purpose: impl Into<String>) -> Self {
+        Self {
+            caller: caller.into(),
+            purpose: purpose.into(),
+            target_host: None,
+            target_path: None,
+            auth_source: None,
+        }
+    }
+
+    pub fn target(mut self, host: impl Into<String>, path: impl Into<String>) -> Self {
+        self.target_host = Some(host.into());
+        self.target_path = Some(path.into());
+        self
+    }
+
+    pub fn auth_source(mut self, auth_source: impl Into<String>) -> Self {
+        self.auth_source = Some(auth_source.into());
+        self
+    }
+}
+
+/// Future-facing backend boundary. The v1 implementation is local encrypted
+/// storage; external backends should preserve this logical interface.
+#[async_trait::async_trait]
+pub trait SecretBackend: Send + Sync {
+    async fn health(&self) -> Result<String, SecretError>;
+    async fn create(
+        &self,
+        user_id: &str,
+        params: CreateSecretParams,
+    ) -> Result<SecretRef, SecretError>;
+    async fn get_for_injection(
+        &self,
+        user_id: &str,
+        name: &str,
+        context: SecretAccessContext,
+    ) -> Result<DecryptedSecret, SecretError>;
+    async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError>;
+    async fn delete(&self, user_id: &str, name: &str) -> Result<bool, SecretError>;
+    async fn rotate(&self) -> Result<String, SecretError>;
 }
 
 /// Where a credential should be injected in an HTTP request.
@@ -255,6 +378,7 @@ mod tests {
         let r = SecretRef::new("my_api_key").with_provider("openai");
         assert_eq!(r.name, "my_api_key");
         assert_eq!(r.provider, Some("openai".to_string()));
+        assert_eq!(r.encryption_version, super::CURRENT_ENCRYPTION_VERSION);
     }
 
     #[test]

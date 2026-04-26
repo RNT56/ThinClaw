@@ -18,8 +18,10 @@ use crate::llm::{
     ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
 use crate::safety::SafetyLayer;
-use crate::tools::ToolRegistry;
-use crate::worker::api::{CompletionReport, JobEventPayload, StatusUpdate, WorkerHttpClient};
+use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
+use crate::worker::api::{
+    CompletionReport, JobDescription, JobEventPayload, StatusUpdate, WorkerHttpClient,
+};
 use crate::worker::proxy_llm::ProxyLlmProvider;
 
 /// Configuration for the worker runtime.
@@ -57,6 +59,7 @@ pub struct WorkerRuntime {
     ///
     /// Wrapped in `Arc` to avoid deep-cloning the map on every tool invocation.
     extra_env: Arc<HashMap<String, String>>,
+    job: Option<JobDescription>,
 }
 
 impl WorkerRuntime {
@@ -94,6 +97,7 @@ impl WorkerRuntime {
             safety,
             tools,
             extra_env: Arc::new(HashMap::new()),
+            job: None,
         })
     }
 
@@ -103,6 +107,7 @@ impl WorkerRuntime {
 
         // Fetch job description from orchestrator
         let job = self.client.get_job().await?;
+        self.job = Some(job.clone());
 
         tracing::info!(
             "Received job: {} - {}",
@@ -160,36 +165,24 @@ Work independently to complete this job. Report when done."#,
         .await;
 
         match result {
-            Ok(Ok(output)) => {
+            Ok(Ok((output, iterations))) => {
                 tracing::info!("Worker completed job {} successfully", self.config.job_id);
-                self.post_event(
-                    "result",
-                    serde_json::json!({
-                        "success": true,
-                        "message": truncate(&output, 2000),
-                    }),
-                )
-                .await;
                 self.client
                     .report_complete(&CompletionReport {
+                        status: Some("completed".to_string()),
+                        session_id: None,
                         success: true,
                         message: Some(output),
-                        iterations: 0,
+                        iterations,
                     })
                     .await?;
             }
             Ok(Err(e)) => {
                 tracing::error!("Worker failed for job {}: {}", self.config.job_id, e);
-                self.post_event(
-                    "result",
-                    serde_json::json!({
-                        "success": false,
-                        "message": format!("Execution failed: {}", e),
-                    }),
-                )
-                .await;
                 self.client
                     .report_complete(&CompletionReport {
+                        status: Some("error".to_string()),
+                        session_id: None,
                         success: false,
                         message: Some(format!("Execution failed: {}", e)),
                         iterations: 0,
@@ -198,16 +191,10 @@ Work independently to complete this job. Report when done."#,
             }
             Err(_) => {
                 tracing::warn!("Worker timed out for job {}", self.config.job_id);
-                self.post_event(
-                    "result",
-                    serde_json::json!({
-                        "success": false,
-                        "message": "Execution timed out",
-                    }),
-                )
-                .await;
                 self.client
                     .report_complete(&CompletionReport {
+                        status: Some("error".to_string()),
+                        session_id: None,
                         success: false,
                         message: Some("Execution timed out".to_string()),
                         iterations: 0,
@@ -223,12 +210,41 @@ Work independently to complete this job. Report when done."#,
         &self,
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
-    ) -> Result<String, WorkerError> {
+    ) -> Result<(String, u32), WorkerError> {
         let max_iterations = self.config.max_iterations;
         let mut last_output = String::new();
+        let mut finish_requested = false;
 
         // Load tool definitions
-        reason_ctx.available_tools = self.tools.tool_definitions().await;
+        reason_ctx.available_tools = self
+            .tools
+            .tool_definitions_for_autonomous_capabilities(
+                self.job_allowed_tools(),
+                self.job_allowed_skills(),
+                None,
+            )
+            .await;
+        if let Some(job) = self.job.as_ref() {
+            let profile = job
+                .tool_profile
+                .as_deref()
+                .map(parse_tool_profile)
+                .unwrap_or(ToolProfile::Restricted);
+            let metadata = job
+                .metadata
+                .as_ref()
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            reason_ctx.available_tools = self
+                .tools
+                .filter_tool_definitions_for_execution_profile(
+                    reason_ctx.available_tools.clone(),
+                    ToolExecutionLane::WorkerRuntime,
+                    profile,
+                    &metadata,
+                )
+                .await;
+        }
 
         for iteration in 1..=max_iterations {
             // Report progress
@@ -241,13 +257,51 @@ Work independently to complete this job. Report when done."#,
                         iteration,
                     })
                     .await;
+                self.post_event(
+                    "status",
+                    serde_json::json!({
+                        "message": format!("Iteration {}", iteration),
+                        "iteration": iteration,
+                    }),
+                )
+                .await;
             }
 
             // Poll for follow-up prompts from the user
-            self.poll_and_inject_prompt(reason_ctx).await;
+            if self.poll_and_inject_prompt(reason_ctx).await {
+                finish_requested = true;
+            }
 
             // Refresh tools (in case WASM tools were built)
-            reason_ctx.available_tools = self.tools.tool_definitions().await;
+            reason_ctx.available_tools = self
+                .tools
+                .tool_definitions_for_autonomous_capabilities(
+                    self.job_allowed_tools(),
+                    self.job_allowed_skills(),
+                    None,
+                )
+                .await;
+            if let Some(job) = self.job.as_ref() {
+                let profile = job
+                    .tool_profile
+                    .as_deref()
+                    .map(parse_tool_profile)
+                    .unwrap_or(ToolProfile::Restricted);
+                let metadata = job
+                    .metadata
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                reason_ctx.available_tools = self
+                    .tools
+                    .filter_tool_definitions_for_execution_profile(
+                        reason_ctx.available_tools.clone(),
+                        ToolExecutionLane::WorkerRuntime,
+                        profile,
+                        &metadata,
+                    )
+                    .await;
+            }
 
             // Ask the LLM what to do next
             let selections = reasoning.select_tools(reason_ctx).await.map_err(|e| {
@@ -277,11 +331,11 @@ Work independently to complete this job. Report when done."#,
                         )
                         .await;
 
-                        if crate::util::llm_signals_completion(&response) {
+                        if finish_requested || crate::util::llm_signals_completion(&response) {
                             if last_output.is_empty() {
                                 last_output = response.clone();
                             }
-                            return Ok(last_output);
+                            return Ok((last_output, iteration));
                         }
                         reason_ctx.messages.push(ChatMessage::assistant(&response));
                     }
@@ -328,6 +382,14 @@ Work independently to complete this job. Report when done."#,
                                         Ok(output) => truncate(output, 2000),
                                         Err(e) => format!("Error: {}", truncate(e, 500)),
                                     },
+                                    "output_text": match &result {
+                                        Ok(output) => truncate(output, 2000),
+                                        Err(e) => format!("Error: {}", truncate(e, 500)),
+                                    },
+                                    "output_json": match &result {
+                                        Ok(output) => serde_json::from_str::<serde_json::Value>(output).ok(),
+                                        Err(_) => None,
+                                    },
                                     "success": result.is_ok(),
                                 }),
                             )
@@ -371,6 +433,14 @@ Work independently to complete this job. Report when done."#,
                                 Ok(output) => truncate(output, 2000),
                                 Err(e) => format!("Error: {}", truncate(e, 500)),
                             },
+                            "output_text": match &result {
+                                Ok(output) => truncate(output, 2000),
+                                Err(e) => format!("Error: {}", truncate(e, 500)),
+                            },
+                            "output_json": match &result {
+                                Ok(output) => serde_json::from_str::<serde_json::Value>(output).ok(),
+                                Err(_) => None,
+                            },
                             "success": result.is_ok(),
                         }),
                     )
@@ -382,7 +452,7 @@ Work independently to complete this job. Report when done."#,
 
                     let completed = self.process_result(reason_ctx, selection, result);
                     if completed {
-                        return Ok(last_output);
+                        return Ok((last_output, iteration));
                     }
                 }
             }
@@ -401,38 +471,39 @@ Work independently to complete this job. Report when done."#,
         tool_name: &str,
         params: &serde_json::Value,
     ) -> Result<String, String> {
-        let tool = match self.tools.get(tool_name).await {
-            Some(t) => t,
-            None => return Err(format!("tool '{}' not found", tool_name)),
+        let ctx = self.job_context();
+        let profile = self
+            .job
+            .as_ref()
+            .and_then(|job| job.tool_profile.as_deref())
+            .map(parse_tool_profile)
+            .unwrap_or(ToolProfile::Restricted);
+
+        let prepared = match execution::prepare_tool_call(execution::ToolPrepareRequest {
+            tools: &self.tools,
+            safety: &self.safety,
+            job_ctx: &ctx,
+            tool_name,
+            params,
+            lane: ToolExecutionLane::WorkerRuntime,
+            default_profile: profile,
+            profile_override: None,
+            approval_mode: execution::ToolApprovalMode::Autonomous,
+            hooks: None,
+        })
+        .await
+        .map_err(|err| err.to_string())?
+        {
+            execution::ToolPrepareOutcome::Ready(prepared) => prepared,
+            execution::ToolPrepareOutcome::NeedsApproval(_) => {
+                return Err(format!("tool '{}' requires approval", tool_name));
+            }
         };
 
-        let ctx = JobContext {
-            extra_env: self.extra_env.clone(),
-            ..Default::default()
-        };
-
-        // Validate params
-        let validation = self.safety.validator().validate_tool_params(params);
-        if !validation.is_valid {
-            let details = validation
-                .errors
-                .iter()
-                .map(|e| format!("{}: {}", e.field, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(format!("invalid parameters: {}", details));
-        }
-
-        // Execute with per-tool timeout
-        let tool_timeout = tool.execution_timeout();
-        let result = tokio::time::timeout(tool_timeout, tool.execute(params.clone(), &ctx)).await;
-
-        match result {
-            Ok(Ok(output)) => serde_json::to_string_pretty(&output.result)
-                .map_err(|e| format!("serialization error: {}", e)),
-            Ok(Err(e)) => Err(e.to_string()),
-            Err(_) => Err("tool execution timed out".to_string()),
-        }
+        execution::execute_tool_call(&prepared, &self.safety, &ctx)
+            .await
+            .map(|output| output.sanitized_content)
+            .map_err(|err| err.to_string())
     }
 
     /// Process a tool result into the reasoning context. Returns true if the job is complete.
@@ -489,28 +560,93 @@ Work independently to complete this job. Report when done."#,
 
     /// Poll the orchestrator for a follow-up prompt. If one is available,
     /// inject it as a user message into the reasoning context.
-    async fn poll_and_inject_prompt(&self, reason_ctx: &mut ReasoningContext) {
+    async fn poll_and_inject_prompt(&self, reason_ctx: &mut ReasoningContext) -> bool {
         match self.client.poll_prompt().await {
             Ok(Some(prompt)) => {
-                tracing::info!(
-                    "Received follow-up prompt: {}",
-                    truncate(&prompt.content, 100)
-                );
+                let content = prompt.content.unwrap_or_else(|| {
+                    "Please wrap up now, summarize what you completed, and finish this job."
+                        .to_string()
+                });
+                tracing::info!("Received follow-up prompt: {}", truncate(&content, 100));
                 self.post_event(
                     "message",
                     serde_json::json!({
                         "role": "user",
-                        "content": truncate(&prompt.content, 2000),
+                        "content": truncate(&content, 2000),
                     }),
                 )
                 .await;
-                reason_ctx.messages.push(ChatMessage::user(&prompt.content));
+                reason_ctx.messages.push(ChatMessage::user(&content));
+                return prompt.done;
             }
             Ok(None) => {}
             Err(e) => {
                 tracing::debug!("Failed to poll for prompt: {}", e);
             }
         }
+        false
+    }
+
+    fn job_allowed_tools(&self) -> Option<&[String]> {
+        self.job
+            .as_ref()
+            .and_then(|job| job.allowed_tools.as_deref())
+    }
+
+    fn job_allowed_skills(&self) -> Option<&[String]> {
+        self.job
+            .as_ref()
+            .and_then(|job| job.allowed_skills.as_deref())
+    }
+
+    fn job_context(&self) -> JobContext {
+        let job = self.job.as_ref();
+        let principal_id = job
+            .and_then(|job| job.principal_id.as_deref())
+            .unwrap_or("default");
+        let actor_id = job
+            .and_then(|job| job.actor_id.as_deref())
+            .unwrap_or(principal_id);
+        let mut ctx = JobContext::with_identity(
+            principal_id,
+            actor_id,
+            job.map(|job| job.title.as_str()).unwrap_or("Untitled"),
+            job.map(|job| job.description.as_str())
+                .unwrap_or("No description"),
+        );
+        ctx.extra_env = self.extra_env.clone();
+        ctx.metadata = job
+            .and_then(|job| job.metadata.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let Some(metadata) = ctx.metadata.as_object_mut()
+            && let Some(job) = job
+        {
+            if let Some(allowed_tools) = job.allowed_tools.as_ref() {
+                metadata.insert(
+                    "allowed_tools".to_string(),
+                    serde_json::json!(allowed_tools),
+                );
+            }
+            if let Some(allowed_skills) = job.allowed_skills.as_ref() {
+                metadata.insert(
+                    "allowed_skills".to_string(),
+                    serde_json::json!(allowed_skills),
+                );
+            }
+            if let Some(tool_profile) = job.tool_profile.as_ref() {
+                metadata.insert("tool_profile".to_string(), serde_json::json!(tool_profile));
+            }
+        }
+        ctx
+    }
+}
+
+fn parse_tool_profile(raw: &str) -> ToolProfile {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "standard" | "default" | "main" => ToolProfile::Standard,
+        "restricted" | "worker" => ToolProfile::Restricted,
+        "explicit_only" | "explicit-only" | "subagent" => ToolProfile::ExplicitOnly,
+        _ => ToolProfile::Restricted,
     }
 }
 

@@ -27,7 +27,7 @@ pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
     // It takes priority over everything else because it represents the user's
     // current UI settings (LLM backend, workspace mode, etc.).
     //
-    // Priority: BRIDGE_VARS (UI config) > INJECTED_VARS (keychain) > std::env::var > None
+    // Priority: BRIDGE_VARS (UI config) > INJECTED_VARS (legacy runtime overlay) > std::env::var > None
     if let Ok(guard) = BRIDGE_VARS.read()
         && let Some(val) = guard.get(key)
         && !val.is_empty()
@@ -35,13 +35,10 @@ pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
         return Ok(Some(val.clone()));
     }
 
-    // Check injected secrets overlay (keychain / secrets store).
+    // Check legacy injected runtime overlay.
     //
-    // This overlay is populated by `inject_llm_keys_from_secrets()` from
-    // the encrypted secrets store (keychain). It takes priority over
-    // `std::env::var()` because `.env` files loaded by dotenvy also set
-    // real process env vars, and those can contain stale API keys that
-    // should be superseded by the keychain-stored value.
+    // Encrypted secrets are no longer preloaded here; callers that need a
+    // stored credential must resolve it through `SecretsStore::get_for_injection`.
     if let Ok(guard) = INJECTED_VARS.read()
         && let Some(val) = guard.get(key)
         && !val.is_empty()

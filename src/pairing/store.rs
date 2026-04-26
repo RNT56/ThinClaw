@@ -5,12 +5,13 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
 use rand::Rng;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 const PAIRING_CODE_LENGTH: usize = 8;
@@ -176,6 +177,17 @@ fn generate_unique_code(existing: &HashSet<String>) -> String {
     format!("{}{:04}", random_code(), rng.gen_range(0..10000))
 }
 
+fn parse_json_or_default<T>(content: &str, default: T) -> Result<T, PairingStoreError>
+where
+    T: DeserializeOwned,
+{
+    if content.trim().is_empty() {
+        Ok(default)
+    } else {
+        serde_json::from_str(content).map_err(PairingStoreError::from)
+    }
+}
+
 /// Pairing store for a channel.
 #[derive(Debug, Clone)]
 pub struct PairingStore {
@@ -206,10 +218,13 @@ impl PairingStore {
             Err(e) => return Err(e.into()),
         };
 
-        let file: PairingStoreFile = serde_json::from_str(&content).unwrap_or(PairingStoreFile {
-            version: 1,
-            requests: Vec::new(),
-        });
+        let file: PairingStoreFile = parse_json_or_default(
+            &content,
+            PairingStoreFile {
+                version: 1,
+                requests: Vec::new(),
+            },
+        )?;
 
         let now = now_secs();
         let original_len = file.requests.len();
@@ -246,12 +261,14 @@ impl PairingStore {
 
         file.lock_exclusive()?;
 
-        let content = fs::read_to_string(&path).unwrap_or_default();
-        let mut store: PairingStoreFile =
-            serde_json::from_str(&content).unwrap_or(PairingStoreFile {
+        let content = fs::read_to_string(&path)?;
+        let mut store: PairingStoreFile = parse_json_or_default(
+            &content,
+            PairingStoreFile {
                 version: 1,
                 requests: Vec::new(),
-            });
+            },
+        )?;
 
         let now = now_iso();
         let now_secs = now_secs();
@@ -321,7 +338,7 @@ impl PairingStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
         };
-        let mut data: ApproveAttemptsFile = serde_json::from_str(&content).unwrap_or_default();
+        let mut data: ApproveAttemptsFile = parse_json_or_default(&content, Default::default())?;
         let now = now_secs();
         let cutoff = now.saturating_sub(PAIRING_APPROVE_RATE_WINDOW_SECS);
         data.failed_at.retain(|&t| t >= cutoff);
@@ -342,10 +359,12 @@ impl PairingStore {
             .open(&path)?;
         file.lock_exclusive()?;
 
-        let mut data: ApproveAttemptsFile = fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or_default();
+        let existing = match fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e.into()),
+        };
+        let mut data: ApproveAttemptsFile = parse_json_or_default(&existing, Default::default())?;
 
         let now = now_secs();
         data.failed_at.push(now);
@@ -389,12 +408,14 @@ impl PairingStore {
 
         file.lock_exclusive()?;
 
-        let content = fs::read_to_string(&path).unwrap_or_default();
-        let mut store: PairingStoreFile =
-            serde_json::from_str(&content).unwrap_or(PairingStoreFile {
+        let content = fs::read_to_string(&path)?;
+        let mut store: PairingStoreFile = parse_json_or_default(
+            &content,
+            PairingStoreFile {
                 version: 1,
                 requests: Vec::new(),
-            });
+            },
+        )?;
 
         let now_secs = now_secs();
         store.requests.retain(|r| !is_expired(r, now_secs));
@@ -456,12 +477,14 @@ impl PairingStore {
 
         file.lock_exclusive()?;
 
-        let content = fs::read_to_string(&path).unwrap_or_default();
-        let mut store: PairingStoreFile =
-            serde_json::from_str(&content).unwrap_or(PairingStoreFile {
+        let content = fs::read_to_string(&path)?;
+        let mut store: PairingStoreFile = parse_json_or_default(
+            &content,
+            PairingStoreFile {
                 version: 1,
                 requests: Vec::new(),
-            });
+            },
+        )?;
 
         store.requests.retain(|existing| existing.id != request.id);
         store.requests.push(request.clone());
@@ -482,13 +505,21 @@ impl PairingStore {
             Err(e) => return Err(e.into()),
         };
 
-        let file: AllowFromStoreFile =
-            serde_json::from_str(&content).unwrap_or(AllowFromStoreFile {
+        let file: AllowFromStoreFile = parse_json_or_default(
+            &content,
+            AllowFromStoreFile {
                 version: 1,
                 allow_from: Vec::new(),
-            });
+            },
+        )?;
 
         Ok(file.allow_from)
+    }
+
+    /// Ensure an entry exists in the allowFrom list without requiring a
+    /// pending pairing request first.
+    pub fn ensure_allow_from(&self, channel: &str, entry: &str) -> Result<(), PairingStoreError> {
+        self.add_allow_from(channel, entry)
     }
 
     /// Check if a sender is allowed (by id or username).
@@ -536,11 +567,13 @@ impl PairingStore {
             Err(e) => return Err(e.into()),
         };
 
-        let file: BlockFromStoreFile =
-            serde_json::from_str(&content).unwrap_or(BlockFromStoreFile {
+        let file: BlockFromStoreFile = parse_json_or_default(
+            &content,
+            BlockFromStoreFile {
                 version: 1,
                 block_from: Vec::new(),
-            });
+            },
+        )?;
 
         Ok(file.block_from)
     }
@@ -554,14 +587,24 @@ impl PairingStore {
 
         let path = block_from_path(&self.base_dir, channel)?;
         fs::create_dir_all(path.parent().expect("constructed path always has parent"))?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        file.lock_exclusive()?;
 
-        // Read existing content before opening for write
-        let content = fs::read_to_string(&path).unwrap_or_default();
-        let mut store: BlockFromStoreFile =
-            serde_json::from_str(&content).unwrap_or(BlockFromStoreFile {
+        let mut content = String::new();
+        let mut reader = file.try_clone()?;
+        reader.read_to_string(&mut content)?;
+        let mut store: BlockFromStoreFile = parse_json_or_default(
+            &content,
+            BlockFromStoreFile {
                 version: 1,
                 block_from: Vec::new(),
-            });
+            },
+        )?;
 
         let normalized = entry.to_lowercase();
         if store
@@ -569,13 +612,17 @@ impl PairingStore {
             .iter()
             .any(|e| e.to_lowercase() == normalized)
         {
+            fs4::FileExt::unlock(&file)?;
             return Ok(());
         }
 
         store.block_from.push(entry);
         let json = serde_json::to_string_pretty(&store)?;
-        fs::write(&path, json)?;
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, json)?;
+        fs::rename(&tmp_path, &path)?;
 
+        fs4::FileExt::unlock(&file)?;
         Ok(())
     }
 
@@ -587,17 +634,23 @@ impl PairingStore {
         }
 
         let path = block_from_path(&self.base_dir, channel)?;
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
+        let file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
         };
+        file.lock_exclusive()?;
+        let mut content = String::new();
+        let mut reader = file.try_clone()?;
+        reader.read_to_string(&mut content)?;
 
-        let mut store: BlockFromStoreFile =
-            serde_json::from_str(&content).unwrap_or(BlockFromStoreFile {
+        let mut store: BlockFromStoreFile = parse_json_or_default(
+            &content,
+            BlockFromStoreFile {
                 version: 1,
                 block_from: Vec::new(),
-            });
+            },
+        )?;
 
         let orig_len = store.block_from.len();
         store
@@ -607,9 +660,12 @@ impl PairingStore {
 
         if removed {
             let json = serde_json::to_string_pretty(&store)?;
-            fs::write(&path, json)?;
+            let tmp_path = path.with_extension("json.tmp");
+            fs::write(&tmp_path, json)?;
+            fs::rename(&tmp_path, &path)?;
         }
 
+        fs4::FileExt::unlock(&file)?;
         Ok(removed)
     }
 
@@ -653,17 +709,21 @@ impl PairingStore {
             .read(true)
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .open(&path)?;
 
         file.lock_exclusive()?;
 
-        let content = fs::read_to_string(&path).unwrap_or_default();
-        let mut store: AllowFromStoreFile =
-            serde_json::from_str(&content).unwrap_or(AllowFromStoreFile {
+        let mut content = String::new();
+        let mut reader = file.try_clone()?;
+        reader.read_to_string(&mut content)?;
+        let mut store: AllowFromStoreFile = parse_json_or_default(
+            &content,
+            AllowFromStoreFile {
                 version: 1,
                 allow_from: Vec::new(),
-            });
+            },
+        )?;
 
         let normalized = entry.to_lowercase();
         if store
@@ -677,7 +737,9 @@ impl PairingStore {
 
         store.allow_from.push(entry);
         let json = serde_json::to_string_pretty(&store)?;
-        fs::write(&path, json)?;
+        let tmp_path = path.with_extension("json.tmp");
+        fs::write(&tmp_path, json)?;
+        fs::rename(&tmp_path, &path)?;
 
         fs4::FileExt::unlock(&file)?;
         Ok(())
@@ -690,17 +752,23 @@ impl PairingStore {
         }
 
         let path = allow_from_path(&self.base_dir, channel)?;
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
+        let file = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
         };
+        file.lock_exclusive()?;
+        let mut content = String::new();
+        let mut reader = file.try_clone()?;
+        reader.read_to_string(&mut content)?;
 
-        let mut store: AllowFromStoreFile =
-            serde_json::from_str(&content).unwrap_or(AllowFromStoreFile {
+        let mut store: AllowFromStoreFile = parse_json_or_default(
+            &content,
+            AllowFromStoreFile {
                 version: 1,
                 allow_from: Vec::new(),
-            });
+            },
+        )?;
 
         let original_len = store.allow_from.len();
         store
@@ -710,9 +778,12 @@ impl PairingStore {
 
         if removed {
             let json = serde_json::to_string_pretty(&store)?;
-            fs::write(&path, json)?;
+            let tmp_path = path.with_extension("json.tmp");
+            fs::write(&tmp_path, json)?;
+            fs::rename(&tmp_path, &path)?;
         }
 
+        fs4::FileExt::unlock(&file)?;
         Ok(removed)
     }
 
@@ -839,6 +910,16 @@ mod tests {
 
         let allow = store.read_allow_from("telegram").unwrap();
         assert_eq!(allow, vec!["user456"]);
+    }
+
+    #[test]
+    fn test_ensure_allow_from_adds_and_deduplicates() {
+        let (store, _) = test_store();
+        store.ensure_allow_from("telegram", "owner123").unwrap();
+        store.ensure_allow_from("telegram", "OWNER123").unwrap();
+
+        let allow = store.read_allow_from("telegram").unwrap();
+        assert_eq!(allow, vec!["owner123"]);
     }
 
     #[test]

@@ -8,13 +8,17 @@
 //!    comma-separated). If TRUSTED_PROXY_IPS is empty/unset, only loopback IPs are trusted.
 
 use axum::{
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use subtle::ConstantTimeEq;
+
+use crate::channels::web::identity_helpers::{GatewayAuthSource, GatewayRequestIdentity};
+use crate::db::Database;
 
 /// Shared auth state injected via axum middleware state.
 #[derive(Clone)]
@@ -26,6 +30,12 @@ pub struct AuthState {
     /// IP addresses allowed to use trusted-proxy auth.
     /// If empty, only loopback addresses (127.0.0.1, ::1) are trusted.
     pub trusted_proxy_ips: Vec<IpAddr>,
+    /// Default gateway principal when auth alone cannot identify the caller.
+    pub fallback_principal_id: String,
+    /// Default gateway actor when auth alone cannot identify the caller.
+    pub fallback_actor_id: String,
+    /// Optional store so bearer-token requests can infer the primary principal.
+    pub store: Option<Arc<dyn Database>>,
 }
 
 /// Check if an IP is trusted for proxy auth.
@@ -69,43 +79,37 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
+    let mut request = request;
     // Check trusted-proxy mode first (if configured)
     if let Some(ref proxy_header) = auth.trusted_proxy_header {
-        // Extract source IP from the connection address.
-        // We intentionally do NOT trust X-Forwarded-For for the proxy-IP check
-        // itself (that would be circular). The request.extensions() ConnectInfo
-        // gives us the direct TCP peer, which is the reverse proxy.
-        let source_ip = headers
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<IpAddr>().ok());
+        let source_ip = request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0.ip());
 
         if let Some(ip) = source_ip
             && is_trusted_ip(&ip, &auth.trusted_proxy_ips)
             && let Some(user_header) = headers.get(proxy_header.as_str())
-            && user_header.to_str().is_ok()
+            && let Ok(principal_id) = user_header.to_str()
         {
+            let principal_id = principal_id.trim();
+            if principal_id.is_empty() {
+                return (StatusCode::UNAUTHORIZED, "Trusted proxy identity was empty")
+                    .into_response();
+            }
+            let actor_id = principal_id.to_string();
+            request.extensions_mut().insert(GatewayRequestIdentity::new(
+                principal_id,
+                actor_id,
+                GatewayAuthSource::TrustedProxy,
+                false,
+            ));
             tracing::debug!(
                 proxy_header = %proxy_header,
                 source_ip = %ip,
                 "Trusted-proxy auth accepted"
             );
             return next.run(request).await;
-        }
-
-        // For loopback connections (no X-Real-IP header), check if the proxy
-        // header is present and loopback is trusted
-        if source_ip.is_none() && auth.trusted_proxy_ips.is_empty() {
-            // No X-Real-IP means likely a direct loopback connection
-            if let Some(user_header) = headers.get(proxy_header.as_str())
-                && user_header.to_str().is_ok()
-            {
-                tracing::debug!(
-                    proxy_header = %proxy_header,
-                    "Trusted-proxy auth accepted (loopback)"
-                );
-                return next.run(request).await;
-            }
         }
     }
 
@@ -115,6 +119,8 @@ pub async fn auth_middleware(
         && let Some(token) = value.strip_prefix("Bearer ")
         && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
     {
+        let identity = fallback_request_identity(&auth, GatewayAuthSource::BearerHeader).await;
+        request.extensions_mut().insert(identity);
         return next.run(request).await;
     }
 
@@ -124,12 +130,45 @@ pub async fn auth_middleware(
             if let Some(token) = pair.strip_prefix("token=")
                 && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
             {
+                let identity =
+                    fallback_request_identity(&auth, GatewayAuthSource::BearerQuery).await;
+                request.extensions_mut().insert(identity);
                 return next.run(request).await;
             }
         }
     }
 
     (StatusCode::UNAUTHORIZED, "Invalid or missing auth token").into_response()
+}
+
+async fn fallback_request_identity(
+    auth: &AuthState,
+    auth_source: GatewayAuthSource,
+) -> GatewayRequestIdentity {
+    let principal_id = if !auth.fallback_principal_id.trim().is_empty()
+        && auth.fallback_principal_id != "default"
+    {
+        auth.fallback_principal_id.clone()
+    } else if let Some(store) = auth.store.as_ref() {
+        match store.infer_primary_user_id_for_channel("gateway").await {
+            Ok(Some(inferred)) if !inferred.trim().is_empty() => inferred,
+            Ok(_) | Err(_) => auth.fallback_principal_id.clone(),
+        }
+    } else {
+        auth.fallback_principal_id.clone()
+    };
+    let actor_id = default_gateway_actor_id_from_auth(auth, &principal_id);
+    GatewayRequestIdentity::new(principal_id, actor_id, auth_source, true)
+}
+
+fn default_gateway_actor_id_from_auth(auth: &AuthState, principal_id: &str) -> String {
+    if auth.fallback_actor_id.trim().is_empty()
+        || auth.fallback_actor_id == auth.fallback_principal_id
+    {
+        principal_id.to_string()
+    } else {
+        auth.fallback_actor_id.clone()
+    }
 }
 
 #[cfg(test)]
@@ -142,6 +181,9 @@ mod tests {
             token: "test-token".to_string(),
             trusted_proxy_header: None,
             trusted_proxy_ips: vec![],
+            fallback_principal_id: "test-user".to_string(),
+            fallback_actor_id: "test-actor".to_string(),
+            store: None,
         };
         let cloned = state.clone();
         assert_eq!(cloned.token, "test-token");
@@ -171,11 +213,32 @@ mod tests {
             token: "my-token".to_string(),
             trusted_proxy_header: Some("X-Forwarded-User".to_string()),
             trusted_proxy_ips: vec!["10.0.0.1".parse().unwrap()],
+            fallback_principal_id: "user-1".to_string(),
+            fallback_actor_id: "actor-1".to_string(),
+            store: None,
         };
         assert_eq!(
             state.trusted_proxy_header.as_deref(),
             Some("X-Forwarded-User")
         );
         assert_eq!(state.trusted_proxy_ips.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fallback_identity_marks_compatibility_mode() {
+        let state = AuthState {
+            token: "my-token".to_string(),
+            trusted_proxy_header: None,
+            trusted_proxy_ips: vec![],
+            fallback_principal_id: "user-1".to_string(),
+            fallback_actor_id: "actor-1".to_string(),
+            store: None,
+        };
+
+        let identity = fallback_request_identity(&state, GatewayAuthSource::BearerHeader).await;
+        assert_eq!(identity.principal_id, "user-1");
+        assert_eq!(identity.actor_id, "actor-1");
+        assert!(identity.compatibility_fallback);
+        assert_eq!(identity.auth_source.as_str(), "bearer_header");
     }
 }

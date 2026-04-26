@@ -142,3 +142,52 @@ pub struct TrashResult {
     pub id: String,
     pub trashed: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GmailAction;
+
+    #[test]
+    fn list_messages_defaults_max_results_and_labels() {
+        let action: GmailAction = serde_json::from_value(serde_json::json!({
+            "action": "list_messages"
+        }))
+        .unwrap();
+
+        match action {
+            GmailAction::ListMessages {
+                query,
+                max_results,
+                label_ids,
+            } => {
+                assert_eq!(query, None);
+                assert_eq!(max_results, 20);
+                assert!(label_ids.is_empty());
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reply_to_message_defaults_reply_all_to_false() {
+        let action: GmailAction = serde_json::from_value(serde_json::json!({
+            "action": "reply_to_message",
+            "message_id": "msg-123",
+            "body": "Thanks"
+        }))
+        .unwrap();
+
+        match action {
+            GmailAction::ReplyToMessage {
+                message_id,
+                body,
+                reply_all,
+            } => {
+                assert_eq!(message_id, "msg-123");
+                assert_eq!(body, "Thanks");
+                assert!(!reply_all);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+}

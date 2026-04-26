@@ -82,9 +82,8 @@ pub fn spawn_job_monitor(
                             );
                             break;
                         }
-                        _ => {
-                            // Skip tool_use, tool_result, status events
-                        }
+                        SseEvent::JobSessionResult { .. } => {}
+                        _ => {}
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -186,6 +185,8 @@ mod tests {
                     job_id: job_id.to_string(),
                     status: "completed".to_string(),
                     session_id: None,
+                    success: Some(true),
+                    message: Some("done".to_string()),
                 },
             ))
             .unwrap();

@@ -91,59 +91,6 @@ pub(super) static NEVER_AUTO_APPROVE_PATTERNS: LazyLock<Vec<&'static str>> = Laz
     ]
 });
 
-/// Environment variables safe to forward to child processes.
-///
-/// When executing commands directly (no sandbox), we scrub the environment to
-/// prevent API keys and secrets from leaking through `env`, `printenv`, or child
-/// process inheritance (CWE-200). Only these well-known OS/toolchain variables
-/// are forwarded.
-pub(super) const SAFE_ENV_VARS: &[&str] = &[
-    // Core OS
-    "PATH",
-    "HOME",
-    "USER",
-    "LOGNAME",
-    "SHELL",
-    "TERM",
-    "COLORTERM",
-    // Locale
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LC_MESSAGES",
-    // Working directory (many tools depend on this)
-    "PWD",
-    // Temp directories
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    // XDG (Linux desktop/config paths)
-    "XDG_RUNTIME_DIR",
-    "XDG_DATA_HOME",
-    "XDG_CONFIG_HOME",
-    "XDG_CACHE_HOME",
-    // Rust toolchain
-    "CARGO_HOME",
-    "RUSTUP_HOME",
-    // Node.js
-    "NODE_PATH",
-    "NPM_CONFIG_PREFIX",
-    // Editor (for git commit, etc.)
-    "EDITOR",
-    "VISUAL",
-    // Windows (no-ops on Unix, but needed if we ever run on Windows)
-    "SystemRoot",
-    "SYSTEMROOT",
-    "ComSpec",
-    "PATHEXT",
-    "APPDATA",
-    "LOCALAPPDATA",
-    "USERPROFILE",
-    "ProgramFiles",
-    "ProgramFiles(x86)",
-    "WINDIR",
-];
-
 /// Environment variables that indicate library injection attacks.
 ///
 /// Commands that set these variables are blocked because they can be used to

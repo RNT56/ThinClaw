@@ -7,19 +7,146 @@ use std::sync::{
 };
 use std::time::Instant;
 
+use chrono::Utc;
 use futures::stream;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::channels::status_view::{ChannelStatusEntry, ChannelViewState};
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 
+const LEGACY_WEB_CHANNEL_ALIAS: &str = "web";
+const GATEWAY_CHANNEL_NAME: &str = "gateway";
+
+/// Raw platform-neutral event shape used by channel drivers before an event is
+/// turned into ThinClaw's canonical [`IncomingMessage`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncomingEvent {
+    pub platform: String,
+    pub chat_type: String,
+    pub chat_id: String,
+    pub user_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+/// Parsed slash command produced by the centralized channel command parser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashCommand {
+    pub command: String,
+    pub args: String,
+}
+
+/// Standard ThinClaw session-key format for gateway and chat platform ingress.
+pub fn mint_session_key(platform: &str, chat_type: &str, chat_id: &str) -> String {
+    format!(
+        "agent:main:{}:{}:{}",
+        sanitize_session_key_part(platform),
+        sanitize_session_key_part(chat_type),
+        sanitize_session_key_part(chat_id)
+    )
+}
+
+/// Compatibility aliases for persisted sessions created before the unified key
+/// format landed. New channel drivers should write only `mint_session_key`.
+pub fn legacy_session_key_aliases(platform: &str, chat_type: &str, chat_id: &str) -> Vec<String> {
+    let platform = sanitize_session_key_part(platform);
+    let chat_type = sanitize_session_key_part(chat_type);
+    let chat_id = sanitize_session_key_part(chat_id);
+    let mut aliases = vec![
+        format!("{platform}:{chat_id}"),
+        format!("{platform}:{chat_type}:{chat_id}"),
+        format!("agent:main:{platform}:{chat_id}"),
+    ];
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+/// Convert a platform-neutral event into the canonical incoming-message shape.
+pub fn normalize_incoming_event(event: IncomingEvent) -> IncomingMessage {
+    let thread_id = mint_session_key(&event.platform, &event.chat_type, &event.chat_id);
+    let aliases = legacy_session_key_aliases(&event.platform, &event.chat_type, &event.chat_id);
+    let metadata = serde_json::json!({
+        "platform": event.platform.clone(),
+        "chat_type": event.chat_type.clone(),
+        "chat_id": event.chat_id.clone(),
+        "session_key": thread_id.clone(),
+        "legacy_session_key_aliases": aliases,
+        "raw": event.metadata,
+    });
+
+    let mut message = IncomingMessage::new(event.platform, event.user_id, event.text)
+        .with_thread(thread_id)
+        .with_metadata(metadata);
+    if let Some(name) = event.user_name {
+        message = message.with_user_name(name);
+    }
+    message
+}
+
+/// Parse a leading slash command without each channel re-implementing prefix
+/// handling. Returns `None` for regular user messages.
+pub fn parse_slash_command(content: &str) -> Option<SlashCommand> {
+    let trimmed = content.trim();
+    let rest = trimmed.strip_prefix('/')?;
+    if rest.is_empty() {
+        return None;
+    }
+    let (command, args) = rest
+        .split_once(char::is_whitespace)
+        .map(|(cmd, args)| (cmd, args.trim()))
+        .unwrap_or((rest, ""));
+    if command.is_empty() {
+        return None;
+    }
+    Some(SlashCommand {
+        command: command.to_ascii_lowercase(),
+        args: args.to_string(),
+    })
+}
+
+fn sanitize_session_key_part(value: &str) -> String {
+    let cleaned = value
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            ':' | '\n' | '\r' | '\t' => '_',
+            _ => ch,
+        })
+        .collect::<String>();
+    if cleaned.is_empty() {
+        "unknown".to_string()
+    } else {
+        cleaned
+    }
+}
+
 /// Per-channel atomic message counters.
-#[derive(Default)]
 struct ChannelCounters {
     received: AtomicU64,
     sent: AtomicU64,
     errors: AtomicU64,
+    last_message_at: std::sync::RwLock<Option<String>>,
+    last_error: std::sync::RwLock<Option<String>>,
+    last_error_at: std::sync::RwLock<Option<String>>,
+}
+
+impl Default for ChannelCounters {
+    fn default() -> Self {
+        Self {
+            received: AtomicU64::new(0),
+            sent: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            last_message_at: std::sync::RwLock::new(None),
+            last_error: std::sync::RwLock::new(None),
+            last_error_at: std::sync::RwLock::new(None),
+        }
+    }
 }
 
 /// Manages multiple input channels and merges their message streams.
@@ -78,6 +205,41 @@ impl ChannelManager {
             .clone()
     }
 
+    fn record_channel_error(counter: &ChannelCounters, error: &ChannelError) {
+        let failed_at = Utc::now().to_rfc3339();
+        counter.errors.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut guard) = counter.last_error.write() {
+            *guard = Some(error.to_string());
+        }
+        if let Ok(mut guard) = counter.last_error_at.write() {
+            *guard = Some(failed_at);
+        }
+    }
+
+    fn clear_channel_error(counter: &ChannelCounters) {
+        if let Ok(mut guard) = counter.last_error.write() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = counter.last_error_at.write() {
+            *guard = None;
+        }
+    }
+
+    fn resolve_channel_name<'a>(
+        requested: &'a str,
+        channels: &'a HashMap<String, Box<dyn Channel>>,
+    ) -> &'a str {
+        if channels.contains_key(requested) {
+            requested
+        } else if requested == LEGACY_WEB_CHANNEL_ALIAS
+            && channels.contains_key(GATEWAY_CHANNEL_NAME)
+        {
+            GATEWAY_CHANNEL_NAME
+        } else {
+            requested
+        }
+    }
+
     /// Get a clone of the injection sender.
     ///
     /// Background tasks (like job monitors) use this to push messages into the
@@ -90,6 +252,7 @@ impl ChannelManager {
     pub async fn add(&self, channel: Box<dyn Channel>) {
         let name = channel.name().to_string();
         self.channels.write().await.insert(name.clone(), channel);
+        let _ = self.counter_for(&name).await;
         tracing::debug!("Added channel: {}", name);
     }
 
@@ -104,6 +267,7 @@ impl ChannelManager {
 
         // Register for respond/broadcast/send_status
         self.channels.write().await.insert(name.clone(), channel);
+        let _ = self.counter_for(&name).await;
 
         // Forward stream messages through inject_tx
         let tx = self.inject_tx.clone();
@@ -214,10 +378,12 @@ impl ChannelManager {
     ///
     /// Call this once per message received from a channel before processing.
     pub async fn record_received(&self, channel_name: &str) {
-        self.counter_for(channel_name)
-            .await
-            .received
-            .fetch_add(1, Ordering::Relaxed);
+        let counter = self.counter_for(channel_name).await;
+        counter.received.fetch_add(1, Ordering::Relaxed);
+        Self::clear_channel_error(counter.as_ref());
+        if let Ok(mut guard) = counter.last_message_at.write() {
+            *guard = Some(Utc::now().to_rfc3339());
+        }
     }
 
     /// Send a response to a specific channel.
@@ -226,23 +392,28 @@ impl ChannelManager {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let channel_name = msg.channel.clone();
+        let requested_channel_name = msg.channel.clone();
+        let resolved_channel_name = {
+            let channels = self.channels.read().await;
+            Self::resolve_channel_name(&requested_channel_name, &channels).to_string()
+        };
         let result = {
             let channels = self.channels.read().await;
-            if let Some(channel) = channels.get(&channel_name) {
+            if let Some(channel) = channels.get(&resolved_channel_name) {
                 channel.respond(msg, response).await
             } else {
                 return Err(ChannelError::SendFailed {
-                    name: channel_name,
+                    name: requested_channel_name,
                     reason: "Channel not found".to_string(),
                 });
             }
         }; // lock guard drops here
+        let counter = self.counter_for(&resolved_channel_name).await;
         if result.is_ok() {
-            self.counter_for(&channel_name)
-                .await
-                .sent
-                .fetch_add(1, Ordering::Relaxed);
+            counter.sent.fetch_add(1, Ordering::Relaxed);
+            Self::clear_channel_error(counter.as_ref());
+        } else if let Err(ref err) = result {
+            Self::record_channel_error(counter.as_ref(), err);
         }
         result
     }
@@ -258,6 +429,7 @@ impl ChannelManager {
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
         let channels = self.channels.read().await;
+        let channel_name = Self::resolve_channel_name(channel_name, &channels);
         if let Some(channel) = channels.get(channel_name) {
             channel.send_status(status, metadata).await
         } else {
@@ -275,9 +447,13 @@ impl ChannelManager {
         user_id: &str,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let resolved_channel_name = {
+            let channels = self.channels.read().await;
+            Self::resolve_channel_name(channel_name, &channels).to_string()
+        };
         let result = {
             let channels = self.channels.read().await;
-            if let Some(channel) = channels.get(channel_name) {
+            if let Some(channel) = channels.get(&resolved_channel_name) {
                 channel.broadcast(user_id, response).await
             } else {
                 return Err(ChannelError::SendFailed {
@@ -286,11 +462,11 @@ impl ChannelManager {
                 });
             }
         }; // lock drops here
+        let counter = self.counter_for(&resolved_channel_name).await;
         if result.is_ok() {
-            self.counter_for(channel_name)
-                .await
-                .sent
-                .fetch_add(1, Ordering::Relaxed);
+            counter.sent.fetch_add(1, Ordering::Relaxed);
+        } else if let Err(ref err) = result {
+            Self::record_channel_error(counter.as_ref(), err);
         }
         result
     }
@@ -315,16 +491,11 @@ impl ChannelManager {
                     continue;
                 }
             };
+            let counter = self.counter_for(name).await;
             if result.is_ok() {
-                self.counter_for(name)
-                    .await
-                    .sent
-                    .fetch_add(1, Ordering::Relaxed);
-            } else {
-                self.counter_for(name)
-                    .await
-                    .errors
-                    .fetch_add(1, Ordering::Relaxed);
+                counter.sent.fetch_add(1, Ordering::Relaxed);
+            } else if let Err(ref err) = result {
+                Self::record_channel_error(counter.as_ref(), err);
             }
             results.push((name.clone(), result));
         }
@@ -362,11 +533,19 @@ impl ChannelManager {
 
     /// Return formatting guidance from the active channel implementation.
     pub async fn formatting_hints_for(&self, channel_name: &str) -> Option<String> {
-        self.channels
-            .read()
-            .await
+        let channels = self.channels.read().await;
+        let channel_name = Self::resolve_channel_name(channel_name, &channels);
+        channels
             .get(channel_name)
             .and_then(|channel| channel.formatting_hints())
+    }
+
+    /// Return channel-specific diagnostics when the implementation exposes them.
+    pub async fn channel_diagnostics(&self, channel_name: &str) -> Option<serde_json::Value> {
+        let channels = self.channels.read().await;
+        let channel_name = Self::resolve_channel_name(channel_name, &channels);
+        let channel = channels.get(channel_name)?;
+        channel.diagnostics().await
     }
 
     /// Return live `ChannelStatusEntry` list for `openclaw_channel_status_list`.
@@ -389,15 +568,33 @@ impl ChannelManager {
                 (0, 0, 0)
             };
 
-            // Derive channel_type from the name prefix heuristic (e.g. "telegram" → "telegram")
-            let channel_type = name.split('_').next().unwrap_or(name.as_str()).to_string();
+            let (last_message_at, last_error, last_error_at) =
+                if let Some(c) = counters_guard.get(name.as_str()) {
+                    (
+                        c.last_message_at
+                            .read()
+                            .ok()
+                            .and_then(|guard| guard.clone()),
+                        c.last_error.read().ok().and_then(|guard| guard.clone()),
+                        c.last_error_at.read().ok().and_then(|guard| guard.clone()),
+                    )
+                } else {
+                    (None, None, None)
+                };
+            let state = if let (Some(error), Some(failed_at)) =
+                (last_error.clone(), last_error_at.clone())
+            {
+                ChannelViewState::Failed { error, failed_at }
+            } else {
+                ChannelViewState::Running { uptime_secs }
+            };
 
             entries.push(ChannelStatusEntry {
                 name: name.clone(),
-                channel_type,
-                state: ChannelViewState::Running { uptime_secs },
-                last_message_at: None,
-                last_error: None,
+                channel_type: name.clone(),
+                state,
+                last_message_at,
+                last_error,
                 messages_received: received,
                 messages_sent: sent,
                 errors,
@@ -471,6 +668,38 @@ impl ChannelManager {
         }
     }
 
+    /// Update channel-specific runtime config values before an in-place restart.
+    pub async fn update_channel_runtime_config(
+        &self,
+        channel_name: &str,
+        updates: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<(), ChannelError> {
+        let channels = self.channels.read().await;
+        let Some(channel) = channels.get(channel_name) else {
+            return Err(ChannelError::SendFailed {
+                name: channel_name.to_string(),
+                reason: "Channel not found".to_string(),
+            });
+        };
+        channel.update_runtime_config(updates).await;
+        Ok(())
+    }
+
+    /// Clear transient connection state before a manual reconnect.
+    pub async fn reset_channel_connection_state(
+        &self,
+        channel_name: &str,
+    ) -> Result<(), ChannelError> {
+        let channels = self.channels.read().await;
+        let Some(channel) = channels.get(channel_name) else {
+            return Err(ChannelError::SendFailed {
+                name: channel_name.to_string(),
+                reason: "Channel not found".to_string(),
+            });
+        };
+        channel.reset_connection_state().await
+    }
+
     /// Restart a channel in-place: shutdown → re-start → merge new stream.
     ///
     /// The channel stays registered in the map so `respond()`/`broadcast()`
@@ -540,10 +769,173 @@ impl ChannelManager {
         tracing::info!(channel = %name, "Channel restarted successfully");
         Ok(())
     }
+
+    /// Toggle debug mode on a specific channel.
+    ///
+    /// Returns the new debug state (`true` = on, `false` = off).
+    /// For channels that don't support debug mode (e.g., REPL), returns `false`.
+    pub async fn toggle_debug_mode(&self, channel_name: &str) -> bool {
+        let channels = self.channels.read().await;
+        let channel_name = Self::resolve_channel_name(channel_name, &channels);
+        if let Some(channel) = channels.get(channel_name) {
+            channel.toggle_debug_mode().await
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::*;
+
+    #[test]
+    fn mints_standard_session_key_and_aliases() {
+        assert_eq!(
+            mint_session_key("matrix", "room", "!abc:def"),
+            "agent:main:matrix:room:!abc_def"
+        );
+        let aliases = legacy_session_key_aliases("matrix", "room", "!abc:def");
+        assert!(aliases.contains(&"matrix:!abc_def".to_string()));
+        assert!(aliases.contains(&"matrix:room:!abc_def".to_string()));
+    }
+
+    #[test]
+    fn normalizes_incoming_event_with_metadata() {
+        let message = normalize_incoming_event(IncomingEvent {
+            platform: "sms".to_string(),
+            chat_type: "dm".to_string(),
+            chat_id: "+15551234567".to_string(),
+            user_id: "+15551234567".to_string(),
+            user_name: Some("Pat".to_string()),
+            text: "/help please".to_string(),
+            metadata: serde_json::json!({ "provider": "twilio" }),
+        });
+        assert_eq!(message.channel, "sms");
+        assert_eq!(
+            message.thread_id.as_deref(),
+            Some("agent:main:sms:dm:+15551234567")
+        );
+        assert_eq!(
+            parse_slash_command(&message.content).unwrap().command,
+            "help"
+        );
+        assert_eq!(message.metadata["raw"]["provider"], "twilio");
+    }
 }
 
 impl Default for ChannelManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use futures::stream;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    #[derive(Default)]
+    struct MockChannelState {
+        broadcasts: Mutex<Vec<(String, String)>>,
+        diagnostics_calls: Mutex<usize>,
+    }
+
+    struct MockChannel {
+        name: String,
+        state: Arc<MockChannelState>,
+    }
+
+    impl MockChannel {
+        fn new(name: &str, state: Arc<MockChannelState>) -> Self {
+            Self {
+                name: name.to_string(),
+                state,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Channel for MockChannel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn start(&self) -> Result<MessageStream, ChannelError> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn broadcast(
+            &self,
+            user_id: &str,
+            response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            self.state
+                .broadcasts
+                .lock()
+                .await
+                .push((user_id.to_string(), response.content));
+            Ok(())
+        }
+
+        async fn diagnostics(&self) -> Option<serde_json::Value> {
+            let mut calls = self.state.diagnostics_calls.lock().await;
+            *calls += 1;
+            Some(serde_json::json!({"channel": self.name}))
+        }
+
+        async fn health_check(&self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_resolves_legacy_web_alias_to_gateway() {
+        let manager = ChannelManager::new();
+        let state = Arc::new(MockChannelState::default());
+        manager
+            .add(Box::new(MockChannel::new("gateway", Arc::clone(&state))))
+            .await;
+
+        manager
+            .broadcast("web", "user-1", OutgoingResponse::text("hello"))
+            .await
+            .expect("legacy web alias should reach gateway channel");
+
+        let broadcasts = state.broadcasts.lock().await;
+        assert_eq!(
+            broadcasts.as_slice(),
+            &[("user-1".to_string(), "hello".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_diagnostics_resolves_legacy_web_alias_to_gateway() {
+        let manager = ChannelManager::new();
+        let state = Arc::new(MockChannelState::default());
+        manager
+            .add(Box::new(MockChannel::new("gateway", Arc::clone(&state))))
+            .await;
+
+        let diagnostics = manager
+            .channel_diagnostics("web")
+            .await
+            .expect("legacy web alias should resolve diagnostics");
+        assert_eq!(
+            diagnostics.get("channel").and_then(|value| value.as_str()),
+            Some("gateway")
+        );
+        assert_eq!(*state.diagnostics_calls.lock().await, 1);
     }
 }

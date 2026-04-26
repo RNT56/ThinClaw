@@ -35,9 +35,10 @@
         "https://www.googleapis.com/auth/gmail.modify",
         "https://www.googleapis.com/auth/gmail.compose"
       ],
-      "use_pkce": false,
+      "use_pkce": true,
       "extra_params": {
         "access_type": "offline",
+        "include_granted_scopes": "true",
         "prompt": "consent"
       }
     },

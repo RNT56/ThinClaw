@@ -283,8 +283,8 @@ impl Guest for DiscordChannel {
                 }
             }
 
-            let payload_bytes = serde_json::to_vec(&payload)
-                .map_err(|e| format!("Failed to serialize: {}", e))?;
+            let payload_bytes =
+                serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
 
             let headers = serde_json::json!({
                 "Content-Type": "application/json"
@@ -377,16 +377,7 @@ fn handle_slash_command(interaction: &DiscordInteraction) -> bool {
         .unwrap_or_default();
     let options = interaction.data.as_ref().and_then(|d| d.options.clone());
 
-    let content = if let Some(opts) = options {
-        let opt_str = opts
-            .iter()
-            .map(|o| format!("{}: {}", o.name, o.value))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("/{} {}", command_name, opt_str)
-    } else {
-        format!("/{}", command_name)
-    };
+    let content = command_content(&command_name, options.as_deref());
 
     let metadata = DiscordMessageMetadata {
         channel_id: channel_id.clone(),
@@ -562,10 +553,7 @@ fn check_sender_permission(
             Ok(result) => {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!(
-                        "Pairing request for user {}: code {}",
-                        user_id, result.code
-                    ),
+                    &format!("Pairing request for user {}: code {}", user_id, result.code),
                 );
                 if result.created {
                     if let Some(ctx) = reply_ctx {
@@ -636,6 +624,19 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
     }
 }
 
+fn command_content(command_name: &str, options: Option<&[DiscordCommandOption]>) -> String {
+    if let Some(opts) = options {
+        let opt_str = opts
+            .iter()
+            .map(|o| format!("{}: {}", o.name, o.value))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("/{} {}", command_name, opt_str)
+    } else {
+        format!("/{}", command_name)
+    }
+}
+
 export!(DiscordChannel);
 
 /// Discord limits messages to 2000 characters.
@@ -664,7 +665,9 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
         let search_area = &remaining[..max_len];
 
         // Priority 1: split at a paragraph break (\n\n)
-        let split_at = search_area.rfind("\n\n").map(|pos| pos + 1)
+        let split_at = search_area
+            .rfind("\n\n")
+            .map(|pos| pos + 1)
             // Priority 2: split at a line break
             .or_else(|| search_area.rfind('\n'))
             // Priority 3: split at a space
@@ -739,5 +742,71 @@ mod tests {
         let parsed: DiscordMessageMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.channel_id, "123");
         assert_eq!(parsed.interaction_id, "456");
+    }
+
+    #[test]
+    fn test_command_content_without_options() {
+        assert_eq!(command_content("help", None), "/help");
+    }
+
+    #[test]
+    fn test_command_content_with_options() {
+        let options = vec![
+            DiscordCommandOption {
+                name: "topic".to_string(),
+                value: serde_json::json!("release"),
+            },
+            DiscordCommandOption {
+                name: "depth".to_string(),
+                value: serde_json::json!(3),
+            },
+        ];
+
+        assert_eq!(
+            command_content("summarize", Some(&options)),
+            r#"/summarize topic: "release", depth: 3"#
+        );
+    }
+
+    #[test]
+    fn test_parse_application_command_interaction() {
+        let payload = r#"{
+            "type": 2,
+            "id": "interaction-1",
+            "application_id": "app-1",
+            "channel_id": "channel-1",
+            "token": "token-1",
+            "member": {
+                "user": {
+                    "id": "user-1",
+                    "username": "alice",
+                    "global_name": "Alice"
+                }
+            },
+            "data": {
+                "id": "command-1",
+                "name": "summarize",
+                "options": [
+                    { "name": "topic", "value": "release" }
+                ]
+            }
+        }"#;
+
+        let interaction: DiscordInteraction = serde_json::from_str(payload).unwrap();
+        assert_eq!(interaction.interaction_type, 2);
+        assert_eq!(interaction.application_id, "app-1");
+        assert_eq!(interaction.channel_id.as_deref(), Some("channel-1"));
+        assert_eq!(interaction.member.as_ref().unwrap().user.username, "alice");
+        assert_eq!(interaction.data.as_ref().unwrap().name, "summarize");
+        assert_eq!(
+            command_content(
+                &interaction.data.as_ref().unwrap().name,
+                interaction
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.options.as_deref())
+            ),
+            r#"/summarize topic: "release""#
+        );
     }
 }

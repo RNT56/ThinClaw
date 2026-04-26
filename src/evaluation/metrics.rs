@@ -131,6 +131,15 @@ impl MetricsCollector {
 
     /// Generate a summary report.
     pub fn summary(&self) -> MetricsSummary {
+        let mut top_errors: Vec<(String, u64)> = self
+            .metrics
+            .error_types
+            .iter()
+            .map(|(e, c)| (e.clone(), *c))
+            .collect();
+        top_errors.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        top_errors.truncate(3);
+
         MetricsSummary {
             total_actions: self.metrics.total_actions,
             success_rate: self.success_rate(),
@@ -148,13 +157,7 @@ impl MetricsCollector {
                 .iter()
                 .max_by_key(|(_, m)| m.failures)
                 .map(|(name, _)| name.clone()),
-            top_errors: self
-                .metrics
-                .error_types
-                .iter()
-                .take(3)
-                .map(|(e, c)| (e.clone(), *c))
-                .collect(),
+            top_errors,
         }
     }
 }

@@ -124,8 +124,7 @@ impl WasmToolRuntime {
         // Enable component model (WASI Preview 2)
         wasmtime_config.wasm_component_model(true);
 
-        // Disable threads (simplifies security model)
-        wasmtime_config.wasm_threads(false);
+        // Threads are disabled by default (wasmtime 'threads' feature not compiled in).
 
         // Set optimization level
         wasmtime_config.cranelift_opt_level(config.optimization_level);

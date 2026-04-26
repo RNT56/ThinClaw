@@ -12,6 +12,11 @@ For the canonical architecture model, start with [../docs/CHANNEL_ARCHITECTURE.m
 
 If you need the architectural why, use [../docs/CHANNEL_ARCHITECTURE.md](../docs/CHANNEL_ARCHITECTURE.md). If you need setup help, use the pages below.
 
+For shared identity vocabulary and cross-surface command names, also use:
+
+- [../docs/IDENTITY_AND_PERSONALITY.md](../docs/IDENTITY_AND_PERSONALITY.md)
+- [../docs/SURFACES_AND_COMMANDS.md](../docs/SURFACES_AND_COMMANDS.md)
+
 ## Operator Surfaces
 
 | Surface | Runtime Shape | Page |
@@ -37,7 +42,7 @@ If you need the architectural why, use [../docs/CHANNEL_ARCHITECTURE.md](../docs
 |---|---|---|
 | Telegram | packaged Bot API channel | [telegram.md](telegram.md) |
 | Slack | packaged Events API channel | [slack.md](slack.md) |
-| WhatsApp | packaged webhook channel | currently documented through architecture and registry references |
+| WhatsApp | packaged webhook channel | [whatsapp.md](whatsapp.md) |
 | Discord interactions | packaged slash-command / webhook path | [discord.md](discord.md) |
 | Generic WASM runtime notes | runtime/operator context | [wasm.md](wasm.md) |
 

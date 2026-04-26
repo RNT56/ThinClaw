@@ -1,10 +1,14 @@
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use thinclaw::db::Database;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
+
+static CONTRACT_DB_TEST_LOCK: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
 
 pub(crate) struct ContractDb {
     pub db: Arc<dyn Database>,
+    _serial_guard: OwnedMutexGuard<()>,
     #[cfg(feature = "libsql")]
     _temp_dir: Option<tempfile::TempDir>,
     #[cfg(feature = "postgres")]
@@ -16,6 +20,7 @@ pub(crate) fn unique_id(prefix: &str) -> String {
 }
 
 pub(crate) async fn contract_db_or_skip() -> Option<ContractDb> {
+    let serial_guard = CONTRACT_DB_TEST_LOCK.clone().lock_owned().await;
     let backend = std::env::var("DATABASE_BACKEND").unwrap_or_else(|_| {
         if cfg!(feature = "libsql") {
             "libsql".to_string()
@@ -25,8 +30,8 @@ pub(crate) async fn contract_db_or_skip() -> Option<ContractDb> {
     });
 
     match backend.as_str() {
-        "postgres" => connect_postgres().await,
-        "libsql" => connect_libsql().await,
+        "postgres" => connect_postgres(serial_guard).await,
+        "libsql" => connect_libsql(serial_guard).await,
         other => {
             eprintln!("skipping db contract test: unsupported DATABASE_BACKEND={other}");
             None
@@ -35,7 +40,7 @@ pub(crate) async fn contract_db_or_skip() -> Option<ContractDb> {
 }
 
 #[cfg(feature = "libsql")]
-async fn connect_libsql() -> Option<ContractDb> {
+async fn connect_libsql(serial_guard: OwnedMutexGuard<()>) -> Option<ContractDb> {
     use thinclaw::db::libsql::LibSqlBackend;
 
     let dir = tempfile::tempdir().ok()?;
@@ -55,6 +60,7 @@ async fn connect_libsql() -> Option<ContractDb> {
 
     Some(ContractDb {
         db: Arc::new(backend),
+        _serial_guard: serial_guard,
         _temp_dir: Some(dir),
         #[cfg(feature = "postgres")]
         _postgres_schema: None,
@@ -62,13 +68,13 @@ async fn connect_libsql() -> Option<ContractDb> {
 }
 
 #[cfg(not(feature = "libsql"))]
-async fn connect_libsql() -> Option<ContractDb> {
+async fn connect_libsql(_serial_guard: OwnedMutexGuard<()>) -> Option<ContractDb> {
     eprintln!("skipping db contract test: binary was built without libsql feature");
     None
 }
 
 #[cfg(feature = "postgres")]
-async fn connect_postgres() -> Option<ContractDb> {
+async fn connect_postgres(serial_guard: OwnedMutexGuard<()>) -> Option<ContractDb> {
     use secrecy::SecretString;
     use thinclaw::config::{DatabaseBackend, DatabaseConfig};
     use thinclaw::db::postgres::PgBackend;
@@ -119,6 +125,7 @@ async fn connect_postgres() -> Option<ContractDb> {
 
     Some(ContractDb {
         db: Arc::new(backend),
+        _serial_guard: serial_guard,
         #[cfg(feature = "libsql")]
         _temp_dir: None,
         _postgres_schema: Some(schema),
@@ -126,7 +133,7 @@ async fn connect_postgres() -> Option<ContractDb> {
 }
 
 #[cfg(not(feature = "postgres"))]
-async fn connect_postgres() -> Option<ContractDb> {
+async fn connect_postgres(_serial_guard: OwnedMutexGuard<()>) -> Option<ContractDb> {
     eprintln!("skipping db contract test: binary was built without postgres feature");
     None
 }

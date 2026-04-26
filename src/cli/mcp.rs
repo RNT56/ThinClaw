@@ -14,13 +14,36 @@ use crate::secrets::PostgresSecretsStore;
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::terminal_branding::TerminalBranding;
 use crate::tools::mcp::{
-    McpClient, McpServerConfig, McpSessionManager, OAuthConfig,
+    McpClient, McpServerConfig, McpSessionManager, OAuthConfig, PromptContent,
     auth::{authorize_mcp_server, is_authenticated},
-    config::{self, McpServersFile},
+    config::{self, McpConfigStore, McpServersFile},
 };
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum McpCommand {
+    /// Manage MCP server registration, activation, and auth.
+    #[command(subcommand)]
+    Server(McpServerCommand),
+
+    /// Browse MCP resources from a server.
+    #[command(subcommand)]
+    Resource(McpResourceCommand),
+
+    /// Browse MCP prompts from a server.
+    #[command(subcommand)]
+    Prompt(McpPromptCommand),
+
+    /// Inspect and manage roots grants for a server.
+    #[command(subcommand)]
+    Root(McpRootCommand),
+
+    /// Inspect and change MCP logging levels.
+    #[command(subcommand)]
+    Log(McpLogCommand),
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum McpServerCommand {
     /// Add an MCP server
     Add {
         /// Server name (e.g., "notion", "filesystem")
@@ -76,6 +99,12 @@ pub enum McpCommand {
         verbose: bool,
     },
 
+    /// Show a single MCP server configuration
+    Show {
+        /// Server name
+        name: String,
+    },
+
     /// Authenticate with an MCP server (OAuth flow)
     Auth {
         /// Server name to authenticate
@@ -111,24 +140,127 @@ pub enum McpCommand {
     },
 }
 
+#[derive(Subcommand, Debug, Clone)]
+pub enum McpResourceCommand {
+    /// List MCP resources exposed by a server
+    List {
+        /// Server name
+        name: String,
+
+        /// User ID for authentication (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
+    },
+
+    /// Read a specific MCP resource
+    Read {
+        /// Server name
+        name: String,
+
+        /// Resource URI
+        uri: String,
+
+        /// User ID for authentication (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
+    },
+
+    /// List MCP resource templates exposed by a server
+    Templates {
+        /// Server name
+        name: String,
+
+        /// User ID for authentication (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum McpPromptCommand {
+    /// List MCP prompts exposed by a server
+    List {
+        /// Server name
+        name: String,
+
+        /// User ID for authentication (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
+    },
+
+    /// Fetch a prompt from an MCP server
+    Get {
+        /// Server name
+        name: String,
+
+        /// Prompt name
+        prompt: String,
+
+        /// Prompt arguments as repeated KEY=VALUE pairs
+        #[arg(long = "arg", value_delimiter = ',')]
+        args: Vec<String>,
+
+        /// User ID for authentication (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum McpRootCommand {
+    /// List roots granted to a server
+    List {
+        /// Server name
+        name: String,
+    },
+
+    /// Grant a filesystem root to a server
+    Grant {
+        /// Server name
+        name: String,
+
+        /// Root path or URI
+        root: String,
+    },
+
+    /// Revoke a filesystem root from a server
+    Revoke {
+        /// Server name
+        name: String,
+
+        /// Root path or URI
+        root: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum McpLogCommand {
+    /// Show the configured log level for a server
+    Show {
+        /// Server name
+        name: String,
+    },
+
+    /// Set the log level for a server and notify the server if reachable
+    Set {
+        /// Server name
+        name: String,
+
+        /// Log level: debug | info | warning | error
+        level: String,
+
+        /// User ID for authentication (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
+    },
+}
+
 /// Run an MCP command.
 pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
     match cmd {
-        McpCommand::Add {
-            name,
-            url,
-            command,
-            args,
-            env,
-            client_id,
-            auth_url,
-            token_url,
-            scopes,
-            description,
-        } => {
-            branding.print_banner("MCP", Some("Register a model context server"));
-            add_server(
+        McpCommand::Server(server_cmd) => match server_cmd {
+            McpServerCommand::Add {
                 name,
                 url,
                 command,
@@ -139,30 +271,101 @@ pub async fn run_mcp_command(cmd: McpCommand) -> anyhow::Result<()> {
                 token_url,
                 scopes,
                 description,
-            )
-            .await
-        }
-        McpCommand::Remove { name } => {
-            branding.print_banner("MCP", Some("Remove a model context server"));
-            remove_server(name).await
-        }
-        McpCommand::List { verbose } => {
-            branding.print_banner("MCP", Some("Inspect configured servers"));
-            list_servers(verbose).await
-        }
-        McpCommand::Auth { name, user } => auth_server(name, user).await,
-        McpCommand::Test { name, user } => {
-            branding.print_banner("MCP", Some("Test a model context server"));
-            test_server(name, user).await
-        }
-        McpCommand::Toggle {
-            name,
-            enable,
-            disable,
-        } => {
-            branding.print_banner("MCP", Some("Enable or disable a server"));
-            toggle_server(name, enable, disable).await
-        }
+            } => {
+                branding.print_banner("MCP", Some("Register a model context server"));
+                add_server(
+                    name,
+                    url,
+                    command,
+                    args,
+                    env,
+                    client_id,
+                    auth_url,
+                    token_url,
+                    scopes,
+                    description,
+                )
+                .await
+            }
+            McpServerCommand::Remove { name } => {
+                branding.print_banner("MCP", Some("Remove a model context server"));
+                remove_server(name).await
+            }
+            McpServerCommand::List { verbose } => {
+                branding.print_banner("MCP", Some("Inspect configured servers"));
+                list_servers(verbose).await
+            }
+            McpServerCommand::Show { name } => {
+                branding.print_banner("MCP", Some("Inspect a model context server"));
+                show_server(name).await
+            }
+            McpServerCommand::Auth { name, user } => auth_server(name, user).await,
+            McpServerCommand::Test { name, user } => {
+                branding.print_banner("MCP", Some("Test a model context server"));
+                test_server(name, user).await
+            }
+            McpServerCommand::Toggle {
+                name,
+                enable,
+                disable,
+            } => {
+                branding.print_banner("MCP", Some("Enable or disable a server"));
+                toggle_server(name, enable, disable).await
+            }
+        },
+        McpCommand::Resource(resource_cmd) => match resource_cmd {
+            McpResourceCommand::List { name, user } => {
+                branding.print_banner("MCP", Some("List MCP resources"));
+                list_server_resources(name, user).await
+            }
+            McpResourceCommand::Read { name, uri, user } => {
+                branding.print_banner("MCP", Some("Read an MCP resource"));
+                read_server_resource(name, uri, user).await
+            }
+            McpResourceCommand::Templates { name, user } => {
+                branding.print_banner("MCP", Some("List MCP resource templates"));
+                list_server_resource_templates(name, user).await
+            }
+        },
+        McpCommand::Prompt(prompt_cmd) => match prompt_cmd {
+            McpPromptCommand::List { name, user } => {
+                branding.print_banner("MCP", Some("List MCP prompts"));
+                list_server_prompts(name, user).await
+            }
+            McpPromptCommand::Get {
+                name,
+                prompt,
+                args,
+                user,
+            } => {
+                branding.print_banner("MCP", Some("Fetch an MCP prompt"));
+                get_server_prompt(name, prompt, args, user).await
+            }
+        },
+        McpCommand::Root(root_cmd) => match root_cmd {
+            McpRootCommand::List { name } => {
+                branding.print_banner("MCP", Some("List MCP roots"));
+                list_server_roots(name).await
+            }
+            McpRootCommand::Grant { name, root } => {
+                branding.print_banner("MCP", Some("Grant an MCP root"));
+                grant_server_root(name, root).await
+            }
+            McpRootCommand::Revoke { name, root } => {
+                branding.print_banner("MCP", Some("Revoke an MCP root"));
+                revoke_server_root(name, root).await
+            }
+        },
+        McpCommand::Log(log_cmd) => match log_cmd {
+            McpLogCommand::Show { name } => {
+                branding.print_banner("MCP", Some("Inspect MCP logging"));
+                show_server_log_level(name).await
+            }
+            McpLogCommand::Set { name, level, user } => {
+                branding.print_banner("MCP", Some("Set MCP logging"));
+                set_server_log_level(name, level, user).await
+            }
+        },
     }
 }
 
@@ -187,7 +390,7 @@ async fn add_server(
 
     let mut config = if is_stdio {
         // Stdio transport: command is required, url is ignored
-        let cmd = command.unwrap();
+        let cmd = command.expect("guarded by is_stdio = command.is_some()");
         let cmd_args = args.unwrap_or_default();
         let mut cfg = McpServerConfig::new_stdio(&name, &cmd, cmd_args);
 
@@ -384,6 +587,346 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn show_server(name: String) -> anyhow::Result<()> {
+    let db = connect_db().await;
+    let servers = load_servers(db.as_deref()).await?;
+    let server = servers
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
+
+    println!("  Name: {}", server.name);
+    println!("  Display: {}", server.display_label());
+    println!(
+        "  Transport: {}",
+        if server.is_stdio() { "stdio" } else { "http" }
+    );
+    if server.is_stdio() {
+        println!(
+            "  Command: {}",
+            server.command.as_deref().unwrap_or("<missing>")
+        );
+        if !server.args.is_empty() {
+            println!("  Args: {}", server.args.join(" "));
+        }
+    } else {
+        println!("  URL: {}", server.url);
+    }
+    println!("  Enabled: {}", if server.enabled { "yes" } else { "no" });
+    println!(
+        "  Requires auth: {}",
+        if server.requires_auth() { "yes" } else { "no" }
+    );
+    println!(
+        "  Log level: {}",
+        format!("{:?}", server.logging_level).to_ascii_lowercase()
+    );
+    println!("  Tool namespace: {}", server.tool_namespace());
+    if !server.roots_grants.is_empty() {
+        println!("  Roots:");
+        for root in &server.roots_grants {
+            println!("    - {}", root);
+        }
+    }
+    if let Some(description) = server.description {
+        println!("  Description: {}", description);
+    }
+    if let Some(oauth) = server.oauth {
+        println!("  OAuth client ID: {}", oauth.client_id);
+        if let Some(resource) = oauth.resource {
+            println!("  OAuth resource: {}", resource);
+        }
+        if !oauth.scopes.is_empty() {
+            println!("  OAuth scopes: {}", oauth.scopes.join(", "));
+        }
+    }
+    println!();
+
+    Ok(())
+}
+
+async fn build_client(server: &McpServerConfig, user_id: &str) -> anyhow::Result<McpClient> {
+    let config_store = Some(McpConfigStore::new(connect_db().await, user_id.to_string()));
+    if server.is_stdio() {
+        return McpClient::new_stdio_with_store(server, config_store).map_err(Into::into);
+    }
+
+    let session_manager = Arc::new(McpSessionManager::new());
+    match get_secrets_store().await {
+        Ok(secrets) if is_authenticated(server, &secrets, user_id).await => {
+            Ok(McpClient::new_authenticated_with_store(
+                server.clone(),
+                session_manager,
+                secrets,
+                user_id,
+                config_store,
+            ))
+        }
+        Ok(_) | Err(_) => Ok(McpClient::new_configured_with_store(
+            server.clone(),
+            config_store,
+        )),
+    }
+}
+
+async fn load_server(name: &str) -> anyhow::Result<McpServerConfig> {
+    let db = connect_db().await;
+    let servers = load_servers(db.as_deref()).await?;
+    servers
+        .get(name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))
+}
+
+fn parse_arg_pairs(args: Vec<String>) -> anyhow::Result<Option<serde_json::Value>> {
+    if args.is_empty() {
+        return Ok(None);
+    }
+
+    let mut payload = serde_json::Map::new();
+    for entry in args {
+        let (key, value) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("Invalid argument '{}'. Expected KEY=VALUE", entry))?;
+        payload.insert(
+            key.trim().to_string(),
+            serde_json::Value::String(value.trim().to_string()),
+        );
+    }
+    Ok(Some(serde_json::Value::Object(payload)))
+}
+
+async fn list_server_resources(name: String, user_id: String) -> anyhow::Result<()> {
+    let server = load_server(&name).await?;
+    let client = build_client(&server, &user_id).await?;
+    let resources = client.list_resources().await?;
+
+    if resources.is_empty() {
+        println!("  No resources exposed by '{}'.", name);
+        println!();
+        return Ok(());
+    }
+
+    println!("  Resources from '{}':", name);
+    for resource in resources {
+        println!("    - {} ({})", resource.name, resource.uri);
+        if let Some(description) = resource.description {
+            println!("      {}", description);
+        }
+    }
+    println!();
+    Ok(())
+}
+
+async fn read_server_resource(name: String, uri: String, user_id: String) -> anyhow::Result<()> {
+    let server = load_server(&name).await?;
+    let client = build_client(&server, &user_id).await?;
+    let result = client.read_resource(&uri).await?;
+
+    println!("  Resource: {}", uri);
+    for content in result.contents {
+        match content {
+            crate::tools::mcp::McpResourceContents::Text {
+                uri,
+                mime_type,
+                text,
+            } => {
+                println!(
+                    "  --- {} ({}) ---",
+                    uri,
+                    mime_type.unwrap_or_else(|| "text/plain".to_string())
+                );
+                println!("{}", text);
+            }
+            crate::tools::mcp::McpResourceContents::Blob {
+                uri,
+                mime_type,
+                blob,
+            } => {
+                println!(
+                    "  --- {} ({}) ---",
+                    uri,
+                    mime_type.unwrap_or_else(|| "application/octet-stream".to_string())
+                );
+                println!("{}", blob);
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+async fn list_server_resource_templates(name: String, user_id: String) -> anyhow::Result<()> {
+    let server = load_server(&name).await?;
+    let client = build_client(&server, &user_id).await?;
+    let templates = client.list_resource_templates().await?;
+
+    if templates.is_empty() {
+        println!("  No resource templates exposed by '{}'.", name);
+        println!();
+        return Ok(());
+    }
+
+    println!("  Resource templates from '{}':", name);
+    for template in templates {
+        println!("    - {} ({})", template.name, template.uri_template);
+        if let Some(description) = template.description {
+            println!("      {}", description);
+        }
+    }
+    println!();
+    Ok(())
+}
+
+async fn list_server_prompts(name: String, user_id: String) -> anyhow::Result<()> {
+    let server = load_server(&name).await?;
+    let client = build_client(&server, &user_id).await?;
+    let prompts = client.list_prompts().await?;
+
+    if prompts.is_empty() {
+        println!("  No prompts exposed by '{}'.", name);
+        println!();
+        return Ok(());
+    }
+
+    println!("  Prompts from '{}':", name);
+    for prompt in prompts {
+        let args = if prompt.arguments.is_empty() {
+            "no args".to_string()
+        } else {
+            prompt
+                .arguments
+                .iter()
+                .map(|arg| format!("{}{}", arg.name, if arg.required { "*" } else { "" }))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        println!("    - {} ({})", prompt.name, args);
+        if let Some(description) = prompt.description {
+            println!("      {}", description);
+        }
+    }
+    println!();
+    Ok(())
+}
+
+async fn get_server_prompt(
+    name: String,
+    prompt: String,
+    args: Vec<String>,
+    user_id: String,
+) -> anyhow::Result<()> {
+    let server = load_server(&name).await?;
+    let client = build_client(&server, &user_id).await?;
+    let prompt_result = client.get_prompt(&prompt, parse_arg_pairs(args)?).await?;
+
+    if let Some(description) = prompt_result.description {
+        println!("  {}", description);
+        println!();
+    }
+
+    for message in prompt_result.messages {
+        println!("  [{}]", message.role);
+        match message.content {
+            PromptContent::Text(text) => println!("{}", text),
+            PromptContent::Block(block) => println!("{}", serde_json::to_string_pretty(&block)?),
+            PromptContent::Blocks(blocks) => {
+                println!("{}", serde_json::to_string_pretty(&blocks)?)
+            }
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+async fn list_server_roots(name: String) -> anyhow::Result<()> {
+    let server = load_server(&name).await?;
+    if server.roots_grants.is_empty() {
+        println!("  No roots granted to '{}'.", name);
+    } else {
+        println!("  Roots granted to '{}':", name);
+        for root in server.roots_grants {
+            println!("    - {}", root);
+        }
+    }
+    println!();
+    Ok(())
+}
+
+async fn grant_server_root(name: String, root: String) -> anyhow::Result<()> {
+    let db = connect_db().await;
+    let mut servers = load_servers(db.as_deref()).await?;
+    let server = servers
+        .get_mut(&name)
+        .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
+    if !server.roots_grants.iter().any(|existing| existing == &root) {
+        server.roots_grants.push(root.clone());
+    }
+    save_servers(db.as_deref(), &servers).await?;
+    println!("  Granted root '{}' to '{}'.", root, name);
+    println!();
+    Ok(())
+}
+
+async fn revoke_server_root(name: String, root: String) -> anyhow::Result<()> {
+    let db = connect_db().await;
+    let mut servers = load_servers(db.as_deref()).await?;
+    let server = servers
+        .get_mut(&name)
+        .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
+    let before = server.roots_grants.len();
+    server.roots_grants.retain(|existing| existing != &root);
+    if before == server.roots_grants.len() {
+        anyhow::bail!("Root '{}' was not granted to '{}'", root, name);
+    }
+    save_servers(db.as_deref(), &servers).await?;
+    println!("  Revoked root '{}' from '{}'.", root, name);
+    println!();
+    Ok(())
+}
+
+async fn show_server_log_level(name: String) -> anyhow::Result<()> {
+    let server = load_server(&name).await?;
+    println!(
+        "  Configured log level for '{}': {}",
+        name,
+        format!("{:?}", server.logging_level).to_ascii_lowercase()
+    );
+    println!();
+    Ok(())
+}
+
+async fn set_server_log_level(name: String, level: String, user_id: String) -> anyhow::Result<()> {
+    let parsed_level = match level.trim().to_ascii_lowercase().as_str() {
+        "debug" => crate::tools::mcp::McpLoggingLevel::Debug,
+        "info" => crate::tools::mcp::McpLoggingLevel::Info,
+        "warn" | "warning" => crate::tools::mcp::McpLoggingLevel::Warning,
+        "error" => crate::tools::mcp::McpLoggingLevel::Error,
+        other => anyhow::bail!("Unsupported log level '{}'", other),
+    };
+
+    let db = connect_db().await;
+    let mut servers = load_servers(db.as_deref()).await?;
+    let server = servers
+        .get_mut(&name)
+        .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
+    server.logging_level = parsed_level;
+    let updated_server = server.clone();
+    save_servers(db.as_deref(), &servers).await?;
+
+    let client = build_client(&updated_server, &user_id).await?;
+    let _ = client.set_logging_level(parsed_level).await;
+
+    println!(
+        "  Set log level for '{}' to {}.",
+        name,
+        level.to_ascii_lowercase()
+    );
+    println!();
+    Ok(())
+}
+
 /// Authenticate with an MCP server.
 async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
@@ -504,8 +1047,9 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
     // Create client — use from_config for automatic transport dispatch
     if server.is_stdio() {
+        let config_store = Some(McpConfigStore::new(db.clone(), user_id.clone()));
         // Stdio: spawn the process directly
-        let client = match McpClient::new_stdio(&server) {
+        let client = match McpClient::new_stdio_with_store(&server, config_store) {
             Ok(c) => c,
             Err(e) => {
                 println!(
@@ -533,9 +1077,16 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         let session_manager = Arc::new(McpSessionManager::new());
         let secrets = get_secrets_store().await?;
         let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
+        let config_store = Some(McpConfigStore::new(db.clone(), user_id.clone()));
 
         let client = if has_tokens {
-            McpClient::new_authenticated(server.clone(), session_manager, secrets, user_id)
+            McpClient::new_authenticated_with_store(
+                server.clone(),
+                session_manager,
+                secrets,
+                user_id,
+                config_store,
+            )
         } else if server.requires_auth() {
             println!();
             println!(
@@ -548,7 +1099,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
             println!();
             return Ok(());
         } else {
-            McpClient::new_with_name(&server.name, &server.url)
+            McpClient::new_configured_with_store(server.clone(), config_store)
         };
 
         // Test connection

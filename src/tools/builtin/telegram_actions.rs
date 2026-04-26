@@ -1,12 +1,16 @@
-//! Telegram moderation actions tool.
+//! Telegram Bot API actions tool.
 //!
-//! Provides the agent with Telegram-specific moderation capabilities:
+//! Provides the agent with Telegram-specific live action capabilities:
 //! - Send/forward/pin/unpin messages
 //! - Kick/ban/unban users from groups
 //! - Delete messages
 //! - Get chat/member info
 //!
-//! Requires the bot to have appropriate admin permissions in the group.
+//! This does NOT read the bot conversation transcript, read a user's personal
+//! Telegram account, or inspect inbound channel history. Use `session_search`
+//! for prior Telegram conversation history.
+//!
+//! Requires the bot to have appropriate admin permissions in the target chat.
 
 use std::time::Instant;
 
@@ -85,9 +89,10 @@ impl Tool for TelegramActionsTool {
     }
 
     fn description(&self) -> &str {
-        "Perform Telegram moderation actions: send messages, kick/ban users, \
-         pin messages, delete messages, and get chat information. \
-         Requires the bot to have admin permissions in the target group."
+        "Perform live Telegram Bot API actions only: send messages, kick/ban users, \
+         pin messages, delete messages, and get chat/member information. \
+         This tool does not read the bot transcript or log into a Telegram account; \
+         use session_search for prior Telegram messages."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

@@ -47,7 +47,7 @@ impl ProviderPreset {
     /// Default model for this provider.
     pub fn default_model(&self) -> &str {
         match self {
-            Self::Nvidia => "meta/llama-3.1-405b-instruct",
+            Self::Nvidia => "meta/llama-3.3-70b-instruct",
             Self::Perplexity => "sonar-pro",
             Self::MiniMax => "MiniMax-M2.7",
             Self::Glm => "glm-4-plus",

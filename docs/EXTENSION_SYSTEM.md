@@ -14,6 +14,7 @@ This document is the canonical overview for those boundaries. For the public-fac
 |---|---|---|---|
 | WASM tool | Loaded inside ThinClaw's WASM runtime | Sandboxed, host-mediated | `thinclaw tool ...` |
 | WASM channel | Loaded inside ThinClaw's WASM channel runtime | Sandboxed, host-mediated | registry / channel setup path |
+| Native plugin | Loaded as `.so`/`.dylib` through C ABI JSON v1 | Unsafe, disabled by default, allowlisted, signed | broad plugin manifest |
 | MCP server | External process or remote service | Operator-trusted, not sandboxed | `thinclaw mcp ...` |
 
 ## Do Not Blur These Flows
@@ -43,6 +44,19 @@ MCP is not the sandboxed extension path.
 - They are configured and trusted by the operator.
 - They can still be a great integration path, but they should be described as operator-trusted execution, not as isolated plugins.
 
+### Native plugins
+
+Native plugins are the exceptional unsafe path for integrations that cannot fit inside WASM.
+
+- `extensions.allow_native_plugins` must be true.
+- `extensions.require_plugin_signatures` is true by default; native loading verifies signed broad plugin manifests against `extensions.trusted_manifest_public_keys`.
+- dynamic libraries must live under `extensions.native_plugin_allowlist_dirs`.
+- native artifacts can declare a `sha256`; when present it is checked before `libloading` opens the library.
+- the only supported ABI is C ABI JSON v1 via `thinclaw_native_plugin_invoke_v1`.
+- requests and responses cross the boundary as bounded JSON byte buffers.
+
+Broad plugin manifests can contribute tools, channels, memory providers, context providers, and native plugins. Native contributions must declare `abi = "c_abi_json_v1"`, `abiVersion = 1`, an artifact id, and non-zero request/response byte limits.
+
 ## Installation And Auth Surface
 
 Use the CLI that matches the extension kind:
@@ -54,6 +68,20 @@ Use the CLI that matches the extension kind:
 | Work with registry-backed packaged artifacts | `thinclaw registry ...` |
 
 Do not document these as interchangeable.
+
+## MCP Operator Surfaces
+
+The MCP surface is now split by task instead of a single flat command set:
+
+- `thinclaw mcp server ...` for add, list, show, auth, test, remove, and toggle
+- `thinclaw mcp resource ...` for listing and reading server resources
+- `thinclaw mcp prompt ...` for listing prompts and fetching prompt payloads
+- `thinclaw mcp root ...` for inspecting and changing roots grants
+- `thinclaw mcp log ...` for inspecting and updating server log levels
+
+The WebUI Extensions area also exposes a live MCP browser for server metadata, resources, prompts, OAuth discovery, and pending approval requests such as `sampling/createMessage` and `elicitation/create`.
+
+Roots grants are treated as persisted server policy rather than a one-time startup snapshot. Long-lived MCP clients reload the configured grants when serving `roots/list`, so updated grants are visible to connected servers without requiring a full ThinClaw restart.
 
 ## Recommended Reading Order
 
@@ -71,3 +99,51 @@ ThinClaw's extension story is one of deliberate separation:
 - MCP where ecosystem reach is worth an operator-trusted boundary
 
 That separation is a feature, not a documentation inconvenience.
+
+## Skill Provenance vs Trust
+
+Skills now expose two different concepts on purpose:
+
+- `trust`: the hard authority ceiling (`installed` vs `trusted`)
+- `source_tier`: ecosystem/display provenance (`builtin`, `official`, `trusted`, `community`, `unvetted`)
+
+Only `trust` participates in tool attenuation and safety decisions. `source_tier` is informational and should not be used as an authorization signal.
+
+## User Tool Fast Path
+
+ThinClaw now has a lightweight operator-trusted tool drop-in path at `~/.thinclaw/user-tools/`.
+
+- Each `*.toml` file in that directory is discovered at startup.
+- `kind = "shell"` wraps a command template and exposes placeholder parameters such as `{input}` as a real agent tool.
+- `kind = "wasm"` loads a local WASM tool file through the existing WASM runtime instead of inventing a parallel sandbox.
+- `kind = "mcp_proxy"` creates a narrow alias over an already-registered tool, which is useful for pre-binding or simplifying MCP-backed workflows.
+
+This fast path is intentionally separate from `~/.thinclaw/tools/`, which remains the WASM tool install directory.
+
+Shell user tools inherit the same workspace/safety defaults as the local dev-tool registration path:
+
+- sandboxed workspaces keep a filesystem boundary
+- project mode keeps the working directory pinned
+- unrestricted mode remains unrestricted
+
+Example:
+
+```toml
+name = "cargo-check-quick"
+description = "Run cargo check in the current workspace"
+kind = "shell"
+command = "cargo check --message-format short"
+approval = "auto_approved"
+```
+
+## Agent-Facing Memory Setup
+
+The agent-facing learning surface now includes:
+
+- `external_memory_setup`
+- `external_memory_status`
+- `external_memory_recall`
+- `external_memory_export`
+- `external_memory_off`
+
+These tools are operator-trusted settings/configuration flows layered on top of the existing external-memory provider runtime.

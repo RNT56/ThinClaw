@@ -17,7 +17,7 @@
 
 use crate::agent::routine::RoutineRun;
 use crate::channels::gmail_wiring::GmailConfig;
-use crate::cli::oauth_defaults::{self, GmailOAuthConfig};
+use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
 use crate::db::Database;
 use crate::extensions::clawhub::{CatalogCache, CatalogEntry};
 use crate::extensions::lifecycle_hooks::{AuditLogHook, SerializedLifecycleEvent};
@@ -26,6 +26,8 @@ use crate::llm::LlmRuntimeManager;
 use crate::llm::cost_tracker::{CostSummary, CostTracker};
 use crate::llm::response_cache_ext::{CacheStats, CachedResponseStore};
 use crate::llm::routing_policy::{RoutingPolicy, RoutingRule, RoutingRuleSummary};
+use crate::secrets::InMemorySecretsStore;
+use crate::tools::wasm::{AuthCapabilitySchema, CapabilitiesFile, WasmToolOAuthFlow};
 use std::sync::{Arc, OnceLock};
 
 struct RoutingPersistenceContext {
@@ -554,129 +556,110 @@ pub struct GmailOAuthResult {
 /// Maps to: `openclaw_gmail_oauth_start`
 /// Response: `GmailOAuthResult`
 pub async fn gmail_oauth_start() -> Result<GmailOAuthResult, String> {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use sha2::{Digest, Sha256};
+    wasm_tool_oauth_start("gmail".to_string()).await
+}
 
-    // Check that we have the built-in Google credentials.
-    let creds = oauth_defaults::builtin_credentials("gmail_oauth_token").ok_or_else(|| {
-        "Gmail OAuth credentials not available. Rebuild with THINCLAW_GOOGLE_CLIENT_ID set."
-            .to_string()
-    })?;
+/// Start the OAuth flow for an installed or bundled WASM tool.
+///
+/// This is the generic desktop helper used by Google Workspace tools.
+pub async fn wasm_tool_oauth_start(tool_name: String) -> Result<GmailOAuthResult, String> {
+    use secrecy::SecretString;
 
-    // Generate PKCE verifier and challenge.
-    let mut verifier_bytes = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut verifier_bytes);
-    let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+    let auth = load_wasm_tool_auth(&tool_name)?;
+    let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
+    let crypto = Arc::new(
+        crate::secrets::SecretsCrypto::new(SecretString::from(
+            "tauri-oauth-temporary-master-key".to_string(),
+        ))
+        .map_err(|e| e.to_string())?,
+    );
+    let store = InMemorySecretsStore::new(crypto);
+    let tools_dir = crate::platform::state_paths().tools_dir;
+    let flow = WasmToolOAuthFlow::new(&store, "tauri", &tools_dir);
+    let auth_request = flow
+        .prepare_authorization(&auth, &redirect_uri, "local", None)
+        .await
+        .map_err(|e| e.to_string())?;
 
-    let mut hasher = Sha256::new();
-    hasher.update(code_verifier.as_bytes());
-    let code_challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
-
-    // Build the authorization URL.
-    let auth_url = GmailOAuthConfig::auth_url("gmail-tauri", &code_challenge);
-
-    // Open the browser.
-    if let Err(e) = open::that(&auth_url) {
-        tracing::warn!(error = %e, "Could not open browser for Gmail OAuth");
+    if let Err(error) = open::that(&auth_request.auth_url) {
+        tracing::warn!(error = %error, tool = %tool_name, "Could not open browser for WASM tool OAuth");
         return Err(format!(
             "Could not open browser. Please open this URL manually: {}",
-            auth_url
+            auth_request.auth_url
         ));
     }
 
-    tracing::info!("Gmail OAuth flow started — waiting for browser callback");
-
-    // Bind the callback listener.
     let listener = oauth_defaults::bind_callback_listener()
         .await
         .map_err(|e| format!("Failed to bind OAuth callback listener: {}", e))?;
+    let code = oauth_defaults::wait_for_callback(
+        listener,
+        "/callback",
+        "code",
+        auth.display_name.as_deref().unwrap_or(&tool_name),
+    )
+    .await
+    .map_err(|e| format!("OAuth callback failed: {}", e))?;
 
-    // Wait for the callback (5 minute timeout).
-    let code = oauth_defaults::wait_for_callback(listener, "/callback", "code", "Gmail")
+    let token = flow
+        .exchange_code(
+            &auth,
+            &redirect_uri,
+            &code,
+            auth_request.code_verifier.as_deref(),
+        )
         .await
-        .map_err(|e| format!("OAuth callback failed: {}", e))?;
+        .map_err(|e| e.to_string())?;
 
-    tracing::info!("Gmail OAuth code received — exchanging for tokens");
-
-    // Exchange the code for tokens.
-    let client = reqwest::Client::new();
-    let token_params = [
-        ("grant_type", "authorization_code"),
-        ("code", &code),
-        ("redirect_uri", &GmailOAuthConfig::redirect_uri()),
-        ("code_verifier", &code_verifier),
-    ];
-
-    let token_response = client
-        .post(GmailOAuthConfig::TOKEN_URL)
-        .basic_auth(creds.client_id, Some(&creds.client_secret))
-        .form(&token_params)
-        .send()
-        .await
-        .map_err(|e| format!("Token exchange request failed: {}", e))?;
-
-    if !token_response.status().is_success() {
-        let status = token_response.status();
-        let body = token_response.text().await.unwrap_or_default();
-        tracing::error!(
-            status = %status,
-            body = %body,
-            "Gmail OAuth token exchange failed"
-        );
-        return Ok(GmailOAuthResult {
-            success: false,
-            access_token: None,
-            refresh_token: None,
-            expires_in: None,
-            scope: None,
-            error: Some(format!("Token exchange failed: {} - {}", status, body)),
-        });
-    }
-
-    let token_data: serde_json::Value = token_response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse token response: {}", e))?;
-
-    let access_token = token_data
-        .get("access_token")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let refresh_token = token_data
-        .get("refresh_token")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
-
-    let scope = token_data
-        .get("scope")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    if access_token.is_none() {
-        return Ok(GmailOAuthResult {
-            success: false,
-            access_token: None,
-            refresh_token: None,
-            expires_in: None,
-            scope: None,
-            error: Some("Token exchange succeeded but no access_token in response".into()),
-        });
-    }
-
-    tracing::info!("Gmail OAuth completed successfully");
+    let scope = if token.granted_scopes.is_empty() {
+        None
+    } else {
+        Some(token.granted_scopes.join(" "))
+    };
+    let expires_in = token
+        .expires_at
+        .map(|expires_at| (expires_at - chrono::Utc::now()).num_seconds().max(0) as u64);
 
     Ok(GmailOAuthResult {
         success: true,
-        access_token,
-        refresh_token,
+        access_token: Some(token.access_token),
+        refresh_token: token.refresh_token,
         expires_in,
         scope,
         error: None,
     })
+}
+
+fn load_wasm_tool_auth(tool_name: &str) -> Result<AuthCapabilitySchema, String> {
+    let mut candidates = vec![
+        crate::platform::state_paths()
+            .tools_dir
+            .join(format!("{}.capabilities.json", tool_name)),
+    ];
+
+    let bundled = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tools-src")
+        .join(tool_name)
+        .join(format!("{}-tool.capabilities.json", tool_name));
+    candidates.push(bundled);
+
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|error| format!("Failed to read {}: {}", path.display(), error))?;
+        let caps = CapabilitiesFile::from_json(&content)
+            .map_err(|error| format!("Invalid capabilities file {}: {}", path.display(), error))?;
+        if let Some(auth) = caps.auth {
+            return Ok(auth);
+        }
+    }
+
+    Err(format!(
+        "No OAuth-capable WASM tool auth configuration found for '{}'",
+        tool_name
+    ))
 }
 
 // ── Canvas panel commands ─────────────────────────────────────────────
@@ -798,11 +781,13 @@ pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
         action: params.action,
         guardrails: RoutineGuardrails::default(),
         notify: params.notify.unwrap_or_default(),
+        policy: Default::default(),
         last_run_at: None,
         next_fire_at: None,
         run_count: 0,
         consecutive_failures: 0,
         state: serde_json::Value::Null,
+        config_version: 1,
         created_at: now,
         updated_at: now,
     };
@@ -831,6 +816,53 @@ pub fn routine_create(params: RoutineCreateParams) -> Result<Routine, String> {
     Ok(routine)
 }
 
+// ── 21. openclaw_autonomy_* ───────────────────────────────────────────
+
+pub async fn autonomy_status() -> Result<crate::desktop_autonomy::AutonomyStatus, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    Ok(manager.status().await)
+}
+
+pub async fn autonomy_pause(reason: Option<String>) -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.pause(reason).await;
+    Ok(serde_json::json!({"paused": true}))
+}
+
+pub async fn autonomy_resume() -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.resume().await?;
+    Ok(serde_json::json!({"paused": false}))
+}
+
+pub async fn desktop_permission_status() -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.desktop_permission_status().await
+}
+
+pub async fn autonomy_bootstrap() -> Result<crate::desktop_autonomy::AutonomyBootstrapReport, String>
+{
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.bootstrap().await
+}
+
+pub async fn autonomy_rollback() -> Result<serde_json::Value, String> {
+    let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() else {
+        return Err("desktop autonomy manager is not active".to_string());
+    };
+    manager.rollback().await
+}
+
 // ── Convenience: list all available command names ──────────────────────
 
 /// List all available Tauri command names from this facade.
@@ -851,11 +883,18 @@ pub fn available_commands() -> Vec<&'static str> {
         "openclaw_routing_status",
         "openclaw_gmail_status",
         "openclaw_gmail_oauth_start",
+        "openclaw_wasm_tool_oauth_start",
         "openclaw_canvas_panels_list",
         "openclaw_canvas_panel_get",
         "openclaw_canvas_panel_dismiss",
         "openclaw_channel_status_list",
         "openclaw_routine_create",
+        "openclaw_autonomy_status",
+        "openclaw_autonomy_pause",
+        "openclaw_autonomy_resume",
+        "openclaw_desktop_permission_status",
+        "openclaw_autonomy_bootstrap",
+        "openclaw_autonomy_rollback",
     ]
 }
 
@@ -864,7 +903,7 @@ mod tests {
     use super::*;
     // RoutineRun tests removed — routine_audit_list now queries the DB (integration test needed)
     use crate::extensions::lifecycle_hooks::{LifecycleEvent, LifecycleHook};
-    use crate::llm::cost_tracker::{BudgetConfig, CostEntry};
+    use crate::llm::cost_tracker::{BudgetConfig, CostEntry, CostSource, TokenCountSource};
     use crate::llm::response_cache_ext::CacheConfig;
     use crate::llm::routing_policy::RoutingRule;
 
@@ -880,6 +919,9 @@ mod tests {
             input_tokens: 100,
             output_tokens: 50,
             request_id: None,
+            token_count_source: TokenCountSource::ProviderUsage,
+            cost_source: CostSource::ProviderCost,
+            token_capture: None,
         });
         let summary = cost_summary(&tracker).unwrap();
         assert!((summary.total_cost_usd - 0.05).abs() < 0.001);
@@ -898,6 +940,9 @@ mod tests {
             input_tokens: 200,
             output_tokens: 100,
             request_id: None,
+            token_count_source: TokenCountSource::ProviderUsage,
+            cost_source: CostSource::ProviderCost,
+            token_capture: None,
         });
         let csv = cost_export_csv(&tracker).unwrap();
         assert!(csv.contains("claude"));
@@ -1024,15 +1069,20 @@ mod tests {
     #[test]
     fn test_available_commands() {
         let cmds = available_commands();
-        assert_eq!(cmds.len(), 20);
+        let unique: std::collections::HashSet<_> = cmds.iter().copied().collect();
+        assert_eq!(unique.len(), cmds.len());
+        assert!(cmds.iter().all(|cmd| cmd.starts_with("openclaw_")));
         assert!(cmds.contains(&"openclaw_cost_summary"));
         assert!(cmds.contains(&"openclaw_manifest_validate"));
         assert!(cmds.contains(&"openclaw_routing_rules_list"));
         assert!(cmds.contains(&"openclaw_routing_status"));
         assert!(cmds.contains(&"openclaw_gmail_status"));
         assert!(cmds.contains(&"openclaw_gmail_oauth_start"));
+        assert!(cmds.contains(&"openclaw_wasm_tool_oauth_start"));
         assert!(cmds.contains(&"openclaw_channel_status_list"));
         assert!(cmds.contains(&"openclaw_routine_create"));
+        assert!(cmds.contains(&"openclaw_autonomy_status"));
+        assert!(cmds.contains(&"openclaw_autonomy_bootstrap"));
     }
 
     #[test]

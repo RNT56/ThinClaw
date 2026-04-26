@@ -17,6 +17,7 @@ use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 
 /// Warn when session count exceeds this threshold.
 const SESSION_COUNT_WARNING_THRESHOLD: usize = 1000;
+const DIRECT_MAIN_THREAD_KEY: &str = "__direct_main__";
 
 /// Key for mapping external thread IDs to internal ones.
 #[derive(Clone, Hash, Eq, PartialEq)]
@@ -32,17 +33,22 @@ fn normalize_external_thread_key(
 ) -> Option<String> {
     let raw = external_thread_id
         .map(str::trim)
-        .filter(|candidate| !candidate.is_empty())?;
+        .filter(|candidate| !candidate.is_empty());
 
     match conversation_kind {
-        ConversationKind::Direct => {
-            if let Ok(uuid) = Uuid::parse_str(raw) {
-                Some(uuid.to_string())
-            } else {
-                Some(raw.to_string())
-            }
-        }
-        ConversationKind::Group => Some(format!("{channel}:{raw}")),
+        ConversationKind::Direct => Some(
+            raw.map(|raw| {
+                if raw.eq_ignore_ascii_case(DIRECT_MAIN_THREAD_KEY) {
+                    DIRECT_MAIN_THREAD_KEY.to_string()
+                } else if let Ok(uuid) = Uuid::parse_str(raw) {
+                    uuid.to_string()
+                } else {
+                    raw.to_string()
+                }
+            })
+            .unwrap_or_else(|| DIRECT_MAIN_THREAD_KEY.to_string()),
+        ),
+        ConversationKind::Group => Some(format!("{channel}:{}", raw?)),
     }
 }
 
@@ -336,6 +342,48 @@ impl SessionManager {
             session,
         )
         .await;
+    }
+
+    /// Register a thread as the canonical shared direct thread for a scope.
+    ///
+    /// This binds both the direct "main" alias and the UUID alias to the same
+    /// thread so channel-default direct messages and WebUI assistant-thread
+    /// messages converge on one live conversation.
+    pub async fn register_direct_main_thread_for_scope(
+        &self,
+        scope_id: Uuid,
+        thread_id: Uuid,
+        session: Arc<Mutex<Session>>,
+    ) {
+        {
+            let mut thread_map = self.thread_map.write().await;
+            thread_map.insert(
+                ThreadKey {
+                    scope_id,
+                    external_thread_id: Some(DIRECT_MAIN_THREAD_KEY.to_string()),
+                },
+                thread_id,
+            );
+            thread_map.insert(
+                ThreadKey {
+                    scope_id,
+                    external_thread_id: Some(thread_id.to_string()),
+                },
+                thread_id,
+            );
+        }
+
+        {
+            let mut undo_managers = self.undo_managers.write().await;
+            undo_managers
+                .entry(thread_id)
+                .or_insert_with(|| Arc::new(Mutex::new(UndoManager::new())));
+        }
+
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.entry(scope_id).or_insert(session);
+        }
     }
 
     /// Register a hydrated thread for a specific conversation scope.
@@ -1140,6 +1188,45 @@ mod tests {
 
         assert!(Arc::ptr_eq(&session1, &session2));
         assert_eq!(thread1, thread2);
+    }
+
+    #[tokio::test]
+    async fn test_register_direct_main_thread_alias_reuses_thread_for_uuid_and_default() {
+        use crate::agent::session::{Session, Thread};
+
+        let manager = SessionManager::new();
+        let tid = Uuid::new_v4();
+        let scope_id = SessionManager::scope_id_for_user_id("user-alias");
+
+        let session = Arc::new(Mutex::new(Session::new("user-alias")));
+        {
+            let mut sess = session.lock().await;
+            let thread = Thread::with_id(tid, sess.id);
+            sess.threads.insert(tid, thread);
+        }
+
+        manager
+            .register_direct_main_thread_for_scope(scope_id, tid, Arc::clone(&session))
+            .await;
+
+        let identity = ResolvedIdentity {
+            principal_id: "user-alias".to_string(),
+            actor_id: "user-alias".to_string(),
+            conversation_scope_id: scope_id_from_key("telegram://direct/user-alias"),
+            conversation_kind: ConversationKind::Direct,
+            raw_sender_id: "user-alias".to_string(),
+            stable_external_conversation_key: "telegram://direct/user-alias".to_string(),
+        };
+
+        let (_, resolved_default) = manager
+            .resolve_thread_for_identity(&identity, "telegram", None)
+            .await;
+        let (_, resolved_uuid) = manager
+            .resolve_thread_for_identity(&identity, "gateway", Some(&tid.to_string()))
+            .await;
+
+        assert_eq!(resolved_default, tid);
+        assert_eq!(resolved_uuid, tid);
     }
 
     #[tokio::test]

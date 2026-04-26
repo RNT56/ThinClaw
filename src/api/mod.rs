@@ -24,6 +24,7 @@ pub mod config;
 pub mod experiments;
 pub mod extensions;
 pub mod learning;
+pub mod mcp;
 pub mod memory;
 pub mod routines;
 pub mod sessions;

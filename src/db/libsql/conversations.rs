@@ -11,7 +11,9 @@ use crate::error::DatabaseError;
 use crate::history::{
     ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationSummary,
     LearningArtifactVersion, LearningCandidate, LearningCodeProposal, LearningEvaluation,
-    LearningEvent, LearningFeedbackRecord, LearningRollbackRecord, SessionSearchHit,
+    LearningEvent, LearningFeedbackRecord, LearningRollbackRecord, OutcomeContract,
+    OutcomeContractQuery, OutcomeEvaluatorHealth, OutcomeObservation, OutcomePendingUser,
+    OutcomeSummaryStats, SessionSearchHit,
 };
 
 fn handoff_from_metadata(metadata: &serde_json::Value) -> Option<ConversationHandoffMetadata> {
@@ -216,6 +218,55 @@ fn learning_code_proposal_from_row(row: &libsql::Row) -> LearningCodeProposal {
         metadata: get_json(row, 13),
         created_at: get_ts(row, 14),
         updated_at: get_ts(row, 15),
+    }
+}
+
+fn outcome_contract_from_row(row: &libsql::Row) -> OutcomeContract {
+    OutcomeContract {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        user_id: get_text(row, 1),
+        actor_id: get_opt_text(row, 2),
+        channel: get_opt_text(row, 3),
+        thread_id: get_opt_text(row, 4),
+        source_kind: get_text(row, 5),
+        source_id: get_text(row, 6),
+        contract_type: get_text(row, 7),
+        status: get_text(row, 8),
+        summary: get_opt_text(row, 9),
+        due_at: get_ts(row, 10),
+        expires_at: get_ts(row, 11),
+        final_verdict: get_opt_text(row, 12),
+        final_score: row.get::<f64>(13).ok(),
+        evaluation_details: get_json(row, 14),
+        metadata: get_json(row, 15),
+        dedupe_key: get_text(row, 16),
+        claimed_at: get_opt_text(row, 17).and_then(|value| {
+            DateTime::parse_from_rfc3339(&value)
+                .ok()
+                .map(|ts| ts.with_timezone(&Utc))
+        }),
+        evaluated_at: get_opt_text(row, 18).and_then(|value| {
+            DateTime::parse_from_rfc3339(&value)
+                .ok()
+                .map(|ts| ts.with_timezone(&Utc))
+        }),
+        created_at: get_ts(row, 19),
+        updated_at: get_ts(row, 20),
+    }
+}
+
+fn outcome_observation_from_row(row: &libsql::Row) -> OutcomeObservation {
+    OutcomeObservation {
+        id: get_text(row, 0).parse().unwrap_or_default(),
+        contract_id: get_text(row, 1).parse().unwrap_or_default(),
+        observation_kind: get_text(row, 2),
+        polarity: get_text(row, 3),
+        weight: row.get::<f64>(4).unwrap_or_default(),
+        summary: get_opt_text(row, 5),
+        evidence: get_json(row, 6),
+        fingerprint: get_text(row, 7),
+        observed_at: get_ts(row, 8),
+        created_at: get_ts(row, 9),
     }
 }
 
@@ -524,6 +575,7 @@ impl ConversationStore for LibSqlBackend {
     async fn update_conversation_identity(
         &self,
         id: Uuid,
+        principal_id: Option<&str>,
         actor_id: Option<&str>,
         conversation_scope_id: Option<Uuid>,
         conversation_kind: ConversationKind,
@@ -534,14 +586,16 @@ impl ConversationStore for LibSqlBackend {
         conn.execute(
             r#"
             UPDATE conversations
-            SET actor_id = ?2,
-                conversation_scope_id = COALESCE(?3, conversation_scope_id),
-                conversation_kind = ?4,
-                stable_external_conversation_key = COALESCE(?5, stable_external_conversation_key)
+            SET user_id = COALESCE(?2, user_id),
+                actor_id = ?3,
+                conversation_scope_id = COALESCE(?4, conversation_scope_id),
+                conversation_kind = ?5,
+                stable_external_conversation_key = COALESCE(?6, stable_external_conversation_key)
             WHERE id = ?1
             "#,
             params![
                 id.to_string(),
+                opt_text(principal_id),
                 opt_text(actor_id),
                 opt_text(scope_id.as_deref()),
                 conversation_kind.as_str(),
@@ -607,7 +661,10 @@ impl ConversationStore for LibSqlBackend {
                         ) AS title
                     FROM conversations c
                     WHERE c.user_id = ?1
-                      AND c.actor_id = ?2
+                      AND (
+                        c.actor_id = ?2
+                        OR ((c.actor_id IS NULL OR trim(c.actor_id) = '') AND ?2 = ?1)
+                      )
                       AND {kind_predicate}
                     ORDER BY c.last_activity DESC
                     LIMIT ?3
@@ -1101,6 +1158,25 @@ impl ConversationStore for LibSqlBackend {
         Ok(candidates)
     }
 
+    async fn update_learning_candidate_proposal(
+        &self,
+        candidate_id: Uuid,
+        proposal: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            r#"
+            UPDATE learning_candidates
+            SET proposal = ?2
+            WHERE id = ?1
+            "#,
+            params![candidate_id.to_string(), proposal.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
     async fn insert_learning_artifact_version(
         &self,
         version: &LearningArtifactVersion,
@@ -1460,6 +1536,573 @@ impl ConversationStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(())
+    }
+
+    async fn insert_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = if contract.id.is_nil() {
+            Uuid::new_v4()
+        } else {
+            contract.id
+        };
+        let affected = conn
+            .execute(
+                r#"
+                INSERT OR IGNORE INTO outcome_contracts (
+                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
+                    contract_type, status, summary, due_at, expires_at, final_verdict,
+                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    evaluated_at, created_at, updated_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                    ?8, ?9, ?10, ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?17, ?18,
+                    ?19, ?20, ?21
+                )
+                "#,
+                params![
+                    id.to_string(),
+                    contract.user_id.as_str(),
+                    contract.actor_id.as_deref(),
+                    contract.channel.as_deref(),
+                    contract.thread_id.as_deref(),
+                    contract.source_kind.as_str(),
+                    contract.source_id.as_str(),
+                    contract.contract_type.as_str(),
+                    contract.status.as_str(),
+                    contract.summary.as_deref(),
+                    fmt_ts(&contract.due_at),
+                    fmt_ts(&contract.expires_at),
+                    contract.final_verdict.as_deref(),
+                    contract.final_score,
+                    contract.evaluation_details.to_string(),
+                    contract.metadata.to_string(),
+                    contract.dedupe_key.as_str(),
+                    contract.claimed_at.as_ref().map(fmt_ts),
+                    contract.evaluated_at.as_ref().map(fmt_ts),
+                    fmt_ts(&contract.created_at),
+                    fmt_ts(&contract.updated_at),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        if affected > 0 {
+            return Ok(id);
+        }
+
+        let mut rows = conn
+            .query(
+                "SELECT id FROM outcome_contracts WHERE dedupe_key = ?1 LIMIT 1",
+                params![contract.dedupe_key.as_str()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        else {
+            return Err(DatabaseError::Query(
+                "failed to resolve existing outcome contract".to_string(),
+            ));
+        };
+        Ok(get_text(&row, 0).parse().unwrap_or_default())
+    }
+
+    async fn get_outcome_contract(
+        &self,
+        user_id: &str,
+        contract_id: Uuid,
+    ) -> Result<Option<OutcomeContract>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
+                    contract_type, status, summary, due_at, expires_at, final_verdict,
+                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    evaluated_at, created_at, updated_at
+                FROM outcome_contracts
+                WHERE id = ?1 AND user_id = ?2
+                LIMIT 1
+                "#,
+                params![contract_id.to_string(), user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(outcome_contract_from_row(&row)))
+    }
+
+    async fn list_outcome_contracts(
+        &self,
+        query: &OutcomeContractQuery,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        if query.limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
+                    contract_type, status, summary, due_at, expires_at, final_verdict,
+                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    evaluated_at, created_at, updated_at
+                FROM outcome_contracts
+                WHERE user_id = ?1
+                  AND (?2 IS NULL OR COALESCE(NULLIF(actor_id, ''), user_id) = ?2)
+                  AND (?3 IS NULL OR status = ?3)
+                  AND (?4 IS NULL OR contract_type = ?4)
+                  AND (?5 IS NULL OR source_kind = ?5)
+                  AND (?6 IS NULL OR source_id = ?6)
+                  AND (?7 IS NULL OR thread_id = ?7)
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?8
+                "#,
+                params![
+                    query.user_id.as_str(),
+                    query.actor_id.as_deref(),
+                    query.status.as_deref(),
+                    query.contract_type.as_deref(),
+                    query.source_kind.as_deref(),
+                    query.source_id.as_deref(),
+                    query.thread_id.as_deref(),
+                    query.limit,
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut contracts = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            contracts.push(outcome_contract_from_row(&row));
+        }
+        Ok(contracts)
+    }
+
+    async fn claim_due_outcome_contracts(
+        &self,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        self.claim_due_outcome_contracts_for_user("", limit, now)
+            .await
+    }
+
+    async fn claim_due_outcome_contracts_for_user(
+        &self,
+        user_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomeContract>, DatabaseError> {
+        if limit <= 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.connect().await?;
+        let now_ts = fmt_ts(&now);
+        let scoped = !user_id.is_empty();
+        if scoped {
+            conn.execute(
+                r#"
+                UPDATE outcome_contracts
+                SET status = 'expired',
+                    updated_at = ?1
+                WHERE user_id = ?2
+                  AND status IN ('open', 'evaluating')
+                  AND evaluated_at IS NULL
+                  AND expires_at <= ?1
+                "#,
+                params![now_ts.clone(), user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        } else {
+            conn.execute(
+                r#"
+                UPDATE outcome_contracts
+                SET status = 'expired',
+                    updated_at = ?1
+                WHERE status IN ('open', 'evaluating')
+                  AND evaluated_at IS NULL
+                  AND expires_at <= ?1
+                "#,
+                params![now_ts.clone()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        }
+
+        let mut rows = if scoped {
+            conn.query(
+                r#"
+                SELECT
+                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
+                    contract_type, status, summary, due_at, expires_at, final_verdict,
+                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    evaluated_at, created_at, updated_at
+                FROM outcome_contracts
+                WHERE user_id = ?2
+                  AND status = 'open'
+                  AND due_at <= ?1
+                  AND expires_at > ?1
+                ORDER BY due_at ASC, created_at ASC
+                LIMIT ?3
+                "#,
+                params![now_ts.clone(), user_id, limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        } else {
+            conn.query(
+                r#"
+                SELECT
+                    id, user_id, actor_id, channel, thread_id, source_kind, source_id,
+                    contract_type, status, summary, due_at, expires_at, final_verdict,
+                    final_score, evaluation_details, metadata, dedupe_key, claimed_at,
+                    evaluated_at, created_at, updated_at
+                FROM outcome_contracts
+                WHERE status = 'open'
+                  AND due_at <= ?1
+                  AND expires_at > ?1
+                ORDER BY due_at ASC, created_at ASC
+                LIMIT ?2
+                "#,
+                params![now_ts.clone(), limit],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
+
+        let mut claimed = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let mut contract = outcome_contract_from_row(&row);
+            let affected = conn
+                .execute(
+                    r#"
+                    UPDATE outcome_contracts
+                    SET status = 'evaluating',
+                        claimed_at = ?2,
+                        updated_at = ?2
+                    WHERE id = ?1
+                      AND status = 'open'
+                "#,
+                    params![contract.id.to_string(), now_ts.clone()],
+                )
+                .await
+                .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            if affected > 0 {
+                contract.status = "evaluating".to_string();
+                contract.claimed_at = Some(now);
+                contract.updated_at = now;
+                claimed.push(contract);
+            }
+        }
+        Ok(claimed)
+    }
+
+    async fn update_outcome_contract(
+        &self,
+        contract: &OutcomeContract,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            r#"
+            UPDATE outcome_contracts
+            SET user_id = ?2,
+                actor_id = ?3,
+                channel = ?4,
+                thread_id = ?5,
+                source_kind = ?6,
+                source_id = ?7,
+                contract_type = ?8,
+                status = ?9,
+                summary = ?10,
+                due_at = ?11,
+                expires_at = ?12,
+                final_verdict = ?13,
+                final_score = ?14,
+                evaluation_details = ?15,
+                metadata = ?16,
+                dedupe_key = ?17,
+                claimed_at = ?18,
+                evaluated_at = ?19,
+                created_at = ?20,
+                updated_at = ?21
+            WHERE id = ?1
+            "#,
+            params![
+                contract.id.to_string(),
+                contract.user_id.as_str(),
+                contract.actor_id.as_deref(),
+                contract.channel.as_deref(),
+                contract.thread_id.as_deref(),
+                contract.source_kind.as_str(),
+                contract.source_id.as_str(),
+                contract.contract_type.as_str(),
+                contract.status.as_str(),
+                contract.summary.as_deref(),
+                fmt_ts(&contract.due_at),
+                fmt_ts(&contract.expires_at),
+                contract.final_verdict.as_deref(),
+                contract.final_score,
+                contract.evaluation_details.to_string(),
+                contract.metadata.to_string(),
+                contract.dedupe_key.as_str(),
+                contract.claimed_at.as_ref().map(fmt_ts),
+                contract.evaluated_at.as_ref().map(fmt_ts),
+                fmt_ts(&contract.created_at),
+                fmt_ts(&contract.updated_at),
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn outcome_summary_stats(
+        &self,
+        user_id: &str,
+    ) -> Result<OutcomeSummaryStats, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    (SELECT COUNT(*) FROM outcome_contracts
+                     WHERE user_id = ?1
+                       AND status IN ('open', 'evaluating')) AS open_count,
+                    (SELECT COUNT(*) FROM outcome_contracts
+                     WHERE user_id = ?1
+                       AND status = 'open'
+                       AND due_at <= ?2
+                       AND expires_at > ?2) AS due_count,
+                    (SELECT COUNT(*) FROM outcome_contracts
+                     WHERE user_id = ?1
+                       AND status = 'evaluated'
+                       AND COALESCE(evaluated_at, updated_at) >= ?3) AS evaluated_count,
+                    (SELECT COALESCE(AVG(CASE WHEN final_verdict = 'negative' THEN 1.0 ELSE 0.0 END), 0.0)
+                     FROM outcome_contracts
+                     WHERE user_id = ?1
+                       AND status = 'evaluated'
+                       AND COALESCE(evaluated_at, updated_at) >= ?3) AS negative_ratio
+                "#,
+                params![
+                    user_id,
+                    fmt_ts(&Utc::now()),
+                    fmt_ts(&(Utc::now() - chrono::Duration::days(7))),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        else {
+            return Ok(OutcomeSummaryStats::default());
+        };
+        Ok(OutcomeSummaryStats {
+            open: row.get::<i64>(0).unwrap_or_default() as u64,
+            due: row.get::<i64>(1).unwrap_or_default() as u64,
+            evaluated_last_7d: row.get::<i64>(2).unwrap_or_default() as u64,
+            negative_ratio_last_7d: row.get::<f64>(3).unwrap_or(0.0),
+        })
+    }
+
+    async fn list_users_with_pending_outcome_work(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<OutcomePendingUser>, DatabaseError> {
+        let conn = self.connect().await?;
+        let now_ts = fmt_ts(&now);
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT DISTINCT user_id
+                FROM outcome_contracts
+                WHERE status = 'open'
+                  AND due_at <= ?1
+                  AND expires_at > ?1
+                ORDER BY user_id ASC
+                "#,
+                params![now_ts],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut users = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            users.push(OutcomePendingUser {
+                user_id: get_text(&row, 0),
+            });
+        }
+        Ok(users)
+    }
+
+    async fn outcome_evaluator_health(
+        &self,
+        user_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<OutcomeEvaluatorHealth, DatabaseError> {
+        let conn = self.connect().await?;
+        let now_ts = fmt_ts(&now);
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    (
+                        SELECT MIN(due_at)
+                        FROM outcome_contracts
+                        WHERE user_id = ?1
+                          AND status = 'open'
+                          AND due_at <= ?2
+                          AND expires_at > ?2
+                    ) AS oldest_due_at,
+                    (
+                        SELECT MIN(COALESCE(claimed_at, updated_at))
+                        FROM outcome_contracts
+                        WHERE user_id = ?1
+                          AND status = 'evaluating'
+                    ) AS oldest_evaluating_claimed_at
+                "#,
+                params![user_id, now_ts],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        else {
+            return Ok(OutcomeEvaluatorHealth::default());
+        };
+
+        Ok(OutcomeEvaluatorHealth {
+            oldest_due_at: get_opt_text(&row, 0).and_then(|value| {
+                chrono::DateTime::parse_from_rfc3339(&value)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc))
+            }),
+            oldest_evaluating_claimed_at: get_opt_text(&row, 1).and_then(|value| {
+                chrono::DateTime::parse_from_rfc3339(&value)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc))
+            }),
+        })
+    }
+
+    async fn insert_outcome_observation(
+        &self,
+        observation: &OutcomeObservation,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = if observation.id.is_nil() {
+            Uuid::new_v4()
+        } else {
+            observation.id
+        };
+        let affected = conn
+            .execute(
+                r#"
+                INSERT OR IGNORE INTO outcome_observations (
+                    id, contract_id, observation_kind, polarity, weight, summary, evidence,
+                    fingerprint, observed_at, created_at
+                ) VALUES (
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                    ?8, ?9, ?10
+                )
+                "#,
+                params![
+                    id.to_string(),
+                    observation.contract_id.to_string(),
+                    observation.observation_kind.as_str(),
+                    observation.polarity.as_str(),
+                    observation.weight,
+                    observation.summary.as_deref(),
+                    observation.evidence.to_string(),
+                    observation.fingerprint.as_str(),
+                    fmt_ts(&observation.observed_at),
+                    fmt_ts(&observation.created_at),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        if affected > 0 {
+            return Ok(id);
+        }
+
+        let mut rows = conn
+            .query(
+                "SELECT id FROM outcome_observations WHERE contract_id = ?1 AND fingerprint = ?2 LIMIT 1",
+                params![
+                    observation.contract_id.to_string(),
+                    observation.fingerprint.as_str(),
+                ],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        else {
+            return Err(DatabaseError::Query(
+                "failed to resolve existing outcome observation".to_string(),
+            ));
+        };
+        Ok(get_text(&row, 0).parse().unwrap_or_default())
+    }
+
+    async fn list_outcome_observations(
+        &self,
+        contract_id: Uuid,
+    ) -> Result<Vec<OutcomeObservation>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    id, contract_id, observation_kind, polarity, weight, summary, evidence,
+                    fingerprint, observed_at, created_at
+                FROM outcome_observations
+                WHERE contract_id = ?1
+                ORDER BY observed_at ASC, rowid ASC
+                "#,
+                params![contract_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let mut observations = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            observations.push(outcome_observation_from_row(&row));
+        }
+        Ok(observations)
     }
 
     async fn conversation_belongs_to_user(

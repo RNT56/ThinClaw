@@ -9,9 +9,11 @@ use crate::settings::Settings;
 use crate::terminal_branding::TerminalBranding;
 
 /// Run the status command, printing system health info.
-pub async fn run_status_command() -> anyhow::Result<()> {
+pub async fn run_status_command(
+    linux_profile: crate::platform::LinuxReadinessProfile,
+) -> anyhow::Result<()> {
     let branding = TerminalBranding::current();
-    let settings = Settings::default();
+    let settings = Settings::load();
 
     branding.print_banner(
         "ThinClaw Status",
@@ -120,7 +122,16 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         .wasm_channels_dir
         .clone()
         .unwrap_or_else(default_channels_dir);
-    let mut channel_info = vec!["cli".to_string()];
+    let mut channel_info = Vec::new();
+    if settings.channels.cli_enabled.unwrap_or(true) {
+        channel_info.push("cli".to_string());
+    }
+    if settings.channels.gateway_enabled.unwrap_or(true) {
+        let access = crate::platform::gateway_access::GatewayAccessInfo::from_env_and_settings(
+            Some(&settings),
+        );
+        channel_info.push(format!("gateway:{}", access.bind_display()));
+    }
     if settings.channels.http_enabled {
         channel_info.push(format!(
             "http:{}",
@@ -156,6 +167,24 @@ pub async fn run_status_command() -> anyhow::Result<()> {
             println!("{} enabled / {} configured", enabled, total);
         }
         Err(_) => println!("none configured"),
+    }
+
+    // Linux readiness
+    print!("{}", branding.muted("  Linux ready   "));
+    let linux = crate::platform::linux_readiness_report(linux_profile).await;
+    println!(
+        "{} pass / {} fail / {} skip ({})",
+        linux.passed(),
+        linux.failed(),
+        linux.skipped(),
+        linux.profile.as_str()
+    );
+    for probe in linux
+        .probes
+        .iter()
+        .filter(|probe| probe.status == crate::platform::LinuxProbeStatus::Fail)
+    {
+        println!("    {}: {}", probe.label, probe.detail);
     }
 
     // Config path

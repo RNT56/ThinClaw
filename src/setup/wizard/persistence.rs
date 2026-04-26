@@ -67,6 +67,18 @@ impl SetupWizard {
         if let Some(ref url) = self.settings.libsql_url {
             env_vars.push(("LIBSQL_URL", url.clone()));
         }
+        if self.settings.secrets_master_key_source == crate::settings::KeySource::Env {
+            if let Some(ref key) = self.generated_env_master_key {
+                env_vars.push(("SECRETS_MASTER_KEY", key.clone()));
+            } else if let Ok(key) = std::env::var("SECRETS_MASTER_KEY")
+                && !key.trim().is_empty()
+            {
+                env_vars.push(("SECRETS_MASTER_KEY", key));
+            }
+            if self.settings.secrets.allow_env_master_key {
+                env_vars.push(("THINCLAW_ALLOW_ENV_MASTER_KEY", "1".to_string()));
+            }
+        }
 
         // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
         // Config::from_env() needs the backend before the DB is connected.
@@ -84,6 +96,12 @@ impl SetupWizard {
         // (which runs before the DB is connected) knows to skip re-onboarding.
         if self.settings.onboard_completed {
             env_vars.push(("ONBOARD_COMPLETED", "true".to_string()));
+        }
+        if let Some(profile) = self.selected_profile.runtime_profile_env_value() {
+            env_vars.push(("THINCLAW_RUNTIME_PROFILE", profile.to_string()));
+            if self.selected_profile.is_headless_remote() {
+                env_vars.push(("THINCLAW_HEADLESS", "true".to_string()));
+            }
         }
 
         // Signal channel env vars (chicken-and-egg: config resolves before DB).
@@ -159,6 +177,12 @@ impl SetupWizard {
         if let Some(ref relays) = self.settings.channels.nostr_relays {
             env_vars.push(("NOSTR_RELAYS", relays.clone()));
         }
+        if let Some(ref owner_pubkey) = self.settings.channels.nostr_owner_pubkey {
+            env_vars.push(("NOSTR_OWNER_PUBKEY", owner_pubkey.clone()));
+        }
+        if self.settings.channels.nostr_social_dm_enabled {
+            env_vars.push(("NOSTR_SOCIAL_DM_ENABLED", "true".to_string()));
+        }
         if let Some(ref allow_from) = self.settings.channels.nostr_allow_from {
             env_vars.push(("NOSTR_ALLOW_FROM", allow_from.clone()));
         }
@@ -208,12 +232,44 @@ impl SetupWizard {
             env_vars.push(("APPLE_MAIL_MARK_AS_READ", "false".to_string()));
         }
 
+        // BlueBubbles iMessage bridge env vars
+        if self.settings.channels.bluebubbles_enabled {
+            env_vars.push(("BLUEBUBBLES_ENABLED", "true".to_string()));
+        }
+        if let Some(ref url) = self.settings.channels.bluebubbles_server_url {
+            env_vars.push(("BLUEBUBBLES_SERVER_URL", url.clone()));
+        }
+        if let Some(ref password) = self.settings.channels.bluebubbles_password {
+            env_vars.push(("BLUEBUBBLES_PASSWORD", password.clone()));
+        }
+        if let Some(ref host) = self.settings.channels.bluebubbles_webhook_host {
+            env_vars.push(("BLUEBUBBLES_WEBHOOK_HOST", host.clone()));
+        }
+        if let Some(port) = self.settings.channels.bluebubbles_webhook_port {
+            env_vars.push(("BLUEBUBBLES_WEBHOOK_PORT", port.to_string()));
+        }
+        if let Some(ref allow_from) = self.settings.channels.bluebubbles_allow_from {
+            env_vars.push(("BLUEBUBBLES_ALLOW_FROM", allow_from.clone()));
+        }
+        if let Some(send_receipts) = self.settings.channels.bluebubbles_send_read_receipts {
+            env_vars.push(("BLUEBUBBLES_SEND_READ_RECEIPTS", send_receipts.to_string()));
+        }
+
         // Web Gateway env vars
+        if let Some(enabled) = self.settings.channels.gateway_enabled {
+            env_vars.push(("GATEWAY_ENABLED", enabled.to_string()));
+        }
+        if let Some(ref host) = self.settings.channels.gateway_host {
+            env_vars.push(("GATEWAY_HOST", host.clone()));
+        }
         if let Some(ref port) = self.settings.channels.gateway_port {
             env_vars.push(("GATEWAY_PORT", port.to_string()));
         }
         if let Some(ref token) = self.settings.channels.gateway_auth_token {
             env_vars.push(("GATEWAY_AUTH_TOKEN", token.clone()));
+        }
+        if let Some(enabled) = self.settings.channels.cli_enabled {
+            env_vars.push(("CLI_ENABLED", enabled.to_string()));
         }
 
         // Smart Routing env vars

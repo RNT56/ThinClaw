@@ -1,5 +1,6 @@
 //! Agent personality wizard steps: identity, tool approval, notification preferences.
 
+use crate::config::resolve_personality_pack_from_settings;
 use crate::setup::prompts::{
     confirm, input, optional_input, print_info, print_success, select_one,
 };
@@ -7,10 +8,65 @@ use crate::setup::prompts::{
 use super::{SetupError, SetupWizard};
 
 impl SetupWizard {
+    pub(super) fn apply_quick_notification_defaults(&mut self) {
+        let selected = self
+            .quick_primary_channel
+            .clone()
+            .unwrap_or_else(|| "web".to_string());
+        let is_verified = |channel: &str| {
+            self.verified_channels
+                .get(channel)
+                .copied()
+                .unwrap_or(false)
+        };
+
+        self.settings.heartbeat.enabled = false;
+        self.settings.heartbeat.notify_channel = None;
+        self.settings.heartbeat.notify_user = None;
+
+        match selected.as_str() {
+            "telegram"
+                if is_verified("telegram")
+                    && self.settings.channels.telegram_owner_id.is_some() =>
+            {
+                let owner_id = self
+                    .settings
+                    .channels
+                    .telegram_owner_id
+                    .expect("guarded by is_some() in match arm")
+                    .to_string();
+                self.settings.notifications.preferred_channel = Some("telegram".to_string());
+                self.settings.notifications.recipient = Some(owner_id.clone());
+                self.settings.heartbeat.enabled = true;
+                self.settings.heartbeat.notify_channel = Some("telegram".to_string());
+                self.settings.heartbeat.notify_user = Some(owner_id);
+            }
+            "signal"
+                if is_verified("signal") && self.settings.channels.signal_account.is_some() =>
+            {
+                let account = self
+                    .settings
+                    .channels
+                    .signal_account
+                    .clone()
+                    .expect("guarded by is_some() in match arm");
+                self.settings.notifications.preferred_channel = Some("signal".to_string());
+                self.settings.notifications.recipient = Some(account.clone());
+                self.settings.heartbeat.enabled = true;
+                self.settings.heartbeat.notify_channel = Some("signal".to_string());
+                self.settings.heartbeat.notify_user = Some(account);
+            }
+            _ => {
+                self.settings.notifications.preferred_channel = Some("web".to_string());
+                self.settings.notifications.recipient = Some("default".to_string());
+            }
+        }
+    }
+
     pub(super) fn step_agent_identity(&mut self) -> Result<(), SetupError> {
         print_info("Give your ThinClaw agent a name. This is used in greetings,");
         print_info("the boot screen, and session metadata.");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let current = &self.settings.agent.name;
         let default_label = format!("current: {}", current);
@@ -27,44 +83,50 @@ impl SetupWizard {
             print_success(&format!("Keeping '{}'", current));
         }
 
-        println!();
-        print_info("Choose a persona seed for the first SOUL.md in a fresh workspace.");
-        print_info("This shapes the starting voice without locking you into it later.");
-        println!();
+        crate::setup::prompts::print_blank_line();
+        print_info("Choose a personality pack for the first canonical SOUL.md in THINCLAW_HOME.");
+        print_info("This sets the starting identity voice without locking you into it later.");
+        crate::setup::prompts::print_blank_line();
 
-        let current_seed = self.settings.agent.persona_seed.clone();
-        if current_seed != "default"
+        let current_pack = resolve_personality_pack_from_settings(&self.settings);
+        self.settings.agent.personality_pack = current_pack.clone();
+        self.settings.agent.persona_seed = current_pack.clone();
+        if current_pack != "balanced"
             && confirm(
-                &format!("Keep current persona seed '{}'?", current_seed),
+                &format!("Keep current personality pack '{}'?", current_pack),
                 true,
             )
             .map_err(SetupError::Io)?
         {
-            print_success(&format!("Keeping persona seed '{}'", current_seed));
+            print_success(&format!("Keeping personality pack '{}'", current_pack));
             return Ok(());
         }
 
         let options = [
-            "default       — Balanced, dependable, and humane",
+            "balanced         — Balanced, dependable, and humane",
             "professional  — Polished, reliable, workplace-ready",
             "creative_partner — Curious, imaginative, and exploratory",
             "research_assistant — Methodical, evidence-driven, and careful",
             "mentor        — Patient, explanatory, and encouraging",
             "minimal       — Lean, unobtrusive, and flexible",
+            "flow_state    — Electric calm, decisive, receipts-driven",
         ];
         let option_refs: Vec<&str> = options.to_vec();
-        let choice = select_one("Persona seed", &option_refs).map_err(SetupError::Io)?;
+        let choice = select_one("Personality pack", &option_refs).map_err(SetupError::Io)?;
         let chosen = match choice {
-            0 => "default",
+            0 => "balanced",
             1 => "professional",
             2 => "creative_partner",
             3 => "research_assistant",
             4 => "mentor",
             5 => "minimal",
-            _ => "default",
+            6 => "flow_state",
+            _ => "balanced",
         };
+        self.settings.agent.personality_pack = chosen.to_string();
+        // Keep the legacy field in sync for one-release compatibility/migration.
         self.settings.agent.persona_seed = chosen.to_string();
-        print_success(&format!("Persona seed set to '{}'", chosen));
+        print_success(&format!("Personality pack set to '{}'", chosen));
 
         Ok(())
     }
@@ -101,7 +163,7 @@ impl SetupWizard {
             print_success(&format!("Timezone set to '{}'", detected_str));
         } else {
             print_info(
-                "Enter your timezone as an IANA name (e.g. America/New_York, Europe/Berlin, Asia/Tokyo).",
+                "Enter your timezone as an IANA name or GMT/UTC offset (e.g. America/New_York, Europe/Berlin, GMT+1).",
             );
             let tz_input = input("Timezone").map_err(SetupError::Io)?;
             if tz_input.is_empty() {
@@ -112,7 +174,7 @@ impl SetupWizard {
                 print_success(&format!("Timezone set to '{}'", tz_input));
             } else {
                 print_info(&format!(
-                    "'{}' is not a valid IANA timezone. Using detected '{}'.",
+                    "'{}' is not a valid timezone. Use an IANA name like 'Europe/Berlin' or a fixed offset like 'GMT+1'. Using detected '{}'.",
                     tz_input, detected_str
                 ));
                 self.settings.user_timezone = Some(detected_str);
@@ -126,7 +188,7 @@ impl SetupWizard {
     pub(super) async fn step_notification_preferences(&mut self) -> Result<(), SetupError> {
         print_info("ThinClaw sends proactive notifications (heartbeat alerts, routine results,");
         print_info("self-repair messages) to a channel of your choice.");
-        println!();
+        crate::setup::prompts::print_blank_line();
 
         let secrets = self.init_secrets_context().await.ok();
         let discord_has_token = self
@@ -216,6 +278,11 @@ impl SetupWizard {
         {
             channels.push("nostr".to_string());
         }
+        if self.settings.channels.bluebubbles_enabled
+            && self.settings.channels.bluebubbles_server_url.is_some()
+        {
+            channels.push("bluebubbles".to_string());
+        }
 
         if channels.len() == 1 {
             // Only web — no external channels configured
@@ -250,6 +317,7 @@ impl SetupWizard {
                 "discord" => "discord   — Discord bot".to_string(),
                 "slack" => "slack     — Slack workspace".to_string(),
                 "nostr" => "nostr     — Nostr relay".to_string(),
+                "bluebubbles" => "bluebubbles — iMessage (via BlueBubbles)".to_string(),
                 other => other.to_string(),
             })
             .collect();
@@ -339,6 +407,53 @@ impl SetupWizard {
                     self.settings.notifications.recipient = Some("default".to_string());
                 }
             }
+            "bluebubbles" => {
+                print_info("Enter your phone number or Apple ID for BlueBubbles notifications.");
+                let contact = input("Phone number or Apple ID (e.g., +4917612345678)")
+                    .map_err(SetupError::Io)?;
+                if !contact.is_empty() {
+                    self.settings.notifications.recipient = Some(contact);
+                } else {
+                    print_info("No recipient set — BlueBubbles notifications disabled.");
+                    self.settings.notifications.preferred_channel = Some("web".to_string());
+                    self.settings.notifications.recipient = Some("default".to_string());
+                }
+            }
+            "nostr" => {
+                if let Some(owner_pubkey) = self.settings.channels.nostr_owner_pubkey.clone() {
+                    print_info("Nostr owner public key detected from channel setup.");
+                    if confirm("Use this owner pubkey for notifications?", true)
+                        .map_err(SetupError::Io)?
+                    {
+                        self.settings.notifications.recipient = Some(owner_pubkey);
+                        return Ok(());
+                    }
+                }
+
+                print_info(
+                    "Enter the Nostr pubkey (hex or npub) that should receive notifications.",
+                );
+                let recipient = input("Nostr pubkey").map_err(SetupError::Io)?;
+                if recipient.trim().is_empty() {
+                    print_info(
+                        "No Nostr recipient set — notifications will stay on the Web Dashboard.",
+                    );
+                    self.settings.notifications.preferred_channel = Some("web".to_string());
+                    self.settings.notifications.recipient = Some("default".to_string());
+                } else {
+                    #[cfg(feature = "nostr")]
+                    {
+                        let normalized =
+                            crate::channels::nostr_runtime::normalize_public_key(&recipient)
+                                .map_err(SetupError::Config)?;
+                        self.settings.notifications.recipient = Some(normalized);
+                    }
+                    #[cfg(not(feature = "nostr"))]
+                    {
+                        self.settings.notifications.recipient = Some(recipient);
+                    }
+                }
+            }
             _ => {
                 self.settings.notifications.recipient = Some("default".to_string());
             }
@@ -349,35 +464,38 @@ impl SetupWizard {
     /// Step 12: Tool approval mode.
     pub(super) fn step_tool_approval(&mut self) -> Result<(), SetupError> {
         print_info(
-            "ThinClaw can execute tools (shell commands, file operations, etc.) on your behalf.",
+            "Choose how much local autonomy ThinClaw should have when running tools on your machine.",
         );
-        print_info("Choose how much autonomy to grant the agent:");
-        println!();
+        print_info("Autonomous and Full Autonomous both enable local tools by default.");
+        crate::setup::prompts::print_blank_line();
 
         let options = [
-            "Standard  — Ask before running destructive operations (recommended)",
+            "Standard  — Ask before risky operations and keep local tools off (recommended)",
             "Autonomous — Auto-approve safe operations, still block destructive commands\n               (rm -rf, DROP TABLE, git push --force, etc.)",
             "Full Auto  — Skip ALL approval checks (for benchmarks/CI only)\n               ⚠️  WARNING: The agent can execute ANY command without asking!",
         ];
         let option_refs: Vec<&str> = options.to_vec();
         let choice = select_one("Tool approval mode", &option_refs).map_err(SetupError::Io)?;
 
+        // Interactive agents should keep prompt mutation available by default.
+        // Fully restricted lanes are enforced by runtime capability filtering.
+        self.settings.learning.prompt_mutation.enabled = true;
+
         match choice {
             0 => {
                 self.settings.agent.auto_approve_tools = false;
-                // Standard mode: keep sandboxed workspace (default)
+                self.settings.agent.allow_local_tools = false;
+                self.settings.agent.workspace_mode = None;
                 print_success(
-                    "Standard approval mode — agent will ask before destructive operations.",
+                    "Standard autonomy enabled — local tools stay off and destructive operations still require approval.",
                 );
             }
             1 => {
                 self.settings.agent.auto_approve_tools = true;
-                // Autonomous mode: grant unrestricted filesystem/shell access.
-                // Without this, the system prompt says "sandboxed" and the LLM
-                // halluccinates restrictions (e.g. refusing to run osascript, ps).
+                self.settings.agent.allow_local_tools = true;
                 self.settings.agent.workspace_mode = Some("unrestricted".to_string());
                 print_success(
-                    "Autonomous mode — safe operations auto-approved, destructive commands still blocked.",
+                    "Autonomous mode — local tools enabled, safe operations auto-approved, destructive commands still blocked.",
                 );
                 print_info(
                     "Note: Commands matching NEVER_AUTO_APPROVE_PATTERNS (rm -rf, DROP TABLE, etc.)",
@@ -386,10 +504,10 @@ impl SetupWizard {
             }
             2 => {
                 self.settings.agent.auto_approve_tools = true;
-                // Full auto: grant unrestricted filesystem/shell access.
+                self.settings.agent.allow_local_tools = true;
                 self.settings.agent.workspace_mode = Some("unrestricted".to_string());
                 print_success(
-                    "Full auto-approve mode — ALL tool executions will run without asking.",
+                    "Full Autonomous mode — local tools enabled and all tool executions will run without asking.",
                 );
                 print_info(
                     "⚠️  Use with extreme caution. This is intended for benchmarks/CI environments.",
@@ -397,6 +515,8 @@ impl SetupWizard {
             }
             _ => {
                 self.settings.agent.auto_approve_tools = false;
+                self.settings.agent.allow_local_tools = false;
+                self.settings.agent.workspace_mode = None;
             }
         }
         Ok(())

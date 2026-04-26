@@ -4,6 +4,12 @@
 //! orchestrator modules. Otherwise, lightweight local shims are used so the
 //! rest of the code can compile without optional container dependencies.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
 #[cfg(feature = "docker-sandbox")]
 pub use crate::orchestrator::TokenStore;
 #[cfg(feature = "docker-sandbox")]
@@ -19,7 +25,6 @@ pub use crate::orchestrator::job_manager::{
 #[cfg(not(feature = "docker-sandbox"))]
 mod fallback {
     use serde::{Deserialize, Serialize};
-    use std::path::PathBuf;
     use uuid::Uuid;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +33,7 @@ mod fallback {
         pub env_var: String,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
     pub enum JobMode {
         Worker,
         ClaudeCode,
@@ -53,19 +58,10 @@ mod fallback {
         Failed,
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     pub struct ContainerJobConfig {
         pub claude_code_enabled: bool,
         pub codex_code_enabled: bool,
-    }
-
-    impl Default for ContainerJobConfig {
-        fn default() -> Self {
-            Self {
-                claude_code_enabled: false,
-                codex_code_enabled: false,
-            }
-        }
     }
 
     #[derive(Debug)]
@@ -85,19 +81,29 @@ mod fallback {
 
     #[derive(Debug, Clone)]
     pub struct CompletionResult {
+        pub status: String,
+        pub session_id: Option<String>,
         pub success: bool,
         pub message: Option<String>,
+        pub iterations: u32,
     }
 
     #[derive(Debug, Clone)]
     pub struct ContainerHandle {
+        pub job_id: Uuid,
+        pub container_id: String,
+        pub spec: crate::sandbox_jobs::SandboxJobSpec,
         pub state: ContainerState,
+        pub mode: JobMode,
+        pub created_at: chrono::DateTime<chrono::Utc>,
+        pub last_worker_status: Option<String>,
+        pub worker_iteration: u32,
         pub completion_result: Option<CompletionResult>,
     }
 
     #[derive(Debug, Clone)]
     pub struct PendingPrompt {
-        pub content: String,
+        pub content: Option<String>,
         pub done: bool,
     }
 
@@ -114,9 +120,7 @@ mod fallback {
         pub async fn create_job(
             &self,
             _job_id: Uuid,
-            _task: &str,
-            _project_dir: Option<PathBuf>,
-            _mode: JobMode,
+            _spec: crate::sandbox_jobs::SandboxJobSpec,
             _credential_grants: Vec<CredentialGrant>,
         ) -> Result<(), String> {
             Ok(())
@@ -130,6 +134,22 @@ mod fallback {
 
         pub async fn get_handle(&self, _job_id: Uuid) -> Option<ContainerHandle> {
             None
+        }
+
+        pub async fn complete_job(
+            &self,
+            _job_id: Uuid,
+            _result: CompletionResult,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        pub async fn list_jobs(&self) -> Vec<ContainerHandle> {
+            Vec::new()
+        }
+
+        pub fn interactive_idle_timeout_secs(&self) -> u64 {
+            crate::sandbox_jobs::DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS
         }
 
         pub async fn update_claude_code_settings(
@@ -156,3 +176,5 @@ pub use fallback::{
     CompletionResult, ContainerHandle, ContainerJobConfig, ContainerJobManager, ContainerState,
     CredentialGrant, JobMode, PendingPrompt, TokenStore,
 };
+
+pub type PromptQueue = Arc<Mutex<HashMap<Uuid, VecDeque<PendingPrompt>>>>;

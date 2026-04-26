@@ -10,7 +10,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::header,
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use tokio::sync::{mpsc, oneshot};
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -30,9 +30,7 @@ use crate::sandbox_types::{ContainerJobManager, PendingPrompt};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
-pub(crate) use crate::channels::web::handlers::chat::{
-    build_turns_from_db_messages, clear_auth_mode,
-};
+pub(crate) use crate::channels::web::handlers::chat::build_turns_from_db_messages;
 #[cfg(test)]
 pub(crate) use crate::channels::web::handlers::providers::{
     ProviderConfigEntry, build_provider_models_response, build_routing_provider_entries,
@@ -76,6 +74,10 @@ pub struct GatewayState {
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.
     pub prompt_queue: Option<PromptQueue>,
+    /// Shared direct-job context manager for local job visibility.
+    pub context_manager: Option<Arc<crate::context::ContextManager>>,
+    /// Direct-job scheduler, filled once the main agent is constructed.
+    pub scheduler: tokio::sync::RwLock<Option<Arc<crate::agent::Scheduler>>>,
     /// User ID for this gateway.
     pub user_id: String,
     /// Actor ID this gateway session should act as by default.
@@ -92,6 +94,10 @@ pub struct GatewayState {
     pub skill_registry: Option<Arc<tokio::sync::RwLock<crate::skills::SkillRegistry>>>,
     /// Skill catalog for searching the ClawHub registry.
     pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
+    /// Refreshable remote skill hub for GitHub taps and marketplace adapters.
+    pub skill_remote_hub: Option<crate::skills::SharedRemoteSkillHub>,
+    /// Skill quarantine manager for inspection and publish scans.
+    pub skill_quarantine: Option<Arc<crate::skills::quarantine::QuarantineManager>>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.
@@ -135,6 +141,18 @@ pub async fn start_server(
                 name: "gateway".to_string(),
                 reason: format!("Failed to get local addr: {}", e),
             })?;
+    if let Some(path) = std::env::var_os("THINCLAW_GATEWAY_BOUND_ADDR_FILE") {
+        std::fs::write(&path, bound_addr.to_string()).map_err(|e| {
+            crate::error::ChannelError::StartupFailed {
+                name: "gateway".to_string(),
+                reason: format!(
+                    "Failed to write bound gateway address to {}: {}",
+                    std::path::PathBuf::from(path).display(),
+                    e
+                ),
+            }
+        })?;
+    }
 
     // Public routes (no auth)
     let public = Router::new()
@@ -180,6 +198,9 @@ pub async fn start_server(
             token: auth_token,
             trusted_proxy_header,
             trusted_proxy_ips,
+            fallback_principal_id: state.user_id.clone(),
+            fallback_actor_id: state.actor_id.clone(),
+            store: state.store.clone(),
         }
     };
     let protected = Router::new()
@@ -194,6 +215,19 @@ pub async fn start_server(
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
         .route("/api/chat/thread/{id}", delete(chat_delete_thread_handler))
+        // Autonomy
+        .route("/api/autonomy/status", get(autonomy_status_handler))
+        .route("/api/autonomy/bootstrap", post(autonomy_bootstrap_handler))
+        .route("/api/autonomy/pause", post(autonomy_pause_handler))
+        .route("/api/autonomy/resume", post(autonomy_resume_handler))
+        .route(
+            "/api/autonomy/permissions",
+            get(autonomy_permissions_handler),
+        )
+        .route("/api/autonomy/rollback", post(autonomy_rollback_handler))
+        .route("/api/autonomy/rollouts", get(autonomy_rollouts_handler))
+        .route("/api/autonomy/checks", get(autonomy_checks_handler))
+        .route("/api/autonomy/evidence", get(autonomy_evidence_handler))
         // Memory
         .route("/api/memory/tree", get(memory_tree_handler))
         .route("/api/memory/list", get(memory_list_handler))
@@ -227,12 +261,56 @@ pub async fn start_server(
             post(extensions_activate_handler),
         )
         .route(
+            "/api/extensions/{name}/reconnect",
+            post(extensions_reconnect_handler),
+        )
+        .route(
             "/api/extensions/{name}/remove",
             post(extensions_remove_handler),
         )
         .route(
             "/api/extensions/{name}/setup",
             get(extensions_setup_handler).post(extensions_setup_submit_handler),
+        )
+        // MCP
+        .route("/api/mcp/servers", get(mcp_servers_handler))
+        .route("/api/mcp/interactions", get(mcp_interactions_handler))
+        .route(
+            "/api/mcp/interactions/{interaction_id}/respond",
+            post(mcp_interaction_respond_handler),
+        )
+        .route("/api/mcp/servers/{name}", get(mcp_server_handler))
+        .route(
+            "/api/mcp/servers/{name}/tools",
+            get(mcp_server_tools_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/resources",
+            get(mcp_server_resources_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/resources/read",
+            get(mcp_server_read_resource_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/resource-templates",
+            get(mcp_server_resource_templates_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/prompts",
+            get(mcp_server_prompts_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/prompts/{prompt_name}",
+            post(mcp_server_prompt_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/oauth",
+            get(mcp_server_oauth_handler),
+        )
+        .route(
+            "/api/mcp/servers/{name}/log-level",
+            put(mcp_server_log_level_handler),
         )
         // Gateway management
         .route("/api/gateway/restart", post(gateway_restart_handler))
@@ -245,6 +323,7 @@ pub async fn start_server(
         // Routines
         .route("/api/routines", get(routines_list_handler))
         .route("/api/routines/summary", get(routines_summary_handler))
+        .route("/api/routines/events", get(routines_events_handler))
         .route("/api/routines/{id}", get(routines_detail_handler))
         .route("/api/routines/{id}/trigger", post(routines_trigger_handler))
         .route("/api/routines/{id}/toggle", post(routines_toggle_handler))
@@ -277,6 +356,19 @@ pub async fn start_server(
         .route(
             "/api/learning/code-proposals/{id}/review",
             post(learning_code_proposal_review_handler),
+        )
+        .route(
+            "/api/learning/outcomes/evaluate-now",
+            post(learning_outcomes_evaluate_now_handler),
+        )
+        .route("/api/learning/outcomes", get(learning_outcomes_handler))
+        .route(
+            "/api/learning/outcomes/{id}",
+            get(learning_outcome_detail_handler),
+        )
+        .route(
+            "/api/learning/outcomes/{id}/review",
+            post(learning_outcome_review_handler),
         )
         .route("/api/learning/rollbacks", get(learning_rollbacks_handler))
         .route(
@@ -424,9 +516,27 @@ pub async fn start_server(
         .route("/api/skills", get(skills_list_handler))
         .route("/api/skills/search", post(skills_search_handler))
         .route("/api/skills/install", post(skills_install_handler))
+        .route("/api/skills/taps", get(skill_taps_list_handler))
+        .route("/api/skills/taps", post(skill_taps_add_handler))
+        .route(
+            "/api/skills/taps/remove",
+            axum::routing::post(skill_taps_remove_handler),
+        )
+        .route(
+            "/api/skills/taps/refresh",
+            axum::routing::post(skill_taps_refresh_handler),
+        )
         .route(
             "/api/skills/{name}",
             axum::routing::delete(skills_remove_handler),
+        )
+        .route(
+            "/api/skills/{name}/inspect",
+            axum::routing::post(skills_inspect_handler),
+        )
+        .route(
+            "/api/skills/{name}/publish",
+            axum::routing::post(skills_publish_handler),
         )
         .route(
             "/api/skills/{name}/trust",
@@ -459,6 +569,15 @@ pub async fn start_server(
         .route(
             "/api/providers/{slug}/key",
             axum::routing::delete(providers_delete_key_handler),
+        );
+    #[cfg(feature = "nostr")]
+    let protected = protected
+        .route("/api/nostr/key", post(nostr_save_key_handler))
+        .route("/api/nostr/key", delete(nostr_delete_key_handler));
+    let protected = protected
+        .route(
+            "/api/webchat/presentation",
+            get(webchat_presentation_handler),
         )
         // Settings
         .route("/api/settings", get(settings_list_handler))
@@ -512,8 +631,9 @@ pub async fn start_server(
     // origins are allowed, since the gateway is a local-first service.
     // When binding to 0.0.0.0 (unspecified), also allow 127.0.0.1 since
     // "http://0.0.0.0" is not a valid browser origin.
+    let cors_port = bound_addr.port();
     let mut origins: Vec<axum::http::HeaderValue> = vec![
-        format!("http://localhost:{}", addr.port())
+        format!("http://localhost:{cors_port}")
             .parse()
             .expect("valid origin"),
     ];
@@ -521,7 +641,7 @@ pub async fn start_server(
     // browsers can't use as an origin).
     if !addr.ip().is_unspecified() {
         origins.push(
-            format!("http://{}:{}", addr.ip(), addr.port())
+            format!("http://{}:{cors_port}", addr.ip())
                 .parse()
                 .expect("valid origin"),
         );
@@ -530,7 +650,7 @@ pub async fn start_server(
     // via http://127.0.0.1:<port> aren't blocked.
     if addr.ip().is_unspecified() {
         origins.push(
-            format!("http://127.0.0.1:{}", addr.port())
+            format!("http://127.0.0.1:{cors_port}")
                 .parse()
                 .expect("valid origin"),
         );
@@ -577,12 +697,15 @@ pub async fn start_server(
     *state.shutdown_tx.write().await = Some(shutdown_tx);
 
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                let _ = shutdown_rx.await;
-                tracing::info!("Web gateway shutting down");
-            })
-            .await
+        if let Err(e) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+            tracing::info!("Web gateway shutting down");
+        })
+        .await
         {
             tracing::error!("Web gateway server error: {}", e);
         }
@@ -629,6 +752,39 @@ mod tests {
         assert_eq!(model_ids, vec!["gpt-4o", "gpt-4o-mini"]);
         assert_eq!(suggested_primary.as_deref(), Some("gpt-4o"));
         assert_eq!(suggested_cheap.as_deref(), Some("gpt-4o-mini"));
+    }
+
+    #[test]
+    fn test_provider_model_options_from_discovery_prefers_catalog_default_primary() {
+        let discovered = vec![
+            crate::llm::discovery::DiscoveredModel {
+                id: "claude-sonnet-4-6".to_string(),
+                name: "claude-sonnet-4-6".to_string(),
+                provider: "anthropic".to_string(),
+                is_chat: true,
+                context_length: None,
+            },
+            crate::llm::discovery::DiscoveredModel {
+                id: "claude-opus-4-7".to_string(),
+                name: "claude-opus-4-7".to_string(),
+                provider: "anthropic".to_string(),
+                is_chat: true,
+                context_length: None,
+            },
+        ];
+
+        let (_models, suggested_primary, suggested_cheap, has_live_models) =
+            provider_model_options_from_discovery(
+                "anthropic",
+                "claude-opus-4-7",
+                discovered,
+                None,
+                None,
+            );
+
+        assert!(has_live_models);
+        assert_eq!(suggested_primary.as_deref(), Some("claude-opus-4-7"));
+        assert_eq!(suggested_cheap.as_deref(), Some("claude-sonnet-4-6"));
     }
 
     #[test]
@@ -858,6 +1014,8 @@ mod tests {
             cheap_model: None,
             suggested_primary_model: Some("gemini-2.5-flash".to_string()),
             suggested_cheap_model: Some("gemini-2.5-flash-lite".to_string()),
+            setup_url: None,
+            tier: None,
         };
         let previous_slots = crate::settings::ProviderModelSlots {
             primary: Some("gemini-3.1-flash-live-preview".to_string()),
@@ -902,6 +1060,8 @@ mod tests {
             cheap_model: Some("gemini-2.5-flash-lite-preview".to_string()),
             suggested_primary_model: Some("gemini-2.5-flash".to_string()),
             suggested_cheap_model: Some("gemini-2.5-flash-lite".to_string()),
+            setup_url: None,
+            tier: None,
         };
         let previous_slots = crate::settings::ProviderModelSlots {
             primary: Some("gemini-1.5-pro".to_string()),
@@ -1126,6 +1286,82 @@ mod tests {
     }
 
     #[test]
+    fn test_build_turns_from_db_messages_hides_only_startup_user_prompt() {
+        let now = chrono::Utc::now();
+        let messages = vec![
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "boot prompt".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({"hide_from_webui_chat": true}),
+                created_at: now,
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "boot reply".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({"synthetic_origin": "startup_hook"}),
+                created_at: now + chrono::TimeDelta::seconds(1),
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "real question".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
+                created_at: now + chrono::TimeDelta::seconds(2),
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "real answer".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
+                created_at: now + chrono::TimeDelta::seconds(3),
+            },
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 2);
+        assert!(turns[0].hide_user_input);
+        assert_eq!(turns[0].user_input, "");
+        assert_eq!(turns[0].response.as_deref(), Some("boot reply"));
+        assert_eq!(turns[1].user_input, "real question");
+        assert_eq!(turns[1].response.as_deref(), Some("real answer"));
+    }
+
+    #[test]
+    fn test_build_turns_from_db_messages_preserves_legacy_assistant_only_startup_reply() {
+        let now = chrono::Utc::now();
+        let messages = vec![crate::history::ConversationMessage {
+            id: Uuid::new_v4(),
+            role: "assistant".to_string(),
+            content: "boot reply".to_string(),
+            actor_id: None,
+            actor_display_name: None,
+            raw_sender_id: None,
+            metadata: serde_json::json!({"synthetic_origin": "startup_hook"}),
+            created_at: now,
+        }];
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].hide_user_input);
+        assert_eq!(turns[0].user_input, "");
+        assert_eq!(turns[0].response.as_deref(), Some("boot reply"));
+    }
+
+    #[test]
     fn test_conversation_visible_to_actor_treats_missing_actor_as_legacy_base_user() {
         assert!(conversation_visible_to_actor(
             None,
@@ -1161,6 +1397,8 @@ mod tests {
             store,
             job_manager: None,
             prompt_queue: None,
+            context_manager: None,
+            scheduler: tokio::sync::RwLock::new(None),
             user_id: user_id.to_string(),
             actor_id: actor_id.to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
@@ -1169,6 +1407,8 @@ mod tests {
             llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
+            skill_remote_hub: None,
+            skill_quarantine: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,
@@ -1257,6 +1497,8 @@ mod tests {
             store: None,
             job_manager: None,
             prompt_queue: None,
+            context_manager: None,
+            scheduler: tokio::sync::RwLock::new(None),
             user_id: "gateway-default".to_string(),
             actor_id: "gateway-actor".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
@@ -1265,6 +1507,8 @@ mod tests {
             llm_runtime: None,
             skill_registry: None,
             skill_catalog: None,
+            skill_remote_hub: None,
+            skill_quarantine: None,
             chat_rate_limiter: RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
             cost_guard: None,

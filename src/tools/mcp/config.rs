@@ -5,11 +5,41 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::tools::tool::ToolError;
+use crate::tools::url_guard::{OutboundUrlGuardOptions, validate_outbound_url};
+
+/// Shared loader for reading persisted MCP server configuration.
+#[derive(Clone)]
+pub struct McpConfigStore {
+    store: Option<Arc<dyn crate::db::Database>>,
+    user_id: String,
+}
+
+impl McpConfigStore {
+    pub fn new(store: Option<Arc<dyn crate::db::Database>>, user_id: impl Into<String>) -> Self {
+        Self {
+            store,
+            user_id: user_id.into(),
+        }
+    }
+
+    pub async fn load_servers(&self) -> Result<McpServersFile, ConfigError> {
+        if let Some(ref store) = self.store {
+            load_mcp_servers_from_db(store.as_ref(), &self.user_id).await
+        } else {
+            load_mcp_servers().await
+        }
+    }
+
+    pub async fn get_server(&self, name: &str) -> Result<Option<McpServerConfig>, ConfigError> {
+        Ok(self.load_servers().await?.get(name).cloned())
+    }
+}
 
 /// Transport type for MCP servers.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,7 +56,12 @@ pub enum McpTransport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Unique name for this server (e.g., "notion", "github").
+    #[serde(alias = "id")]
     pub name: String,
+
+    /// Optional human-friendly name for display surfaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 
     /// Server URL (must be HTTPS for remote servers).
     /// Required for HTTP transport, unused for stdio.
@@ -53,9 +88,33 @@ pub struct McpServerConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth: Option<OAuthConfig>,
 
-    /// Whether this server is enabled.
-    #[serde(default = "default_true")]
+    /// Whether this server auto-activates at startup.
+    #[serde(default = "default_true", alias = "auto_activate")]
     pub enabled: bool,
+
+    /// Allow loopback/private HTTP endpoints for local development.
+    #[serde(default)]
+    pub allow_local_http: bool,
+
+    /// Per-server capability policy for client features.
+    #[serde(default)]
+    pub capability_policy: McpCapabilityPolicy,
+
+    /// Explicit roots granted to this server when roots capability is enabled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots_grants: Vec<String>,
+
+    /// Desired logging level for this server.
+    #[serde(default)]
+    pub logging_level: McpLoggingLevel,
+
+    /// Persisted metadata discovered during prior connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+
+    /// Last-known runtime health snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_health: Option<McpRuntimeHealth>,
 
     /// Optional description for the server.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,6 +137,13 @@ impl McpServerConfig {
             env: BTreeMap::new(),
             oauth: None,
             enabled: true,
+            display_name: None,
+            allow_local_http: false,
+            capability_policy: McpCapabilityPolicy::default(),
+            roots_grants: Vec::new(),
+            logging_level: McpLoggingLevel::default(),
+            metadata: None,
+            runtime_health: None,
             description: None,
         }
     }
@@ -97,8 +163,21 @@ impl McpServerConfig {
             env: BTreeMap::new(),
             oauth: None,
             enabled: true,
+            display_name: None,
+            allow_local_http: false,
+            capability_policy: McpCapabilityPolicy::default(),
+            roots_grants: Vec::new(),
+            logging_level: McpLoggingLevel::default(),
+            metadata: None,
+            runtime_health: None,
             description: None,
         }
+    }
+
+    /// Set the display name.
+    pub fn with_display_name(mut self, display_name: impl Into<String>) -> Self {
+        self.display_name = Some(display_name.into());
+        self
     }
 
     /// Set OAuth configuration.
@@ -140,14 +219,32 @@ impl McpServerConfig {
                     });
                 }
 
-                // Remote servers must use HTTPS (localhost is allowed for development)
-                let url_lower = self.url.to_lowercase();
-                let is_localhost =
-                    url_lower.contains("localhost") || url_lower.contains("127.0.0.1");
-                if !is_localhost && !url_lower.starts_with("https://") {
+                let options = OutboundUrlGuardOptions {
+                    require_https: !self.allow_local_http,
+                    upgrade_http_to_https: false,
+                    allowlist: Vec::new(),
+                };
+
+                if let Err(error) = validate_outbound_url(&self.url, &options) {
+                    if !self.allow_local_http && is_localhost_url(&self.url) {
+                        return Ok(());
+                    }
+
                     return Err(ConfigError::InvalidConfig {
-                        reason: "Remote MCP servers must use HTTPS".to_string(),
+                        reason: error.to_string(),
                     });
+                }
+
+                if self.allow_local_http {
+                    let parsed =
+                        url::Url::parse(&self.url).map_err(|e| ConfigError::InvalidConfig {
+                            reason: format!("Invalid MCP server URL: {e}"),
+                        })?;
+                    if !matches!(parsed.scheme(), "http" | "https") {
+                        return Err(ConfigError::InvalidConfig {
+                            reason: "MCP server URLs must use http:// or https://".to_string(),
+                        });
+                    }
                 }
             }
             McpTransport::Stdio => {
@@ -179,6 +276,30 @@ impl McpServerConfig {
         let url_lower = self.url.to_lowercase();
         let is_localhost = is_localhost_url(&url_lower);
         url_lower.starts_with("https://") && !is_localhost
+    }
+
+    /// Stable tool namespace used for registered ThinClaw tool names.
+    pub fn tool_namespace(&self) -> String {
+        self.name
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
+    /// Display label for UI/CLI surfaces.
+    pub fn display_label(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Whether this server should auto-activate at startup.
+    pub fn auto_activate(&self) -> bool {
+        self.enabled
     }
 
     /// Get the secret name used to store the access token.
@@ -217,6 +338,10 @@ pub struct OAuthConfig {
     #[serde(default)]
     pub scopes: Vec<String>,
 
+    /// Explicit protected-resource identifier to use for OAuth resource binding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+
     /// Whether to use PKCE (default: true, as required by OAuth 2.1).
     #[serde(default = "default_true")]
     pub use_pkce: bool,
@@ -234,6 +359,7 @@ impl OAuthConfig {
             authorization_url: None,
             token_url: None,
             scopes: Vec::new(),
+            resource: None,
             use_pkce: true,
             extra_params: HashMap::new(),
         }
@@ -255,6 +381,12 @@ impl OAuthConfig {
         self.scopes = scopes;
         self
     }
+
+    /// Set the OAuth resource identifier.
+    pub fn with_resource(mut self, resource: impl Into<String>) -> Self {
+        self.resource = Some(resource.into());
+        self
+    }
 }
 
 /// Configuration file containing all MCP servers.
@@ -270,10 +402,22 @@ pub struct McpServersFile {
 }
 
 fn default_schema_version() -> u32 {
-    1
+    2
 }
 
 impl McpServersFile {
+    /// Upgrade older config payloads to the current schema defaults.
+    pub fn migrate_in_place(&mut self) {
+        if self.schema_version < 2 {
+            for server in &mut self.servers {
+                if server.display_name.is_none() {
+                    server.display_name = Some(server.name.clone());
+                }
+            }
+            self.schema_version = 2;
+        }
+    }
+
     /// Get a server by name.
     pub fn get(&self, name: &str) -> Option<&McpServerConfig> {
         self.servers.iter().find(|s| s.name == name)
@@ -304,6 +448,71 @@ impl McpServersFile {
     pub fn enabled_servers(&self) -> impl Iterator<Item = &McpServerConfig> {
         self.servers.iter().filter(|s| s.enabled)
     }
+}
+
+/// Policy for advertising and serving MCP client capabilities.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpCapabilityPolicy {
+    #[serde(default = "default_true")]
+    pub tools: bool,
+    #[serde(default = "default_true")]
+    pub resources: bool,
+    #[serde(default = "default_true")]
+    pub prompts: bool,
+    #[serde(default = "default_true")]
+    pub completion: bool,
+    #[serde(default)]
+    pub roots: bool,
+    #[serde(default)]
+    pub sampling: bool,
+    #[serde(default)]
+    pub sampling_tools: bool,
+    #[serde(default)]
+    pub form_elicitation: bool,
+    #[serde(default = "default_logging_enabled")]
+    pub logging: bool,
+}
+
+fn default_logging_enabled() -> bool {
+    true
+}
+
+impl Default for McpCapabilityPolicy {
+    fn default() -> Self {
+        Self {
+            tools: true,
+            resources: true,
+            prompts: true,
+            completion: true,
+            roots: false,
+            sampling: false,
+            sampling_tools: false,
+            form_elicitation: false,
+            logging: true,
+        }
+    }
+}
+
+/// Last-known runtime health for a configured server.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpRuntimeHealth {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_connected_at: Option<String>,
+    #[serde(default)]
+    pub connected: bool,
+}
+
+/// Persisted per-server logging preference.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpLoggingLevel {
+    Debug,
+    Info,
+    #[default]
+    Warning,
+    Error,
 }
 
 /// Error type for MCP configuration operations.
@@ -347,7 +556,8 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
     }
 
     let content = fs::read_to_string(path).await?;
-    let config: McpServersFile = serde_json::from_str(&content)?;
+    let mut config: McpServersFile = serde_json::from_str(&content)?;
+    config.migrate_in_place();
 
     Ok(config)
 }
@@ -369,7 +579,9 @@ pub async fn save_mcp_servers_to(
         fs::create_dir_all(parent).await?;
     }
 
-    let content = serde_json::to_string_pretty(config)?;
+    let mut config = config.clone();
+    config.migrate_in_place();
+    let content = serde_json::to_string_pretty(&config)?;
     fs::write(path, content).await?;
 
     Ok(())
@@ -424,7 +636,8 @@ pub async fn load_mcp_servers_from_db(
 ) -> Result<McpServersFile, ConfigError> {
     match store.get_setting(user_id, "mcp_servers").await {
         Ok(Some(value)) => {
-            let config: McpServersFile = serde_json::from_value(value)?;
+            let mut config: McpServersFile = serde_json::from_value(value)?;
+            config.migrate_in_place();
             Ok(config)
         }
         Ok(None) => {

@@ -23,7 +23,7 @@ use crate::context::JobContext;
 use crate::error::LlmError;
 use crate::llm::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamChunkStream,
-    ToolCompletionRequest, ToolCompletionResponse,
+    StreamSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
@@ -167,6 +167,16 @@ impl LlmProvider for ModelSpecOverrideProvider {
             .supports_streaming_for_model(requested_model.or(Some(self.model_spec.as_str())))
     }
 
+    fn stream_support(&self) -> StreamSupport {
+        self.inner
+            .stream_support_for_model(Some(self.model_spec.as_str()))
+    }
+
+    fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
+        self.inner
+            .stream_support_for_model(requested_model.or(Some(self.model_spec.as_str())))
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         self.inner.list_models().await
     }
@@ -276,7 +286,9 @@ impl Tool for LlmSelectTool {
             )));
         }
 
-        let (provider_slug, model_name) = model_spec.split_once('/').unwrap();
+        let (provider_slug, model_name) = model_spec
+            .split_once('/')
+            .expect("validated by contains('/') check above");
 
         // Validate against provider catalog
         let endpoint = crate::config::provider_catalog::endpoint_for(provider_slug);
@@ -291,7 +303,7 @@ impl Tool for LlmSelectTool {
 
         // Check if API key is available for this provider
         if let Some(endpoint) = endpoint {
-            let env_key = endpoint.env_key_name;
+            let env_key = &endpoint.env_key_name;
             let has_key = crate::config::helpers::optional_env(env_key)
                 .ok()
                 .flatten()
@@ -425,7 +437,7 @@ impl Tool for LlmListModelsTool {
             crate::config::provider_catalog::catalog()
                 .iter()
                 .map(|(slug, endpoint)| {
-                    let has_key = crate::config::helpers::optional_env(endpoint.env_key_name)
+                    let has_key = crate::config::helpers::optional_env(&endpoint.env_key_name)
                         .ok()
                         .flatten()
                         .is_some();

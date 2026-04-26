@@ -3,11 +3,37 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
 
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::extensions::manager::AuthRequestContext;
+
+fn request_origin(headers: &HeaderMap) -> Option<String> {
+    if let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        return Some(origin.trim_end_matches('/').to_string());
+    }
+
+    headers
+        .get(axum::http::header::REFERER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| url::Url::parse(value).ok())
+        .map(|url| {
+            format!(
+                "{}://{}",
+                url.scheme(),
+                url.host_str().map(str::to_string).unwrap_or_default()
+                    + &url
+                        .port()
+                        .map(|port| format!(":{port}"))
+                        .unwrap_or_default()
+            )
+        })
+}
 
 pub(crate) async fn extensions_list_handler(
     State(state): State<Arc<GatewayState>>,
@@ -23,46 +49,61 @@ pub(crate) async fn extensions_list_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let pairing_store = crate::pairing::PairingStore::new();
-    let extensions = installed
-        .into_iter()
-        .map(|ext| {
-            let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-                Some(if ext.activation_error.is_some() {
-                    "failed".to_string()
-                } else if !ext.authenticated {
-                    "installed".to_string()
-                } else if ext.active && ext.name == "telegram" {
-                    let has_paired = pairing_store
-                        .read_allow_from(&ext.name)
-                        .map(|list| !list.is_empty())
-                        .unwrap_or(false);
-                    if has_paired {
-                        "active".to_string()
-                    } else {
-                        "pairing".to_string()
-                    }
-                } else if ext.active {
+    let mut extensions = Vec::with_capacity(installed.len());
+    for ext in installed {
+        let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+            Some(if ext.activation_error.is_some() {
+                "failed".to_string()
+            } else if !ext.authenticated {
+                "installed".to_string()
+            } else if ext.active && ext.name == "telegram" {
+                let has_paired = pairing_store
+                    .read_allow_from(&ext.name)
+                    .map(|list| !list.is_empty())
+                    .unwrap_or(false);
+                if has_paired {
                     "active".to_string()
                 } else {
-                    "configured".to_string()
-                })
+                    "pairing".to_string()
+                }
+            } else if ext.active {
+                "active".to_string()
+            } else {
+                "configured".to_string()
+            })
+        } else {
+            None
+        };
+        let channel_diagnostics = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+            if let Some(channel_manager) = state.channel_manager.as_ref() {
+                channel_manager.channel_diagnostics(&ext.name).await
             } else {
                 None
-            };
-            ExtensionInfo {
-                name: ext.name,
-                kind: ext.kind.to_string(),
-                description: ext.description,
-                url: ext.url,
-                authenticated: ext.authenticated,
-                active: ext.active,
-                tools: ext.tools,
-                needs_setup: ext.needs_setup,
-                activation_status,
-                activation_error: ext.activation_error,
             }
-        })
-        .collect();
+        } else {
+            None
+        };
+        let reconnect_supported =
+            ext.kind == crate::extensions::ExtensionKind::WasmChannel && ext.name == "telegram";
+        extensions.push(ExtensionInfo {
+            name: ext.name,
+            kind: ext.kind.to_string(),
+            description: ext.description,
+            url: ext.url,
+            authenticated: ext.authenticated,
+            auth_mode: ext.auth_mode,
+            auth_status: ext.auth_status,
+            active: ext.active,
+            tools: ext.tools,
+            needs_setup: ext.needs_setup,
+            shared_auth_provider: ext.shared_auth_provider,
+            missing_scopes: ext.missing_scopes,
+            activation_status,
+            activation_error: ext.activation_error,
+            channel_diagnostics,
+            reconnect_supported,
+        });
+    }
 
     Ok(Json(ExtensionListResponse { extensions }))
 }
@@ -75,7 +116,12 @@ pub(crate) async fn extensions_tools_handler(
         "Tool registry not available".to_string(),
     ))?;
 
-    let definitions = registry.tool_definitions().await;
+    let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
+    let metadata = serde_json::json!({
+        "channel": "web",
+    });
+    let definitions = tool_policies
+        .filter_tool_definitions_for_metadata(registry.tool_definitions().await, &metadata);
     let tools = definitions
         .into_iter()
         .map(|td| ToolInfo {
@@ -130,6 +176,7 @@ pub(crate) async fn extensions_install_handler(
 
 pub(crate) async fn extensions_activate_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -149,8 +196,17 @@ pub(crate) async fn extensions_activate_handler(
                 return Ok(Json(ActionResponse::fail(err_str)));
             }
 
-            match ext_mgr.auth(&name, None).await {
-                Ok(auth_result) if auth_result.status == "authenticated" => {
+            let auth_context = AuthRequestContext {
+                callback_base_url: request_origin(&headers),
+                callback_type: Some("web".to_string()),
+                thread_id: None,
+            };
+
+            match ext_mgr.auth_with_context(&name, None, auth_context).await {
+                Ok(auth_result)
+                    if auth_result.auth_status == "authenticated"
+                        || auth_result.auth_status == "no_auth_required" =>
+                {
                     match ext_mgr.activate(&name).await {
                         Ok(result) => Ok(Json(ActionResponse::ok(result.message))),
                         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
@@ -164,8 +220,13 @@ pub(crate) async fn extensions_activate_handler(
                             .unwrap_or_else(|| format!("'{}' requires authentication.", name)),
                     );
                     resp.auth_url = auth_result.auth_url;
+                    resp.setup_url = auth_result.setup_url;
+                    resp.auth_mode = Some(auth_result.auth_mode.clone());
+                    resp.auth_status = Some(auth_result.auth_status.clone());
                     resp.awaiting_token = Some(auth_result.awaiting_token);
                     resp.instructions = auth_result.instructions;
+                    resp.shared_auth_provider = auth_result.shared_auth_provider;
+                    resp.missing_scopes = auth_result.missing_scopes;
                     Ok(Json(resp))
                 }
                 Err(auth_err) => Ok(Json(ActionResponse::fail(format!(
@@ -174,6 +235,46 @@ pub(crate) async fn extensions_activate_handler(
                 )))),
             }
         }
+    }
+}
+
+pub(crate) async fn extensions_reconnect_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+    let channel_manager = state.channel_manager.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Channel manager not available".to_string(),
+    ))?;
+
+    match ext_mgr.activate(&name).await {
+        Ok(_) => {}
+        Err(err) => {
+            return Ok(Json(ActionResponse::fail(format!(
+                "Failed to refresh '{}': {}",
+                name, err
+            ))));
+        }
+    }
+
+    if let Err(err) = channel_manager.reset_channel_connection_state(&name).await {
+        tracing::warn!(
+            channel = %name,
+            error = %err,
+            "Failed to clear channel runtime state before reconnect"
+        );
+    }
+
+    match channel_manager.restart_channel(&name).await {
+        Ok(()) => Ok(Json(ActionResponse::ok(format!("Reconnected '{}'", name)))),
+        Err(err) => Ok(Json(ActionResponse::fail(format!(
+            "Reconnect failed for '{}': {}",
+            name, err
+        )))),
     }
 }
 
@@ -253,6 +354,7 @@ pub(crate) async fn extensions_registry_handler(
 
 pub(crate) async fn extensions_setup_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<ExtensionSetupResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -260,8 +362,15 @@ pub(crate) async fn extensions_setup_handler(
         "Extension manager not available (secrets store required)".to_string(),
     ))?;
 
-    let secrets = ext_mgr
-        .get_setup_schema(&name)
+    let setup = ext_mgr
+        .get_setup_schema(
+            &name,
+            AuthRequestContext {
+                callback_base_url: request_origin(&headers),
+                callback_type: Some("web".to_string()),
+                thread_id: None,
+            },
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -276,7 +385,14 @@ pub(crate) async fn extensions_setup_handler(
     Ok(Json(ExtensionSetupResponse {
         name,
         kind,
-        secrets,
+        mode: setup.mode,
+        auth_status: setup.auth_status,
+        fields: setup.fields,
+        auth_url: setup.auth_url,
+        instructions: setup.instructions,
+        setup_url: setup.setup_url,
+        shared_auth_provider: setup.shared_auth_provider,
+        missing_scopes: setup.missing_scopes,
     }))
 }
 

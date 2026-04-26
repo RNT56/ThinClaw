@@ -84,12 +84,10 @@ fn check_api_key() -> Result<(), String> {
     if near::agent::host::secret_exists("brave_search_api_key") {
         Ok(())
     } else {
-        Err(
-            "Brave Search API key not configured. \
+        Err("Brave Search API key not configured. \
              Get a free key at https://brave.com/search/api/ \
              then store it with: thinclaw tool auth brave-search"
-                .to_string(),
-        )
+            .to_string())
     }
 }
 
@@ -125,7 +123,13 @@ fn execute_inner(params: &str) -> Result<String, String> {
             country,
             search_lang,
             include_news,
-        } => web_search(&query, count, country.as_deref(), search_lang.as_deref(), include_news.unwrap_or(false)),
+        } => web_search(
+            &query,
+            count,
+            country.as_deref(),
+            search_lang.as_deref(),
+            include_news.unwrap_or(false),
+        ),
         BraveSearchAction::NewsSearch {
             query,
             count,
@@ -194,7 +198,10 @@ fn web_search(
     }
     if response.status != 200 {
         let body = String::from_utf8_lossy(&response.body);
-        return Err(format!("Brave Search API error {}: {}", response.status, body));
+        return Err(format!(
+            "Brave Search API error {}: {}",
+            response.status, body
+        ));
     }
 
     let body: serde_json::Value = serde_json::from_slice(&response.body)
@@ -228,14 +235,9 @@ fn news_search(query: &str, count: Option<u32>, country: Option<&str>) -> Result
         "User-Agent": "ThinClaw-BraveSearch/1.0"
     });
 
-    let response = near::agent::host::http_request(
-        "GET",
-        &url,
-        &headers.to_string(),
-        None,
-        Some(10_000),
-    )
-    .map_err(|e| format!("HTTP request failed: {e}"))?;
+    let response =
+        near::agent::host::http_request("GET", &url, &headers.to_string(), None, Some(10_000))
+            .map_err(|e| format!("HTTP request failed: {e}"))?;
 
     if response.status == 401 || response.status == 403 {
         return Err(
@@ -248,7 +250,10 @@ fn news_search(query: &str, count: Option<u32>, country: Option<&str>) -> Result
     }
     if response.status != 200 {
         let body = String::from_utf8_lossy(&response.body);
-        return Err(format!("Brave News API error {}: {}", response.status, body));
+        return Err(format!(
+            "Brave News API error {}: {}",
+            response.status, body
+        ));
     }
 
     let body: serde_json::Value = serde_json::from_slice(&response.body)
@@ -271,9 +276,16 @@ fn format_web_results(body: &serde_json::Value, query: &str, count: u32) -> Resu
         if results.is_empty() {
             out.push_str("No web results found.\n");
         } else {
-            out.push_str(&format!("## Web Results (top {} of {})\n\n", results.len().min(count as usize), results.len()));
+            out.push_str(&format!(
+                "## Web Results (top {} of {})\n\n",
+                results.len().min(count as usize),
+                results.len()
+            ));
             for (i, result) in results.iter().enumerate().take(count as usize) {
-                let title = result.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
+                let title = result
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Untitled");
                 let url = result.get("url").and_then(|v| v.as_str()).unwrap_or("");
                 let description = result
                     .get("description")
@@ -303,9 +315,15 @@ fn format_web_results(body: &serde_json::Value, query: &str, count: u32) -> Resu
         if !news.is_empty() {
             out.push_str("\n## Recent News\n\n");
             for (i, article) in news.iter().enumerate().take(3) {
-                let title = article.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
+                let title = article
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Untitled");
                 let url = article.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                let description = article.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let description = article
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let age = article.get("age").and_then(|v| v.as_str()).unwrap_or("");
 
                 out.push_str(&format!("{}. **{}**\n", i + 1, title));
@@ -328,18 +346,22 @@ fn format_web_results(body: &serde_json::Value, query: &str, count: u32) -> Resu
 fn format_news_results(body: &serde_json::Value, query: &str) -> Result<String, String> {
     let mut out = format!("# Brave News Search Results\n**Query:** {}\n\n", query);
 
-    let results = body
-        .get("results")
-        .and_then(|r| r.as_array());
+    let results = body.get("results").and_then(|r| r.as_array());
 
     if let Some(results) = results {
         if results.is_empty() {
             out.push_str("No news results found.\n");
         } else {
             for (i, article) in results.iter().enumerate() {
-                let title = article.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
+                let title = article
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Untitled");
                 let url = article.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                let description = article.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let description = article
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let age = article.get("age").and_then(|v| v.as_str()).unwrap_or("");
                 let source = article
                     .get("meta_url")
@@ -426,3 +448,55 @@ const SCHEMA: &str = r#"{
 }"#;
 
 export!(BraveSearchTool);
+
+#[cfg(test)]
+mod tests {
+    use super::{format_news_results, format_web_results, url_encode};
+
+    #[test]
+    fn url_encode_escapes_spaces_and_reserved_characters() {
+        assert_eq!(url_encode("rust lang"), "rust+lang");
+        assert_eq!(url_encode("a/b?c"), "a%2Fb%3Fc");
+    }
+
+    #[test]
+    fn format_web_results_includes_web_and_news_sections() {
+        let body = serde_json::json!({
+            "web": {
+                "results": [
+                    {
+                        "title": "Rust",
+                        "url": "https://www.rust-lang.org",
+                        "description": "Systems programming language",
+                        "age": "1 day ago"
+                    }
+                ]
+            },
+            "news": {
+                "results": [
+                    {
+                        "title": "Rust release",
+                        "url": "https://example.com/rust-release",
+                        "description": "New version shipped"
+                    }
+                ]
+            }
+        });
+
+        let formatted = format_web_results(&body, "rust", 5).unwrap();
+        assert!(formatted.contains("# Brave Web Search Results"));
+        assert!(formatted.contains("## Web Results"));
+        assert!(formatted.contains("### 1. Rust"));
+        assert!(formatted.contains("https://www.rust-lang.org"));
+        assert!(formatted.contains("## Recent News"));
+        assert!(formatted.contains("Rust release"));
+    }
+
+    #[test]
+    fn format_news_results_handles_empty_results() {
+        let body = serde_json::json!({ "results": [] });
+        let formatted = format_news_results(&body, "ai").unwrap();
+        assert!(formatted.contains("# Brave News Search Results"));
+        assert!(formatted.contains("No news results found."));
+    }
+}

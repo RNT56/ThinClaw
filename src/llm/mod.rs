@@ -21,7 +21,9 @@ pub mod llama_cpp;
 pub mod llm_hooks;
 pub mod llms_txt;
 pub mod model_guidance;
+pub mod model_metadata_sync;
 pub mod pricing_sync;
+pub mod prompt_stack;
 mod provider;
 pub(crate) mod provider_factory;
 pub mod provider_presets;
@@ -35,6 +37,8 @@ pub mod route_planner;
 pub mod routing_policy;
 pub mod runtime_manager;
 pub mod smart_routing;
+pub mod streaming;
+pub mod turn_analysis;
 pub mod usage_tracking;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
@@ -42,22 +46,25 @@ pub use credential_sync::{OAuthCredentialSyncHandle, prime_runtime_oauth_credent
 pub use failover::{
     CooldownConfig, FailoverProvider, LeaseConfig, LeaseSelectionStrategy, ProviderLeaseEntry,
 };
+pub use prompt_stack::{PromptLayer, PromptStack};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
-    Role, StreamChunk, StreamChunkStream, ThinkingConfig, ToolCall, ToolCompletionRequest,
-    ToolCompletionResponse, ToolDefinition, ToolResult, sanitize_tool_messages,
+    ProviderTokenCapture, Role, StreamChunk, StreamChunkStream, StreamPolicy, StreamSupport,
+    ThinkingConfig, TokenCaptureSupport, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ToolDefinition, ToolResult, sanitize_tool_messages,
 };
 pub use provider_factory::{build_provider_chain, create_llm_provider};
 pub use reasoning::{
-    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, SILENT_REPLY_TOKEN,
-    TokenUsage, ToolSelection, is_silent_reply,
+    ActionPlan, PlannedAction, Reasoning, ReasoningContext, RespondOutput, RespondResult,
+    SILENT_REPLY_TOKEN, TokenUsage, ToolSelection, is_silent_reply,
 };
 pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
 pub use runtime_manager::{
     LlmRuntimeManager, RouteSimulationResult, RouteSimulationScore, RuntimeStatus,
-    derive_runtime_defaults, normalize_providers_settings, validate_providers_settings,
+    derive_runtime_defaults, hydrate_runtime_credentials_from_secrets,
+    normalize_providers_settings, validate_providers_settings,
 };
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 pub use usage_tracking::UsageTrackingProvider;

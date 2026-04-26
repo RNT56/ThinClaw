@@ -16,8 +16,8 @@ use sha2::{Digest, Sha256};
 use crate::skills::gating;
 use crate::skills::parser::{SkillParseError, parse_skill_md};
 use crate::skills::{
-    GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE, SkillSource, SkillTrust,
-    normalize_line_endings,
+    GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE, SkillSource, SkillSourceTier,
+    SkillTrust, normalize_line_endings,
 };
 
 /// Maximum number of skills that can be discovered from a single directory.
@@ -77,6 +77,8 @@ pub struct SkillRegistry {
     installed_dir: Option<PathBuf>,
     /// Optional workspace skills directory.
     workspace_dir: Option<PathBuf>,
+    /// Optional external read-only skill directories with display provenance.
+    external_read_only_dirs: Vec<(PathBuf, SkillSourceTier)>,
 }
 
 impl SkillRegistry {
@@ -87,6 +89,7 @@ impl SkillRegistry {
             user_dir,
             installed_dir: None,
             workspace_dir: None,
+            external_read_only_dirs: Vec::new(),
         }
     }
 
@@ -107,6 +110,11 @@ impl SkillRegistry {
         self
     }
 
+    pub fn with_external_read_only_dir(mut self, dir: PathBuf, tier: SkillSourceTier) -> Self {
+        self.external_read_only_dirs.push((dir, tier));
+        self
+    }
+
     /// Return the configured directories that participate in discovery.
     pub fn discovery_dirs(&self) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
@@ -117,7 +125,18 @@ impl SkillRegistry {
         if let Some(dir) = self.installed_dir.as_ref() {
             dirs.push(dir.clone());
         }
+        dirs.extend(
+            self.external_read_only_dirs
+                .iter()
+                .map(|(dir, _)| dir.clone()),
+        );
         dirs
+    }
+
+    /// Return the writable directory used for installs prepared through the
+    /// staged install pipeline.
+    pub fn install_root(&self) -> &Path {
+        self.installed_dir.as_deref().unwrap_or(&self.user_dir)
     }
 
     /// Discover and load skills from all configured directories.
@@ -173,6 +192,25 @@ impl SkillRegistry {
                     );
                     continue;
                 }
+                seen.insert(name.clone());
+                loaded_names.push(name);
+                self.skills.push(skill);
+            }
+        }
+
+        for (dir, tier) in self.external_read_only_dirs.clone() {
+            let ext_skills = self
+                .discover_from_dir(&dir, SkillTrust::Installed, SkillSource::External)
+                .await;
+            for (name, mut skill) in ext_skills {
+                if seen.contains(&name) {
+                    tracing::debug!(
+                        "Skipping external skill '{}' (overridden by local registry tiers)",
+                        name
+                    );
+                    continue;
+                }
+                skill.source_tier = tier;
                 seen.insert(name.clone());
                 loaded_names.push(name);
                 self.skills.push(skill);
@@ -414,6 +452,38 @@ impl SkillRegistry {
         load_and_validate_skill(&skill_dir.join("SKILL.md"), trust, source).await
     }
 
+    /// Validate an existing SKILL.md file or skill directory without mutating registry state.
+    pub async fn validate_skill_file(
+        path: &Path,
+        trust: SkillTrust,
+        source: SkillSource,
+    ) -> Result<(String, LoadedSkill), SkillRegistryError> {
+        let skill_path = if path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+            path.to_path_buf()
+        } else {
+            path.join("SKILL.md")
+        };
+        load_and_validate_skill(&skill_path, trust, source).await
+    }
+
+    /// Validate SKILL.md content without writing it to disk or mutating registry state.
+    pub async fn validate_skill_content(
+        content: &str,
+        trust: SkillTrust,
+        source: SkillSource,
+    ) -> Result<(String, LoadedSkill), SkillRegistryError> {
+        if content.len() as u64 > MAX_PROMPT_FILE_SIZE {
+            return Err(SkillRegistryError::FileTooLarge {
+                name: "(inline content)".to_string(),
+                size: content.len() as u64,
+                max: MAX_PROMPT_FILE_SIZE,
+            });
+        }
+        let normalized_content = normalize_line_endings(content);
+        validate_normalized_skill_content("(inline content)", &normalized_content, trust, source)
+            .await
+    }
+
     /// Commit a prepared skill into the in-memory registry.
     ///
     /// This is a fast, synchronous operation that only adds to the Vec.
@@ -486,6 +556,10 @@ impl SkillRegistry {
             SkillSource::Bundled(_) => Err(SkillRegistryError::CannotRemove {
                 name: name.to_string(),
                 reason: "bundled skills cannot be removed".to_string(),
+            }),
+            SkillSource::External(_) => Err(SkillRegistryError::CannotRemove {
+                name: name.to_string(),
+                reason: "external read-only skills cannot be removed".to_string(),
             }),
         }
     }
@@ -573,6 +647,12 @@ impl SkillRegistry {
                     reason: "bundled skills cannot change trust".into(),
                 });
             }
+            SkillSource::External(_) => {
+                return Err(SkillRegistryError::CannotRemove {
+                    name: name.to_string(),
+                    reason: "external read-only skills cannot change trust".into(),
+                });
+            }
         };
 
         // Already at target trust?
@@ -622,6 +702,11 @@ impl SkillRegistry {
         let skill = &mut self.skills[idx];
         skill.trust = target_trust;
         skill.source = SkillSource::User(new_skill_dir);
+        skill.source_tier = if target_trust == SkillTrust::Trusted {
+            SkillSourceTier::Trusted
+        } else {
+            SkillSourceTier::Community
+        };
 
         tracing::info!(
             skill = name,
@@ -663,6 +748,7 @@ impl SkillRegistry {
                 SkillSource::User(dir) => dir.join("SKILL.md"),
                 SkillSource::Workspace(dir) => dir.join("SKILL.md"),
                 SkillSource::Bundled(dir) => dir.join("SKILL.md"),
+                SkillSource::External(dir) => dir.join("SKILL.md"),
             };
             (md_path, skill.trust, skill.source.clone())
         };
@@ -751,14 +837,29 @@ async fn load_and_validate_skill(
     // Normalize line endings before parsing to handle CRLF
     let normalized_content = normalize_line_endings(&raw_content);
 
+    validate_normalized_skill_content(
+        &path.display().to_string(),
+        &normalized_content,
+        trust,
+        source,
+    )
+    .await
+}
+
+async fn validate_normalized_skill_content(
+    error_name: &str,
+    normalized_content: &str,
+    trust: SkillTrust,
+    source: SkillSource,
+) -> Result<(String, LoadedSkill), SkillRegistryError> {
     // Parse SKILL.md
-    let parsed = parse_skill_md(&normalized_content).map_err(|e: SkillParseError| match e {
+    let parsed = parse_skill_md(normalized_content).map_err(|e: SkillParseError| match e {
         SkillParseError::InvalidName { ref name } => SkillRegistryError::ParseError {
             name: name.clone(),
             reason: e.to_string(),
         },
         _ => SkillRegistryError::ParseError {
-            name: path.display().to_string(),
+            name: error_name.to_string(),
             reason: e.to_string(),
         },
     })?;
@@ -793,6 +894,7 @@ async fn load_and_validate_skill(
 
     // Compute content hash
     let content_hash = compute_hash(&prompt_content);
+    let source_tier = source_tier_for_skill(&manifest, trust, &source);
 
     // Compile regex patterns
     let compiled_patterns = LoadedSkill::compile_patterns(&manifest.activation.patterns);
@@ -828,6 +930,7 @@ async fn load_and_validate_skill(
         prompt_content,
         trust,
         source,
+        source_tier,
         content_hash,
         compiled_patterns,
         lowercased_keywords,
@@ -836,6 +939,37 @@ async fn load_and_validate_skill(
     };
 
     Ok((name, skill))
+}
+
+fn source_tier_for_skill(
+    manifest: &crate::skills::SkillManifest,
+    trust: SkillTrust,
+    source: &SkillSource,
+) -> SkillSourceTier {
+    if let Some(provenance) = manifest
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.openclaw.as_ref())
+        .and_then(|openclaw| openclaw.provenance.as_deref())
+    {
+        match provenance.trim().to_ascii_lowercase().as_str() {
+            "builtin" => return SkillSourceTier::Builtin,
+            "official" => return SkillSourceTier::Official,
+            "trusted" => return SkillSourceTier::Trusted,
+            "unvetted" => return SkillSourceTier::Unvetted,
+            "community" | "generated" => return SkillSourceTier::Community,
+            _ => {}
+        }
+    }
+
+    match source {
+        SkillSource::Bundled(_) => SkillSourceTier::Builtin,
+        SkillSource::Workspace(_) | SkillSource::User(_) if trust == SkillTrust::Trusted => {
+            SkillSourceTier::Trusted
+        }
+        SkillSource::External(_) => SkillSourceTier::Community,
+        _ => SkillSourceTier::Community,
+    }
 }
 
 /// Compute SHA-256 hash of content in the format "sha256:hex...".
@@ -994,6 +1128,52 @@ mod tests {
         let mut registry = SkillRegistry::new(dir.path().to_path_buf());
         let loaded = registry.discover_all().await;
         assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_validate_skill_file_does_not_mutate_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("checked-skill");
+        fs::create_dir(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: checked-skill\n---\n\nChecked prompt.\n",
+        )
+        .unwrap();
+
+        let registry = SkillRegistry::new(dir.path().to_path_buf());
+        let (name, loaded) = SkillRegistry::validate_skill_file(
+            &skill_dir,
+            SkillTrust::Installed,
+            SkillSource::External(skill_dir.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(name, "checked-skill");
+        assert_eq!(loaded.trust, SkillTrust::Installed);
+        assert_eq!(registry.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_validate_skill_content_reuses_token_budget_rules() {
+        let big_prompt = "word ".repeat(4000);
+        let content = format!(
+            "---\nname: content-budget\nactivation:\n  max_context_tokens: 100\n---\n\n{}",
+            big_prompt
+        );
+
+        let result = SkillRegistry::validate_skill_content(
+            &content,
+            SkillTrust::Installed,
+            SkillSource::External(PathBuf::from(".")),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(SkillRegistryError::TokenBudgetExceeded { .. })
+        ));
     }
 
     #[tokio::test]

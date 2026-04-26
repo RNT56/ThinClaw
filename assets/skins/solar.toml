@@ -9,15 +9,24 @@ warn = "#D97706"
 bad = "#DC2626"
 header = "#B45309"
 prompt_symbol = "›"
-ascii_art = [
-  '                 \  |  /',
-  '              .---\ | /---.',
-  '           ---==== (*) ====---',
-  '              .---/ | \---.',
-  '                 /__|__\',
-  '              SOLAR ARCHIVE',
+hero_art = [
+  '      ╲│╱      ',
+  '    ──☼☼──    ',
+  '    ╭─┴┴─╮    ',
+  '   ╭╯╲☉╱╰╮   ',
+  '   │ ╲│╱ │   ',
+  '   │ ╭┼╮ │   ',
+  '   │ ╰┼╯ │   ',
+  '   ╰╮╭┼╮╭╯   ',
+  '    ││█││    ',
+  '    ╰╯█╰╯    ',
+  '      ╵      ',
 ]
-tool_emojis = { shell = "☀️", browser = "🔎", memory = "📚", search_files = "🧾", todo = "🪶", subagent = "🦅" }
+tool_emojis = { shell = "☼", browser = "◌", memory = "▤", search_files = "⌗", todo = "✦", subagent = "▲" }
+border_style = "rounded"
+header_alignment = "left"
+status_gradient = false
+spinner_style = "dots"
 
 [web]
 aura_primary = "#D97706"

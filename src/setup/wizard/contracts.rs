@@ -19,14 +19,49 @@ impl UiMode {
     }
 }
 
+/// Topic-oriented guided setup entry points.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GuideTopic {
+    Menu,
+    Ai,
+    Channels,
+    Agent,
+    Tools,
+    Automation,
+    Runtime,
+}
+
+impl GuideTopic {
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Menu => "Guided Settings",
+            Self::Ai => "AI & Models",
+            Self::Channels => "Channels & Notifications",
+            Self::Agent => "Agent & Experience",
+            Self::Tools => "Tools & Safety",
+            Self::Automation => "Automation & Skills",
+            Self::Runtime => "Runtime & Diagnostics",
+        }
+    }
+}
+
 /// High-level onboarding intent profile used to prefill recommended defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum OnboardingProfile {
+    #[value(name = "balanced")]
     #[default]
     Balanced,
+    #[value(name = "local-private", alias = "local-and-private")]
     LocalAndPrivate,
+    #[value(name = "builder-coding", alias = "builder-and-coding")]
     BuilderAndCoding,
+    #[value(name = "channel-first")]
     ChannelFirst,
+    #[value(name = "remote", alias = "remote-server")]
+    RemoteServer,
+    #[value(name = "pi-os-lite-64", alias = "raspberry-pi-os-lite", alias = "pi")]
+    PiOsLite64,
+    #[value(name = "custom", alias = "custom-advanced")]
     CustomAdvanced,
 }
 
@@ -37,6 +72,8 @@ impl OnboardingProfile {
             Self::LocalAndPrivate => "Local & Private",
             Self::BuilderAndCoding => "Builder & Coding",
             Self::ChannelFirst => "Channel-First",
+            Self::RemoteServer => "Remote / SSH Host",
+            Self::PiOsLite64 => "Pi OS Lite 64-bit",
             Self::CustomAdvanced => "Custom / Advanced",
         }
     }
@@ -55,9 +92,27 @@ impl OnboardingProfile {
             Self::ChannelFirst => {
                 "Prioritize inbound and outbound channels so ThinClaw can meet you where you already work."
             }
+            Self::RemoteServer => {
+                "Run ThinClaw as a safe headless/service runtime on a Raspberry Pi, Mac Mini, VPS, or SSH-managed host with WebUI access through a tunnel by default."
+            }
+            Self::PiOsLite64 => {
+                "Run ThinClaw on Raspberry Pi OS Lite as a headless remote service with WebUI access, Docker Chromium fallback, and desktop autonomy explicitly blocked."
+            }
             Self::CustomAdvanced => {
                 "Start from a neutral baseline with minimal profile assumptions so you can choose the stack, routing, and trust boundaries step by step."
             }
+        }
+    }
+
+    pub fn is_headless_remote(self) -> bool {
+        matches!(self, Self::RemoteServer | Self::PiOsLite64)
+    }
+
+    pub fn runtime_profile_env_value(self) -> Option<&'static str> {
+        match self {
+            Self::PiOsLite64 => Some("pi-os-lite-64"),
+            Self::RemoteServer => Some("remote"),
+            _ => None,
         }
     }
 }
@@ -78,7 +133,7 @@ pub enum WizardPhaseId {
 impl WizardPhaseId {
     pub fn title(self) -> &'static str {
         match self {
-            Self::WelcomeProfile => "Welcome & Profile",
+            Self::WelcomeProfile => "Skin & Profile",
             Self::CoreRuntime => "Core Runtime",
             Self::AiStack => "AI Stack",
             Self::IdentityPresence => "Identity & Presence",
@@ -91,7 +146,9 @@ impl WizardPhaseId {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::WelcomeProfile => "Choose the onboarding lane and set the initial flight plan.",
+            Self::WelcomeProfile => {
+                "Choose the cockpit look first, then pick the onboarding lane that fits your setup."
+            }
             Self::CoreRuntime => "Establish storage, secrets, and the base operating posture.",
             Self::AiStack => "Configure providers, models, routing, fallback, and memory search.",
             Self::IdentityPresence => "Confirm how the agent presents itself and keeps time.",
@@ -111,7 +168,7 @@ impl WizardPhaseId {
 /// business logic so the CLI and TUI wrappers cannot drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WizardStepId {
-    Welcome,
+    CliSkin,
     Profile,
     Database,
     Security,
@@ -128,6 +185,7 @@ pub enum WizardStepId {
     Notifications,
     Extensions,
     DockerSandbox,
+    CodingWorkers,
     ClaudeCode,
     CodexCode,
     ToolApproval,
@@ -154,8 +212,6 @@ pub struct StepDescriptor {
 #[derive(Debug, Clone)]
 pub struct WizardPhase {
     pub id: WizardPhaseId,
-    pub title: &'static str,
-    pub description: &'static str,
     pub step_ids: Vec<WizardStepId>,
 }
 
@@ -169,6 +225,14 @@ pub struct WizardPlan {
 impl WizardPlan {
     pub fn total_steps(&self) -> usize {
         self.steps.len()
+    }
+
+    pub fn phase(&self, id: WizardPhaseId) -> Option<&WizardPhase> {
+        self.phases.iter().find(|phase| phase.id == id)
+    }
+
+    pub fn phase_index(&self, id: WizardPhaseId) -> Option<usize> {
+        self.phases.iter().position(|phase| phase.id == id)
     }
 }
 

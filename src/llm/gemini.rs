@@ -37,7 +37,9 @@ impl Default for GeminiConfig {
 impl GeminiConfig {
     /// Create from environment variables.
     pub fn from_env() -> Self {
-        let api_key = std::env::var("GOOGLE_AI_API_KEY").ok();
+        let api_key = std::env::var("GOOGLE_AI_API_KEY")
+            .ok()
+            .or_else(|| std::env::var("GEMINI_API_KEY").ok());
 
         let mut config = Self {
             api_key,
@@ -135,6 +137,21 @@ impl GeminiConfig {
                 temperature,
                 max_output_tokens: Some(max_tokens),
                 top_p: openai_body.get("top_p").and_then(|v| v.as_f64()),
+                response_logprobs: openai_body
+                    .get("logprobs")
+                    .and_then(|v| v.as_bool())
+                    .filter(|enabled| *enabled),
+                logprobs: openai_body
+                    .get("top_logprobs")
+                    .and_then(|v| v.as_u64())
+                    .map(|value| value.clamp(1, 20) as u32)
+                    .or_else(|| {
+                        openai_body
+                            .get("logprobs")
+                            .and_then(|v| v.as_bool())
+                            .filter(|enabled| *enabled)
+                            .map(|_| 1)
+                    }),
             }),
         }
     }
@@ -169,18 +186,43 @@ impl GeminiConfig {
             })
             .unwrap_or((0, 0));
 
+        let logprobs = gemini_response
+            .candidates
+            .as_ref()
+            .and_then(|c| c.first())
+            .and_then(|candidate| candidate.logprobs_result.as_ref())
+            .map(|result| {
+                let content = result
+                    .chosen_candidates
+                    .iter()
+                    .map(|candidate| {
+                        serde_json::json!({
+                            "token": candidate.token,
+                            "logprob": candidate.log_probability,
+                            "top_logprobs": [],
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::json!({ "content": content })
+            });
+
+        let mut choice = serde_json::json!({
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content,
+            },
+            "finish_reason": finish_reason,
+        });
+        if let Some(logprobs) = logprobs {
+            choice["logprobs"] = logprobs;
+        }
+
         serde_json::json!({
             "id": format!("gemini-{}", uuid::Uuid::new_v4()),
             "object": "chat.completion",
             "model": self.model,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": content,
-                },
-                "finish_reason": finish_reason,
-            }],
+            "choices": [choice],
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
@@ -209,6 +251,10 @@ pub struct GeminiGenerationConfig {
     pub max_output_tokens: Option<u32>,
     #[serde(rename = "topP", skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
+    #[serde(rename = "responseLogprobs", skip_serializing_if = "Option::is_none")]
+    pub response_logprobs: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<u32>,
 }
 
 /// Content block in Gemini format.
@@ -240,6 +286,23 @@ pub struct GeminiCandidate {
     pub content: GeminiContent,
     #[serde(rename = "finishReason")]
     pub finish_reason: Option<String>,
+    #[serde(rename = "logprobsResult")]
+    pub logprobs_result: Option<GeminiLogprobsResult>,
+}
+
+/// Gemini token logprob payload.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeminiLogprobsResult {
+    #[serde(rename = "chosenCandidates", default)]
+    pub chosen_candidates: Vec<GeminiLogprobCandidate>,
+}
+
+/// Gemini chosen-token logprob payload.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GeminiLogprobCandidate {
+    pub token: String,
+    #[serde(rename = "logProbability")]
+    pub log_probability: f32,
 }
 
 /// Usage metadata from Gemini.
@@ -297,6 +360,21 @@ mod tests {
     }
 
     #[test]
+    fn test_adapt_request_enables_native_logprobs_when_requested() {
+        let config = GeminiConfig::default();
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "Hi"}],
+            "logprobs": true,
+            "top_logprobs": 3,
+        });
+
+        let req = config.adapt_request(&body);
+        let generation = req.generation_config.expect("generation config");
+        assert_eq!(generation.response_logprobs, Some(true));
+        assert_eq!(generation.logprobs, Some(3));
+    }
+
+    #[test]
     fn test_generate_content_url() {
         let config = GeminiConfig {
             api_key: Some("test-key".to_string()),
@@ -317,6 +395,12 @@ mod tests {
                     parts: vec![GeminiPart::Text("Hello there!".to_string())],
                 },
                 finish_reason: Some("STOP".to_string()),
+                logprobs_result: Some(GeminiLogprobsResult {
+                    chosen_candidates: vec![GeminiLogprobCandidate {
+                        token: "Hello".to_string(),
+                        log_probability: -0.25,
+                    }],
+                }),
             }]),
             usage_metadata: Some(GeminiUsageMetadata {
                 prompt_token_count: Some(20),
@@ -330,5 +414,13 @@ mod tests {
             Some("Hello there!")
         );
         assert_eq!(adapted["usage"]["total_tokens"].as_u64(), Some(30));
+        assert_eq!(
+            adapted["choices"][0]["logprobs"]["content"][0]["token"].as_str(),
+            Some("Hello")
+        );
+        let logprob = adapted["choices"][0]["logprobs"]["content"][0]["logprob"]
+            .as_f64()
+            .expect("logprob");
+        assert!((logprob - -0.25).abs() < 0.000_001);
     }
 }

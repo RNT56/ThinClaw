@@ -30,6 +30,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::{fs, path::PathBuf};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -59,6 +60,8 @@ struct GmailChannelState {
     last_error: RwLock<Option<String>>,
     /// Count of messages processed (for health check telemetry).
     messages_processed: std::sync::atomic::AtomicU64,
+    /// Last processed Gmail history ID persisted across restarts.
+    last_history_id: RwLock<Option<u64>>,
 }
 
 /// Response from Gmail API `messages.list`.
@@ -163,6 +166,29 @@ struct GmailNotification {
     history_id: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GmailHistoryResponse {
+    history: Option<Vec<GmailHistoryEntry>>,
+    history_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GmailHistoryEntry {
+    messages_added: Option<Vec<GmailHistoryMessageAdded>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GmailHistoryMessageAdded {
+    message: GmailMessageRef,
+}
+
+struct FetchMessagesResult {
+    messages: Vec<GmailMessage>,
+    latest_history_id: Option<u64>,
+}
+
 /// Pub/Sub pull request body.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -190,6 +216,7 @@ const PUBSUB_MAX_MESSAGES: u32 = 10;
 
 /// Poll interval between Pub/Sub pull requests.
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
+const GMAIL_UNREAD_FALLBACK_DAYS: u32 = 7;
 
 impl GmailChannel {
     /// Create a new Gmail channel from configuration.
@@ -205,6 +232,7 @@ impl GmailChannel {
         }
 
         let access_token = config.oauth_token.clone().unwrap_or_default();
+        let persisted_history_id = Self::load_persisted_history_id(&config);
 
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
@@ -223,6 +251,7 @@ impl GmailChannel {
                 running: RwLock::new(false),
                 last_error: RwLock::new(None),
                 messages_processed: std::sync::atomic::AtomicU64::new(0),
+                last_history_id: RwLock::new(persisted_history_id),
             }),
             http,
         })
@@ -321,11 +350,155 @@ impl GmailChannel {
         Ok(())
     }
 
-    /// Fetch new messages from Gmail API using history ID.
+    fn history_state_path(config: &GmailConfig) -> PathBuf {
+        let sanitize = |value: &str| {
+            value
+                .chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                .collect::<String>()
+        };
+        crate::platform::resolve_thinclaw_home()
+            .join("channels")
+            .join("gmail")
+            .join(format!(
+                "{}_{}.history_id",
+                sanitize(&config.project_id),
+                sanitize(&config.subscription_id)
+            ))
+    }
+
+    fn load_persisted_history_id(config: &GmailConfig) -> Option<u64> {
+        let path = Self::history_state_path(config);
+        let content = fs::read_to_string(path).ok()?;
+        content.trim().parse::<u64>().ok()
+    }
+
+    async fn persist_history_id(&self, history_id: u64) -> Result<(), ChannelError> {
+        let path = Self::history_state_path(&self.config);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| ChannelError::SendFailed {
+                name: "gmail".into(),
+                reason: format!("Failed to create Gmail state directory: {}", e),
+            })?;
+        }
+        fs::write(&path, history_id.to_string()).map_err(|e| ChannelError::SendFailed {
+            name: "gmail".into(),
+            reason: format!("Failed to persist Gmail history ID: {}", e),
+        })?;
+        *self.state.last_history_id.write().await = Some(history_id);
+        Ok(())
+    }
+
     async fn fetch_new_messages(
         &self,
-        _history_id: Option<u64>,
-    ) -> Result<Vec<GmailMessage>, ChannelError> {
+        notification_history_id: Option<u64>,
+    ) -> Result<FetchMessagesResult, ChannelError> {
+        let last_history_id = *self.state.last_history_id.read().await;
+        if let Some(start_history_id) = last_history_id {
+            match self
+                .fetch_messages_from_history(start_history_id, notification_history_id)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(ChannelError::SendFailed { reason, .. })
+                    if reason.contains("history window expired")
+                        || reason.contains("invalid startHistoryId") =>
+                {
+                    tracing::info!("Gmail history cursor expired, falling back to unread rescan");
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        let messages = self.fetch_unread_messages_bounded().await?;
+        Ok(FetchMessagesResult {
+            messages,
+            latest_history_id: notification_history_id.or(last_history_id),
+        })
+    }
+
+    async fn fetch_messages_from_history(
+        &self,
+        start_history_id: u64,
+        notification_history_id: Option<u64>,
+    ) -> Result<FetchMessagesResult, ChannelError> {
+        let token = self.state.access_token.read().await.clone();
+        let url = format!(
+            "https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId={}&historyTypes=messageAdded&maxResults=100",
+            start_history_id
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: "gmail".into(),
+                reason: format!("Gmail history fetch failed: {}", e),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::NOT_FOUND
+                || body.contains("startHistoryId")
+                || body.contains("historyId")
+            {
+                return Err(ChannelError::SendFailed {
+                    name: "gmail".into(),
+                    reason: format!(
+                        "Gmail history window expired for startHistoryId {}",
+                        start_history_id
+                    ),
+                });
+            }
+            return Err(ChannelError::SendFailed {
+                name: "gmail".into(),
+                reason: format!("Gmail history returned {}: {}", status, body),
+            });
+        }
+
+        let history: GmailHistoryResponse =
+            resp.json().await.map_err(|e| ChannelError::SendFailed {
+                name: "gmail".into(),
+                reason: format!("Failed to parse Gmail history response: {}", e),
+            })?;
+        let latest_history_id = history
+            .history_id
+            .as_deref()
+            .and_then(|value| value.parse::<u64>().ok())
+            .or(notification_history_id);
+
+        let mut message_ids = std::collections::BTreeSet::new();
+        for entry in history.history.unwrap_or_default() {
+            for added in entry.messages_added.unwrap_or_default() {
+                message_ids.insert(added.message.id);
+            }
+        }
+
+        let mut messages = Vec::new();
+        for id in message_ids {
+            match self.fetch_message(&id, &token).await {
+                Ok(msg) => messages.push(msg),
+                Err(e) => {
+                    tracing::warn!(
+                        message_id = %id,
+                        error = %e,
+                        "Failed to fetch Gmail history message, skipping"
+                    );
+                }
+            }
+        }
+
+        Ok(FetchMessagesResult {
+            messages,
+            latest_history_id,
+        })
+    }
+
+    async fn fetch_unread_messages_bounded(&self) -> Result<Vec<GmailMessage>, ChannelError> {
         let token = self.state.access_token.read().await.clone();
 
         // List unread messages matching label filters.
@@ -338,9 +511,12 @@ impl GmailChannel {
             .join(" ");
 
         let query = if label_query.is_empty() {
-            "is:unread".to_string()
+            format!("is:unread newer_than:{}d", GMAIL_UNREAD_FALLBACK_DAYS)
         } else {
-            format!("is:unread {}", label_query)
+            format!(
+                "is:unread newer_than:{}d {}",
+                GMAIL_UNREAD_FALLBACK_DAYS, label_query
+            )
         };
 
         let url = format!(
@@ -389,7 +565,6 @@ impl GmailChannel {
                 }
             }
         }
-
         Ok(messages)
     }
 
@@ -717,6 +892,31 @@ impl GmailChannel {
                     // Collect ack IDs for all received messages.
                     let ack_ids: Vec<String> = received.iter().map(|m| m.ack_id.clone()).collect();
 
+                    let latest_notification_history_id =
+                        received.iter().fold(None::<u64>, |latest, pubsub_msg| {
+                            let history_id = pubsub_msg
+                                .message
+                                .data
+                                .as_ref()
+                                .and_then(|data| Self::decode_base64url(data))
+                                .and_then(|decoded| {
+                                    serde_json::from_str::<GmailNotification>(&decoded).ok()
+                                })
+                                .and_then(|notification| {
+                                    tracing::debug!(
+                                        email = ?notification.email_address,
+                                        history_id = ?notification.history_id,
+                                        "Gmail notification: new mail"
+                                    );
+                                    notification.history_id
+                                });
+                            match (latest, history_id) {
+                                (Some(current), Some(next)) => Some(current.max(next)),
+                                (None, Some(next)) => Some(next),
+                                (current, None) => current,
+                            }
+                        });
+
                     // Process each notification.
                     for pubsub_msg in &received {
                         // Decode notification data.
@@ -734,15 +934,21 @@ impl GmailChannel {
                     }
 
                     // Fetch actual emails from Gmail API.
-                    match channel.fetch_new_messages(None).await {
-                        Ok(messages) => {
-                            for gmail_msg in &messages {
+                    let mut should_ack = false;
+                    match channel
+                        .fetch_new_messages(latest_notification_history_id)
+                        .await
+                    {
+                        Ok(result) => {
+                            let mut delivery_failed = false;
+                            for gmail_msg in &result.messages {
                                 if let Some(incoming) = channel.to_incoming_message(gmail_msg) {
                                     let tx_guard = state.msg_tx.read().await;
                                     if let Some(ref tx) = *tx_guard {
                                         if tx.send(incoming).await.is_err() {
                                             tracing::error!("Gmail message channel closed");
                                             *state.running.write().await = false;
+                                            delivery_failed = true;
                                             break;
                                         }
                                         state
@@ -759,6 +965,24 @@ impl GmailChannel {
                                     }
                                 }
                             }
+
+                            if let Some(history_id) = result.latest_history_id
+                                && let Err(e) = channel.persist_history_id(history_id).await
+                            {
+                                tracing::warn!(
+                                    error = %e,
+                                    history_id,
+                                    "Failed to persist Gmail history cursor"
+                                );
+                            }
+
+                            if delivery_failed {
+                                tracing::warn!(
+                                    "Skipping Pub/Sub ack because message delivery failed"
+                                );
+                            } else {
+                                should_ack = true;
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Failed to fetch Gmail messages");
@@ -766,9 +990,15 @@ impl GmailChannel {
                         }
                     }
 
-                    // Acknowledge Pub/Sub messages.
-                    if let Err(e) = channel.ack_pubsub(ack_ids).await {
-                        tracing::warn!(error = %e, "Failed to ack Pub/Sub messages");
+                    // Only acknowledge when we successfully fetched and processed.
+                    if should_ack {
+                        if let Err(e) = channel.ack_pubsub(ack_ids).await {
+                            tracing::warn!(error = %e, "Failed to ack Pub/Sub messages");
+                        }
+                    } else {
+                        tracing::warn!(
+                            "Skipping Pub/Sub ack due to processing failure; message will be retried"
+                        );
                     }
                 }
                 Ok(_) => {
@@ -1022,6 +1252,30 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_sender_malformed_angle_brackets() {
+        let msg = GmailMessage {
+            id: "2a".into(),
+            thread_id: None,
+            snippet: None,
+            label_ids: None,
+            internal_date: None,
+            payload: Some(GmailPayload {
+                headers: Some(vec![GmailHeader {
+                    name: "From".into(),
+                    value: "Bob <bob@example.com".into(),
+                }]),
+                body: None,
+                parts: None,
+                mime_type: None,
+            }),
+        };
+        assert_eq!(
+            GmailChannel::extract_sender(&msg),
+            Some("Bob <bob@example.com".into())
+        );
+    }
+
+    #[test]
     fn test_extract_subject() {
         let msg = GmailMessage {
             id: "3".into(),
@@ -1056,6 +1310,11 @@ mod tests {
         let encoded = "SGVsbG8gV29ybGQ"; // "Hello World" in base64url
         let decoded = GmailChannel::decode_base64url(encoded);
         assert_eq!(decoded, Some("Hello World".into()));
+    }
+
+    #[test]
+    fn test_decode_base64url_invalid() {
+        assert_eq!(GmailChannel::decode_base64url("???"), None);
     }
 
     #[test]
@@ -1282,5 +1541,86 @@ mod tests {
             }),
         };
         assert_eq!(GmailChannel::extract_body(&msg), "Plain text");
+    }
+
+    #[test]
+    fn test_extract_message_id_header() {
+        let msg = GmailMessage {
+            id: "11".into(),
+            thread_id: None,
+            snippet: Some("snippet".into()),
+            label_ids: None,
+            internal_date: None,
+            payload: Some(GmailPayload {
+                headers: Some(vec![
+                    GmailHeader {
+                        name: "From".into(),
+                        value: "alice@example.com".into(),
+                    },
+                    GmailHeader {
+                        name: "Message-ID".into(),
+                        value: "<id-1234@example.com>".into(),
+                    },
+                ]),
+                body: None,
+                parts: None,
+                mime_type: None,
+            }),
+        };
+        assert_eq!(
+            GmailChannel::extract_message_id_header(&msg),
+            Some("<id-1234@example.com>".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_message_id_header_missing() {
+        let msg = GmailMessage {
+            id: "12".into(),
+            thread_id: None,
+            snippet: Some("snippet".into()),
+            label_ids: None,
+            internal_date: None,
+            payload: Some(GmailPayload {
+                headers: Some(vec![GmailHeader {
+                    name: "From".into(),
+                    value: "alice@example.com".into(),
+                }]),
+                body: None,
+                parts: None,
+                mime_type: None,
+            }),
+        };
+        assert_eq!(GmailChannel::extract_message_id_header(&msg), None);
+    }
+
+    #[test]
+    fn test_extract_text_from_payload_nested_part() {
+        let payload = GmailPayload {
+            headers: None,
+            body: None,
+            parts: Some(vec![GmailPart {
+                mime_type: Some("multipart/related".into()),
+                body: None,
+                parts: Some(vec![GmailPart {
+                    mime_type: Some("text/plain".into()),
+                    body: Some(GmailBody {
+                        data: Some("UGxhaW4gbmVzdGVkIHRleHQ".into()), // "Plain nested text"
+                        size: None,
+                    }),
+                    parts: None,
+                }]),
+            }]),
+            mime_type: Some("multipart/mixed".into()),
+        };
+        let msg = GmailMessage {
+            id: "13".into(),
+            thread_id: None,
+            snippet: Some("snippet".into()),
+            label_ids: None,
+            internal_date: None,
+            payload: Some(payload),
+        };
+        assert_eq!(GmailChannel::extract_body(&msg), "Plain nested text");
     }
 }

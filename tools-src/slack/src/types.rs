@@ -138,3 +138,61 @@ pub struct GetUserInfoResult {
     pub ok: bool,
     pub user: UserInfo,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SlackAction;
+
+    #[test]
+    fn list_channels_defaults_limit() {
+        let action: SlackAction = serde_json::from_value(serde_json::json!({
+            "action": "list_channels"
+        }))
+        .unwrap();
+
+        match action {
+            SlackAction::ListChannels { limit } => assert_eq!(limit, 100),
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_channel_history_defaults_limit() {
+        let action: SlackAction = serde_json::from_value(serde_json::json!({
+            "action": "get_channel_history",
+            "channel": "C123"
+        }))
+        .unwrap();
+
+        match action {
+            SlackAction::GetChannelHistory { channel, limit } => {
+                assert_eq!(channel, "C123");
+                assert_eq!(limit, 20);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_message_defaults_thread_to_none() {
+        let action: SlackAction = serde_json::from_value(serde_json::json!({
+            "action": "send_message",
+            "channel": "#general",
+            "text": "hello"
+        }))
+        .unwrap();
+
+        match action {
+            SlackAction::SendMessage {
+                channel,
+                text,
+                thread_ts,
+            } => {
+                assert_eq!(channel, "#general");
+                assert_eq!(text, "hello");
+                assert_eq!(thread_ts, None);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+}

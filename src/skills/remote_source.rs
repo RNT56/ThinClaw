@@ -2,9 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::RwLock;
 
 use super::quarantine::SkillContent;
-use crate::settings::SkillTapTrustLevel;
+use crate::settings::{SkillTapConfig, SkillTapTrustLevel, WellKnownSkillRegistryConfig};
 
 /// A remotely discoverable skill from a configured source adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +101,110 @@ impl RemoteSkillHub {
 
         source.download_skill(skill).await
     }
+}
+
+/// Refreshable holder for the current remote skill sources.
+#[derive(Clone, Default)]
+pub struct SharedRemoteSkillHub {
+    inner: Arc<RwLock<Option<Arc<RemoteSkillHub>>>>,
+}
+
+impl SharedRemoteSkillHub {
+    pub fn new(hub: Option<Arc<RemoteSkillHub>>) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(hub)),
+        }
+    }
+
+    pub async fn get(&self) -> Option<Arc<RemoteSkillHub>> {
+        self.inner.read().await.clone()
+    }
+
+    pub async fn replace(&self, hub: Option<Arc<RemoteSkillHub>>) {
+        *self.inner.write().await = hub;
+    }
+
+    pub async fn is_enabled(&self) -> bool {
+        self.get().await.is_some_and(|hub| hub.is_enabled())
+    }
+
+    pub async fn search(&self, query: &str) -> Vec<RemoteSkill> {
+        match self.get().await {
+            Some(hub) => hub.search(query).await,
+            None => Vec::new(),
+        }
+    }
+
+    pub async fn resolve_skill(&self, name_or_slug: &str) -> Option<RemoteSkill> {
+        match self.get().await {
+            Some(hub) => hub.resolve_skill(name_or_slug).await,
+            None => None,
+        }
+    }
+
+    pub async fn download_skill(&self, skill: &RemoteSkill) -> anyhow::Result<SkillContent> {
+        let Some(hub) = self.get().await else {
+            anyhow::bail!("No remote skill sources are configured");
+        };
+        hub.download_skill(skill).await
+    }
+}
+
+pub fn build_remote_skill_hub(
+    skill_taps: Vec<SkillTapConfig>,
+    well_known_skill_registries: Vec<WellKnownSkillRegistryConfig>,
+) -> Option<Arc<RemoteSkillHub>> {
+    let mut remote_sources: Vec<Arc<dyn RemoteSkillSource>> = Vec::new();
+
+    if !skill_taps.is_empty() {
+        match crate::skills::github_source::GitHubSkillSource::new(skill_taps) {
+            Ok(source) if source.is_enabled() => remote_sources.push(Arc::new(source)),
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to initialize GitHub skill source");
+            }
+        }
+    }
+
+    if !well_known_skill_registries.is_empty() {
+        match crate::skills::well_known_source::WellKnownSkillSource::new(
+            well_known_skill_registries,
+        ) {
+            Ok(source) if source.is_enabled() => remote_sources.push(Arc::new(source)),
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Failed to initialize well-known skill source"
+                );
+            }
+        }
+    }
+
+    if std::env::var("LOBEHUB_SKILLS_ENABLED")
+        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+    {
+        match crate::skills::lobe_source::LobeHubSkillSource::new(
+            std::env::var("LOBEHUB_SKILLS_INDEX_URL").ok(),
+        ) {
+            Ok(source) => remote_sources.push(Arc::new(source)),
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to initialize LobeHub skill source");
+            }
+        }
+    }
+
+    if let Ok(index_url) = std::env::var("SKILLS_SH_INDEX_URL") {
+        match crate::skills::skills_sh_source::SkillsShSource::new(index_url) {
+            Ok(source) => remote_sources.push(Arc::new(source)),
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to initialize skills.sh source");
+            }
+        }
+    }
+
+    (!remote_sources.is_empty()).then(|| Arc::new(RemoteSkillHub::new(remote_sources)))
 }
 
 fn dedupe_remote_skills(skills: Vec<RemoteSkill>) -> Vec<RemoteSkill> {

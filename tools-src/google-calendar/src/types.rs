@@ -191,3 +191,69 @@ pub struct DeleteResult {
     pub deleted: bool,
     pub event_id: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GoogleCalendarAction;
+
+    #[test]
+    fn list_events_defaults_calendar_and_limit() {
+        let action: GoogleCalendarAction = serde_json::from_value(serde_json::json!({
+            "action": "list_events"
+        }))
+        .unwrap();
+
+        match action {
+            GoogleCalendarAction::ListEvents {
+                calendar_id,
+                time_min,
+                time_max,
+                max_results,
+                query,
+            } => {
+                assert_eq!(calendar_id, "primary");
+                assert_eq!(time_min, None);
+                assert_eq!(time_max, None);
+                assert_eq!(max_results, 25);
+                assert_eq!(query, None);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn create_event_defaults_optional_fields() {
+        let action: GoogleCalendarAction = serde_json::from_value(serde_json::json!({
+            "action": "create_event",
+            "summary": "Team Sync"
+        }))
+        .unwrap();
+
+        match action {
+            GoogleCalendarAction::CreateEvent {
+                calendar_id,
+                summary,
+                description,
+                location,
+                start_datetime,
+                end_datetime,
+                start_date,
+                end_date,
+                timezone,
+                attendees,
+            } => {
+                assert_eq!(calendar_id, "primary");
+                assert_eq!(summary, "Team Sync");
+                assert_eq!(description, None);
+                assert_eq!(location, None);
+                assert_eq!(start_datetime, None);
+                assert_eq!(end_datetime, None);
+                assert_eq!(start_date, None);
+                assert_eq!(end_date, None);
+                assert_eq!(timezone, None);
+                assert!(attendees.is_empty());
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+}

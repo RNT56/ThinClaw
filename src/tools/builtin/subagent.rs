@@ -9,7 +9,10 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::json;
 
-use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
+use crate::agent::subagent_executor::{
+    SubagentExecutor, SubagentMemoryMode, SubagentSkillMode, SubagentSpawnRequest,
+    SubagentTaskPacket, SubagentToolMode,
+};
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
@@ -53,15 +56,57 @@ impl Tool for SpawnSubagentTool {
                     "type": "string",
                     "description": "Clear, specific task description for the sub-agent. Be detailed about what you need."
                 },
+                "task_packet": {
+                    "type": "object",
+                    "description": "Optional canonical task packet. If omitted, the legacy task string is normalized into objective.",
+                    "properties": {
+                        "objective": { "type": "string" },
+                        "todos": { "type": "array", "items": { "type": "string" } },
+                        "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
+                        "constraints": { "type": "array", "items": { "type": "string" } },
+                        "provided_context": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "title": { "type": "string" },
+                                    "content": { "type": "string" }
+                                },
+                                "required": ["title", "content"]
+                            }
+                        },
+                        "parent_summary": { "type": "string" }
+                    }
+                },
                 "tools": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional: specific tools the sub-agent can use (e.g. ['http', 'shell', 'read_file']). If omitted, all tools are available."
+                    "description": "Optional explicit tool grants for the sub-agent. If omitted, the strict default is no task-affecting tools."
                 },
                 "skills": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "Optional: specific skills the sub-agent can read/list. If omitted, all skills remain visible."
+                    "description": "Optional explicit skill grants for the sub-agent. If omitted, the strict default is no optional skills."
+                },
+                "memory_mode": {
+                    "type": "string",
+                    "enum": ["provided_context_only", "granted_tools_only"],
+                    "description": "Optional sub-agent memory policy. Default: provided_context_only."
+                },
+                "tool_mode": {
+                    "type": "string",
+                    "enum": ["explicit_only"],
+                    "description": "Optional sub-agent tool policy. Default: explicit_only."
+                },
+                "skill_mode": {
+                    "type": "string",
+                    "enum": ["explicit_only"],
+                    "description": "Optional sub-agent skill policy. Default: explicit_only."
+                },
+                "tool_profile": {
+                    "type": "string",
+                    "enum": ["standard", "restricted", "explicit_only"],
+                    "description": "Optional execution profile override for the sub-agent. Default inherits the runtime's subagent profile."
                 },
                 "system_prompt": {
                     "type": "string",
@@ -118,8 +163,50 @@ impl Tool for SpawnSubagentTool {
             .get("system_prompt")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let task_packet = params
+            .get("task_packet")
+            .cloned()
+            .map(serde_json::from_value::<SubagentTaskPacket>)
+            .transpose()
+            .map_err(|e| ToolError::InvalidParameters(format!("Invalid task_packet: {e}")))?;
+        let memory_mode = params
+            .get("memory_mode")
+            .and_then(|v| v.as_str())
+            .map(|value| match value {
+                "granted_tools_only" => Ok(SubagentMemoryMode::GrantedToolsOnly),
+                "provided_context_only" => Ok(SubagentMemoryMode::ProvidedContextOnly),
+                other => Err(ToolError::InvalidParameters(format!(
+                    "Invalid memory_mode '{other}'"
+                ))),
+            })
+            .transpose()?;
+        let tool_mode = params
+            .get("tool_mode")
+            .and_then(|v| v.as_str())
+            .map(|value| match value {
+                "explicit_only" => Ok(SubagentToolMode::ExplicitOnly),
+                other => Err(ToolError::InvalidParameters(format!(
+                    "Invalid tool_mode '{other}'"
+                ))),
+            })
+            .transpose()?;
+        let skill_mode = params
+            .get("skill_mode")
+            .and_then(|v| v.as_str())
+            .map(|value| match value {
+                "explicit_only" => Ok(SubagentSkillMode::ExplicitOnly),
+                other => Err(ToolError::InvalidParameters(format!(
+                    "Invalid skill_mode '{other}'"
+                ))),
+            })
+            .transpose()?;
 
         let timeout_secs = params.get("timeout_secs").and_then(|v| v.as_u64());
+        let tool_profile = params
+            .get("tool_profile")
+            .and_then(|v| v.as_str())
+            .map(|value| value.parse().map_err(ToolError::InvalidParameters))
+            .transpose()?;
 
         let wait = params.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
 
@@ -128,6 +215,11 @@ impl Tool for SpawnSubagentTool {
             task,
             system_prompt,
             model: None,
+            task_packet,
+            memory_mode,
+            tool_mode,
+            skill_mode,
+            tool_profile,
             allowed_tools: tools,
             allowed_skills: skills,
             principal_id: None,
@@ -311,6 +403,11 @@ mod tests {
             task: "Find papers about AI".to_string(),
             system_prompt: None,
             model: None,
+            task_packet: None,
+            memory_mode: None,
+            tool_mode: None,
+            skill_mode: None,
+            tool_profile: None,
             allowed_tools: Some(vec!["http".to_string(), "read_file".to_string()]),
             allowed_skills: None,
             principal_id: None,
@@ -335,6 +432,7 @@ mod tests {
         assert_eq!(request.name, "test");
         assert!(request.system_prompt.is_none());
         assert!(request.model.is_none());
+        assert!(request.task_packet.is_none());
         assert!(request.allowed_tools.is_none());
         assert!(request.timeout_secs.is_none());
         assert!(!request.wait);

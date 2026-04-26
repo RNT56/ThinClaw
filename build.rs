@@ -1,3 +1,6 @@
+// Build scripts are compile-time only — panics abort the build with clear errors.
+#![allow(clippy::unwrap_used)]
+
 //! Build script: compile WASM extensions and embed registry catalog.
 //!
 //! Do not commit compiled WASM binaries — they are a supply chain risk.
@@ -396,6 +399,26 @@ fn embed_registry_catalog(root: &Path) {
     );
 
     fs::write(&out_path, catalog).unwrap();
+
+    // Also embed providers.json for the provider catalog fallback
+    let providers_src = registry_dir.join("providers.json");
+    let providers_out = out_dir.join("providers_catalog.json");
+    println!("cargo:rerun-if-changed=registry/providers.json");
+    if providers_src.is_file() {
+        fs::copy(&providers_src, &providers_out).expect("failed to copy providers.json to OUT_DIR");
+    } else {
+        fs::write(&providers_out, "[]").unwrap();
+    }
+
+    // Embed models.json for the model compat catalog fallback
+    let models_src = registry_dir.join("models.json");
+    let models_out = out_dir.join("models_catalog.json");
+    println!("cargo:rerun-if-changed=registry/models.json");
+    if models_src.is_file() {
+        fs::copy(&models_src, &models_out).expect("failed to copy models.json to OUT_DIR");
+    } else {
+        fs::write(&models_out, r#"{"version":1,"models":[]}"#).unwrap();
+    }
 }
 
 /// Read all .json files from a directory and push their raw contents into `out`.

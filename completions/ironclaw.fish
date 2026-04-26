@@ -55,6 +55,8 @@ complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -s m -l messa
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -s c -l config -d 'Configuration file path (optional, uses env vars by default)' -r -F
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l skip-auth -d 'Skip authentication (use existing session)'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l channels-only -d 'Reconfigure channels only'
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l guide -d 'Revisit guided settings by topic. Use without a value to open the topic menu' -r
+complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l ui -d 'Onboarding interface mode' -r
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l cli-only -d 'Run in interactive CLI mode only (disable other channels)'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l no-db -d 'Skip database connection (for testing)'
 complete -c ironclaw -n "__fish_ironclaw_using_subcommand onboard" -l no-onboard -d 'Skip first-run onboarding check'

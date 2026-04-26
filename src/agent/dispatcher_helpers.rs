@@ -7,8 +7,10 @@
 //! - Message compaction for context-length retries
 //! - String truncation utilities
 
+use crate::agent::session::PendingAuthMode;
 use crate::error::Error;
 use crate::llm::ChatMessage;
+use crate::tools::{ToolExecutionLane, ToolProfile, execution};
 
 /// Execute a chat tool without requiring `&Agent`.
 ///
@@ -21,105 +23,57 @@ pub(crate) async fn execute_chat_tool_standalone(
     tool_name: &str,
     params: &serde_json::Value,
     job_ctx: &crate::context::JobContext,
+    lane: ToolExecutionLane,
+    default_profile: ToolProfile,
 ) -> Result<String, Error> {
-    if !crate::tools::ToolRegistry::tool_name_allowed_by_metadata(&job_ctx.metadata, tool_name) {
-        return Err(crate::error::ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            reason: "Tool is not permitted in this agent context".to_string(),
-        }
-        .into());
-    }
+    let profile_override = job_ctx
+        .metadata
+        .get("tool_profile")
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse::<ToolProfile>().ok());
 
-    let tool = tools
-        .get(tool_name)
-        .await
-        .ok_or_else(|| crate::error::ToolError::NotFound {
-            name: tool_name.to_string(),
-        })?;
-
-    // Validate tool parameters
-    let validation = safety.validator().validate_tool_params(params);
-    if !validation.is_valid {
-        let details = validation
-            .errors
-            .iter()
-            .map(|e| format!("{}: {}", e.field, e.message))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(crate::error::ToolError::InvalidParameters {
-            name: tool_name.to_string(),
-            reason: format!("Invalid tool parameters: {}", details),
-        }
-        .into());
-    }
-
-    tracing::debug!(
-        tool = %tool_name,
-        params = %params,
-        "Tool call started"
-    );
-
-    // Execute with per-tool timeout
-    let timeout = tool.execution_timeout();
-    let start = std::time::Instant::now();
-    let result = tokio::time::timeout(timeout, async {
-        tool.execute(params.clone(), job_ctx).await
+    let prepared = match execution::prepare_tool_call(execution::ToolPrepareRequest {
+        tools,
+        safety,
+        job_ctx,
+        tool_name,
+        params,
+        lane,
+        default_profile,
+        profile_override,
+        approval_mode: execution::ToolApprovalMode::Bypass,
+        hooks: None,
     })
-    .await;
-    let elapsed = start.elapsed();
+    .await?
+    {
+        execution::ToolPrepareOutcome::Ready(prepared) => prepared,
+        execution::ToolPrepareOutcome::NeedsApproval(_) => {
+            return Err(crate::error::ToolError::AuthRequired {
+                name: tool_name.to_string(),
+            }
+            .into());
+        }
+    };
 
-    match &result {
-        Ok(Ok(output)) => {
-            let result_str = serde_json::to_string(&output.result)
-                .unwrap_or_else(|_| "<serialize error>".to_string());
-            tracing::debug!(
-                tool = %tool_name,
-                elapsed_ms = elapsed.as_millis() as u64,
-                result = %result_str,
-                "Tool call succeeded"
-            );
-        }
-        Ok(Err(e)) => {
-            tracing::debug!(
-                tool = %tool_name,
-                elapsed_ms = elapsed.as_millis() as u64,
-                error = %e,
-                "Tool call failed"
-            );
-        }
-        Err(_) => {
-            tracing::debug!(
-                tool = %tool_name,
-                elapsed_ms = elapsed.as_millis() as u64,
-                timeout_secs = timeout.as_secs(),
-                "Tool call timed out"
-            );
-        }
-    }
-
-    let result = result
-        .map_err(|_| crate::error::ToolError::Timeout {
-            name: tool_name.to_string(),
-            timeout,
-        })?
-        .map_err(|e| crate::error::ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            reason: e.to_string(),
-        })?;
-
-    serde_json::to_string_pretty(&result.result).map_err(|e| {
-        crate::error::ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            reason: format!("Failed to serialize result: {}", e),
-        }
-        .into()
-    })
+    let output = execution::execute_tool_call(&prepared, safety, job_ctx).await?;
+    Ok(output.sanitized_content)
 }
 
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
 pub(crate) struct ParsedAuthData {
     pub(crate) auth_url: Option<String>,
     pub(crate) setup_url: Option<String>,
+    pub(crate) auth_mode: Option<String>,
+    pub(crate) auth_status: Option<String>,
+    pub(crate) shared_auth_provider: Option<String>,
+    pub(crate) missing_scopes: Vec<String>,
+}
+
+pub(crate) struct PendingAuthRequest {
+    pub(crate) extension_name: String,
+    pub(crate) instructions: String,
+    pub(crate) auth_mode: PendingAuthMode,
+    pub(crate) auth_status: String,
 }
 
 /// Extract auth_url and setup_url from a tool_auth result JSON string.
@@ -139,32 +93,84 @@ pub(crate) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthDat
             .and_then(|v| v.get("setup_url"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        auth_mode: parsed
+            .as_ref()
+            .and_then(|v| v.get("auth_mode"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        auth_status: parsed
+            .as_ref()
+            .and_then(|v| v.get("auth_status").or_else(|| v.get("status")))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        shared_auth_provider: parsed
+            .as_ref()
+            .and_then(|v| v.get("shared_auth_provider"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        missing_scopes: parsed
+            .as_ref()
+            .and_then(|v| v.get("missing_scopes"))
+            .and_then(|v| v.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
     }
 }
 
-/// Check if a tool_auth result indicates the extension is awaiting a token.
+/// Check if a tool auth/activation result indicates authentication is required.
 ///
-/// Returns `Some((extension_name, instructions))` if the tool result contains
-/// `awaiting_token: true`, meaning the thread should enter auth mode.
+/// Returns auth interception details for either manual token entry or external OAuth.
 pub(crate) fn check_auth_required(
     tool_name: &str,
     result: &Result<String, Error>,
-) -> Option<(String, String)> {
+) -> Option<PendingAuthRequest> {
     if tool_name != "tool_auth" && tool_name != "tool_activate" {
         return None;
     }
     let output = result.as_ref().ok()?;
     let parsed: serde_json::Value = serde_json::from_str(output).ok()?;
-    if parsed.get("awaiting_token") != Some(&serde_json::Value::Bool(true)) {
+    let auth_status = parsed
+        .get("auth_status")
+        .or_else(|| parsed.get("status"))
+        .and_then(|v| v.as_str())?;
+    if !matches!(
+        auth_status,
+        "awaiting_token" | "awaiting_authorization" | "needs_reauth" | "insufficient_scope"
+    ) {
         return None;
     }
     let name = parsed.get("name")?.as_str()?.to_string();
+    let auth_mode = parsed.get("auth_mode").and_then(|v| v.as_str()).unwrap_or(
+        if auth_status == "awaiting_token" {
+            "manual_token"
+        } else {
+            "oauth"
+        },
+    );
     let instructions = parsed
         .get("instructions")
         .and_then(|v| v.as_str())
-        .unwrap_or("Please provide your API token/key.")
+        .unwrap_or(if auth_mode == "oauth" {
+            "Open the browser authentication flow to continue."
+        } else {
+            "Please provide your API token/key."
+        })
         .to_string();
-    Some((name, instructions))
+    Some(PendingAuthRequest {
+        extension_name: name,
+        instructions,
+        auth_mode: if auth_mode == "manual_token" && auth_status == "awaiting_token" {
+            PendingAuthMode::ManualToken
+        } else {
+            PendingAuthMode::ExternalOAuth
+        },
+        auth_status: auth_status.to_string(),
+    })
 }
 
 /// Compact messages for retry after a context-length-exceeded error.
@@ -250,6 +256,7 @@ mod tests {
 
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+    use crate::agent::session::PendingAuthMode;
     use crate::agent::session::Session;
     use crate::channels::ChannelManager;
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
@@ -290,6 +297,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
 
@@ -306,6 +314,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                token_capture: None,
             })
         }
     }
@@ -343,6 +352,7 @@ mod tests {
             routing_policy: None,
             model_override: None,
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sandbox_children: None,
         };
 
         Agent::new(
@@ -363,6 +373,9 @@ mod tests {
                 thinking_enabled: false,
                 thinking_budget_tokens: 10_000,
                 auto_approve_tools: false,
+                main_tool_profile: crate::tools::ToolProfile::Standard,
+                worker_tool_profile: crate::tools::ToolProfile::Restricted,
+                subagent_tool_profile: crate::tools::ToolProfile::ExplicitOnly,
                 subagent_transparency_level: "balanced".to_string(),
                 model_thinking_overrides: std::collections::HashMap::new(),
                 workspace_mode: "unrestricted".to_string(),
@@ -370,6 +383,7 @@ mod tests {
                 notify_channel: None,
                 model_guidance_enabled: true,
                 cli_skin: "cockpit".to_string(),
+                personality_pack: "balanced".to_string(),
                 persona_seed: "default".to_string(),
                 checkpoints_enabled: true,
                 max_checkpoints: 50,
@@ -500,9 +514,10 @@ mod tests {
 
         let detected = check_auth_required("tool_auth", &result);
         assert!(detected.is_some());
-        let (name, instructions) = detected.unwrap();
-        assert_eq!(name, "telegram");
-        assert!(instructions.contains("Telegram Bot API"));
+        let detected = detected.unwrap();
+        assert_eq!(detected.extension_name, "telegram");
+        assert!(detected.instructions.contains("Telegram Bot API"));
+        assert_eq!(detected.auth_mode, PendingAuthMode::ManualToken);
     }
 
     #[test]
@@ -545,8 +560,8 @@ mod tests {
         })
         .to_string());
 
-        let (_, instructions) = check_auth_required("tool_auth", &result).unwrap();
-        assert_eq!(instructions, "Please provide your API token/key.");
+        let detected = check_auth_required("tool_auth", &result).unwrap();
+        assert_eq!(detected.instructions, "Please provide your API token/key.");
     }
 
     #[test]
@@ -562,9 +577,9 @@ mod tests {
 
         let detected = check_auth_required("tool_activate", &result);
         assert!(detected.is_some());
-        let (name, instructions) = detected.unwrap();
-        assert_eq!(name, "slack");
-        assert!(instructions.contains("Slack Bot"));
+        let detected = detected.unwrap();
+        assert_eq!(detected.extension_name, "slack");
+        assert!(detected.instructions.contains("Slack Bot"));
     }
 
     #[test]
@@ -588,7 +603,9 @@ mod tests {
         use crate::tools::builtin::EchoTool;
 
         let registry = ToolRegistry::new();
-        registry.register(std::sync::Arc::new(EchoTool)).await;
+        registry
+            .register_builtin(std::sync::Arc::new(EchoTool))
+            .await;
 
         let safety = SafetyLayer::new(&SafetyConfig {
             max_output_length: 100_000,
@@ -607,6 +624,8 @@ mod tests {
             "echo",
             &serde_json::json!({"message": "hello"}),
             &job_ctx,
+            crate::tools::ToolExecutionLane::Chat,
+            crate::tools::ToolProfile::Standard,
         )
         .await;
 
@@ -639,6 +658,8 @@ mod tests {
             "nonexistent",
             &serde_json::json!({}),
             &job_ctx,
+            crate::tools::ToolExecutionLane::Chat,
+            crate::tools::ToolProfile::Standard,
         )
         .await;
 

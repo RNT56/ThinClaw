@@ -22,6 +22,12 @@ pub use crate::api::learning::{
     LearningRecentCounts, LearningRollbackActionResponse, LearningRollbackItem,
     LearningRollbackRequest, LearningRollbackResponse, LearningStatusResponse,
 };
+pub use crate::api::mcp::{
+    McpInteractionListResponse, McpInteractionRespondRequest, McpLogLevelRequest,
+    McpOAuthDiscoveryResponse, McpPromptRequest, McpPromptResponse, McpPromptsResponse,
+    McpReadResourceQuery, McpReadResourceResponse, McpResourceTemplatesResponse,
+    McpResourcesResponse, McpServerInfo, McpServerListResponse, McpToolsResponse,
+};
 use crate::api::system::ModelInfo;
 
 // --- Chat ---
@@ -69,6 +75,8 @@ pub struct ThreadListResponse {
 pub struct TurnInfo {
     pub turn_number: usize,
     pub user_input: String,
+    #[serde(default)]
+    pub hide_user_input: bool,
     pub response: Option<String>,
     pub state: String,
     pub started_at: String,
@@ -109,6 +117,20 @@ pub struct ApprovalRequest {
     #[serde(default)]
     pub actor_id: Option<String>,
 }
+
+// --- Autonomy ---
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AutonomyPauseRequest {
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+pub type AutonomyStatusResponse = crate::desktop_autonomy::AutonomyStatus;
+pub type AutonomyBootstrapResponse = crate::desktop_autonomy::AutonomyBootstrapReport;
+pub type AutonomyRolloutsResponse = crate::desktop_autonomy::AutonomyRolloutSummary;
+pub type AutonomyChecksResponse = crate::desktop_autonomy::AutonomyChecksSummary;
+pub type AutonomyEvidenceResponse = crate::desktop_autonomy::AutonomyEvidenceSummary;
 
 // --- Experiments ---
 
@@ -200,11 +222,34 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+    #[serde(rename = "conversation_updated")]
+    ConversationUpdated {
+        thread_id: String,
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
+    },
+    #[serde(rename = "conversation_deleted")]
+    ConversationDeleted {
+        thread_id: String,
+        #[serde(skip_serializing)]
+        principal_id: String,
+        #[serde(skip_serializing)]
+        actor_id: String,
+    },
     #[serde(rename = "subagent_spawned")]
     SubagentSpawned {
         agent_id: String,
         name: String,
         task: String,
+        task_packet: crate::agent::subagent_executor::SubagentTaskPacket,
+        #[serde(default)]
+        allowed_tools: Vec<String>,
+        #[serde(default)]
+        allowed_skills: Vec<String>,
+        memory_mode: String,
+        tool_mode: String,
+        skill_mode: String,
         timestamp: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
@@ -226,6 +271,14 @@ pub enum SseEvent {
         response: String,
         duration_ms: u64,
         iterations: usize,
+        task_packet: crate::agent::subagent_executor::SubagentTaskPacket,
+        #[serde(default)]
+        allowed_tools: Vec<String>,
+        #[serde(default)]
+        allowed_skills: Vec<String>,
+        memory_mode: String,
+        tool_mode: String,
+        skill_mode: String,
         timestamp: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
@@ -254,12 +307,30 @@ pub enum SseEvent {
         auth_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         setup_url: Option<String>,
+        auth_mode: String,
+        auth_status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shared_auth_provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        missing_scopes: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
     },
     #[serde(rename = "auth_completed")]
     AuthCompleted {
         extension_name: String,
         success: bool,
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth_mode: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth_status: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shared_auth_provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        missing_scopes: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
     },
     #[serde(rename = "error")]
     Error {
@@ -288,15 +359,34 @@ pub enum SseEvent {
         job_id: String,
         tool_name: String,
         output: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_json: Option<serde_json::Value>,
     },
     #[serde(rename = "job_status")]
     JobStatus { job_id: String, message: String },
+    #[serde(rename = "job_session_result")]
+    JobSessionResult {
+        job_id: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        success: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
     #[serde(rename = "job_result")]
     JobResult {
         job_id: String,
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        success: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
 
     /// Extension activation status change (WASM channels).
@@ -378,6 +468,48 @@ pub enum SseEvent {
     BootstrapCompleted,
 }
 
+impl SseEvent {
+    pub fn event_type(&self) -> &'static str {
+        match self {
+            SseEvent::Response { .. } => "response",
+            SseEvent::Thinking { .. } => "thinking",
+            SseEvent::ReasoningContent { .. } => "reasoning_content",
+            SseEvent::ToolStarted { .. } => "tool_started",
+            SseEvent::ToolCompleted { .. } => "tool_completed",
+            SseEvent::ToolResult { .. } => "tool_result",
+            SseEvent::StreamChunk { .. } => "stream_chunk",
+            SseEvent::Status { .. } => "status",
+            SseEvent::ConversationUpdated { .. } => "conversation_updated",
+            SseEvent::ConversationDeleted { .. } => "conversation_deleted",
+            SseEvent::SubagentSpawned { .. } => "subagent_spawned",
+            SseEvent::SubagentProgress { .. } => "subagent_progress",
+            SseEvent::SubagentCompleted { .. } => "subagent_completed",
+            SseEvent::JobStarted { .. } => "job_started",
+            SseEvent::ApprovalNeeded { .. } => "approval_needed",
+            SseEvent::AuthRequired { .. } => "auth_required",
+            SseEvent::AuthCompleted { .. } => "auth_completed",
+            SseEvent::Error { .. } => "error",
+            SseEvent::Heartbeat => "heartbeat",
+            SseEvent::JobMessage { .. } => "job_message",
+            SseEvent::JobToolUse { .. } => "job_tool_use",
+            SseEvent::JobToolResult { .. } => "job_tool_result",
+            SseEvent::JobStatus { .. } => "job_status",
+            SseEvent::JobSessionResult { .. } => "job_session_result",
+            SseEvent::JobResult { .. } => "job_result",
+            SseEvent::ExtensionStatus { .. } => "extension_status",
+            SseEvent::ChannelStatusChange { .. } => "channel_status_change",
+            SseEvent::RoutineLifecycle { .. } => "routine_lifecycle",
+            SseEvent::CostAlert { .. } => "cost_alert",
+            SseEvent::CanvasUpdate { .. } => "canvas_update",
+            SseEvent::ExperimentOpportunityUpdated { .. } => "experiment_opportunity_updated",
+            SseEvent::ExperimentCampaignUpdated { .. } => "experiment_campaign_updated",
+            SseEvent::ExperimentTrialUpdated { .. } => "experiment_trial_updated",
+            SseEvent::ExperimentRunnerUpdated { .. } => "experiment_runner_updated",
+            SseEvent::BootstrapCompleted => "bootstrap_completed",
+        }
+    }
+}
+
 // --- Memory ---
 
 #[derive(Debug, Serialize)]
@@ -452,6 +584,14 @@ pub struct JobInfo {
     pub user_id: String,
     pub created_at: String,
     pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unknown_job_mode_raw: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -466,6 +606,8 @@ pub struct JobSummaryResponse {
     pub in_progress: usize,
     pub completed: usize,
     pub failed: usize,
+    pub cancelled: usize,
+    pub interrupted: usize,
     pub stuck: usize,
 }
 
@@ -485,7 +627,21 @@ pub struct JobDetailResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browse_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_isolation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub job_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unknown_job_mode_raw: Option<String>,
+    #[serde(default)]
+    pub interactive: bool,
     pub transitions: Vec<TransitionInfo>,
 }
 
@@ -527,17 +683,29 @@ pub struct ExtensionInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     pub authenticated: bool,
+    pub auth_mode: String,
+    pub auth_status: String,
     pub active: bool,
     pub tools: Vec<String>,
     /// Whether this extension has configurable secrets (setup schema).
     #[serde(default)]
     pub needs_setup: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_auth_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_scopes: Vec<String>,
     /// WASM channel activation status: "installed", "configured", "active", "failed".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation_status: Option<String>,
     /// Human-readable error when activation_status is "failed".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<String>,
+    /// Channel-specific runtime diagnostics for live transport debugging.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_diagnostics: Option<serde_json::Value>,
+    /// Whether the UI can request an explicit reconnect for this extension.
+    #[serde(default)]
+    pub reconnect_supported: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -569,10 +737,22 @@ pub struct InstallExtensionRequest {
 pub struct ExtensionSetupResponse {
     pub name: String,
     pub kind: String,
-    pub secrets: Vec<SecretFieldInfo>,
+    pub mode: String,
+    pub auth_status: String,
+    pub fields: Vec<SecretFieldInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_auth_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_scopes: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SecretFieldInfo {
     pub name: String,
     pub prompt: String,
@@ -595,12 +775,27 @@ pub struct ActionResponse {
     /// Auth URL to open (when activation requires OAuth).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_url: Option<String>,
+    /// Setup URL to open for manual token flows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_url: Option<String>,
+    /// Auth mode (`oauth`, `manual_token`, `secrets`, `none`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_mode: Option<String>,
+    /// Detailed auth status (`awaiting_authorization`, `needs_reauth`, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_status: Option<String>,
     /// Whether the extension is waiting for a manual token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub awaiting_token: Option<bool>,
     /// Instructions for manual token entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Shared auth provider for grouped credentials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_auth_provider: Option<String>,
+    /// Missing scopes when reauth is required.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_scopes: Vec<String>,
     /// Whether the channel was successfully activated after setup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activated: Option<bool>,
@@ -615,8 +810,13 @@ impl ActionResponse {
             success: true,
             message: message.into(),
             auth_url: None,
+            setup_url: None,
+            auth_mode: None,
+            auth_status: None,
             awaiting_token: None,
             instructions: None,
+            shared_auth_provider: None,
+            missing_scopes: Vec::new(),
             activated: None,
             needs_restart: None,
         }
@@ -627,8 +827,13 @@ impl ActionResponse {
             success: false,
             message: message.into(),
             auth_url: None,
+            setup_url: None,
+            auth_mode: None,
+            auth_status: None,
             awaiting_token: None,
             instructions: None,
+            shared_auth_provider: None,
+            missing_scopes: Vec::new(),
             activated: None,
             needs_restart: None,
         }
@@ -728,6 +933,59 @@ pub struct SkillInstallRequest {
 pub struct SkillTrustRequest {
     /// Target trust level: "trusted" or "installed".
     pub trust: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillInspectRequest {
+    #[serde(default)]
+    pub include_content: Option<bool>,
+    #[serde(default)]
+    pub include_files: Option<bool>,
+    #[serde(default)]
+    pub audit: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillPublishRequest {
+    pub target_repo: String,
+    #[serde(default)]
+    pub dry_run: Option<bool>,
+    #[serde(default)]
+    pub remote_write: Option<bool>,
+    #[serde(default)]
+    pub confirm_remote_write: Option<bool>,
+    #[serde(default)]
+    pub approve_risky: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillTapAddRequest {
+    pub repo: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub trust_level: Option<String>,
+    #[serde(default)]
+    pub replace: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillTapRemoveRequest {
+    pub repo: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillTapRefreshRequest {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 // --- Auth Token ---
@@ -865,43 +1123,9 @@ pub enum WsServerMessage {
 impl WsServerMessage {
     /// Create a WsServerMessage from an SseEvent.
     pub fn from_sse_event(event: &SseEvent) -> Self {
-        let event_type = match event {
-            SseEvent::Response { .. } => "response",
-            SseEvent::Thinking { .. } => "thinking",
-            SseEvent::ReasoningContent { .. } => "reasoning_content",
-            SseEvent::ToolStarted { .. } => "tool_started",
-            SseEvent::ToolCompleted { .. } => "tool_completed",
-            SseEvent::ToolResult { .. } => "tool_result",
-            SseEvent::StreamChunk { .. } => "stream_chunk",
-            SseEvent::Status { .. } => "status",
-            SseEvent::SubagentSpawned { .. } => "subagent_spawned",
-            SseEvent::SubagentProgress { .. } => "subagent_progress",
-            SseEvent::SubagentCompleted { .. } => "subagent_completed",
-            SseEvent::JobStarted { .. } => "job_started",
-            SseEvent::ApprovalNeeded { .. } => "approval_needed",
-            SseEvent::AuthRequired { .. } => "auth_required",
-            SseEvent::AuthCompleted { .. } => "auth_completed",
-            SseEvent::Error { .. } => "error",
-            SseEvent::Heartbeat => "heartbeat",
-            SseEvent::JobMessage { .. } => "job_message",
-            SseEvent::JobToolUse { .. } => "job_tool_use",
-            SseEvent::JobToolResult { .. } => "job_tool_result",
-            SseEvent::JobStatus { .. } => "job_status",
-            SseEvent::JobResult { .. } => "job_result",
-            SseEvent::ExtensionStatus { .. } => "extension_status",
-            SseEvent::ChannelStatusChange { .. } => "channel_status_change",
-            SseEvent::RoutineLifecycle { .. } => "routine_lifecycle",
-            SseEvent::CostAlert { .. } => "cost_alert",
-            SseEvent::CanvasUpdate { .. } => "canvas_update",
-            SseEvent::ExperimentOpportunityUpdated { .. } => "experiment_opportunity_updated",
-            SseEvent::ExperimentCampaignUpdated { .. } => "experiment_campaign_updated",
-            SseEvent::ExperimentTrialUpdated { .. } => "experiment_trial_updated",
-            SseEvent::ExperimentRunnerUpdated { .. } => "experiment_runner_updated",
-            SseEvent::BootstrapCompleted => "bootstrap_completed",
-        };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         WsServerMessage::Event {
-            event_type: event_type.to_string(),
+            event_type: event.event_type().to_string(),
             data,
         }
     }
@@ -949,12 +1173,17 @@ pub struct RoutineDetailResponse {
     pub action: serde_json::Value,
     pub guardrails: serde_json::Value,
     pub notify: serde_json::Value,
+    pub policy: serde_json::Value,
     pub last_run_at: Option<String>,
     pub next_fire_at: Option<String>,
     pub run_count: u64,
     pub consecutive_failures: u32,
     pub created_at: String,
     pub recent_runs: Vec<RoutineRunInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_event_checks: Vec<RoutineEventCheckInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_trigger_checks: Vec<RoutineTriggerCheckInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -966,6 +1195,54 @@ pub struct RoutineRunInfo {
     pub status: String,
     pub result_summary: Option<String>,
     pub tokens_used: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineEventCheckInfo {
+    pub id: Uuid,
+    pub event_id: Uuid,
+    pub decision: String,
+    pub reason: Option<String>,
+    pub details: serde_json::Value,
+    pub sequence_num: u32,
+    pub channel: String,
+    pub content_preview: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineTriggerCheckInfo {
+    pub id: Uuid,
+    pub trigger_kind: String,
+    pub due_at: String,
+    pub status: String,
+    pub decision: Option<String>,
+    pub claimed_by: Option<String>,
+    pub processed_at: Option<String>,
+    pub coalesced_count: u32,
+    pub backlog_collapsed: bool,
+    pub diagnostics: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineEventActivityInfo {
+    pub id: Uuid,
+    pub channel: String,
+    pub content_preview: String,
+    pub status: String,
+    pub created_at: String,
+    pub processed_at: Option<String>,
+    pub matched_routines: u32,
+    pub fired_routines: u32,
+    pub error_message: Option<String>,
+    pub diagnostics: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoutineEventActivityResponse {
+    pub events: Vec<RoutineEventActivityInfo>,
 }
 
 // --- Settings ---
@@ -1126,6 +1403,36 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_conversation_updated_serialize() {
+        let event = SseEvent::ConversationUpdated {
+            thread_id: "thread-9".to_string(),
+            reason: "user_message".to_string(),
+            channel: Some("telegram".to_string()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "conversation_updated");
+        assert_eq!(parsed["thread_id"], "thread-9");
+        assert_eq!(parsed["reason"], "user_message");
+        assert_eq!(parsed["channel"], "telegram");
+    }
+
+    #[test]
+    fn test_sse_conversation_deleted_omits_identity_fields() {
+        let event = SseEvent::ConversationDeleted {
+            thread_id: "thread-7".to_string(),
+            principal_id: "user-1".to_string(),
+            actor_id: "actor-1".to_string(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "conversation_deleted");
+        assert_eq!(parsed["thread_id"], "thread-7");
+        assert!(parsed.get("principal_id").is_none());
+        assert!(parsed.get("actor_id").is_none());
+    }
+
+    #[test]
     fn test_ws_server_from_sse_thinking() {
         let sse = SseEvent::Thinking {
             message: "reasoning...".to_string(),
@@ -1142,11 +1449,39 @@ mod tests {
     }
 
     #[test]
+    fn test_ws_server_from_sse_conversation_updated() {
+        let sse = SseEvent::ConversationUpdated {
+            thread_id: "t2".to_string(),
+            reason: "assistant_response".to_string(),
+            channel: Some("repl".to_string()),
+        };
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, data } => {
+                assert_eq!(event_type, "conversation_updated");
+                assert_eq!(data["thread_id"], "t2");
+                assert_eq!(data["reason"], "assistant_response");
+                assert_eq!(data["channel"], "repl");
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
+
+    #[test]
     fn test_sse_subagent_spawned_serialize() {
         let event = SseEvent::SubagentSpawned {
             agent_id: "agent-1".to_string(),
             name: "researcher".to_string(),
             task: "Check docs".to_string(),
+            task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                objective: "Check docs".to_string(),
+                ..Default::default()
+            },
+            allowed_tools: vec!["read_file".to_string()],
+            allowed_skills: vec![],
+            memory_mode: "provided_context_only".to_string(),
+            tool_mode: "explicit_only".to_string(),
+            skill_mode: "explicit_only".to_string(),
             timestamp: "2026-04-12T12:00:00Z".to_string(),
             thread_id: Some("thread-1".to_string()),
         };
@@ -1156,6 +1491,8 @@ mod tests {
         assert_eq!(parsed["agent_id"], "agent-1");
         assert_eq!(parsed["name"], "researcher");
         assert_eq!(parsed["task"], "Check docs");
+        assert_eq!(parsed["task_packet"]["objective"], "Check docs");
+        assert_eq!(parsed["allowed_tools"][0], "read_file");
         assert_eq!(parsed["timestamp"], "2026-04-12T12:00:00Z");
         assert_eq!(parsed["thread_id"], "thread-1");
     }
@@ -1169,6 +1506,15 @@ mod tests {
             response: "Done".to_string(),
             duration_ms: 1250,
             iterations: 3,
+            task_packet: crate::agent::subagent_executor::SubagentTaskPacket {
+                objective: "Summarize findings".to_string(),
+                ..Default::default()
+            },
+            allowed_tools: vec![],
+            allowed_skills: vec![],
+            memory_mode: "provided_context_only".to_string(),
+            tool_mode: "explicit_only".to_string(),
+            skill_mode: "explicit_only".to_string(),
             timestamp: "2026-04-12T12:00:03Z".to_string(),
             thread_id: None,
         };
@@ -1284,6 +1630,11 @@ mod tests {
             instructions: Some("Get your token from...".to_string()),
             auth_url: None,
             setup_url: Some("https://notion.so/integrations".to_string()),
+            auth_mode: "manual_token".to_string(),
+            auth_status: "awaiting_token".to_string(),
+            shared_auth_provider: None,
+            missing_scopes: Vec::new(),
+            thread_id: Some("thread-1".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1292,6 +1643,8 @@ mod tests {
         assert_eq!(parsed["instructions"], "Get your token from...");
         assert!(parsed.get("auth_url").is_none());
         assert_eq!(parsed["setup_url"], "https://notion.so/integrations");
+        assert_eq!(parsed["auth_mode"], "manual_token");
+        assert_eq!(parsed["thread_id"], "thread-1");
     }
 
     #[test]
@@ -1300,6 +1653,11 @@ mod tests {
             extension_name: "notion".to_string(),
             success: true,
             message: "notion authenticated (3 tools loaded)".to_string(),
+            auth_mode: Some("manual_token".to_string()),
+            auth_status: Some("authenticated".to_string()),
+            shared_auth_provider: None,
+            missing_scopes: Vec::new(),
+            thread_id: Some("thread-1".to_string()),
         };
         let json = serde_json::to_string(&event).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1315,6 +1673,11 @@ mod tests {
             instructions: Some("Enter API key".to_string()),
             auth_url: None,
             setup_url: None,
+            auth_mode: "manual_token".to_string(),
+            auth_status: "awaiting_token".to_string(),
+            shared_auth_provider: None,
+            missing_scopes: Vec::new(),
+            thread_id: None,
         };
         let ws = WsServerMessage::from_sse_event(&sse);
         match ws {
@@ -1332,6 +1695,11 @@ mod tests {
             extension_name: "slack".to_string(),
             success: false,
             message: "Invalid token".to_string(),
+            auth_mode: None,
+            auth_status: None,
+            shared_auth_provider: None,
+            missing_scopes: Vec::new(),
+            thread_id: None,
         };
         let ws = WsServerMessage::from_sse_event(&sse);
         match ws {

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::agent::context_monitor::ContextPressure;
-use crate::agent::vibe::VibeOverlay;
+use crate::agent::personality::SessionPersonalityOverlay;
 use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
 use crate::llm::{ChatMessage, ToolCall};
 
@@ -49,9 +49,9 @@ pub struct Session {
     /// Tools that have been auto-approved for this session ("always approve").
     #[serde(default)]
     pub auto_approved_tools: HashSet<String>,
-    /// Temporary session-level vibe overlay. This is intentionally not persisted.
+    /// Temporary session-level personality overlay. This is intentionally not persisted.
     #[serde(skip)]
-    pub active_vibe: Option<VibeOverlay>,
+    pub active_personality: Option<SessionPersonalityOverlay>,
 }
 
 impl Session {
@@ -73,7 +73,7 @@ impl Session {
             last_active_at: now,
             metadata: serde_json::Value::Null,
             auto_approved_tools: HashSet::new(),
-            active_vibe: None,
+            active_personality: None,
         }
     }
 
@@ -100,7 +100,7 @@ impl Session {
             last_active_at: now,
             metadata: serde_json::Value::Null,
             auto_approved_tools: HashSet::new(),
-            active_vibe: None,
+            active_personality: None,
         }
     }
 
@@ -147,7 +147,11 @@ impl Session {
 
     /// Create a new thread in this session.
     pub fn create_thread(&mut self) -> &mut Thread {
-        let thread = Thread::new(self.id);
+        self.insert_thread(Thread::new(self.id))
+    }
+
+    /// Insert an already-created thread into this session and activate it.
+    pub fn insert_thread(&mut self, thread: Thread) -> &mut Thread {
         let thread_id = thread.id;
         self.active_thread = Some(thread_id);
         self.last_active_at = Utc::now();
@@ -217,10 +221,23 @@ pub enum ThreadState {
 /// The next user message is intercepted before entering the normal pipeline
 /// (no logging, no turn creation, no history) and routed directly to the
 /// credential store.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingAuthMode {
+    ManualToken,
+    ExternalOAuth,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingAuth {
     /// Extension name to authenticate.
     pub extension_name: String,
+    #[serde(default = "default_pending_auth_mode")]
+    pub auth_mode: PendingAuthMode,
+}
+
+fn default_pending_auth_mode() -> PendingAuthMode {
+    PendingAuthMode::ManualToken
 }
 
 /// Pending tool approval request stored on a thread.
@@ -284,6 +301,20 @@ pub struct ThreadRuntimeState {
     pub active_subagents: Vec<PersistedSubagentState>,
     #[serde(default)]
     pub last_context_pressure: Option<ContextPressure>,
+    #[serde(default)]
+    pub post_compaction_context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_workspace_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_provider_system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_snapshot_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral_overlay_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompt_segment_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_context_refs: Vec<String>,
 }
 
 /// A conversation thread within a session.
@@ -364,6 +395,13 @@ impl Thread {
             auto_approved_tools,
             active_subagents,
             last_context_pressure,
+            post_compaction_context: None,
+            frozen_workspace_prompt: None,
+            frozen_provider_system_prompt: None,
+            prompt_snapshot_hash: None,
+            ephemeral_overlay_hash: None,
+            prompt_segment_order: Vec::new(),
+            provider_context_refs: Vec::new(),
         }
     }
 
@@ -402,8 +440,17 @@ impl Thread {
 
     /// Start a new turn with user input.
     pub fn start_turn(&mut self, user_input: impl Into<String>) -> &mut Turn {
+        self.start_turn_with_visibility(user_input, false)
+    }
+
+    /// Start a new turn with user input and explicit user-message visibility.
+    pub fn start_turn_with_visibility(
+        &mut self,
+        user_input: impl Into<String>,
+        hide_user_input_from_ui: bool,
+    ) -> &mut Turn {
         let turn_number = self.turns.len();
-        let turn = Turn::new(turn_number, user_input);
+        let turn = Turn::new(turn_number, user_input, hide_user_input_from_ui);
         self.turns.push(turn);
         self.state = ThreadState::Processing;
         self.updated_at = Utc::now();
@@ -450,8 +497,11 @@ impl Thread {
 
     /// Enter auth mode: next user message will be routed directly to
     /// the credential store, bypassing the normal pipeline entirely.
-    pub fn enter_auth_mode(&mut self, extension_name: String) {
-        self.pending_auth = Some(PendingAuth { extension_name });
+    pub fn enter_auth_mode(&mut self, extension_name: String, auth_mode: PendingAuthMode) {
+        self.pending_auth = Some(PendingAuth {
+            extension_name,
+            auth_mode,
+        });
         self.updated_at = Utc::now();
     }
 
@@ -508,6 +558,8 @@ impl Thread {
     pub fn restore_from_messages(&mut self, messages: Vec<ChatMessage>) {
         self.turns.clear();
         self.state = ThreadState::Idle;
+        self.pending_approval = None;
+        self.pending_auth = None;
 
         // Messages alternate: user, assistant, user, assistant...
         let mut iter = messages.into_iter().peekable();
@@ -515,7 +567,7 @@ impl Thread {
 
         while let Some(msg) = iter.next() {
             if msg.role == crate::llm::Role::User {
-                let mut turn = Turn::new(turn_number, &msg.content);
+                let mut turn = Turn::new(turn_number, &msg.content, false);
 
                 // Check if next is assistant response
                 if let Some(next) = iter.peek()
@@ -530,6 +582,52 @@ impl Thread {
                 self.turns.push(turn);
                 turn_number += 1;
             }
+        }
+
+        self.updated_at = Utc::now();
+    }
+
+    /// Restore thread state from DB conversation messages, preserving
+    /// per-message visibility metadata used by the WebUI.
+    pub fn restore_from_conversation_messages(
+        &mut self,
+        messages: &[crate::history::ConversationMessage],
+    ) {
+        self.turns.clear();
+        self.state = ThreadState::Idle;
+        self.pending_approval = None;
+        self.pending_auth = None;
+
+        let mut iter = messages.iter().peekable();
+        let mut turn_number = 0;
+
+        while let Some(msg) = iter.next() {
+            if msg.role != "user" {
+                if msg.role == "assistant" && message_is_startup_hook(&msg.metadata) {
+                    let mut turn = Turn::new(turn_number, "", true);
+                    turn.complete(&msg.content);
+                    self.turns.push(turn);
+                    turn_number += 1;
+                }
+                continue;
+            }
+
+            let hide_user_input_from_ui = message_hides_user_input_in_main_chat(&msg.metadata);
+            let mut turn = Turn::new(turn_number, &msg.content, hide_user_input_from_ui);
+
+            if let Some(next) = iter.peek()
+                && next.role == "assistant"
+                && let Some(response) = iter.next()
+            {
+                turn.complete(&response.content);
+            }
+
+            if turn.hide_user_input_from_ui && turn.response.is_none() {
+                continue;
+            }
+
+            self.turns.push(turn);
+            turn_number += 1;
         }
 
         self.updated_at = Utc::now();
@@ -556,6 +654,9 @@ pub struct Turn {
     pub turn_number: usize,
     /// User input that started this turn.
     pub user_input: String,
+    /// Whether the user-side prompt should be hidden from the main WebUI chat transcript.
+    #[serde(default, alias = "hidden_from_ui")]
+    pub hide_user_input_from_ui: bool,
     /// Agent response (if completed).
     pub response: Option<String>,
     /// Tool calls made during this turn.
@@ -572,10 +673,15 @@ pub struct Turn {
 
 impl Turn {
     /// Create a new turn.
-    pub fn new(turn_number: usize, user_input: impl Into<String>) -> Self {
+    pub fn new(
+        turn_number: usize,
+        user_input: impl Into<String>,
+        hide_user_input_from_ui: bool,
+    ) -> Self {
         Self {
             turn_number,
             user_input: user_input.into(),
+            hide_user_input_from_ui,
             response: None,
             tool_calls: Vec::new(),
             state: TurnState::Processing,
@@ -628,6 +734,25 @@ impl Turn {
             call.error = Some(error.into());
         }
     }
+}
+
+fn message_hides_user_input_in_main_chat(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("hide_user_input_from_webui_chat")
+        .and_then(|value| value.as_bool())
+        .or_else(|| {
+            metadata
+                .get("hide_from_webui_chat")
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+fn message_is_startup_hook(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("synthetic_origin")
+        .and_then(|value| value.as_str())
+        == Some("startup_hook")
 }
 
 /// Record of a tool call made during a turn.
@@ -684,7 +809,7 @@ mod tests {
 
     #[test]
     fn test_turn_tool_calls() {
-        let mut turn = Turn::new(0, "Test input");
+        let mut turn = Turn::new(0, "Test input", false);
         turn.record_tool_call("echo", serde_json::json!({"message": "test"}));
         turn.record_tool_result(serde_json::json!("test"));
 
@@ -741,18 +866,22 @@ mod tests {
         let mut thread = Thread::new(Uuid::new_v4());
         assert!(thread.pending_auth.is_none());
 
-        thread.enter_auth_mode("telegram".to_string());
+        thread.enter_auth_mode("telegram".to_string(), PendingAuthMode::ManualToken);
         assert!(thread.pending_auth.is_some());
         assert_eq!(
             thread.pending_auth.as_ref().unwrap().extension_name,
             "telegram"
+        );
+        assert_eq!(
+            thread.pending_auth.as_ref().unwrap().auth_mode,
+            PendingAuthMode::ManualToken
         );
     }
 
     #[test]
     fn test_take_pending_auth() {
         let mut thread = Thread::new(Uuid::new_v4());
-        thread.enter_auth_mode("notion".to_string());
+        thread.enter_auth_mode("notion".to_string(), PendingAuthMode::ManualToken);
 
         let pending = thread.take_pending_auth();
         assert!(pending.is_some());
@@ -766,7 +895,7 @@ mod tests {
     #[test]
     fn test_pending_auth_serialization() {
         let mut thread = Thread::new(Uuid::new_v4());
-        thread.enter_auth_mode("openai".to_string());
+        thread.enter_auth_mode("openai".to_string(), PendingAuthMode::ExternalOAuth);
 
         let json = serde_json::to_string(&thread).expect("should serialize");
         assert!(json.contains("pending_auth"));
@@ -774,7 +903,9 @@ mod tests {
 
         let restored: Thread = serde_json::from_str(&json).expect("should deserialize");
         assert!(restored.pending_auth.is_some());
-        assert_eq!(restored.pending_auth.unwrap().extension_name, "openai");
+        let pending = restored.pending_auth.unwrap();
+        assert_eq!(pending.extension_name, "openai");
+        assert_eq!(pending.auth_mode, PendingAuthMode::ExternalOAuth);
     }
 
     #[test]
@@ -806,6 +937,7 @@ mod tests {
         });
         thread.pending_auth = Some(PendingAuth {
             extension_name: "github".to_string(),
+            auth_mode: PendingAuthMode::ManualToken,
         });
 
         let runtime = thread.runtime_state(
@@ -823,6 +955,11 @@ mod tests {
                     task: "verify restart state".to_string(),
                     system_prompt: None,
                     model: None,
+                    task_packet: None,
+                    memory_mode: None,
+                    tool_mode: None,
+                    skill_mode: None,
+                    tool_profile: None,
                     allowed_tools: Some(vec!["read_file".to_string()]),
                     allowed_skills: Some(vec!["github".to_string()]),
                     principal_id: Some("principal-1".to_string()),
@@ -893,6 +1030,13 @@ mod tests {
             auto_approved_tools: vec![],
             active_subagents: vec![],
             last_context_pressure: None,
+            post_compaction_context: None,
+            frozen_workspace_prompt: None,
+            frozen_provider_system_prompt: None,
+            prompt_snapshot_hash: None,
+            ephemeral_overlay_hash: None,
+            prompt_segment_order: Vec::new(),
+            provider_context_refs: Vec::new(),
         });
 
         assert_eq!(thread.state, ThreadState::Interrupted);
@@ -900,6 +1044,50 @@ mod tests {
             thread.last_turn().map(|turn| turn.state),
             Some(TurnState::Interrupted)
         );
+    }
+
+    #[test]
+    fn test_thread_runtime_state_serde_round_trip_preserves_prompt_fields() {
+        let runtime = ThreadRuntimeState {
+            state: ThreadState::Idle,
+            pending_approval: None,
+            pending_auth: None,
+            owner_agent_id: Some("agent-1".to_string()),
+            model_override: None,
+            auto_approved_tools: vec!["shell".to_string()],
+            active_subagents: Vec::new(),
+            last_context_pressure: Some(ContextPressure::Warning),
+            post_compaction_context: Some("summary".to_string()),
+            frozen_workspace_prompt: Some("workspace".to_string()),
+            frozen_provider_system_prompt: Some("provider".to_string()),
+            prompt_snapshot_hash: Some("sha256:stable".to_string()),
+            ephemeral_overlay_hash: Some("sha256:ephemeral".to_string()),
+            prompt_segment_order: vec![
+                "stable:identity".to_string(),
+                "ephemeral:provider_recall".to_string(),
+            ],
+            provider_context_refs: vec!["provider:1".to_string(), "provider:2".to_string()],
+        };
+
+        let encoded = serde_json::to_string(&runtime).expect("serialize runtime");
+        let decoded: ThreadRuntimeState =
+            serde_json::from_str(&encoded).expect("deserialize runtime");
+
+        assert_eq!(decoded.prompt_snapshot_hash, runtime.prompt_snapshot_hash);
+        assert_eq!(
+            decoded.frozen_workspace_prompt,
+            runtime.frozen_workspace_prompt
+        );
+        assert_eq!(
+            decoded.frozen_provider_system_prompt,
+            runtime.frozen_provider_system_prompt
+        );
+        assert_eq!(
+            decoded.ephemeral_overlay_hash,
+            runtime.ephemeral_overlay_hash
+        );
+        assert_eq!(decoded.prompt_segment_order, runtime.prompt_segment_order);
+        assert_eq!(decoded.provider_context_refs, runtime.provider_context_refs);
     }
 
     #[test]
@@ -966,6 +1154,85 @@ mod tests {
         // Assistant-only messages have no user turn to attach to, so
         // they should be skipped entirely.
         assert!(thread.turns.is_empty());
+    }
+
+    #[test]
+    fn test_restore_from_conversation_messages_hides_only_startup_user_prompt() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        let now = Utc::now();
+        let messages = vec![
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "boot prompt".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({"hide_from_webui_chat": true}),
+                created_at: now,
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "boot reply".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({"synthetic_origin": "startup_hook"}),
+                created_at: now + chrono::TimeDelta::seconds(1),
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "real question".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
+                created_at: now + chrono::TimeDelta::seconds(2),
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "real answer".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({}),
+                created_at: now + chrono::TimeDelta::seconds(3),
+            },
+        ];
+
+        thread.restore_from_conversation_messages(&messages);
+
+        assert_eq!(thread.turns.len(), 2);
+        assert!(thread.turns[0].hide_user_input_from_ui);
+        assert_eq!(thread.turns[0].response.as_deref(), Some("boot reply"));
+        assert_eq!(thread.turns[1].user_input, "real question");
+        assert!(!thread.turns[1].hide_user_input_from_ui);
+    }
+
+    #[test]
+    fn test_restore_from_conversation_messages_preserves_legacy_assistant_only_startup_reply() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        let now = Utc::now();
+        let messages = vec![crate::history::ConversationMessage {
+            id: Uuid::new_v4(),
+            role: "assistant".to_string(),
+            content: "boot reply".to_string(),
+            actor_id: None,
+            actor_display_name: None,
+            raw_sender_id: None,
+            metadata: serde_json::json!({"synthetic_origin": "startup_hook"}),
+            created_at: now,
+        }];
+
+        thread.restore_from_conversation_messages(&messages);
+
+        assert_eq!(thread.turns.len(), 1);
+        assert!(thread.turns[0].hide_user_input_from_ui);
+        assert_eq!(thread.turns[0].user_input, "");
+        assert_eq!(thread.turns[0].response.as_deref(), Some("boot reply"));
     }
 
     #[test]
@@ -1193,7 +1460,7 @@ mod tests {
 
     #[test]
     fn test_turn_tool_call_error() {
-        let mut turn = Turn::new(0, "test");
+        let mut turn = Turn::new(0, "test", false);
         turn.record_tool_call("http", serde_json::json!({"url": "example.com"}));
         turn.record_tool_error("timeout");
 

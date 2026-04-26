@@ -33,6 +33,7 @@ pub mod oauth_defaults;
 mod pairing;
 mod registry;
 mod reset;
+mod secrets;
 #[cfg(feature = "repl")]
 mod service;
 pub mod session_export;
@@ -64,6 +65,7 @@ pub use models::{ModelCommand, run_model_command};
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
 pub use reset::{ResetCommand, run_reset_command};
+pub use secrets::{SecretsCommand, run_secrets_command};
 #[cfg(feature = "repl")]
 pub use service::{ServiceCommand, run_service_command};
 pub use sessions::{SessionCommand, run_sessions_command};
@@ -72,15 +74,13 @@ pub use tool::{ToolCommand, run_tool_command};
 pub use trajectory::{TrajectoryCommand, run_trajectory_command};
 pub use update::{UpdateCommand, run_update_command};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::setup::UiMode;
+use crate::setup::{GuideTopic, OnboardingProfile, UiMode};
 
 #[derive(Parser, Debug)]
 #[command(name = "thinclaw")]
-#[command(
-    about = "Secure personal AI assistant that protects your data and expands its capabilities"
-)]
+#[command(about = "Secure personal agent that protects your data and expands its capabilities")]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
@@ -111,11 +111,37 @@ pub struct Cli {
     pub no_onboard: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum LinuxReadinessCliProfile {
+    Server,
+    Remote,
+    #[value(name = "desktop-linux", alias = "desktop-gnome", alias = "desktop")]
+    DesktopLinux,
+    #[value(name = "pi-os-lite-64")]
+    PiOsLite64,
+    AllFeatures,
+}
+
+impl From<LinuxReadinessCliProfile> for crate::platform::LinuxReadinessProfile {
+    fn from(value: LinuxReadinessCliProfile) -> Self {
+        match value {
+            LinuxReadinessCliProfile::Server => Self::Server,
+            LinuxReadinessCliProfile::Remote => Self::Remote,
+            LinuxReadinessCliProfile::DesktopLinux => Self::DesktopLinux,
+            LinuxReadinessCliProfile::PiOsLite64 => Self::PiOsLite64,
+            LinuxReadinessCliProfile::AllFeatures => Self::AllFeatures,
+        }
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Run the agent (default if no subcommand given)
     Run,
+
+    /// Run the agent with the full-screen terminal UI
+    Tui,
 
     /// Interactive onboarding wizard
     Onboard {
@@ -127,13 +153,25 @@ pub enum Command {
         #[arg(long)]
         channels_only: bool,
 
+        /// Revisit guided settings by topic. Use without a value to open the topic menu.
+        #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "menu")]
+        guide: Option<GuideTopic>,
+
         /// Onboarding interface mode
         #[arg(long, value_enum, default_value_t = UiMode::Auto)]
         ui: UiMode,
+
+        /// Preselect an onboarding profile, e.g. remote for SSH-managed hosts.
+        #[arg(long, value_enum)]
+        profile: Option<OnboardingProfile>,
     },
 
     /// Fully reset ThinClaw state so onboarding can start fresh
     Reset(ResetCommand),
+
+    /// Manage encrypted user/API secrets
+    #[command(subcommand)]
+    Secrets(SecretsCommand),
 
     /// Manage configuration settings
     #[command(subcommand)]
@@ -210,10 +248,18 @@ pub enum Command {
     },
 
     /// Probe external dependencies and validate configuration
-    Doctor,
+    Doctor {
+        /// Linux readiness profile to evaluate
+        #[arg(long, value_enum, default_value_t = LinuxReadinessCliProfile::Server)]
+        profile: LinuxReadinessCliProfile,
+    },
 
     /// Show system health and diagnostics
-    Status,
+    Status {
+        /// Linux readiness profile to summarize
+        #[arg(long, value_enum, default_value_t = LinuxReadinessCliProfile::Server)]
+        profile: LinuxReadinessCliProfile,
+    },
 
     /// Query and filter logs
     #[command(subcommand)]
@@ -267,8 +313,8 @@ pub enum Command {
         #[arg(long, default_value = "50")]
         max_turns: u32,
 
-        /// Claude model to use (e.g. "sonnet", "opus").
-        #[arg(long, default_value = "sonnet")]
+        /// Claude model to use (e.g. "claude-sonnet-4-6", "claude-opus-4-5").
+        #[arg(long, default_value = "claude-sonnet-4-6")]
         model: String,
     },
 
@@ -303,12 +349,19 @@ pub enum Command {
         #[arg(long)]
         workspace_root: Option<std::path::PathBuf>,
     },
+
+    /// Run the desktop autonomy shadow canary manifest (internal use).
+    #[command(name = "autonomy-shadow-canary", hide = true)]
+    AutonomyShadowCanary {
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+    },
 }
 
 impl Cli {
     /// Check if we should run the agent (default behavior or explicit `run` command).
     pub fn should_run_agent(&self) -> bool {
-        matches!(self.command, None | Some(Command::Run))
+        matches!(self.command, None | Some(Command::Run) | Some(Command::Tui))
     }
 }
 
@@ -337,6 +390,105 @@ mod tests {
         let cli = Cli::try_parse_from(["thinclaw", "--debug", "status"])
             .expect("parse cli with global debug flag");
         assert!(cli.debug);
-        assert!(matches!(cli.command, Some(Command::Status)));
+        assert!(matches!(cli.command, Some(Command::Status { .. })));
+    }
+
+    #[test]
+    fn test_linux_readiness_profile_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "doctor", "--profile", "desktop-gnome"])
+            .expect("parse doctor profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Doctor {
+                profile: LinuxReadinessCliProfile::DesktopLinux
+            })
+        ));
+    }
+
+    #[test]
+    fn test_remote_readiness_profile_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "doctor", "--profile", "remote"])
+            .expect("parse remote doctor profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Doctor {
+                profile: LinuxReadinessCliProfile::Remote
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["thinclaw", "status", "--profile", "remote"])
+            .expect("parse remote status profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Status {
+                profile: LinuxReadinessCliProfile::Remote
+            })
+        ));
+    }
+
+    #[test]
+    fn test_onboard_remote_profile_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "onboard", "--profile", "remote"])
+            .expect("parse remote onboarding profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Onboard {
+                profile: Some(OnboardingProfile::RemoteServer),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_onboard_pi_os_lite_profile_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "onboard", "--profile", "pi-os-lite-64"])
+            .expect("parse Pi OS Lite onboarding profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Onboard {
+                profile: Some(OnboardingProfile::PiOsLite64),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_pi_os_lite_readiness_profile_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "doctor", "--profile", "pi-os-lite-64"])
+            .expect("parse pi doctor profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Doctor {
+                profile: LinuxReadinessCliProfile::PiOsLite64
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["thinclaw", "status", "--profile", "pi-os-lite-64"])
+            .expect("parse pi status profile");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Status {
+                profile: LinuxReadinessCliProfile::PiOsLite64
+            })
+        ));
+    }
+
+    #[test]
+    fn test_linux_desktop_readiness_alias_parses() {
+        let cli = Cli::try_parse_from(["thinclaw", "doctor", "--profile", "desktop-linux"])
+            .expect("parse linux desktop doctor profile alias");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Doctor {
+                profile: LinuxReadinessCliProfile::DesktopLinux
+            })
+        ));
+    }
+
+    #[test]
+    fn test_tui_command_runs_agent() {
+        let cli = Cli::try_parse_from(["thinclaw", "tui"]).expect("parse tui command");
+        assert!(cli.should_run_agent());
+        assert!(matches!(cli.command, Some(Command::Tui)));
     }
 }

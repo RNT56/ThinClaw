@@ -7,16 +7,17 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use rust_decimal::prelude::ToPrimitive;
+use secrecy::SecretString;
 
 use crate::config::{Config, LlmBackend};
 use crate::db::Database;
 use crate::error::LlmError;
 use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, StreamChunkStream,
-    ToolCompletionRequest, ToolCompletionResponse,
+    StreamSupport, TokenCaptureSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
 use crate::llm::provider_factory::{
-    build_provider_chain, create_llm_provider, create_provider_for_catalog_entry,
+    build_provider_chain, create_llm_provider, create_provider_for_catalog_entry_with_settings,
 };
 use crate::llm::route_planner::{
     RequiredCapabilities, RoutePlanner, RoutePlannerInput, log_routing_decision,
@@ -26,9 +27,29 @@ use crate::llm::routing_policy::{RouteCandidate, RoutingContext, RoutingPolicy, 
 use crate::llm::usage_tracking::{
     USAGE_TRACKING_ENDPOINT_TYPE_KEY, USAGE_TRACKING_TELEMETRY_KEY, USAGE_TRACKING_WORKLOAD_TAG_KEY,
 };
-use crate::llm::{CooldownConfig, FailoverProvider, RetryConfig, RetryProvider};
+use crate::llm::{
+    CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig, FailoverProvider,
+    ResponseCacheConfig, RetryConfig, RetryProvider,
+};
 use crate::secrets::SecretsStore;
 use crate::settings::{ProvidersSettings, RoutingMode, Settings};
+
+pub async fn hydrate_runtime_credentials_from_secrets(
+    config: &mut Config,
+    providers: &mut ProvidersSettings,
+    secrets_store: Option<&Arc<dyn SecretsStore + Send + Sync>>,
+    user_id: &str,
+) -> usize {
+    let mut loaded = hydrate_llm_config_api_keys_from_secrets(config, secrets_store, user_id).await;
+    loaded += hydrate_provider_api_keys_from_secrets(providers, secrets_store, user_id).await;
+    if loaded > 0 {
+        tracing::info!(
+            loaded,
+            "Hydrated scoped LLM/provider credentials from encrypted secrets store"
+        );
+    }
+    loaded
+}
 
 #[derive(Clone)]
 pub struct RuntimeStatus {
@@ -44,8 +65,18 @@ pub struct RuntimeStatus {
     pub fallback_chain: Vec<String>,
     /// AdvisorExecutor: max advisor calls per turn.
     pub advisor_max_calls: u32,
+    /// AdvisorExecutor: automatic escalation policy.
+    pub advisor_auto_escalation_mode: crate::settings::AdvisorAutoEscalationMode,
     /// AdvisorExecutor: custom advisor escalation prompt.
     pub advisor_escalation_prompt: Option<String>,
+    /// Whether the advisor lane is currently usable.
+    pub advisor_ready: bool,
+    /// Why the advisor lane is unavailable, if known.
+    pub advisor_disabled_reason: Option<String>,
+    /// Resolved executor model spec selected for AdvisorExecutor diagnostics.
+    pub executor_target: Option<String>,
+    /// Resolved advisor model spec selected for AdvisorExecutor diagnostics.
+    pub advisor_target: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +110,8 @@ struct LlmRuntimeSnapshot {
     cheap_llm: Option<Arc<dyn LlmProvider>>,
 }
 
+type AdvisorReadyCallback = Arc<dyn Fn(bool) + Send + Sync>;
+
 #[derive(Clone, Copy)]
 enum RuntimeProviderRole {
     Primary,
@@ -108,6 +141,339 @@ struct ResolvedRoute {
 pub struct RuntimeLlmProvider {
     manager: Arc<LlmRuntimeManager>,
     role: RuntimeProviderRole,
+}
+
+async fn runtime_secret_from_store(
+    secrets_store: Option<&Arc<dyn SecretsStore + Send + Sync>>,
+    user_id: &str,
+    names: &[&str],
+    caller: &str,
+    purpose: &str,
+    target_host: &str,
+) -> Option<SecretString> {
+    let store = secrets_store?;
+    for name in names {
+        let secret_name = name.trim();
+        if secret_name.is_empty() {
+            continue;
+        }
+        match store
+            .get_for_injection(
+                user_id,
+                secret_name,
+                crate::secrets::SecretAccessContext::new(caller, purpose)
+                    .target(target_host, secret_name),
+            )
+            .await
+        {
+            Ok(secret) => {
+                let value = secret.expose().trim().to_string();
+                if !value.is_empty() {
+                    return Some(SecretString::from(value));
+                }
+            }
+            Err(crate::secrets::SecretError::NotFound(_)) => {}
+            Err(crate::secrets::SecretError::LegacySecret(reason)) => {
+                tracing::warn!(
+                    secret = %secret_name,
+                    reason = %reason,
+                    "Legacy secret cannot be used for runtime credential hydration"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    secret = %secret_name,
+                    error = %err,
+                    "Failed to hydrate runtime credential from encrypted store"
+                );
+            }
+        }
+    }
+    None
+}
+
+fn replace_secret_keys(
+    primary: &mut Option<SecretString>,
+    all: &mut Vec<SecretString>,
+    value: SecretString,
+) {
+    *primary = Some(value.clone());
+    *all = vec![value];
+}
+
+async fn hydrate_llm_config_api_keys_from_secrets(
+    config: &mut Config,
+    secrets_store: Option<&Arc<dyn SecretsStore + Send + Sync>>,
+    user_id: &str,
+) -> usize {
+    let Some(_) = secrets_store else {
+        return 0;
+    };
+
+    match config.llm.backend {
+        LlmBackend::OpenAi => {
+            let Some(openai) = config.llm.openai.as_mut() else {
+                return 0;
+            };
+            let Some(endpoint) = crate::config::provider_catalog::endpoint_for("openai") else {
+                return 0;
+            };
+            if let Some(value) = runtime_secret_from_store(
+                secrets_store,
+                user_id,
+                &[endpoint.secret_name.as_str(), "openai"],
+                "llm.runtime_manager",
+                "direct_provider_credential",
+                "openai",
+            )
+            .await
+            {
+                replace_secret_keys(&mut openai.api_key, &mut openai.api_keys, value);
+                1
+            } else {
+                0
+            }
+        }
+        LlmBackend::Anthropic => {
+            let Some(anthropic) = config.llm.anthropic.as_mut() else {
+                return 0;
+            };
+            let Some(endpoint) = crate::config::provider_catalog::endpoint_for("anthropic") else {
+                return 0;
+            };
+            if let Some(value) = runtime_secret_from_store(
+                secrets_store,
+                user_id,
+                &[endpoint.secret_name.as_str(), "anthropic"],
+                "llm.runtime_manager",
+                "direct_provider_credential",
+                "anthropic",
+            )
+            .await
+            {
+                replace_secret_keys(&mut anthropic.api_key, &mut anthropic.api_keys, value);
+                1
+            } else {
+                0
+            }
+        }
+        LlmBackend::OpenAiCompatible => {
+            let Some(compat) = config.llm.openai_compatible.as_mut() else {
+                return 0;
+            };
+            let (target_host, names): (&str, Vec<&str>) =
+                if compat.base_url.contains("openrouter.ai") {
+                    if let Some(endpoint) =
+                        crate::config::provider_catalog::endpoint_for("openrouter")
+                    {
+                        (
+                            "openrouter",
+                            vec![endpoint.secret_name.as_str(), "openrouter"],
+                        )
+                    } else {
+                        ("openrouter", vec!["openrouter"])
+                    }
+                } else {
+                    (
+                        "openai_compatible",
+                        vec!["llm_compatible_api_key", "openai_compatible"],
+                    )
+                };
+            if let Some(value) = runtime_secret_from_store(
+                secrets_store,
+                user_id,
+                &names,
+                "llm.runtime_manager",
+                "direct_provider_credential",
+                target_host,
+            )
+            .await
+            {
+                replace_secret_keys(&mut compat.api_key, &mut compat.api_keys, value);
+                1
+            } else {
+                0
+            }
+        }
+        LlmBackend::Tinfoil => {
+            let Some(tinfoil) = config.llm.tinfoil.as_mut() else {
+                return 0;
+            };
+            let names = crate::config::provider_catalog::endpoint_for("tinfoil")
+                .map(|endpoint| vec![endpoint.secret_name.as_str(), "tinfoil"])
+                .unwrap_or_else(|| vec!["tinfoil"]);
+            if let Some(value) = runtime_secret_from_store(
+                secrets_store,
+                user_id,
+                &names,
+                "llm.runtime_manager",
+                "direct_provider_credential",
+                "tinfoil",
+            )
+            .await
+            {
+                replace_secret_keys(&mut tinfoil.api_key, &mut tinfoil.api_keys, value);
+                1
+            } else {
+                0
+            }
+        }
+        LlmBackend::Gemini => {
+            let Some(gemini) = config.llm.gemini.as_mut() else {
+                return 0;
+            };
+            let names = crate::config::provider_catalog::endpoint_for("gemini")
+                .map(|endpoint| vec![endpoint.secret_name.as_str(), "gemini"])
+                .unwrap_or_else(|| vec!["gemini"]);
+            if let Some(value) = runtime_secret_from_store(
+                secrets_store,
+                user_id,
+                &names,
+                "llm.runtime_manager",
+                "direct_provider_credential",
+                "gemini",
+            )
+            .await
+            {
+                replace_secret_keys(&mut gemini.api_key, &mut gemini.api_keys, value);
+                1
+            } else {
+                0
+            }
+        }
+        LlmBackend::Bedrock => {
+            let Some(bedrock) = config.llm.bedrock.as_mut() else {
+                return 0;
+            };
+            let mut loaded = 0;
+            if let Some(value) = runtime_secret_from_store(
+                secrets_store,
+                user_id,
+                &["llm_bedrock_api_key", "bedrock"],
+                "llm.runtime_manager",
+                "direct_provider_credential",
+                "bedrock",
+            )
+            .await
+            {
+                replace_secret_keys(&mut bedrock.api_key, &mut bedrock.api_keys, value);
+                loaded += 1;
+            }
+            if let Some(value) = runtime_secret_from_store(
+                secrets_store,
+                user_id,
+                &["llm_bedrock_proxy_api_key", "bedrock_proxy"],
+                "llm.runtime_manager",
+                "direct_provider_proxy_credential",
+                "bedrock",
+            )
+            .await
+            {
+                bedrock.proxy_api_key = Some(value);
+                loaded += 1;
+            }
+            loaded
+        }
+        LlmBackend::Ollama | LlmBackend::LlamaCpp => 0,
+    }
+}
+
+async fn hydrate_provider_api_keys_from_secrets(
+    providers: &mut ProvidersSettings,
+    secrets_store: Option<&Arc<dyn SecretsStore + Send + Sync>>,
+    user_id: &str,
+) -> usize {
+    providers.resolved_provider_api_keys.clear();
+    let Some(_) = secrets_store else {
+        return 0;
+    };
+
+    let slugs = provider_slugs_for_secret_hydration(providers);
+    let mut loaded = 0;
+    for slug in slugs {
+        let Some(endpoint) = crate::config::provider_catalog::endpoint_for(&slug) else {
+            continue;
+        };
+        if let Some(value) = runtime_secret_from_store(
+            secrets_store,
+            user_id,
+            &[endpoint.secret_name.as_str(), slug.as_str()],
+            "llm.runtime_manager",
+            "catalog_provider_credential",
+            &slug,
+        )
+        .await
+        {
+            providers
+                .resolved_provider_api_keys
+                .insert(slug.clone(), vec![value]);
+            loaded += 1;
+        }
+    }
+    loaded
+}
+
+fn provider_slugs_for_secret_hydration(providers: &ProvidersSettings) -> BTreeSet<String> {
+    let mut slugs = BTreeSet::new();
+
+    if let Some(primary) = providers.primary.as_deref() {
+        push_provider_slug(&mut slugs, primary);
+    }
+    if let Some(preferred) = providers.preferred_cheap_provider.as_deref() {
+        push_provider_slug(&mut slugs, preferred);
+    }
+    for slug in &providers.enabled {
+        push_provider_slug(&mut slugs, slug);
+    }
+    for slug in &providers.primary_pool_order {
+        push_provider_slug(&mut slugs, slug);
+    }
+    for slug in &providers.cheap_pool_order {
+        push_provider_slug(&mut slugs, slug);
+    }
+    for slug in providers.provider_models.keys() {
+        push_provider_slug(&mut slugs, slug);
+    }
+    for slug in providers.allowed_models.keys() {
+        push_provider_slug(&mut slugs, slug);
+    }
+    for slug in providers.provider_credential_modes.keys() {
+        push_provider_slug(&mut slugs, slug);
+    }
+    if let Some(spec) = providers.cheap_model.as_deref() {
+        push_provider_slug_from_target(&mut slugs, spec);
+    }
+    for target in &providers.fallback_chain {
+        push_provider_slug_from_target(&mut slugs, target);
+    }
+    for target in policy_rule_targets(&providers.policy_rules) {
+        push_provider_slug_from_target(&mut slugs, &target);
+    }
+
+    slugs
+}
+
+fn push_provider_slug_from_target(slugs: &mut BTreeSet<String>, target: &str) {
+    let target = target.trim();
+    if matches!(target, "" | "primary" | "cheap") {
+        return;
+    }
+    if let Some((slug, _)) = target.split_once('/') {
+        push_provider_slug(slugs, slug);
+        return;
+    }
+    if let Some((slug, _)) = parse_provider_slot_selector(target) {
+        push_provider_slug(slugs, slug);
+        return;
+    }
+    push_provider_slug(slugs, target);
+}
+
+fn push_provider_slug(slugs: &mut BTreeSet<String>, slug: &str) {
+    let slug = slug.trim();
+    if !slug.is_empty() && crate::config::provider_catalog::endpoint_for(slug).is_some() {
+        slugs.insert(slug.to_string());
+    }
 }
 
 impl RuntimeLlmProvider {
@@ -167,6 +533,18 @@ impl RuntimeLlmProvider {
 
         if let Some(model) = requested_model {
             let provider = self.manager.provider_for_model_spec(model, &snapshot)?;
+            if routing_context
+                .map(|ctx| ctx.requires_streaming)
+                .unwrap_or(false)
+                && !provider
+                    .stream_support_for_model(Some(model))
+                    .is_available()
+            {
+                return Err(LlmError::StreamingUnsupported {
+                    provider: provider.model_name().to_string(),
+                    model: model.trim().to_string(),
+                });
+            }
             let telemetry_key = format!("unknown|unknown|{}", model.trim());
             return Ok(ResolvedRoute {
                 provider,
@@ -211,6 +589,14 @@ impl RuntimeLlmProvider {
                 budget_utilization: None,
                 last_user_message,
                 advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
+                primary_provider_preferences: normalized_provider_pool_order(
+                    &snapshot.providers,
+                    ProviderModelRole::Primary,
+                ),
+                cheap_provider_preferences: normalized_provider_pool_order(
+                    &snapshot.providers,
+                    ProviderModelRole::Cheap,
+                ),
             };
 
             if let Ok(guard) = self.manager.route_planner.read() {
@@ -418,16 +804,47 @@ impl LlmProvider for RuntimeLlmProvider {
         self.current_provider().supports_streaming()
     }
 
-    fn supports_streaming_for_model(&self, requested_model: Option<&str>) -> bool {
+    fn stream_support(&self) -> StreamSupport {
+        self.current_provider().stream_support()
+    }
+
+    fn stream_support_for_model(&self, requested_model: Option<&str>) -> StreamSupport {
         let snapshot = self.manager.snapshot();
         self.provider_for_request(requested_model, None, None)
-            .map(|route| route.provider.supports_streaming())
+            .map(|route| route.provider.stream_support_for_model(requested_model))
             .unwrap_or_else(|_| match self.role {
-                RuntimeProviderRole::Primary => snapshot.llm.supports_streaming(),
+                RuntimeProviderRole::Primary => snapshot.llm.stream_support(),
+                RuntimeProviderRole::Cheap => {
+                    snapshot.cheap_llm.unwrap_or(snapshot.llm).stream_support()
+                }
+            })
+    }
+
+    fn supports_streaming_for_model(&self, requested_model: Option<&str>) -> bool {
+        self.stream_support_for_model(requested_model).is_native()
+    }
+
+    fn token_capture_support(&self) -> TokenCaptureSupport {
+        self.current_provider().token_capture_support()
+    }
+
+    fn token_capture_support_for_model(
+        &self,
+        requested_model: Option<&str>,
+    ) -> TokenCaptureSupport {
+        let snapshot = self.manager.snapshot();
+        self.provider_for_request(requested_model, None, None)
+            .map(|route| {
+                route
+                    .provider
+                    .token_capture_support_for_model(requested_model)
+            })
+            .unwrap_or_else(|_| match self.role {
+                RuntimeProviderRole::Primary => snapshot.llm.token_capture_support(),
                 RuntimeProviderRole::Cheap => snapshot
                     .cheap_llm
                     .unwrap_or(snapshot.llm)
-                    .supports_streaming(),
+                    .token_capture_support(),
             })
     }
 
@@ -530,6 +947,7 @@ pub struct LlmRuntimeManager {
     dynamic_pricing_revision_seen: AtomicU64,
     revision: AtomicU64,
     last_error: RwLock<Option<String>>,
+    advisor_ready_callback: RwLock<Option<AdvisorReadyCallback>>,
 }
 
 impl LlmRuntimeManager {
@@ -581,9 +999,32 @@ impl LlmRuntimeManager {
             ),
             revision: AtomicU64::new(1),
             last_error: RwLock::new(None),
+            advisor_ready_callback: RwLock::new(None),
         });
         manager.refresh_route_caches()?;
         Ok(manager)
+    }
+
+    pub fn set_advisor_ready_callback<F>(&self, callback: F)
+    where
+        F: Fn(bool) + Send + Sync + 'static,
+    {
+        let callback: AdvisorReadyCallback = Arc::new(callback);
+        if let Ok(mut slot) = self.advisor_ready_callback.write() {
+            *slot = Some(Arc::clone(&callback));
+        }
+        callback(self.status().advisor_ready);
+    }
+
+    fn notify_advisor_ready_callback(&self) {
+        let callback = self
+            .advisor_ready_callback
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(callback) = callback {
+            callback(self.status().advisor_ready);
+        }
     }
 
     pub fn primary_handle(self: &Arc<Self>) -> Arc<dyn LlmProvider> {
@@ -609,6 +1050,21 @@ impl LlmRuntimeManager {
 
     pub fn status(&self) -> RuntimeStatus {
         let snapshot = self.snapshot();
+        let advisor_status = self.advisor_status_decision(&snapshot);
+        let executor_target = advisor_status
+            .as_ref()
+            .and_then(|decision| decision.executor_target.as_deref())
+            .and_then(|target| {
+                self.resolve_route_model_spec(target, &snapshot)
+                    .or_else(|| Some(target.to_string()))
+            });
+        let advisor_target = advisor_status
+            .as_ref()
+            .and_then(|decision| decision.advisor_target.as_deref())
+            .and_then(|target| {
+                self.resolve_route_model_spec(target, &snapshot)
+                    .or_else(|| Some(target.to_string()))
+            });
         RuntimeStatus {
             revision: self.revision.load(Ordering::Relaxed),
             last_error: self.last_error.read().ok().and_then(|guard| guard.clone()),
@@ -629,7 +1085,25 @@ impl LlmRuntimeManager {
             primary_provider: snapshot.providers.primary.clone(),
             fallback_chain: snapshot.providers.fallback_chain.clone(),
             advisor_max_calls: snapshot.providers.advisor_max_calls,
+            advisor_auto_escalation_mode: snapshot.providers.advisor_auto_escalation_mode,
             advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
+            advisor_ready: advisor_status
+                .as_ref()
+                .map(|decision| decision.advisor_ready)
+                .unwrap_or(false),
+            advisor_disabled_reason: advisor_status
+                .as_ref()
+                .and_then(|decision| decision.advisor_disabled_reason.clone())
+                .or_else(|| {
+                    (snapshot.providers.routing_mode == RoutingMode::AdvisorExecutor
+                        && !snapshot.providers.smart_routing_enabled)
+                        .then_some(
+                            "advisor routing is disabled because smart routing is turned off"
+                                .to_string(),
+                        )
+                }),
+            executor_target,
+            advisor_target,
         }
     }
 
@@ -639,13 +1113,20 @@ impl LlmRuntimeManager {
         }
 
         let reload_result = async {
-            let (config, providers) =
+            let (mut config, mut providers) =
                 self.load_runtime_inputs()
                     .await
                     .map_err(|reason| LlmError::RequestFailed {
                         provider: "runtime".to_string(),
                         reason,
                     })?;
+            hydrate_runtime_credentials_from_secrets(
+                &mut config,
+                &mut providers,
+                self.secrets_store.as_ref(),
+                &self.user_id,
+            )
+            .await;
             let (llm, cheap_llm) = build_provider_chain(&config.llm, Some(&providers))?;
             let policy = build_routing_policy(&providers);
             Ok::<_, LlmError>((config, providers, llm, cheap_llm, policy))
@@ -693,6 +1174,7 @@ impl LlmRuntimeManager {
             *last_error = None;
         }
         self.revision.fetch_add(1, Ordering::Relaxed);
+        self.notify_advisor_ready_callback();
         Ok(())
     }
 
@@ -1009,7 +1491,8 @@ impl LlmRuntimeManager {
                 {
                     return self.direct_provider_for_route_target(&target, snapshot);
                 }
-                create_llm_provider(&snapshot.config.llm)
+                let provider = create_llm_provider(&snapshot.config.llm)?;
+                Ok(Self::wrap_runtime_provider_with_retry(provider, snapshot))
             }
             "cheap" => {
                 if let Some(target) =
@@ -1073,7 +1556,8 @@ impl LlmRuntimeManager {
         }
 
         if providers.len() == 1 {
-            let provider = providers.remove(0);
+            let provider =
+                Self::wrap_runtime_provider_with_reliability(providers.remove(0), snapshot);
             if let Ok(mut cache) = self.chain_provider_cache.write() {
                 cache.insert(chain_key, provider.clone());
             }
@@ -1094,7 +1578,21 @@ impl LlmRuntimeManager {
             })?,
         );
 
-        let provider = if rel.max_retries > 0 {
+        let provider = Self::wrap_runtime_provider_with_reliability(provider, snapshot);
+
+        if let Ok(mut cache) = self.chain_provider_cache.write() {
+            cache.insert(chain_key, provider.clone());
+        }
+
+        Ok(provider)
+    }
+
+    fn wrap_runtime_provider_with_retry(
+        provider: Arc<dyn LlmProvider>,
+        snapshot: &LlmRuntimeSnapshot,
+    ) -> Arc<dyn LlmProvider> {
+        let rel = &snapshot.config.llm.reliability;
+        if rel.max_retries > 0 {
             Arc::new(RetryProvider::new(
                 provider,
                 RetryConfig {
@@ -1103,13 +1601,34 @@ impl LlmRuntimeManager {
             )) as Arc<dyn LlmProvider>
         } else {
             provider
-        };
+        }
+    }
 
-        if let Ok(mut cache) = self.chain_provider_cache.write() {
-            cache.insert(chain_key, provider.clone());
+    fn wrap_runtime_provider_with_reliability(
+        provider: Arc<dyn LlmProvider>,
+        snapshot: &LlmRuntimeSnapshot,
+    ) -> Arc<dyn LlmProvider> {
+        let rel = &snapshot.config.llm.reliability;
+        let mut wrapped = Self::wrap_runtime_provider_with_retry(provider, snapshot);
+
+        if let Some(threshold) = rel.circuit_breaker_threshold {
+            let cb_config = CircuitBreakerConfig {
+                failure_threshold: threshold,
+                recovery_timeout: std::time::Duration::from_secs(rel.circuit_breaker_recovery_secs),
+                ..CircuitBreakerConfig::default()
+            };
+            wrapped = Arc::new(CircuitBreakerProvider::new(wrapped, cb_config));
         }
 
-        Ok(provider)
+        if rel.response_cache_enabled {
+            let rc_config = ResponseCacheConfig {
+                ttl: std::time::Duration::from_secs(rel.response_cache_ttl_secs),
+                max_entries: rel.response_cache_max_entries,
+            };
+            wrapped = Arc::new(CachedProvider::new(wrapped, rc_config));
+        }
+
+        wrapped
     }
 
     fn provider_for_provider_slot(
@@ -1151,16 +1670,29 @@ impl LlmRuntimeManager {
         }
 
         if let Some((provider, model)) = spec.split_once('/') {
-            return create_provider_for_runtime_slug(provider, model, &snapshot.config.llm);
+            let provider = create_provider_for_runtime_slug(
+                provider,
+                model,
+                &snapshot.config.llm,
+                Some(&snapshot.providers),
+            )?;
+            return Ok(Self::wrap_runtime_provider_with_retry(provider, snapshot));
         }
 
         if let Some(primary_provider) = snapshot.providers.primary.as_deref() {
-            return create_provider_for_runtime_slug(primary_provider, spec, &snapshot.config.llm);
+            let provider = create_provider_for_runtime_slug(
+                primary_provider,
+                spec,
+                &snapshot.config.llm,
+                Some(&snapshot.providers),
+            )?;
+            return Ok(Self::wrap_runtime_provider_with_retry(provider, snapshot));
         }
 
         let mut llm_config = snapshot.config.llm.clone();
         apply_model_override(&mut llm_config, spec);
-        create_llm_provider(&llm_config)
+        let provider = create_llm_provider(&llm_config)?;
+        Ok(Self::wrap_runtime_provider_with_retry(provider, snapshot))
     }
 
     pub fn advisor_config_for_messages(
@@ -1192,23 +1724,7 @@ impl LlmRuntimeManager {
             budget_usd: None,
         };
 
-        let planner_input = RoutePlannerInput {
-            required_capabilities: RequiredCapabilities::from_routing_context(&ctx),
-            routing_mode: snapshot.providers.routing_mode,
-            routing_context: ctx,
-            model_override: None,
-            provider_health: self.route_health_snapshot(),
-            candidates: self.available_route_candidates(&snapshot),
-            turn_cost_usd: 0.0,
-            budget_utilization: None,
-            last_user_message,
-            advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
-        };
-
-        self.route_planner
-            .read()
-            .ok()
-            .map(|planner| planner.plan(&planner_input, self.routing_policy.read().ok().as_deref()))
+        self.route_decision_for_context(&snapshot, ctx, last_user_message)
             .and_then(|decision| decision.advisor)
     }
 
@@ -1251,21 +1767,9 @@ impl LlmRuntimeManager {
             };
         }
 
-        let planner_input = RoutePlannerInput {
-            required_capabilities: RequiredCapabilities::from_routing_context(&ctx),
-            routing_mode: snapshot.providers.routing_mode,
-            routing_context: ctx.clone(),
-            model_override: None,
-            provider_health: self.route_health_snapshot(),
-            candidates: self.available_route_candidates(&snapshot),
-            turn_cost_usd: 0.0,
-            budget_utilization: None,
-            last_user_message: prompt.map(ToOwned::to_owned),
-            advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
-        };
-
-        if let Ok(guard) = self.route_planner.read() {
-            let decision = guard.plan(&planner_input, self.routing_policy.read().ok().as_deref());
+        if let Some(decision) =
+            self.route_decision_for_context(&snapshot, ctx.clone(), prompt.map(ToOwned::to_owned))
+        {
             let reason = if decision.fallbacks.is_empty() {
                 decision.reason
             } else {
@@ -1312,6 +1816,62 @@ impl LlmRuntimeManager {
                 diagnostics: Vec::new(),
             }
         }
+    }
+
+    fn advisor_status_decision(
+        &self,
+        snapshot: &LlmRuntimeSnapshot,
+    ) -> Option<crate::llm::route_planner::RouteDecision> {
+        if snapshot.providers.routing_mode != RoutingMode::AdvisorExecutor
+            || !snapshot.providers.smart_routing_enabled
+        {
+            return None;
+        }
+
+        self.route_decision_for_context(
+            snapshot,
+            RoutingContext {
+                estimated_input_tokens: 1024,
+                has_vision: false,
+                has_tools: true,
+                requires_streaming: false,
+                budget_usd: None,
+            },
+            Some("advisor readiness probe".to_string()),
+        )
+    }
+
+    fn route_decision_for_context(
+        &self,
+        snapshot: &LlmRuntimeSnapshot,
+        ctx: RoutingContext,
+        last_user_message: Option<String>,
+    ) -> Option<crate::llm::route_planner::RouteDecision> {
+        let planner_input = RoutePlannerInput {
+            required_capabilities: RequiredCapabilities::from_routing_context(&ctx),
+            routing_mode: snapshot.providers.routing_mode,
+            routing_context: ctx,
+            model_override: None,
+            provider_health: self.route_health_snapshot(),
+            candidates: self.available_route_candidates(snapshot),
+            turn_cost_usd: 0.0,
+            budget_utilization: None,
+            last_user_message,
+            advisor_escalation_prompt: snapshot.providers.advisor_escalation_prompt.clone(),
+            primary_provider_preferences: normalized_provider_pool_order(
+                &snapshot.providers,
+                ProviderModelRole::Primary,
+            ),
+            cheap_provider_preferences: normalized_provider_pool_order(
+                &snapshot.providers,
+                ProviderModelRole::Cheap,
+            ),
+        };
+
+        self.route_planner
+            .read()
+            .ok()
+            .map(|planner| planner.plan(&planner_input, self.routing_policy.read().ok().as_deref()))
     }
 
     fn available_route_candidates(&self, snapshot: &LlmRuntimeSnapshot) -> Vec<RouteCandidate> {
@@ -1457,9 +2017,14 @@ fn create_provider_for_runtime_slug(
     provider: &str,
     model: &str,
     base_config: &crate::config::LlmConfig,
+    providers_settings: Option<&ProvidersSettings>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     if crate::config::provider_catalog::endpoint_for(provider).is_some() {
-        return create_provider_for_catalog_entry(provider, model);
+        return create_provider_for_catalog_entry_with_settings(
+            provider,
+            model,
+            providers_settings,
+        );
     }
 
     let mut llm_config = base_config.clone();
@@ -1843,7 +2408,7 @@ fn suggest_cheap_model(
 fn suggest_provider_cheap_model(slug: &str, primary_model: Option<&str>) -> Option<String> {
     let mapped = match slug {
         "openai" => Some("gpt-4o-mini"),
-        "anthropic" => Some("claude-3-5-haiku-latest"),
+        "anthropic" => Some("claude-sonnet-4-6"),
         "gemini" => Some("gemini-2.5-flash-lite"),
         "openrouter" => Some("openai/gpt-4o-mini"),
         "tinfoil" => Some("kimi-k2-5"),
@@ -1863,7 +2428,7 @@ fn suggest_provider_cheap_model(slug: &str, primary_model: Option<&str>) -> Opti
 
 fn default_model_for_runtime_slug(slug: &str) -> Option<&'static str> {
     crate::config::provider_catalog::endpoint_for(slug)
-        .map(|endpoint| endpoint.default_model)
+        .map(|endpoint| endpoint.default_model.as_str())
         .or(match slug {
             "ollama" => Some("llama3"),
             "openai_compatible" => Some("default"),
@@ -1938,7 +2503,7 @@ fn route_target_resolves_in_settings(settings: &ProvidersSettings, target: &str)
             if let Some((slug, _)) = other.split_once('/') {
                 provider_declared_for_routing(settings, slug)
             } else {
-                settings.primary.is_some() || !settings.enabled.is_empty()
+                false
             }
         }
     }
@@ -2189,7 +2754,21 @@ fn route_target_known_cost_per_m_usd(target: &str) -> f64 {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::settings::ProviderModelSlots;
+    use crate::settings::{ProviderModelSlots, SecretsMasterKeySource};
+
+    async fn advisor_executor_test_config() -> Config {
+        let mut settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://localhost:12345/v1".to_string()),
+            selected_model: Some("gpt-5.4".to_string()),
+            ..Settings::default()
+        };
+        settings.secrets.master_key_source = SecretsMasterKeySource::None;
+
+        Config::from_test_settings(&settings)
+            .await
+            .expect("config should load without touching the OS keychain")
+    }
 
     #[test]
     fn resolved_completion_request_clears_model_override() {
@@ -2260,8 +2839,8 @@ mod tests {
         providers.provider_models.insert(
             "anthropic".to_string(),
             ProviderModelSlots {
-                primary: Some("claude-sonnet-4-20250514".to_string()),
-                cheap: Some("claude-3-5-haiku-latest".to_string()),
+                primary: Some("claude-opus-4-7".to_string()),
+                cheap: Some("claude-sonnet-4-6".to_string()),
             },
         );
         providers.provider_models.insert(
@@ -2318,8 +2897,8 @@ mod tests {
         providers.provider_models.insert(
             "anthropic".to_string(),
             ProviderModelSlots {
-                primary: Some("claude-sonnet-4-20250514".to_string()),
-                cheap: Some("claude-3-5-haiku-latest".to_string()),
+                primary: Some("claude-opus-4-7".to_string()),
+                cheap: Some("claude-sonnet-4-6".to_string()),
             },
         );
         providers.provider_models.insert(
@@ -2374,8 +2953,8 @@ mod tests {
         settings.providers.provider_models.insert(
             "anthropic".to_string(),
             ProviderModelSlots {
-                primary: Some("claude-sonnet-4-20250514".to_string()),
-                cheap: Some("claude-3-5-haiku-latest".to_string()),
+                primary: Some("claude-opus-4-7".to_string()),
+                cheap: Some("claude-sonnet-4-6".to_string()),
             },
         );
 
@@ -2468,34 +3047,13 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn advisor_target_primary_resolves_to_primary_provider_in_advisor_executor() {
-        let config = {
-            let _env_guard = crate::config::helpers::lock_env();
-            // SAFETY: guarded by crate-wide ENV_MUTEX.
-            unsafe {
-                std::env::set_var("LLM_BACKEND", "openai_compatible");
-                std::env::set_var("LLM_BASE_URL", "http://localhost:12345/v1");
-                std::env::set_var("LLM_MODEL", "primary-model");
-                std::env::set_var(
-                    "SECRETS_MASTER_KEY",
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                );
-            }
-            let loaded = Config::from_env().await.expect("config should load");
-            // SAFETY: guarded by crate-wide ENV_MUTEX.
-            unsafe {
-                std::env::remove_var("LLM_BACKEND");
-                std::env::remove_var("LLM_BASE_URL");
-                std::env::remove_var("LLM_MODEL");
-                std::env::remove_var("SECRETS_MASTER_KEY");
-            }
-            loaded
-        };
+        let config = advisor_executor_test_config().await;
 
         let mut providers = ProvidersSettings {
             enabled: vec!["openai_compatible".to_string()],
             primary: Some("openai_compatible".to_string()),
-            primary_model: Some("primary-model".to_string()),
-            cheap_model: Some("openai_compatible/cheap-model".to_string()),
+            primary_model: Some("gpt-5.4".to_string()),
+            cheap_model: Some("openai_compatible/gpt-5.4-mini".to_string()),
             smart_routing_enabled: true,
             routing_mode: RoutingMode::AdvisorExecutor,
             ..ProvidersSettings::default()
@@ -2503,8 +3061,8 @@ mod tests {
         providers.provider_models.insert(
             "openai_compatible".to_string(),
             ProviderModelSlots {
-                primary: Some("primary-model".to_string()),
-                cheap: Some("cheap-model".to_string()),
+                primary: Some("gpt-5.4".to_string()),
+                cheap: Some("gpt-5.4-mini".to_string()),
             },
         );
 
@@ -2515,6 +3073,81 @@ mod tests {
             .provider_handle_for_target("primary")
             .expect("primary advisor target should resolve");
 
-        assert_eq!(provider.active_model_name(), "primary-model");
+        assert_eq!(provider.active_model_name(), "gpt-5.4");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn advisor_executor_status_reports_readiness_and_targets() {
+        let config = advisor_executor_test_config().await;
+
+        let mut providers = ProvidersSettings {
+            enabled: vec!["openai_compatible".to_string()],
+            primary: Some("openai_compatible".to_string()),
+            primary_model: Some("gpt-5.4".to_string()),
+            cheap_model: Some("openai_compatible/gpt-5.4-mini".to_string()),
+            smart_routing_enabled: true,
+            routing_mode: RoutingMode::AdvisorExecutor,
+            ..ProvidersSettings::default()
+        };
+        providers.provider_models.insert(
+            "openai_compatible".to_string(),
+            ProviderModelSlots {
+                primary: Some("gpt-5.4".to_string()),
+                cheap: Some("gpt-5.4-mini".to_string()),
+            },
+        );
+
+        let manager = LlmRuntimeManager::new(config, providers, None, None, "test-user", None)
+            .expect("runtime manager should build");
+        let status = manager.status();
+
+        assert!(status.advisor_ready);
+        assert_eq!(
+            status.executor_target.as_deref(),
+            Some("openai_compatible/gpt-5.4-mini")
+        );
+        assert_eq!(
+            status.advisor_target.as_deref(),
+            Some("openai_compatible/gpt-5.4")
+        );
+        assert_eq!(
+            status.advisor_auto_escalation_mode,
+            crate::settings::AdvisorAutoEscalationMode::RiskAndComplexFinal
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn advisor_ready_callback_reports_current_readiness_immediately() {
+        let config = advisor_executor_test_config().await;
+
+        let mut providers = ProvidersSettings {
+            enabled: vec!["openai_compatible".to_string()],
+            primary: Some("openai_compatible".to_string()),
+            primary_model: Some("gpt-5.4".to_string()),
+            cheap_model: Some("openai_compatible/gpt-5.4-mini".to_string()),
+            smart_routing_enabled: true,
+            routing_mode: RoutingMode::AdvisorExecutor,
+            ..ProvidersSettings::default()
+        };
+        providers.provider_models.insert(
+            "openai_compatible".to_string(),
+            ProviderModelSlots {
+                primary: Some("gpt-5.4".to_string()),
+                cheap: Some("gpt-5.4-mini".to_string()),
+            },
+        );
+
+        let manager = LlmRuntimeManager::new(config, providers, None, None, "test-user", None)
+            .expect("runtime manager should build");
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let seen_for_callback = Arc::clone(&seen);
+
+        manager.set_advisor_ready_callback(move |advisor_ready| {
+            *seen_for_callback.lock().expect("callback lock") = Some(advisor_ready);
+        });
+
+        assert_eq!(*seen.lock().expect("callback lock"), Some(true));
     }
 }

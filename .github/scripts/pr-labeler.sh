@@ -20,6 +20,8 @@ REPO="${REPO:?REPO is required}"
 set_exclusive_label() {
   local prefix="$1" desired="$2"
 
+  ensure_label_exists "$desired" "$prefix"
+
   # Fetch current labels on the PR
   local current
   current=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '.labels[].name')
@@ -36,16 +38,42 @@ set_exclusive_label() {
   gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "$desired"
 }
 
+ensure_label_exists() {
+  local label="$1" prefix="$2" color description
+
+  case "$prefix" in
+    size)
+      color="bfdadc"
+      description="Automatically classified PR size"
+      ;;
+    risk)
+      color="f9d0c4"
+      description="Automatically classified PR risk"
+      ;;
+    contributor)
+      color="d4c5f9"
+      description="Automatically classified contributor tier"
+      ;;
+    *)
+      color="ededed"
+      description="Automatically managed PR label"
+      ;;
+  esac
+
+  if ! gh label list --repo "$REPO" --limit 200 --json name --jq '.[].name' | grep -Fxq "$label"; then
+    gh label create "$label" --repo "$REPO" --color "$color" --description "$description" 2>/dev/null || true
+  fi
+}
+
 # ─── size ───────────────────────────────────────────────────────────────────
 
 classify_size() {
   # Sum changed lines across non-doc files
   local total
   total=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
-    --paginate --jq '
-      [.[] | select(.filename | test("\\.(md|txt|rst|adoc)$") | not) | .changes]
-      | add // 0
-    ')
+    --paginate \
+    --jq '.[] | select(.filename | test("\\.(md|txt|rst|adoc)$") | not) | .changes' \
+    | awk '{sum += $1} END {print sum + 0}')
 
   local label
   if   (( total < 10 ));  then label="size: XS"

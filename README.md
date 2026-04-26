@@ -5,7 +5,7 @@
 <h1 align="center">ThinClaw</h1>
 
 <p align="center">
-  <em>A self-hosted personal agent runtime in Rust</em>
+  <em>A self-hosted personal agent runtime with Rust underneath.</em>
 </p>
 
 <p align="center">
@@ -13,128 +13,156 @@
   &nbsp;
   <a href="https://github.com/RNT56/ThinClaw/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/RNT56/ThinClaw/ci.yml?branch=main&style=flat-square&label=CI" alt="CI" /></a>
   &nbsp;
-  <a href="https://github.com/RNT56/ThinClaw/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue?style=flat-square" alt="License" /></a>
+  <a href="https://github.com/RNT56/ThinClaw/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-0969da?style=flat-square" alt="License" /></a>
 </p>
 
 <p align="center">
-  <a href="#quick-start"><img src="https://img.shields.io/badge/Quick_Start-grey?style=flat-square" alt="Quick Start" /></a>&nbsp;
-  <a href="#why-thinclaw"><img src="https://img.shields.io/badge/Why_ThinClaw-grey?style=flat-square" alt="Why ThinClaw" /></a>&nbsp;
-  <a href="#core-capabilities"><img src="https://img.shields.io/badge/Capabilities-grey?style=flat-square" alt="Capabilities" /></a>&nbsp;
-  <a href="#deployment-modes"><img src="https://img.shields.io/badge/Deployment-grey?style=flat-square" alt="Deployment" /></a>&nbsp;
-  <a href="#security-and-trust"><img src="https://img.shields.io/badge/Security-grey?style=flat-square" alt="Security" /></a>&nbsp;
-  <a href="#documentation-map"><img src="https://img.shields.io/badge/Docs-grey?style=flat-square" alt="Docs" /></a>&nbsp;
-  <a href="#development"><img src="https://img.shields.io/badge/Development-grey?style=flat-square" alt="Development" /></a>
+  <a href="#quick-start"><img src="https://img.shields.io/badge/Quick_Start-2ea44f?style=flat-square" alt="Quick Start" /></a>&nbsp;
+  <a href="#why-thinclaw"><img src="https://img.shields.io/badge/Why_ThinClaw-8250df?style=flat-square" alt="Why ThinClaw" /></a>&nbsp;
+  <a href="#core-capabilities"><img src="https://img.shields.io/badge/Capabilities-0969da?style=flat-square" alt="Capabilities" /></a>&nbsp;
+  <a href="#deployment-modes"><img src="https://img.shields.io/badge/Deployment-f59e0b?style=flat-square" alt="Deployment" /></a>&nbsp;
+  <a href="#security-and-trust"><img src="https://img.shields.io/badge/Security-c2410c?style=flat-square" alt="Security" /></a>&nbsp;
+  <a href="#documentation-map"><img src="https://img.shields.io/badge/Docs-57606a?style=flat-square" alt="Docs" /></a>&nbsp;
+  <a href="#development"><img src="https://img.shields.io/badge/Development-24292f?style=flat-square" alt="Development" /></a>
 </p>
 
 ---
 
 ## What Is ThinClaw?
 
-ThinClaw is a Rust-based agent runtime you run yourself. It can operate as a standalone binary, a long-running service with a web gateway, or as the backend engine embedded inside Scrappy.
+ThinClaw is a self-hosted personal agent runtime for people who want durable agent identity, memory, tools, channels, routines, and policy under their own control.
 
-It is built around a few core ideas:
+It can run as a local CLI, a full-screen TUI, a long-running service behind a web gateway, or the backend engine embedded inside Scrappy. The core runtime is Rust; extension points use native Rust, sandboxed WASM, and operator-trusted MCP depending on the job.
 
-- operator-controlled deployment, models, and integrations
-- layered safety around secrets, tools, network access, and external content
-- hybrid extensibility through native Rust, WASM, and MCP
-- a proactive runtime built around channels, routines, memory, and background work
-
-ThinClaw is not just a chat wrapper. It is the runtime that handles sessions, tools, channels, persistence, and policy.
+| ThinClaw Gives You | Why It Matters |
+|---|---|
+| Durable agent identity | The same named agent can operate across CLI, WebUI, channels, sessions, and background work. |
+| Operator-owned deployment | You choose where it runs, which providers it uses, and which integrations are trusted. |
+| Layered safety boundaries | Secrets, tools, code execution, network access, and external content are treated as separate trust surfaces. |
+| Proactive runtime surfaces | Channels, routines, heartbeat, memory, notifications, background jobs, and subagents are first-class runtime pieces. |
+| Hybrid extensibility | Native Rust handles trusted host work, WASM handles scoped hot-reloadable components, and MCP connects external ecosystems. |
 
 ## Quick Start
 
-macOS / Linux:
+### macOS / Linux
 
 ```bash
-# 1. Install the latest release
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh
 
-# 2. Run onboarding
 thinclaw onboard
-# or force the full-screen Humanist Cockpit shell:
-# thinclaw onboard --ui tui
-# or fully reset ThinClaw state and start over:
-# thinclaw reset --yes
-
-# 3. Start ThinClaw locally
-thinclaw run --no-onboard
-
-# 4. Open the gateway
-# http://127.0.0.1:3000
+thinclaw
 ```
 
-Windows (PowerShell):
+Open the local gateway after startup:
+
+```text
+http://127.0.0.1:3000
+```
+
+### Windows PowerShell
+
+Install the latest MSI or portable ZIP from [GitHub Releases](https://github.com/RNT56/ThinClaw/releases), then run:
 
 ```powershell
-# 1. Install the latest MSI or portable ZIP from GitHub Releases
-# https://github.com/RNT56/ThinClaw/releases
-
-# 2. Run onboarding
 thinclaw onboard
-# or fully reset ThinClaw state and start over:
-# thinclaw reset --yes
-
-# 3. Start ThinClaw locally
-thinclaw run --no-onboard
-
-# 4. Open the gateway
-# http://127.0.0.1:3000
+thinclaw
 ```
 
-By default, `thinclaw` and `thinclaw run` use the same startup path and keep terminal output quiet, only surfacing warnings and errors during startup. If you want the full initialization log stream for troubleshooting, start it with either:
+### Useful First Commands
+
+| Task | Command |
+|---|---|
+| Run onboarding | `thinclaw onboard` |
+| Start the local runtime | `thinclaw` |
+| Start the full-screen runtime | `thinclaw tui` |
+| Force full-screen onboarding | `thinclaw onboard --ui tui` |
+| Reset local ThinClaw state | `thinclaw reset --yes` |
+| Show verbose startup logs | `thinclaw --debug --no-onboard` |
+| Show verbose `run` logs | `thinclaw --debug run --no-onboard` |
+
+`thinclaw` and `thinclaw run` share the same quiet startup path by default. For targeted log filtering, `RUST_LOG=...` still takes precedence.
+
+### Remote / SSH Hosts
 
 ```bash
-thinclaw --debug --no-onboard
-thinclaw --debug run --no-onboard
+thinclaw onboard --profile remote
+thinclaw gateway access
+thinclaw service install
+thinclaw service start
 ```
 
-If you need more targeted filtering, `RUST_LOG=...` still works and takes precedence.
+Use this path for Raspberry Pi, Mac Mini, VPS, and other SSH-managed hosts. The remote profile ships in the regular `thinclaw` release binary; there is no separate remote artifact.
 
-For a deeper setup path, including service mode, remote access, provider guidance, Windows service management, and external dependencies, use the docs hub at [docs/README.md](docs/README.md).
+For Raspberry Pi OS Lite native service installs from a downloaded release binary:
 
-The onboarding flow now uses a calmer "Humanist Cockpit" framing in both CLI and TUI modes, with shared readiness summaries, skin-aware presentation, and saved follow-up notes so operators can pause setup without losing context.
+```bash
+sudo bash deploy-setup.sh --mode native --binary ./thinclaw
+```
+
+See [docs/deploy/raspberry-pi-os-lite.md](docs/deploy/raspberry-pi-os-lite.md) for the full helper download and service setup flow.
 
 ## Why ThinClaw
 
-### 1. Security Is Part of the Architecture
+### Operator-Owned Runtime
 
-ThinClaw’s safety story is not one toggle. It is split across host-boundary secret injection, sandboxing, tool policy, network controls, and explicit trust boundaries.
+ThinClaw is built for an operator who wants control over deployment, providers, extensions, channels, data paths, secrets, and host privileges. It is a runtime you run, not a remote chat wrapper you decorate.
 
-- WASM tools and WASM channels are sandboxed and capability-scoped.
-- Native channels and built-in tools run in the trusted host runtime.
-- MCP servers are operator-trusted external processes or services, not sandboxed plugins.
+### Identity, Memory, and Surfaces
 
-That distinction matters, and ThinClaw documents it explicitly instead of pretending every integration has the same trust model.
+A ThinClaw agent has a durable identity and workspace-backed memory. It can operate through local terminal clients, the gateway UI, native channels, packaged WASM channels, and background work without treating each surface as a separate product.
 
-### 2. Hybrid Extensibility
+### Security as Architecture
 
-ThinClaw uses different extension paths for different jobs:
+ThinClaw separates trust zones instead of pretending every integration has the same risk profile. Native integrations run in the trusted host runtime, WASM components are capability-scoped, MCP servers are operator-trusted external processes or services, and privileged desktop autonomy is an explicit opt-in mode.
 
-- native Rust for persistent connections and local-system access
-- WASM for hot-reloadable tools and channels with credential isolation
-- MCP for external tool ecosystems where operator-managed trust is acceptable
+### Extensible Without One Extension Model for Everything
 
-This is a deliberate design choice, not a migration artifact.
+Persistent host integrations, hot-reloadable components, and external tool ecosystems have different safety and lifecycle needs. ThinClaw uses native Rust, WASM, and MCP where each model fits best.
 
-### 3. Proactive Runtime
+## Run Modes
 
-ThinClaw is designed for more than interactive chat:
+| Mode | Best For | Start Here |
+|---|---|---|
+| Local CLI | Personal local runtime, development, direct terminal use | `thinclaw` |
+| Full-screen TUI | Keyboard-first local agent cockpit | `thinclaw tui` |
+| Web gateway | Browser-based chat, memory, routines, logs, extensions, providers, and settings | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| Service mode | Long-running host, Mac Mini, VPS, Raspberry Pi, Windows service | [docs/deploy/](docs/deploy/) |
+| Native channels | Telegram, Signal, Discord, Slack, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail | [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md) |
+| WASM channels and tools | Packaged, capability-scoped extension components | [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md) |
+| Scrappy backend | Embedding ThinClaw as a local or remote runtime | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| Reckless desktop autonomy | Operator-approved host-level desktop automation | [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md) |
 
-- channels and web gateway delivery
-- routines and background execution
-- heartbeat and notifications
-- workspace-backed memory and search
-- subagents and multi-session orchestration
+## Core Capabilities
 
-### 4. Flexible Deployment
+| Area | Capabilities |
+|---|---|
+| Runtime surfaces | CLI, TUI, web gateway, native channels, WASM channels, and background jobs |
+| Identity | `personality_pack` defaults, `/personality` overlays, durable agent identity, and `/vibe` compatibility |
+| Shared commands | `/compress`, `/personality`, `/skills`, `/heartbeat`, `/summarize`, `/rollback` |
+| Onboarding | Humanist Cockpit CLI/TUI setup with Quick Setup, Advanced Setup, readiness summaries, and saved follow-up notes |
+| Channels | Telegram, Signal, Discord, Slack, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail, and packaged WASM channels |
+| Memory | Workspace-backed memory, search, citations, identity files, and continuity surfaces |
+| Extensions | Built-in tools, WASM tools, WASM channels, MCP servers, registries, and policy boundaries |
+| Models | Multi-provider routing, failover, provider setup, and cost controls |
+| Gateway | Chat, memory, routines, logs, extensions, providers, projects, skills, and settings |
+| Subagents | Detail-level transparency controls and Telegram subagent session routing |
+| Desktop autonomy | Native app adapters, UI automation, evidence capture, managed code autorollout, and rollback |
 
-You can run ThinClaw:
+## Deployment Modes
 
-- locally on your own machine
-- as a long-running service on macOS, Linux, or Windows
-- behind the built-in gateway
-- embedded inside Scrappy
+| Situation | Best For | Start Here |
+|---|---|---|
+| macOS | Local use, Mac Mini, launchd service | [docs/deploy/macos.md](docs/deploy/macos.md) |
+| Windows | Native install, Windows service, WSL guidance | [docs/deploy/windows.md](docs/deploy/windows.md) |
+| Linux | Laptop, workstation, server, VPS | [docs/deploy/linux.md](docs/deploy/linux.md) |
+| Raspberry Pi OS Lite 64-bit | Pi 4/5 or ARM64 Pi server | [docs/deploy/raspberry-pi-os-lite.md](docs/deploy/raspberry-pi-os-lite.md) |
+| Docker | Compose or container deployment | [docs/deploy/docker.md](docs/deploy/docker.md) |
+| Remote access | Gateway, Tailscale, webhook tunnels | [docs/deploy/remote-access.md](docs/deploy/remote-access.md) |
+| Reckless desktop autonomy | Host-level desktop control with operator approval | [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md) |
+| Scrappy embedding | Local or remote ThinClaw runtime | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+
+The local gateway listens on port `3000` unless configured otherwise. For the full deployment decision tree, use [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Host Support Matrix
 
@@ -143,89 +171,97 @@ You can run ThinClaw:
 | Local CLI / gateway host | Supported | Supported | Supported |
 | Native OS secure store | Supported | Supported | Supported |
 | `thinclaw service` lifecycle | Supported | Supported | Supported |
-| Local browser automation | Chrome / Brave | Chrome / Chromium / Brave | Chrome / Edge / Brave |
+| Local browser automation | Chrome / Brave / Edge | Chrome / Chromium / Brave / Edge | Chrome / Edge / Brave |
 | Docker browser fallback | Supported | Supported | Docker Desktop |
 | Camera / microphone capture | Supported | Supported | Supported with `ffmpeg` |
 | Signal attachments | Supported | Supported | Supported, override with `SIGNAL_ATTACHMENTS_DIR` when needed |
-| Apple Mail / iMessage channels | Supported | Unsupported | Unsupported |
+| Apple Mail / iMessage native adapters | Supported | Unsupported | Unsupported |
+| iMessage via BlueBubbles | Supported | Supported | Supported |
 
-## Core Capabilities
+## Extension and Trust Model
 
-- Multi-surface operation through the CLI, gateway, channels, and background jobs
-- Humanist Cockpit onboarding with shared CLI/TUI readiness framing, shared skin palettes, and saved follow-up notes
-- Shared terminal skin system across boot, REPL, full-screen TUI, onboarding TUI, setup prompts, and human-readable CLI subcommands
-- Built-in ASCII-art skins plus user-defined TOML skins from `~/.thinclaw/skins/`
-- Hybrid delivery across native channels and packaged WASM channels, with platform formatting/rendering guidance owned by the channel layer instead of hard-coded in prompt assembly
-- Workspace-backed memory with search, citations, and identity files
-- Extension support through built-in tools, WASM tools, and MCP servers
-- Multi-provider LLM routing, failover, and cost controls
-- Operator-facing gateway UI for chat, memory, routines, logs, extensions, providers, and settings
-- Operator-facing transparency controls for subagent detail levels and Telegram subagent session routing
-
-## Deployment Modes
-
-| Mode | Best For | Main Doc |
+| Extension Path | Trust Model | Used For |
 |---|---|---|
-| Local standalone | personal machine, laptop, workstation | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| Long-running service | Mac Mini, Linux host, VPS | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| Remote gateway access | LAN, Tailscale, controlled remote use | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
-| Scrappy embedding | desktop app workflow | [Agent_flow.md](Agent_flow.md) |
+| Native Rust | Trusted host runtime | Persistent connections, local-system access, and built-in integrations |
+| WASM tools | Sandboxed and capability-scoped | Hot-reloadable tool components with credential isolation |
+| WASM channels | Sandboxed and capability-scoped | Packaged channel components with explicit host capabilities |
+| MCP servers | Operator-trusted external process or service | External tool ecosystems and services managed outside the sandbox |
+| Desktop autonomy | Privileged opt-in profile | Host-level app control, UI automation, evidence capture, rollout, and rollback |
 
-Code-backed local default: the gateway listens on port `3000` unless you configure otherwise.
+## Security and Trust
 
-## Terminal Skins
+ThinClaw aims for operator control, but it does not claim every configured integration is equally isolated.
 
-Local terminal clients use the active CLI skin for palette, prompt symbol, tool labels, boot art, and human-readable command presentation. The WebUI now follows the active CLI skin by default and can optionally override it with a dedicated WebUI skin.
+- Local data paths, secrets, and policy enforcement live in the trusted host runtime.
+- WASM components are sandboxed and capability-scoped.
+- MCP servers, tunnels, LLM providers, and external services are real trust boundaries.
+- Restricted workspace modes disable unsupported execution paths instead of implying isolation that is not present.
+- Docker remains the portable hard-isolation path for code execution; host-local isolation reports its actual backend and capabilities.
+- Tool outputs and job surfaces expose runtime backend, runtime family, runtime mode, capabilities, and network-isolation metadata.
+- `desktop_autonomy.profile = "reckless_desktop"` adds host-level app, UI, and screen control plus managed code promotion and rollback.
 
-- Built-in skins: `cockpit`, `midnight`, `solar`, `athena`, `delphi`, `olympus`
-- Runtime switching in local clients: `/skin`, `/skin list`, `/skin reset`
-- Persistent default: `AGENT_CLI_SKIN=<name>`
-- WebUI follow/override: `WEBCHAT_SKIN=<name>` or leave unset to follow `AGENT_CLI_SKIN`
-- Custom skins: drop `name.toml` files into `~/.thinclaw/skins/`
-
-Skin TOML files now support:
-
-- core palette tokens: `accent`, `border`, `body`, `muted`, `good`, `warn`, `bad`, `header`
-- prompt symbol: `prompt_symbol`
-- ASCII banner art: `ascii_art`
-- optional skin subtitle: `tagline`
-- tool label embellishments: `tool_emojis`
-- optional WebUI aura colors: `[web].aura_primary`, `[web].aura_secondary`
-
-Legacy compatibility note:
-
-- `WEBCHAT_ACCENT_COLOR` still works, but it only retints accent surfaces in the WebUI and does not replace the shared skin identity, tagline, prompt symbol, or tool iconography
-
-## Security And Trust
-
-ThinClaw aims for operator control, but it does not claim that every configured integration is equally isolated.
-
-- local data paths, secrets, and policy enforcement are handled in the trusted host runtime
-- WASM components are sandboxed
-- MCP servers, tunnels, LLM providers, and external services are real trust boundaries
-
-Use the deep docs before relying on a surface for sensitive workflows:
+Read the deep docs before relying on a surface for sensitive workflows:
 
 - [docs/SECURITY.md](docs/SECURITY.md)
+- [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md)
 - [src/NETWORK_SECURITY.md](src/NETWORK_SECURITY.md)
 - [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md)
 - [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md)
 
+## Build From Source
+
+ThinClaw uses Cargo feature flags to control binary size and capabilities. The default build (`light`) is lean; opt into more with `--features`.
+
+| Profile | Command | What It Adds |
+|---|---|---|
+| **light** (default) | `cargo build` | PostgreSQL, libSQL, local gateway, HTML-to-Markdown, doc extraction, timezones |
+| **full** | `cargo build --release --features full` | ACP, REPL/TUI, tunnel, Docker sandbox, browser, Nostr |
+| **desktop** | `cargo build --features desktop` | libSQL, HTML-to-Markdown, doc extraction, REPL, timezones |
+| **minimal** | `cargo build --no-default-features --features libsql` | Single DB backend, nothing else |
+
+Additional opt-in flags not included in `full`: `voice`, `bedrock`, `bundled-wasm`.
+
+GitHub Releases are the normal user path. The release workflow publishes the regular `thinclaw` binary with the `full` feature set for supported Linux, macOS, and Windows targets.
+
+Full details, custom combinations, and CI matrix: [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md)
+
+## Repository Layout
+
+| Path | Purpose |
+|---|---|
+| [src/](src/) | Core runtime, CLI, gateway, channels, tools, memory, policy, and platform integration |
+| [docs/](docs/) | Canonical user, operator, architecture, security, and deployment docs |
+| [deploy/](deploy/) | Linux, Docker, Raspberry Pi, and service helper assets |
+| [channels-src/](channels-src/) | Source crates for packaged channel integrations |
+| [tools-src/](tools-src/) | Source crates for packaged tool integrations |
+| [channels-docs/](channels-docs/) | Channel setup and operation docs |
+| [tools-docs/](tools-docs/) | Tool setup and operation docs |
+| [patches/](patches/) | Vendored or patched dependency material |
+
 ## Documentation Map
 
-Start here, then go deeper by topic:
-
-- [docs/README.md](docs/README.md): audience-first docs index
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md): standalone, service, remote, and gateway deployment
-- [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md): provider setup and routing
-- [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md): native vs WASM channel model
-- [docs/SECURITY.md](docs/SECURITY.md): public security and trust overview
-- [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md): WASM tools, WASM channels, MCP, registry, and trust boundaries
-- [src/setup/README.md](src/setup/README.md): canonical onboarding and setup spec
-- [Agent_flow.md](Agent_flow.md): boot and runtime flow
-- [src/tools/README.md](src/tools/README.md): maintainer-facing tool architecture
-- [src/workspace/README.md](src/workspace/README.md): workspace and memory model
-- [FEATURE_PARITY.md](FEATURE_PARITY.md): parity tracker plus ThinClaw-first feature ledger
+| Need | Start Here |
+|---|---|
+| Audience-first docs index | [docs/README.md](docs/README.md) |
+| Deployment decision tree | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| Platform runbooks | [docs/deploy/](docs/deploy/) |
+| CLI command reference | [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) |
+| Build profiles and feature flags | [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md) |
+| LLM provider setup | [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) |
+| Security and trust overview | [docs/SECURITY.md](docs/SECURITY.md) |
+| Deep network model | [src/NETWORK_SECURITY.md](src/NETWORK_SECURITY.md) |
+| Extensions, WASM, MCP, and registries | [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md) |
+| Channel architecture | [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md) |
+| Shared surface commands | [docs/SURFACES_AND_COMMANDS.md](docs/SURFACES_AND_COMMANDS.md) |
+| Terminal and WebUI skins | [docs/TERMINAL_SKINS.md](docs/TERMINAL_SKINS.md) |
+| Identity and personality | [docs/IDENTITY_AND_PERSONALITY.md](docs/IDENTITY_AND_PERSONALITY.md) |
+| Memory and growth surfaces | [docs/MEMORY_AND_GROWTH.md](docs/MEMORY_AND_GROWTH.md) |
+| Research and experiments | [docs/RESEARCH_AND_EXPERIMENTS.md](docs/RESEARCH_AND_EXPERIMENTS.md) |
+| Onboarding and setup behavior | [src/setup/README.md](src/setup/README.md) |
+| Tool implementation guidance | [src/tools/README.md](src/tools/README.md) |
+| Workspace and memory model | [src/workspace/README.md](src/workspace/README.md) |
+| Feature parity tracking | [FEATURE_PARITY.md](FEATURE_PARITY.md) |
+| Contribution guidance | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
 ## Development
 

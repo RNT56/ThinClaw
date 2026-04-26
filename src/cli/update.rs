@@ -85,6 +85,57 @@ pub struct BuildInfo {
     pub build_date: String,
 }
 
+fn best_asset_for_target<'a>(
+    assets: &'a [serde_json::Value],
+    target_os: &str,
+    target_arch: &str,
+) -> Option<&'a serde_json::Value> {
+    assets
+        .iter()
+        .filter_map(|asset| {
+            let name = asset["name"].as_str()?.to_ascii_lowercase();
+            let mut score = 0i32;
+
+            if name.contains(target_os) {
+                score += 10;
+            }
+            if name.contains(target_arch) {
+                score += 10;
+            }
+
+            // Common alias support.
+            if target_arch == "x86_64" && (name.contains("amd64") || name.contains("x64")) {
+                score += 6;
+            }
+            if target_arch == "aarch64" && (name.contains("arm64") || name.contains("armv8")) {
+                score += 6;
+            }
+            if target_os == "macos" && name.contains("darwin") {
+                score += 6;
+            }
+            if target_os == "windows" && name.contains("win") {
+                score += 6;
+            }
+
+            // Prefer executable archive formats over source blobs.
+            if name.ends_with(".tar.gz")
+                || name.ends_with(".tgz")
+                || name.ends_with(".zip")
+                || name.ends_with(".msi")
+                || name.ends_with(".exe")
+            {
+                score += 3;
+            }
+            if name.contains("source") || name.contains("src") {
+                score -= 5;
+            }
+
+            Some((score, asset))
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, asset)| asset)
+}
+
 impl BuildInfo {
     pub fn current() -> Self {
         Self {
@@ -266,27 +317,16 @@ async fn fetch_latest_release(channel: &str) -> anyhow::Result<ReleaseInfo> {
             continue;
         }
 
-        // Find the right asset for this platform
-        let download_url = release["assets"]
+        // Pick the best matching asset for this platform deterministically.
+        let selected_asset = release["assets"]
             .as_array()
-            .and_then(|assets| {
-                assets.iter().find(|a| {
-                    let name = a["name"].as_str().unwrap_or("");
-                    name.contains(target_os) && name.contains(target_arch)
-                })
-            })
+            .and_then(|assets| best_asset_for_target(assets, target_os, target_arch));
+
+        let download_url = selected_asset
             .and_then(|a| a["browser_download_url"].as_str())
             .map(String::from);
 
-        let size_bytes = release["assets"]
-            .as_array()
-            .and_then(|assets| {
-                assets.iter().find(|a| {
-                    let name = a["name"].as_str().unwrap_or("");
-                    name.contains(target_os) && name.contains(target_arch)
-                })
-            })
-            .and_then(|a| a["size"].as_u64());
+        let size_bytes = selected_asset.and_then(|a| a["size"].as_u64());
 
         return Ok(ReleaseInfo {
             version: tag.to_string(),
@@ -477,34 +517,36 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
                     bytes.as_ref(),
                     &release.version,
                 )?;
-                return Ok(());
             }
 
-            // Backup current binary
-            let current = std::env::current_exe()?;
-            let backup = backup_binary_path();
-            std::fs::copy(&current, &backup)?;
-            println!("{}", branding.key_value("Backup", backup.display()));
-
-            // Replace binary
-            let temp_path = current.with_extension("new");
-            std::fs::write(&temp_path, &bytes)?;
-
-            #[cfg(unix)]
+            #[cfg(not(target_os = "windows"))]
             {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = std::fs::Permissions::from_mode(0o755);
-                std::fs::set_permissions(&temp_path, perms)?;
-            }
+                // Backup current binary
+                let current = std::env::current_exe()?;
+                let backup = backup_binary_path();
+                std::fs::copy(&current, &backup)?;
+                println!("{}", branding.key_value("Backup", backup.display()));
 
-            std::fs::rename(&temp_path, &current)?;
-            println!(
-                "{}",
-                branding.good(format!(
-                    "Updated to v{}. Restart ThinClaw for changes to take effect.",
-                    release.version
-                ))
-            );
+                // Replace binary
+                let temp_path = current.with_extension("new");
+                std::fs::write(&temp_path, &bytes)?;
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = std::fs::Permissions::from_mode(0o755);
+                    std::fs::set_permissions(&temp_path, perms)?;
+                }
+
+                std::fs::rename(&temp_path, &current)?;
+                println!(
+                    "{}",
+                    branding.good(format!(
+                        "Updated to v{}. Restart ThinClaw for changes to take effect.",
+                        release.version
+                    ))
+                );
+            }
         }
 
         UpdateCommand::Rollback => {
@@ -518,29 +560,31 @@ pub async fn run_update_command(cmd: UpdateCommand) -> anyhow::Result<()> {
                         "Windows rollback is installer-based. Reinstall the previous MSI/ZIP instead of swapping the running executable."
                     )
                 );
-                return Ok(());
             }
 
-            let backup = backup_binary_path();
-            if !backup.exists() {
-                println!(
-                    "{}",
-                    branding.warn(format!("No backup found at {}.", backup.display()))
-                );
-                println!(
-                    "{}",
-                    branding.muted("Rollback is only available after a successful update.")
-                );
-                return Ok(());
-            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let backup = backup_binary_path();
+                if !backup.exists() {
+                    println!(
+                        "{}",
+                        branding.warn(format!("No backup found at {}.", backup.display()))
+                    );
+                    println!(
+                        "{}",
+                        branding.muted("Rollback is only available after a successful update.")
+                    );
+                    return Ok(());
+                }
 
-            let current = std::env::current_exe()?;
-            std::fs::rename(&backup, &current)?;
-            println!("{}", branding.good("Rolled back to the previous version."));
-            println!(
-                "{}",
-                branding.muted("Restart ThinClaw for changes to take effect.")
-            );
+                let current = std::env::current_exe()?;
+                std::fs::rename(&backup, &current)?;
+                println!("{}", branding.good("Rolled back to the previous version."));
+                println!(
+                    "{}",
+                    branding.muted("Restart ThinClaw for changes to take effect.")
+                );
+            }
         }
     }
 
