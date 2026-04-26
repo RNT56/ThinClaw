@@ -182,7 +182,10 @@ esac
 
 sidecar() {
     local command="$1"
-    local payload="${2:-{}}"
+    local payload="${2:-}"
+    if [[ -z "$payload" ]]; then
+        payload="{}"
+    fi
     THINCLAW_DESKTOP_BRIDGE_PAYLOAD="$payload" python3 "$SIDECAR" "$command" </dev/null
 }
 
