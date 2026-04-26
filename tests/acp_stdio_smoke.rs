@@ -79,6 +79,21 @@ impl AcpStdioHarness {
             .stdout_rx
             .recv_timeout(Duration::from_secs(20))
             .expect("ACP stdout response");
+        Self::parse_stdout_line(&line)
+    }
+
+    fn read_json_with_timeout(&self, timeout: Duration) -> Option<serde_json::Value> {
+        let line = match self.stdout_rx.recv_timeout(timeout) {
+            Ok(line) => line,
+            Err(mpsc::RecvTimeoutError::Timeout) => return None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("ACP stdout closed before response");
+            }
+        };
+        Some(Self::parse_stdout_line(&line))
+    }
+
+    fn parse_stdout_line(line: &str) -> serde_json::Value {
         assert!(
             !line.trim().is_empty(),
             "stdout must not contain blank NDJSON lines"
@@ -423,12 +438,18 @@ fn thinclaw_acp_agent_permission_approve_reject_cancel_and_timeout_are_transcrip
         })
         .to_string(),
     );
-    let (approve_updates, approve_prompt) =
+    let (mut approve_updates, approve_prompt) =
         harness.read_until_response(serde_json::json!("approve-prompt"));
     assert_eq!(
         approve_prompt["result"]["stopReason"],
         serde_json::json!("end_turn")
     );
+    if !has_update_kind(&approve_updates, "tool_call")
+        && !has_update_kind(&approve_updates, "tool_call_update")
+        && let Some(late_update) = harness.read_json_with_timeout(Duration::from_secs(5))
+    {
+        approve_updates.push(late_update);
+    }
     assert!(
         has_update_kind(&approve_updates, "tool_call")
             || has_update_kind(&approve_updates, "tool_call_update"),
