@@ -216,12 +216,12 @@ async fn connection_execute_batch() {
 
     let mut rows = conn
         .query(
-            "SELECT 
+            "SELECT
                 name
-            FROM 
+            FROM
                 sqlite_schema
-            WHERE 
-                type ='table' AND 
+            WHERE
+                type ='table' AND
                 name NOT LIKE 'sqlite_%';",
             (),
         )

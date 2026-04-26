@@ -1,6 +1,6 @@
 # CLI Reference
 
-This document provides a comprehensive reference for all `thinclaw` terminal commands. 
+This document provides a comprehensive reference for all `thinclaw` terminal commands.
 
 > [!NOTE]
 > For in-chat slash commands (like `/help` and `/personality`) used while talking to the agent, see [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md).

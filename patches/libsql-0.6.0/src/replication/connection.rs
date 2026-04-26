@@ -966,7 +966,7 @@ mod tests {
 
         assert_should_execute_local(
             "
-           COMMIT; 
+           COMMIT;
             ",
             State::TxnReadOnly,
             State::Init,
@@ -979,7 +979,7 @@ mod tests {
             SELECT 1;
             COMMIT;
             BEGIN IMMEDIATE;
-            SELECT 1; 
+            SELECT 1;
             COMMIT;
             ",
             State::Init,
