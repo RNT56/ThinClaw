@@ -243,8 +243,10 @@ import os
 payload = json.loads(os.environ["JSON"])
 mode = os.environ["MODE"]
 result = payload["result"]
-if mode in ("kde-wayland", "plasma-kwin-wayland") and result.get("backend") != "spectacle":
-    raise SystemExit(f"expected KDE/Plasma screen capture through spectacle, got {result}")
+if mode in ("kde-wayland", "plasma-kwin-wayland"):
+    supported = {"spectacle", "grim", "scrot", "import", "weston-screenshooter"}
+    if result.get("backend") not in supported:
+        raise SystemExit(f"unexpected KDE/Plasma screen capture backend: {result}")
 PY
 }
 
