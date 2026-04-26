@@ -40,14 +40,14 @@ eula = false
 dist = true
 
 [dependencies]
-thinclaw-types = { path = "crates/thinclaw-types", default-features = false }
-thinclaw-db = { path = "crates/thinclaw-db" }
-thinclaw-channels-core = { path = "crates/thinclaw-channels-core" }
-thinclaw-identity = { path = "crates/thinclaw-identity" }
-thinclaw-llm-core = { path = "crates/thinclaw-llm-core" }
-thinclaw-safety = { path = "crates/thinclaw-safety" }
-thinclaw-tools-core = { path = "crates/thinclaw-tools-core" }
-thinclaw-workspace = { path = "crates/thinclaw-workspace" }
+thinclaw-types = { version = "0.1.0", path = "crates/thinclaw-types", default-features = false }
+thinclaw-db = { version = "0.1.0", path = "crates/thinclaw-db" }
+thinclaw-channels-core = { version = "0.1.0", path = "crates/thinclaw-channels-core" }
+thinclaw-identity = { version = "0.1.0", path = "crates/thinclaw-identity" }
+thinclaw-llm-core = { version = "0.1.0", path = "crates/thinclaw-llm-core" }
+thinclaw-safety = { version = "0.1.0", path = "crates/thinclaw-safety" }
+thinclaw-tools-core = { version = "0.1.0", path = "crates/thinclaw-tools-core" }
+thinclaw-workspace = { version = "0.1.0", path = "crates/thinclaw-workspace" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

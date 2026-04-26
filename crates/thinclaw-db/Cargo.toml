@@ -2,10 +2,11 @@
 name = "thinclaw-db"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
 async-trait = "0.1"
-thinclaw-types = { path = "../thinclaw-types" }
-thinclaw-workspace = { path = "../thinclaw-workspace" }
+thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
+thinclaw-workspace = { version = "0.1.0", path = "../thinclaw-workspace" }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }

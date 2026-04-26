@@ -23,7 +23,9 @@ ET.register_namespace("manifest", OOO_MANIFEST_NS)
 
 
 def read_payload():
-    raw = sys.stdin.read()
+    raw = os.environ.get("THINCLAW_DESKTOP_BRIDGE_PAYLOAD")
+    if raw is None:
+        raw = sys.stdin.read()
     if not raw.strip():
         return {}
     return json.loads(raw)

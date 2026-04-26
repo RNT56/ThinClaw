@@ -183,7 +183,7 @@ esac
 sidecar() {
     local command="$1"
     local payload="${2:-{}}"
-    printf '%s' "$payload" | python3 "$SIDECAR" "$command"
+    THINCLAW_DESKTOP_BRIDGE_PAYLOAD="$payload" python3 "$SIDECAR" "$command" </dev/null
 }
 
 assert_ok() {
