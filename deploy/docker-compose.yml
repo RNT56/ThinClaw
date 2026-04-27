@@ -6,7 +6,9 @@
 #   docker compose pull thinclaw
 #   docker compose up -d
 #
-# Source-build fallback:
+# Source-build fallback (requires pre-built binary):
+#   cargo build --release --features full --bin thinclaw
+#   cp target/release/thinclaw .
 #   docker compose up -d --build
 #
 # Scrappy connects via: http://<server-ip>:3000
@@ -19,7 +21,7 @@ services:
       context: ..  # ThinClaw/ directory (one level up from deploy/)
       dockerfile: Dockerfile
       args:
-        BUILD_FEATURES: ${BUILD_FEATURES:-full}
+        THINCLAW_BINARY: ${THINCLAW_BINARY:-thinclaw}
     container_name: thinclaw-remote
     restart: unless-stopped
     ports:

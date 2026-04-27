@@ -311,8 +311,19 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-      - name: Build Docker image with full profile
-        run: docker build --build-arg BUILD_FEATURES=full -t thinclaw:ci .
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-deploy-smoke
+      - name: Build thinclaw binary
+        run: cargo build --release --features full --bin thinclaw
+      - name: Copy binary into build context
+        run: cp target/release/thinclaw ./thinclaw
+      - name: Build Docker image
+        run: docker build --build-arg THINCLAW_BINARY=thinclaw -t thinclaw:ci .
       - name: Prepare Compose env
         run: |
           cp deploy/env.example deploy/.env
@@ -347,14 +358,24 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-docker-multiarch
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-      - name: Verify base images support ARM64
+      - name: Verify base image supports ARM64
         run: |
-          docker buildx imagetools inspect rust:1.92-slim-bookworm | grep -q 'linux/arm64'
           docker buildx imagetools inspect debian:bookworm-slim | grep -q 'linux/arm64'
+      - name: Build thinclaw binary for Docker smoke
+        run: cargo build --release --features light --bin thinclaw
+      - name: Copy binary into build context
+        run: cp target/release/thinclaw ./thinclaw
       - name: Validate local Docker build
-        run: docker buildx build --platform linux/amd64 --build-arg BUILD_FEATURES=light --load -t thinclaw:ci-light .
+        run: docker buildx build --platform linux/amd64 --build-arg THINCLAW_BINARY=thinclaw --load -t thinclaw:ci-light .
 
   windows-host-matrix:
     name: "Windows Host: ${{ matrix.name }}"
