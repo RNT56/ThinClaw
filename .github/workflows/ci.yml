@@ -349,13 +349,7 @@ jobs:
 
           # Create a compose override to neutralize hardcoded environment
           # values from docker-compose.yml that would override .env entries.
-          cat > deploy/docker-compose.override.yml <<'EOF'
-services:
-  thinclaw:
-    environment:
-      - HEARTBEAT_ENABLED=false
-      - HEARTBEAT_NOTIFY_CHANNEL=gateway
-EOF
+          printf 'services:\n  thinclaw:\n    environment:\n      - HEARTBEAT_ENABLED=false\n      - HEARTBEAT_NOTIFY_CHANNEL=gateway\n' > deploy/docker-compose.override.yml
 
           echo "=== Final .env (non-comment lines) ==="
           grep -v '^#' deploy/.env | grep -v '^$' || true
