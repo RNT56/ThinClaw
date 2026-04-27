@@ -329,10 +329,24 @@ jobs:
           cp deploy/env.example deploy/.env
           sed -i 's/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=ci-smoke-token/' deploy/.env
           sed -i 's/^LLM_BACKEND=.*/LLM_BACKEND=ollama/' deploy/.env
-          sed -i 's|^LLM_BASE_URL=.*|OLLAMA_BASE_URL=http://127.0.0.1:11434|' deploy/.env
+          sed -i 's|^LLM_BASE_URL=.*|LLM_BASE_URL=http://127.0.0.1:11434|' deploy/.env
           sed -i 's/^EMBEDDING_ENABLED=.*/EMBEDDING_ENABLED=false/' deploy/.env
           # Use the locally-built image instead of pulling from GHCR
           sed -i 's|^THINCLAW_IMAGE=.*|THINCLAW_IMAGE=thinclaw:ci|' deploy/.env
+          # Headless Docker requires onboarding bypass and env-based secrets
+          echo 'ONBOARD_COMPLETED=true' >> deploy/.env
+          echo 'THINCLAW_HEADLESS=true' >> deploy/.env
+          echo 'THINCLAW_ALLOW_ENV_MASTER_KEY=1' >> deploy/.env
+          echo 'SECRETS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000' >> deploy/.env
+          echo 'OLLAMA_BASE_URL=http://127.0.0.1:11434' >> deploy/.env
+          echo 'SANDBOX_ENABLED=false' >> deploy/.env
+          echo 'DESKTOP_AUTONOMY_ENABLED=false' >> deploy/.env
+          echo 'ROUTINES_ENABLED=false' >> deploy/.env
+          echo 'EXPERIMENTS_ENABLED=false' >> deploy/.env
+          echo 'BUILDER_ENABLED=false' >> deploy/.env
+          echo 'SKILLS_ENABLED=false' >> deploy/.env
+          echo 'HEARTBEAT_ENABLED=false' >> deploy/.env
+          echo 'BROWSER_DOCKER=never' >> deploy/.env
       - name: Compose smoke
         working-directory: deploy
         run: |
