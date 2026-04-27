@@ -32,7 +32,7 @@ fn docker_compose_setup_and_docs_share_gateway_port() {
     let deployment_docs = repo_file("docs/DEPLOYMENT.md");
 
     assert!(dockerfile.contains("EXPOSE 3000"));
-    assert!(dockerfile.contains("ARG BUILD_FEATURES=full"));
+    assert!(dockerfile.contains("ARG THINCLAW_BINARY=thinclaw"));
     assert!(compose.contains("ghcr.io/rnt56/thinclaw:latest"));
     assert!(compose.contains("GATEWAY_PORT=${GATEWAY_PORT:-3000}"));
     assert!(compose.contains("localhost:$${GATEWAY_PORT:-3000}/api/health"));
@@ -65,7 +65,6 @@ fn docker_compose_setup_and_docs_share_gateway_port() {
 fn deploy_env_documents_linux_runtime_overrides() {
     let env = repo_file("deploy/env.example");
     for key in [
-        "BUILD_FEATURES=full",
         "THINCLAW_IMAGE=ghcr.io/rnt56/thinclaw:latest",
         "BROWSER_DOCKER=auto",
         "CHROMIUM_IMAGE=chromedp/headless-shell:latest",
@@ -137,7 +136,8 @@ fn pi_os_lite_support_is_documented_and_guarded() {
     assert!(ci.contains("kde-spectacle"));
     assert!(ci.contains("command -v spectacle"));
     assert!(ci.contains("scripts/ci/linux_desktop_sidecar_smoke.sh"));
-    assert!(release.contains("linux/amd64,linux/arm64"));
+    assert!(release.contains("platforms: linux/amd64"));
+    assert!(release.contains("platforms: linux/arm64"));
     assert!(release.contains("ghcr.io/${GITHUB_REPOSITORY,,}"));
 }
 
