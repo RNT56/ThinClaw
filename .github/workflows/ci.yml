@@ -327,37 +327,59 @@ jobs:
       - name: Prepare Compose env
         run: |
           cp deploy/env.example deploy/.env
+          # Override existing keys via sed (avoids duplicates)
           sed -i 's/^GATEWAY_AUTH_TOKEN=.*/GATEWAY_AUTH_TOKEN=ci-smoke-token/' deploy/.env
           sed -i 's/^LLM_BACKEND=.*/LLM_BACKEND=ollama/' deploy/.env
           sed -i 's|^LLM_BASE_URL=.*|LLM_BASE_URL=http://127.0.0.1:11434|' deploy/.env
           sed -i 's/^EMBEDDING_ENABLED=.*/EMBEDDING_ENABLED=false/' deploy/.env
-          # Use the locally-built image instead of pulling from GHCR
           sed -i 's|^THINCLAW_IMAGE=.*|THINCLAW_IMAGE=thinclaw:ci|' deploy/.env
-          # Headless Docker requires onboarding bypass and env-based secrets
+          sed -i 's/^HEARTBEAT_ENABLED=.*/HEARTBEAT_ENABLED=false/' deploy/.env
+          sed -i 's/^SANDBOX_ENABLED=.*/SANDBOX_ENABLED=false/' deploy/.env
+          sed -i 's/^ROUTINES_ENABLED=.*/ROUTINES_ENABLED=false/' deploy/.env
+          sed -i 's/^BROWSER_DOCKER=.*/BROWSER_DOCKER=never/' deploy/.env
+          sed -i 's/^DESKTOP_AUTONOMY_ENABLED=.*/DESKTOP_AUTONOMY_ENABLED=false/' deploy/.env
+          # Append keys that do not exist in env.example
           echo 'ONBOARD_COMPLETED=true' >> deploy/.env
-          echo 'THINCLAW_HEADLESS=true' >> deploy/.env
           echo 'THINCLAW_ALLOW_ENV_MASTER_KEY=1' >> deploy/.env
           echo 'SECRETS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000' >> deploy/.env
           echo 'OLLAMA_BASE_URL=http://127.0.0.1:11434' >> deploy/.env
-          echo 'SANDBOX_ENABLED=false' >> deploy/.env
-          echo 'DESKTOP_AUTONOMY_ENABLED=false' >> deploy/.env
-          echo 'ROUTINES_ENABLED=false' >> deploy/.env
           echo 'EXPERIMENTS_ENABLED=false' >> deploy/.env
           echo 'BUILDER_ENABLED=false' >> deploy/.env
           echo 'SKILLS_ENABLED=false' >> deploy/.env
-          echo 'HEARTBEAT_ENABLED=false' >> deploy/.env
-          echo 'BROWSER_DOCKER=never' >> deploy/.env
+
+          # Create a compose override to neutralize hardcoded environment
+          # values from docker-compose.yml that would override .env entries.
+          cat > deploy/docker-compose.override.yml <<'EOF'
+services:
+  thinclaw:
+    environment:
+      - HEARTBEAT_ENABLED=false
+      - HEARTBEAT_NOTIFY_CHANNEL=gateway
+EOF
+
+          echo "=== Final .env (non-comment lines) ==="
+          grep -v '^#' deploy/.env | grep -v '^$' || true
       - name: Compose smoke
         working-directory: deploy
         run: |
           docker compose up -d thinclaw
-          for i in {1..60}; do
+          # Show container status immediately
+          sleep 5
+          docker compose ps
+          echo "=== Early container logs ==="
+          docker compose logs thinclaw 2>&1 | tail -30
+          echo "=== Polling health endpoint ==="
+          for i in {1..55}; do
             if curl -fsS http://127.0.0.1:3000/api/health; then
+              echo ""
+              echo "=== Health check passed after $((i * 2)) seconds ==="
               exit 0
             fi
             sleep 2
           done
+          echo "=== HEALTH CHECK TIMED OUT ==="
           docker compose ps
+          echo "=== Full container logs ==="
           docker compose logs thinclaw
           exit 1
       - name: Compose cleanup
