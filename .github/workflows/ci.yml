@@ -331,10 +331,12 @@ jobs:
           sed -i 's/^LLM_BACKEND=.*/LLM_BACKEND=ollama/' deploy/.env
           sed -i 's|^LLM_BASE_URL=.*|OLLAMA_BASE_URL=http://127.0.0.1:11434|' deploy/.env
           sed -i 's/^EMBEDDING_ENABLED=.*/EMBEDDING_ENABLED=false/' deploy/.env
+          # Use the locally-built image instead of pulling from GHCR
+          sed -i 's|^THINCLAW_IMAGE=.*|THINCLAW_IMAGE=thinclaw:ci|' deploy/.env
       - name: Compose smoke
         working-directory: deploy
         run: |
-          docker compose up -d --build thinclaw
+          docker compose up -d thinclaw
           for i in {1..60}; do
             if curl -fsS http://127.0.0.1:3000/api/health; then
               exit 0
