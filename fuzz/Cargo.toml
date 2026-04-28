@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+serde_json = "1"
 thinclaw = { path = "..", features = ["full"] }
 
 # Prevent this crate from interfering with the workspace
