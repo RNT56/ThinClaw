@@ -25,6 +25,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+      - name: Free disk space for full profile test compile
+        if: matrix.name == 'full'
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker system prune -af || true
+          df -h
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -307,7 +314,8 @@ jobs:
 
   linux-deploy-smoke:
     name: Linux Docker Deploy Smoke
-    runs-on: ubuntu-latest
+    # Keep host-built binaries compatible with the Debian bookworm runtime image.
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -349,7 +357,7 @@ jobs:
 
           # Create a compose override to neutralize hardcoded environment
           # values from docker-compose.yml that would override .env entries.
-          printf 'services:\n  thinclaw:\n    command: ["run", "--no-onboard"]\n    environment:\n      - HEARTBEAT_ENABLED=false\n      - HEARTBEAT_NOTIFY_CHANNEL=gateway\n      - ROUTINES_ENABLED=false\n      - CLI_ENABLED=false\n      - ONBOARD_COMPLETED=true\n      - THINCLAW_ALLOW_ENV_MASTER_KEY=1\n' > deploy/docker-compose.override.yml
+          printf 'services:\n  thinclaw:\n    command: ["run", "--no-onboard"]\n    environment:\n      - HEARTBEAT_ENABLED=false\n      - HEARTBEAT_NOTIFY_CHANNEL=gateway\n      - ROUTINES_ENABLED=false\n      - CLI_ENABLED=false\n      - ONBOARD_COMPLETED=true\n      - THINCLAW_ALLOW_ENV_MASTER_KEY=1\n      - RUST_BACKTRACE=1\n      - RUST_LOG=thinclaw=debug\n' > deploy/docker-compose.override.yml
 
           echo "=== Final .env (non-comment lines) ==="
           grep -v '^#' deploy/.env | grep -v '^$' || true
@@ -359,11 +367,13 @@ jobs:
         working-directory: deploy
         run: |
           docker compose up -d thinclaw
-          # Show container status immediately
+          # Show container status and env immediately
           sleep 5
           docker compose ps
+          echo "=== Container env ==="
+          docker compose exec -T thinclaw env 2>&1 | grep -E '^(LLM_|GATEWAY_|DATABASE_|LIBSQL_|ONBOARD_|THINCLAW_|HEARTBEAT_|CLI_|SECRETS_|ROUTINES_|RUST_)' || echo "(container not running)"
           echo "=== Early container logs ==="
-          docker compose logs thinclaw 2>&1 | tail -40
+          docker compose logs thinclaw 2>&1 | tail -100
           echo "=== Polling health endpoint (up to 240s) ==="
           for i in $(seq 1 120); do
             # Detect container crash early
@@ -413,7 +423,8 @@ jobs:
 
   linux-docker-multiarch-metadata:
     name: Linux Docker Multi-Arch Metadata
-    runs-on: ubuntu-latest
+    # Keep host-built binaries compatible with the Debian bookworm runtime image.
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
