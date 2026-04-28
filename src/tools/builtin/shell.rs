@@ -944,8 +944,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
     async fn test_external_scanner_blocks_before_smart_approval() {
+        let _env_guard = lock_env();
         let dir = tempfile::tempdir().unwrap();
         let scanner_path = dir.path().join(if cfg!(windows) {
             "scanner.cmd"
@@ -981,9 +983,10 @@ mod tests {
             ..SafetyConfig::default()
         });
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let command = "sudo echo scanner-block";
         tool.store_smart_decision(
             SmartApprovalMode::Smart,
-            "sudo echo approve",
+            command,
             &cwd,
             ApprovalDecision::Approve,
         );
@@ -991,7 +994,7 @@ mod tests {
             .external_scanner
             .as_ref()
             .expect("scanner should be configured")
-            .scan("sudo echo approve")
+            .scan(command)
             .await;
         assert_eq!(
             scanner_report.verdict,
@@ -1001,7 +1004,7 @@ mod tests {
         let ctx = JobContext::default();
 
         let result = tool
-            .execute(serde_json::json!({"command": "sudo echo approve"}), &ctx)
+            .execute(serde_json::json!({"command": command}), &ctx)
             .await;
 
         assert!(
