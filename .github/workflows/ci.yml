@@ -349,7 +349,7 @@ jobs:
 
           # Create a compose override to neutralize hardcoded environment
           # values from docker-compose.yml that would override .env entries.
-          printf 'services:\n  thinclaw:\n    environment:\n      - HEARTBEAT_ENABLED=false\n      - HEARTBEAT_NOTIFY_CHANNEL=gateway\n      - ROUTINES_ENABLED=false\n      - CLI_ENABLED=false\n' > deploy/docker-compose.override.yml
+          printf 'services:\n  thinclaw:\n    command: ["run", "--no-onboard"]\n    environment:\n      - HEARTBEAT_ENABLED=false\n      - HEARTBEAT_NOTIFY_CHANNEL=gateway\n      - ROUTINES_ENABLED=false\n      - CLI_ENABLED=false\n      - ONBOARD_COMPLETED=true\n      - THINCLAW_ALLOW_ENV_MASTER_KEY=1\n' > deploy/docker-compose.override.yml
 
           echo "=== Final .env (non-comment lines) ==="
           grep -v '^#' deploy/.env | grep -v '^$' || true
@@ -385,6 +385,24 @@ jobs:
           echo "=== Full container logs ==="
           docker compose logs thinclaw
           exit 1
+      - name: Save compose logs
+        if: always()
+        working-directory: deploy
+        run: |
+          docker compose logs thinclaw > /tmp/compose-thinclaw.log 2>&1 || true
+          docker compose ps > /tmp/compose-ps.log 2>&1 || true
+          cat .env > /tmp/compose-env.log 2>&1 || true
+          cat docker-compose.override.yml >> /tmp/compose-env.log 2>&1 || true
+      - name: Upload compose logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-smoke-logs
+          path: |
+            /tmp/compose-thinclaw.log
+            /tmp/compose-ps.log
+            /tmp/compose-env.log
+          retention-days: 5
       - name: Compose cleanup
         if: always()
         working-directory: deploy
