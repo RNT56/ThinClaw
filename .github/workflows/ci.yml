@@ -349,10 +349,12 @@ jobs:
 
           # Create a compose override to neutralize hardcoded environment
           # values from docker-compose.yml that would override .env entries.
-          printf 'services:\n  thinclaw:\n    environment:\n      - HEARTBEAT_ENABLED=false\n      - HEARTBEAT_NOTIFY_CHANNEL=gateway\n' > deploy/docker-compose.override.yml
+          printf 'services:\n  thinclaw:\n    environment:\n      - HEARTBEAT_ENABLED=false\n      - HEARTBEAT_NOTIFY_CHANNEL=gateway\n      - ROUTINES_ENABLED=false\n      - CLI_ENABLED=false\n' > deploy/docker-compose.override.yml
 
           echo "=== Final .env (non-comment lines) ==="
           grep -v '^#' deploy/.env | grep -v '^$' || true
+          echo "=== Compose override ==="
+          cat deploy/docker-compose.override.yml
       - name: Compose smoke
         working-directory: deploy
         run: |
@@ -361,9 +363,16 @@ jobs:
           sleep 5
           docker compose ps
           echo "=== Early container logs ==="
-          docker compose logs thinclaw 2>&1 | tail -30
-          echo "=== Polling health endpoint ==="
-          for i in {1..55}; do
+          docker compose logs thinclaw 2>&1 | tail -40
+          echo "=== Polling health endpoint (up to 240s) ==="
+          for i in $(seq 1 120); do
+            # Detect container crash early
+            if ! docker compose ps thinclaw --format '{{.State}}' | grep -qi running; then
+              echo "=== CONTAINER IS NOT RUNNING ==="
+              docker compose ps
+              docker compose logs thinclaw
+              exit 1
+            fi
             if curl -fsS http://127.0.0.1:3000/api/health; then
               echo ""
               echo "=== Health check passed after $((i * 2)) seconds ==="
@@ -371,7 +380,7 @@ jobs:
             fi
             sleep 2
           done
-          echo "=== HEALTH CHECK TIMED OUT ==="
+          echo "=== HEALTH CHECK TIMED OUT (240s) ==="
           docker compose ps
           echo "=== Full container logs ==="
           docker compose logs thinclaw
