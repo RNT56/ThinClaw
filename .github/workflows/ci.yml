@@ -73,8 +73,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-      - name: Free disk space for full profile test compile
-        if: matrix.name == 'full'
+      - name: Free disk space for heavy profile test compile
+        if: matrix.name == 'full' || matrix.name == 'all-features'
         run: |
           df -h
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
