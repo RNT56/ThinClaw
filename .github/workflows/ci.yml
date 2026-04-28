@@ -88,6 +88,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: profile-${{ matrix.name }}
+          # Feature profiles are compile-only gates; avoid failing a green
+          # profile in the post-job cache save when hosted runners are low on disk.
+          save-if: false
       - name: Install Linux all-features packages
         if: matrix.name == 'all-features'
         run: |
