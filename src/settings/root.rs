@@ -1,5 +1,17 @@
 use super::*;
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_webchat_theme() -> String {
+    "system".to_string()
+}
+
+fn default_observability_backend() -> String {
+    "none".to_string()
+}
+
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {

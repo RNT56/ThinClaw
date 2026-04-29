@@ -11,67 +11,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::tools::policy::ToolPolicyManager;
 
-fn default_true() -> bool {
-    true
-}
-
-fn default_telegram_subagent_session_mode() -> String {
-    "temp_topic".to_string()
-}
-
-fn default_telegram_transport_mode() -> String {
-    "auto".to_string()
-}
-
-fn default_webchat_theme() -> String {
-    "system".to_string()
-}
-
-fn default_observability_backend() -> String {
-    "none".to_string()
-}
-
-fn default_experiments_ui_visibility() -> String {
-    "hidden_until_enabled".to_string()
-}
-
-fn default_experiments_promotion_mode() -> String {
-    "branch_pr_draft".to_string()
-}
-
-fn default_prompt_project_context_max_tokens() -> usize {
-    8_000
-}
-
-fn default_extensions_user_tools_dir() -> String {
-    crate::platform::resolve_data_dir("user-tools")
-        .to_string_lossy()
-        .to_string()
-}
-
 mod agent;
+mod builder;
 mod channels;
+mod desktop_autonomy;
 mod embeddings;
+mod experiments;
+mod extensions;
 mod heartbeat;
 mod learning;
+mod notifications;
 mod onboarding;
-mod product;
+mod prompt;
 mod providers;
 mod root;
-mod runtime;
+mod safety;
+mod sandbox;
 mod serialization;
 mod settings_impl;
+mod tunnel;
+mod wasm;
 
 pub use agent::*;
+pub use builder::*;
 pub use channels::*;
+pub use desktop_autonomy::*;
 pub use embeddings::*;
+pub use experiments::*;
+pub use extensions::*;
 pub use heartbeat::*;
 pub use learning::*;
+pub use notifications::*;
 pub use onboarding::*;
-pub use product::*;
+pub use prompt::*;
 pub use providers::*;
 pub use root::*;
-pub use runtime::*;
+pub use safety::*;
+pub use sandbox::*;
+pub use tunnel::*;
+pub use wasm::*;
 
 use serialization::*;
 

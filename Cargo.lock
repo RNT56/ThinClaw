@@ -7527,10 +7527,12 @@ dependencies = [
 name = "thinclaw-channels-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "futures",
  "serde_json",
  "thinclaw-identity",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "uuid",
 ]

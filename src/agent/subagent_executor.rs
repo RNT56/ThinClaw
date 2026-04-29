@@ -27,6 +27,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+pub use thinclaw_types::{
+    SubagentMemoryMode, SubagentProvidedContext, SubagentSkillMode, SubagentTaskPacket,
+    SubagentToolMode,
+};
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -366,49 +370,6 @@ pub struct SubagentSpawnRequest {
     /// If false, return immediately and re-inject the result on completion.
     #[serde(default)]
     pub wait: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SubagentMemoryMode {
-    #[default]
-    ProvidedContextOnly,
-    GrantedToolsOnly,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SubagentToolMode {
-    #[default]
-    ExplicitOnly,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SubagentSkillMode {
-    #[default]
-    ExplicitOnly,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SubagentProvidedContext {
-    pub title: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct SubagentTaskPacket {
-    pub objective: String,
-    #[serde(default)]
-    pub todos: Vec<String>,
-    #[serde(default)]
-    pub acceptance_criteria: Vec<String>,
-    #[serde(default)]
-    pub constraints: Vec<String>,
-    #[serde(default)]
-    pub provided_context: Vec<SubagentProvidedContext>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_summary: Option<String>,
 }
 
 impl SubagentSpawnRequest {

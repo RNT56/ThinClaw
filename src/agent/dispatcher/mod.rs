@@ -35,14 +35,18 @@ pub(crate) use super::dispatcher_helpers::{
 };
 
 mod advisor;
-mod agent_loop;
 mod llm_turn;
+mod r#loop;
+mod prompt_context;
 mod tool_execution;
 mod tool_phase;
 mod types;
 
+use prompt_context::*;
 use tool_phase::*;
 pub(crate) use types::*;
 
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;

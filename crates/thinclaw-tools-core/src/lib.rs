@@ -1,9 +1,13 @@
 //! Core tool traits, schemas, and execution metadata.
 
+pub mod canvas;
 pub mod rate_limiter;
 pub mod tool;
 pub mod url_guard;
 
+pub use canvas::{
+    ButtonStyle, CanvasAction, FormField, KvItem, NotifyLevel, PanelPosition, UiComponent,
+};
 pub use rate_limiter::{LimitType, RateLimitResult, RateLimiter};
 pub use tool::{
     ApprovalRequirement, Tool, ToolApprovalClass, ToolArtifact, ToolDescriptor, ToolDomain,

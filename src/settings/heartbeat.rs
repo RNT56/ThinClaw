@@ -1,5 +1,9 @@
 use super::*;
 
+fn default_true() -> bool {
+    true
+}
+
 /// Heartbeat configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatSettings {

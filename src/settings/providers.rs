@@ -1,5 +1,9 @@
 use super::*;
 
+fn default_true() -> bool {
+    true
+}
+
 /// Multi-provider cloud intelligence configuration.
 ///
 /// Enables ThinClaw to manage multiple LLM providers with failover,

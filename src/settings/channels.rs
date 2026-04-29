@@ -1,80 +1,15 @@
 use super::*;
 
-/// Global notification routing preferences.
-///
-/// Controls where proactive messages (heartbeats, routine alerts, self-repair)
-/// are delivered. When a routine's own `NotifyConfig` has no channel/user set,
-/// these global defaults are used.
-///
-/// - If only one channel is configured, it's auto-selected.
-/// - If multiple channels exist, the user should explicitly set their preference.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct NotificationSettings {
-    /// Preferred channel for proactive notifications.
-    /// e.g. "telegram", "imessage", "bluebubbles", "signal", "web".
-    /// None = broadcast to web only (safe default).
-    #[serde(default)]
-    pub preferred_channel: Option<String>,
-
-    /// User identifier on the preferred channel.
-    /// - Telegram: numeric chat ID (e.g. "123456789")
-    /// - iMessage: phone number or Apple ID (e.g. "+4917612345678")
-    /// - Signal: phone number (e.g. "+4917612345678")
-    /// - Web: "default" (always works, no setup needed)
-    /// None = use "default" (web-only, no external messaging).
-    #[serde(default)]
-    pub recipient: Option<String>,
+fn default_true() -> bool {
+    true
 }
 
-/// Tunnel settings for public webhook endpoints.
-///
-/// The tunnel URL is shared across all channels that need webhooks.
-/// Two modes:
-/// - **Static URL**: `public_url` set directly (manual tunnel management).
-/// - **Managed provider**: `provider` is set and the agent starts/stops the
-///   tunnel process automatically at boot/shutdown.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct TunnelSettings {
-    /// Public URL from tunnel provider (e.g., "https://abc123.ngrok.io").
-    /// When set without a provider, treated as a static (externally managed) URL.
-    #[serde(default)]
-    pub public_url: Option<String>,
+fn default_telegram_subagent_session_mode() -> String {
+    "temp_topic".to_string()
+}
 
-    /// Managed tunnel provider: "ngrok", "cloudflare", "tailscale", "custom".
-    #[serde(default)]
-    pub provider: Option<String>,
-
-    /// Cloudflare tunnel token.
-    #[serde(default)]
-    pub cf_token: Option<String>,
-
-    /// ngrok auth token.
-    #[serde(default)]
-    pub ngrok_token: Option<String>,
-
-    /// ngrok custom domain (paid plans).
-    #[serde(default)]
-    pub ngrok_domain: Option<String>,
-
-    /// Use Tailscale Funnel (public) instead of Serve (tailnet-only).
-    #[serde(default)]
-    pub ts_funnel: bool,
-
-    /// Tailscale hostname override.
-    #[serde(default)]
-    pub ts_hostname: Option<String>,
-
-    /// Shell command for custom tunnel (with `{port}` / `{host}` placeholders).
-    #[serde(default)]
-    pub custom_command: Option<String>,
-
-    /// Health check URL for custom tunnel.
-    #[serde(default)]
-    pub custom_health_url: Option<String>,
-
-    /// Substring pattern to extract URL from custom tunnel stdout.
-    #[serde(default)]
-    pub custom_url_pattern: Option<String>,
+fn default_telegram_transport_mode() -> String {
+    "auto".to_string()
 }
 
 /// Channel-specific settings.
