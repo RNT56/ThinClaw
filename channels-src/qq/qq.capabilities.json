@@ -1,0 +1,51 @@
+{
+  "type": "channel",
+  "name": "qq",
+  "description": "QQ bot webhook channel",
+  "formatting_hints": "QQ messages should be concise plain text unless a richer bot adapter is configured.",
+  "setup": {
+    "required_secrets": [
+      { "name": "qq_bot_token", "prompt": "Enter your QQ bot token", "optional": false },
+      { "name": "qq_webhook_secret", "prompt": "Enter your QQ webhook secret", "optional": false }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [{ "host": "api.sgroup.qq.com", "path_prefix": "/" }],
+      "credentials": {
+        "qq_bot_token": {
+          "secret_name": "qq_bot_token",
+          "location": { "type": "bearer" },
+          "host_patterns": ["api.sgroup.qq.com"]
+        }
+      },
+      "rate_limit": { "requests_per_minute": 60, "requests_per_hour": 2000 }
+    },
+    "secrets": { "allowed_names": ["qq_*"] },
+    "channel": {
+      "allowed_paths": ["/webhook/qq"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/qq/",
+      "emit_rate_limit": { "messages_per_minute": 60, "messages_per_hour": 2000 }
+    }
+  },
+  "config": {
+    "channel_name": "qq",
+    "display_name": "QQ",
+    "webhook_path": "/webhook/qq",
+    "mapping": {
+      "text": ["content", "message.content", "text"],
+      "user_id": ["author.id", "user_id", "sender.id"],
+      "user_name": ["author.username", "sender.name"],
+      "chat_id": ["channel_id", "group_id", "guild_id"],
+      "chat_type": ["message_type", "chat_type"],
+      "message_id": ["id", "message_id"]
+    },
+    "response": {
+      "url": "https://api.sgroup.qq.com/channels/{chat_id}/messages",
+      "method": "POST",
+      "body_format": "json",
+      "body": { "content": "{content}" }
+    }
+  }
+}

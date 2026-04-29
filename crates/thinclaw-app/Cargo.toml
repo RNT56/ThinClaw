@@ -1,0 +1,15 @@
+[package]
+name = "thinclaw-app"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+thinclaw-agent = { version = "0.1.0", path = "../thinclaw-agent" }
+thinclaw-channels = { version = "0.1.0", path = "../thinclaw-channels" }
+thinclaw-config = { version = "0.1.0", path = "../thinclaw-config" }
+thinclaw-db = { version = "0.1.0", path = "../thinclaw-db" }
+thinclaw-gateway = { version = "0.1.0", path = "../thinclaw-gateway" }
+thinclaw-llm = { version = "0.1.0", path = "../thinclaw-llm" }
+thinclaw-tools = { version = "0.1.0", path = "../thinclaw-tools" }

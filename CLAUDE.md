@@ -67,6 +67,21 @@ The codebase is easier to reason about by subsystem than by file count.
 - `src/tools/`: built-in tools, extension tools, WASM runtime, MCP client
 - `src/workspace/`: persistent memory, search, citations, chunking, repository support
 
+## Architecture Hygiene
+
+God files are architectural debt, not a neutral style choice. New code should keep modules focused around one domain concept, lifecycle phase, or integration boundary, with a clear reason for each file to change.
+
+- Prefer directory modules when a subsystem grows beyond a single focused file. The `mod.rs` file should stay a façade: declare submodules, re-export the stable public API, and keep only narrowly shared imports or glue.
+- Split large subsystems by responsibility: `types`, `core`/manager, orchestration phases, provider adapters, persistence/query code, platform-specific helpers, and test support.
+- Add new behavior to the narrowest existing submodule that owns it. Do not grow façade modules, coordinators, or catch-all helper files just because they are convenient.
+- Treat repeated unrelated edits to the same file as a signal to extract a cohesive submodule before adding more behavior.
+- Preserve public paths during decompositions with `pub use` re-exports. Keep internal cross-module visibility at `pub(super)` or `pub(in crate::...)`; do not widen APIs just to make a split compile.
+- Keep tests and fixtures close to the module they validate. Use `tests.rs` or `test_support.rs` for broad behavioral coverage and shared scripted fixtures, not as a dumping ground.
+- Avoid vague buckets like `misc`, `common`, or `utils` unless the contents are genuinely cross-cutting and small. Prefer names that describe the owning domain.
+- If a coordinator or test file must remain large temporarily, leave the boundaries obvious and extract the next cohesive phase as soon as it stabilizes.
+
+When reviewing or generating changes, block new god-file growth early. A PR that adds substantial unrelated behavior to an already broad file should either split the module first or explain why the code cannot yet be separated safely.
+
 ## Runtime Model
 
 At a high level:

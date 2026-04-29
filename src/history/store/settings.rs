@@ -2,13 +2,7 @@ use super::*;
 
 // ==================== Settings ====================
 
-/// A single setting row from the database.
-#[derive(Debug, Clone)]
-pub struct SettingRow {
-    pub key: String,
-    pub value: serde_json::Value,
-    pub updated_at: DateTime<Utc>,
-}
+pub use thinclaw_history::SettingRow;
 
 #[cfg(feature = "postgres")]
 impl Store {

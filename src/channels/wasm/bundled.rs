@@ -22,6 +22,18 @@ const KNOWN_CHANNELS: &[(&str, &str)] = &[
     ("slack", "slack_channel"),
     ("discord", "discord_channel"),
     ("whatsapp", "whatsapp_channel"),
+    ("matrix", "matrix_channel"),
+    ("mattermost", "mattermost_channel"),
+    ("twilio_sms", "twilio_sms_channel"),
+    ("dingtalk", "dingtalk_channel"),
+    ("feishu_lark", "feishu_lark_channel"),
+    ("wecom", "wecom_channel"),
+    ("weixin", "weixin_channel"),
+    ("qq", "qq_channel"),
+    ("line", "line_channel"),
+    ("google_chat", "google_chat_channel"),
+    ("ms_teams", "ms_teams_channel"),
+    ("twitch", "twitch_channel"),
 ];
 
 /// Names of known channels that can be installed.
@@ -142,12 +154,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_known_channels_includes_all_four() {
+    fn test_known_channels_includes_packaged_messaging_channels() {
         let names = bundled_channel_names();
-        assert!(names.contains(&"telegram"));
-        assert!(names.contains(&"slack"));
-        assert!(names.contains(&"discord"));
-        assert!(names.contains(&"whatsapp"));
+        for expected in [
+            "telegram",
+            "slack",
+            "discord",
+            "whatsapp",
+            "matrix",
+            "mattermost",
+            "twilio_sms",
+            "dingtalk",
+            "feishu_lark",
+            "wecom",
+            "weixin",
+            "qq",
+            "line",
+            "google_chat",
+            "ms_teams",
+            "twitch",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}");
+        }
     }
 
     #[test]

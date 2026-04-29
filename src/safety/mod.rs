@@ -1,8 +1,6 @@
 //! Safety compatibility facade.
 
-pub mod smart_approve;
-
-pub use smart_approve::{ApprovalDecision, SmartApprovalMode, SmartApprover};
+pub use crate::tools::builtin::{ApprovalDecision, SmartApprovalMode, SmartApprover};
 pub use thinclaw_safety::*;
 
 impl thinclaw_safety::SafetyConfigLike for crate::config::SafetyConfig {

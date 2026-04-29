@@ -1486,6 +1486,7 @@ impl Agent {
             thread.start_turn_with_visibility(content, hide_user_input_from_ui);
             thread.messages()
         };
+        self.begin_turn_cancellation(thread_id).await;
 
         // Attach multimodal media to the last user message for LLM processing.
         // The rig adapter converts these to provider-native base64 content blocks.
@@ -1542,6 +1543,7 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
         if thread.state == ThreadState::Interrupted {
+            self.finish_turn_cancellation(thread_id).await;
             let _ = self
                 .channels
                 .send_status(
@@ -1634,8 +1636,10 @@ impl Agent {
                     .await;
 
                 if was_streamed {
+                    self.finish_turn_cancellation(thread_id).await;
                     Ok(SubmissionResult::Streamed(response))
                 } else {
+                    self.finish_turn_cancellation(thread_id).await;
                     Ok(SubmissionResult::response(response))
                 }
             }
@@ -1662,6 +1666,7 @@ impl Agent {
                     .await;
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
+                self.finish_turn_cancellation(thread_id).await;
                 Ok(SubmissionResult::NeedApproval {
                     request_id,
                     tool_name,
@@ -1692,6 +1697,7 @@ impl Agent {
                     .await;
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
+                self.finish_turn_cancellation(thread_id).await;
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }
@@ -1918,6 +1924,7 @@ impl Agent {
         match thread.state {
             ThreadState::Processing | ThreadState::AwaitingApproval => {
                 thread.interrupt();
+                self.signal_turn_cancellation(thread_id).await;
                 let thread_snapshot = thread.clone();
                 drop(sess);
                 let _ = thread_snapshot;

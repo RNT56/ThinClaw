@@ -1349,10 +1349,188 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use async_trait::async_trait;
+
+    use crate::config::SafetyConfig;
     use crate::context::JobContext;
+    use crate::safety::SafetyLayer;
+    use crate::tools::execution::HostMediatedToolInvoker;
     use crate::tools::wasm::capabilities::Capabilities;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
+    use crate::tools::wasm::wrapper::StoreData;
+    use crate::tools::{
+        ApprovalRequirement, Tool, ToolError, ToolExecutionLane, ToolOutput, ToolProfile,
+        ToolRegistry,
+    };
+
+    enum TestToolBehavior {
+        Static(serde_json::Value),
+        ContextMetadata,
+        Sleep(Duration),
+    }
+
+    struct HostInvokeTestTool {
+        name: &'static str,
+        approval: ApprovalRequirement,
+        behavior: TestToolBehavior,
+        timeout: Duration,
+    }
+
+    impl HostInvokeTestTool {
+        fn static_output(name: &'static str, output: serde_json::Value) -> Self {
+            Self {
+                name,
+                approval: ApprovalRequirement::Never,
+                behavior: TestToolBehavior::Static(output),
+                timeout: Duration::from_secs(60),
+            }
+        }
+
+        fn with_approval(mut self, approval: ApprovalRequirement) -> Self {
+            self.approval = approval;
+            self
+        }
+
+        fn context_metadata(name: &'static str) -> Self {
+            Self {
+                name,
+                approval: ApprovalRequirement::Never,
+                behavior: TestToolBehavior::ContextMetadata,
+                timeout: Duration::from_secs(60),
+            }
+        }
+
+        fn slow(name: &'static str, sleep: Duration, timeout: Duration) -> Self {
+            Self {
+                name,
+                approval: ApprovalRequirement::Never,
+                behavior: TestToolBehavior::Sleep(sleep),
+                timeout,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for HostInvokeTestTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "host-mediated WASM tool_invoke test tool"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            match &self.behavior {
+                TestToolBehavior::Static(output) => Ok(ToolOutput::success(
+                    output.clone(),
+                    Duration::from_millis(1),
+                )),
+                TestToolBehavior::ContextMetadata => Ok(ToolOutput::success(
+                    ctx.metadata.clone(),
+                    Duration::from_millis(1),
+                )),
+                TestToolBehavior::Sleep(sleep) => {
+                    tokio::time::sleep(*sleep).await;
+                    Ok(ToolOutput::text("too slow", *sleep))
+                }
+            }
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            self.approval
+        }
+
+        fn execution_timeout(&self) -> Duration {
+            self.timeout
+        }
+    }
+
+    fn host_invoker_with_tool(tool: Arc<dyn Tool>) -> Arc<HostMediatedToolInvoker> {
+        let registry = Arc::new(ToolRegistry::new());
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build registration runtime")
+            .block_on(registry.register_builtin(tool));
+
+        Arc::new(HostMediatedToolInvoker::new(
+            registry,
+            Arc::new(SafetyLayer::new(&SafetyConfig::default())),
+            ToolExecutionLane::WorkerRuntime,
+            ToolProfile::ExplicitOnly,
+        ))
+    }
+
+    fn store_data_for_tool_invoke(
+        alias: &str,
+        real_name: &str,
+        invoker: Arc<HostMediatedToolInvoker>,
+        job_context: JobContext,
+    ) -> StoreData {
+        use std::collections::{HashMap, HashSet};
+
+        let mut aliases = HashMap::new();
+        aliases.insert(alias.to_string(), real_name.to_string());
+        StoreData::new(
+            1024 * 1024,
+            Capabilities::default().with_tool_invoke(aliases),
+            HashMap::new(),
+            Vec::new(),
+            HashSet::new(),
+            Some(invoker),
+            job_context,
+        )
+    }
+
+    fn decode_base64_fixture(encoded: &str) -> Vec<u8> {
+        let mut output = Vec::new();
+        let mut buffer = 0u32;
+        let mut bits = 0u8;
+
+        for byte in encoded.bytes().filter(|b| !b.is_ascii_whitespace()) {
+            let value = match byte {
+                b'A'..=b'Z' => byte - b'A',
+                b'a'..=b'z' => byte - b'a' + 26,
+                b'0'..=b'9' => byte - b'0' + 52,
+                b'+' => 62,
+                b'/' => 63,
+                b'=' => break,
+                other => panic!("invalid base64 byte in WASM fixture: {other}"),
+            } as u32;
+
+            buffer = (buffer << 6) | value;
+            bits += 6;
+            while bits >= 8 {
+                bits -= 8;
+                output.push((buffer >> bits) as u8);
+                if bits > 0 {
+                    buffer &= (1 << bits) - 1;
+                } else {
+                    buffer = 0;
+                }
+            }
+        }
+
+        output
+    }
+
+    fn prebuilt_tool_invoke_smoke_component() -> Vec<u8> {
+        decode_base64_fixture(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/wasm-tool-invoke-smoke/prebuilt/wasm_tool_invoke_smoke.wasm.base64"
+        )))
+    }
 
     #[test]
     fn test_wrapper_creation() {
@@ -1912,6 +2090,190 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("Unknown tool alias"));
+        assert_eq!(store_data.host_state.tool_invoke_count(), 0);
+    }
+
+    #[test]
+    fn test_tool_invoke_allows_declared_alias_only() {
+        let invoker = host_invoker_with_tool(Arc::new(HostInvokeTestTool::static_output(
+            "safe_tool",
+            serde_json::json!({"ok": true}),
+        )));
+        let mut store_data =
+            store_data_for_tool_invoke("safe_alias", "safe_tool", invoker, JobContext::default());
+
+        let output = <StoreData as super::near::agent::host::Host>::tool_invoke(
+            &mut store_data,
+            "safe_alias".to_string(),
+            "{}".to_string(),
+        )
+        .expect("declared alias should invoke real tool");
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&output).unwrap(),
+            serde_json::json!({"ok": true})
+        );
+        assert_eq!(store_data.host_state.tool_invoke_count(), 1);
+    }
+
+    #[test]
+    fn test_tool_invoke_policy_denial_is_not_bypassed() {
+        let invoker = host_invoker_with_tool(Arc::new(HostInvokeTestTool::static_output(
+            "blocked_tool",
+            serde_json::json!({"should_not_run": true}),
+        )));
+        let mut context = JobContext::default();
+        context.metadata = serde_json::json!({ "allowed_tools": ["different_tool"] });
+        let mut store_data =
+            store_data_for_tool_invoke("blocked_alias", "blocked_tool", invoker, context);
+
+        let err = <StoreData as super::near::agent::host::Host>::tool_invoke(
+            &mut store_data,
+            "blocked_alias".to_string(),
+            "{}".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(
+            err.contains("not permitted") || err.contains("not granted"),
+            "{err}"
+        );
+        assert_eq!(store_data.host_state.tool_invoke_count(), 1);
+    }
+
+    #[test]
+    fn test_tool_invoke_approval_denial_is_not_bypassed() {
+        let tool = HostInvokeTestTool::static_output(
+            "approval_tool",
+            serde_json::json!({"should_not_run": true}),
+        )
+        .with_approval(ApprovalRequirement::UnlessAutoApproved);
+        let invoker = host_invoker_with_tool(Arc::new(tool));
+        let mut store_data = store_data_for_tool_invoke(
+            "approval_alias",
+            "approval_tool",
+            invoker,
+            JobContext::default(),
+        );
+
+        let err = <StoreData as super::near::agent::host::Host>::tool_invoke(
+            &mut store_data,
+            "approval_alias".to_string(),
+            "{}".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("requires approval"), "{err}");
+    }
+
+    #[test]
+    fn test_tool_invoke_recursion_depth_is_capped() {
+        let invoker = host_invoker_with_tool(Arc::new(HostInvokeTestTool::static_output(
+            "recursive_tool",
+            serde_json::json!({"should_not_run": true}),
+        )));
+        let mut context = JobContext::default();
+        context.metadata = serde_json::json!({ "wasm_tool_invoke_depth": 4 });
+        let mut store_data =
+            store_data_for_tool_invoke("recursive_alias", "recursive_tool", invoker, context);
+
+        let err = <StoreData as super::near::agent::host::Host>::tool_invoke(
+            &mut store_data,
+            "recursive_alias".to_string(),
+            "{}".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("recursion depth exceeded"), "{err}");
+    }
+
+    #[test]
+    fn test_tool_invoke_enforces_target_timeout() {
+        let invoker = host_invoker_with_tool(Arc::new(HostInvokeTestTool::slow(
+            "slow_tool",
+            Duration::from_millis(100),
+            Duration::from_millis(10),
+        )));
+        let mut store_data =
+            store_data_for_tool_invoke("slow_alias", "slow_tool", invoker, JobContext::default());
+
+        let err = <StoreData as super::near::agent::host::Host>::tool_invoke(
+            &mut store_data,
+            "slow_alias".to_string(),
+            "{}".to_string(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_lowercase().contains("timed out"), "{err}");
+    }
+
+    #[test]
+    fn test_tool_invoke_preserves_audit_metadata() {
+        let invoker = host_invoker_with_tool(Arc::new(HostInvokeTestTool::context_metadata(
+            "metadata_tool",
+        )));
+        let mut context = JobContext::default();
+        context.metadata = serde_json::json!({ "channel": "wasm-test" });
+        let mut store_data =
+            store_data_for_tool_invoke("metadata_alias", "metadata_tool", invoker, context);
+
+        let output = <StoreData as super::near::agent::host::Host>::tool_invoke(
+            &mut store_data,
+            "metadata_alias".to_string(),
+            "{}".to_string(),
+        )
+        .expect("metadata tool should run");
+        let metadata = serde_json::from_str::<serde_json::Value>(&output).unwrap();
+
+        assert_eq!(metadata["channel"], serde_json::json!("wasm-test"));
+        assert_eq!(
+            metadata["wasm_tool_invoke_target"],
+            serde_json::json!("metadata_tool")
+        );
+        assert_eq!(metadata["wasm_tool_invoke_depth"], serde_json::json!(1));
+        assert_eq!(
+            metadata["allowed_tools"],
+            serde_json::json!(["metadata_tool"])
+        );
+    }
+
+    #[test]
+    fn test_tool_invoke_returns_sanitized_host_output() {
+        let leaked_token = "Bearer abcdefghijklmnopqrstuvwxyz123456";
+        let invoker = host_invoker_with_tool(Arc::new(HostInvokeTestTool::static_output(
+            "sanitizing_tool",
+            serde_json::json!(format!("Authorization: {leaked_token}")),
+        )));
+        let mut store_data = store_data_for_tool_invoke(
+            "sanitize_alias",
+            "sanitizing_tool",
+            invoker,
+            JobContext::default(),
+        );
+
+        let output = <StoreData as super::near::agent::host::Host>::tool_invoke(
+            &mut store_data,
+            "sanitize_alias".to_string(),
+            "{}".to_string(),
+        )
+        .expect("sanitizing tool should run");
+
+        assert!(output.contains("[REDACTED]"), "{output}");
+        assert!(!output.contains(leaked_token), "{output}");
+    }
+
+    #[tokio::test]
+    async fn test_wasm_tool_invoke_prebuilt_fixture_prepares() {
+        let wasm_bytes = prebuilt_tool_invoke_smoke_component();
+
+        let mut config = WasmRuntimeConfig::for_testing();
+        config.default_limits = config.default_limits.with_memory(2 * 1024 * 1024);
+        let runtime = Arc::new(WasmToolRuntime::new(config).unwrap());
+
+        runtime
+            .prepare("tool_invoke_smoke_prebuilt", &wasm_bytes, None)
+            .await
+            .expect("prepare prebuilt WASM tool_invoke fixture");
     }
 
     #[tokio::test]
@@ -1920,14 +2282,8 @@ mod tests {
         use std::path::{Path, PathBuf};
         use std::process::Command;
 
-        use crate::config::SafetyConfig;
-        use crate::safety::SafetyLayer;
         use crate::tools::builtin::EchoTool;
-        use crate::tools::execution::HostMediatedToolInvoker;
-        use crate::tools::{
-            Tool, ToolExecutionLane, ToolProfile, ToolRegistry,
-            wasm::{WasmRuntimeConfig, WasmToolRuntime, WasmToolWrapper},
-        };
+        use crate::tools::wasm::{WasmRuntimeConfig, WasmToolRuntime, WasmToolWrapper};
 
         fn repo_root() -> PathBuf {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1949,8 +2305,18 @@ mod tests {
                 .expect("run cargo component build for WASM tool_invoke fixture");
             assert!(status.success(), "WASM tool_invoke fixture build failed");
 
-            let wasm_path = fixture_dir
-                .join("target")
+            let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .map(|path| {
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        fixture_dir.join(path)
+                    }
+                })
+                .unwrap_or_else(|| fixture_dir.join("target"));
+
+            let wasm_path = target_dir
                 .join("wasm32-wasip1")
                 .join("release")
                 .join("wasm_tool_invoke_smoke.wasm");
@@ -1962,17 +2328,21 @@ mod tests {
             wasm_path
         }
 
-        if !cargo_component_available() {
-            eprintln!("skipping WASM tool_invoke component smoke: cargo-component is unavailable");
-            return;
+        fn load_smoke_component(fixture_dir: &Path) -> Vec<u8> {
+            if cargo_component_available() {
+                let wasm_path = build_smoke_component(fixture_dir);
+                return std::fs::read(&wasm_path).expect("read built WASM tool_invoke fixture");
+            }
+
+            eprintln!("using prebuilt WASM tool_invoke fixture: cargo-component is unavailable");
+            prebuilt_tool_invoke_smoke_component()
         }
 
         let fixture_dir = repo_root()
             .join("tests")
             .join("fixtures")
             .join("wasm-tool-invoke-smoke");
-        let wasm_path = build_smoke_component(&fixture_dir);
-        let wasm_bytes = std::fs::read(&wasm_path).expect("read WASM tool_invoke fixture");
+        let wasm_bytes = load_smoke_component(&fixture_dir);
 
         let mut config = WasmRuntimeConfig::for_testing();
         config.default_limits = config.default_limits.with_memory(2 * 1024 * 1024);

@@ -250,11 +250,11 @@ pub struct TerminalBenchCase {
     pub command: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, alias = "expectedStdoutContains")]
     pub expected_stdout_contains: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "expectedExitCode")]
     pub expected_exit_code: Option<i32>,
-    #[serde(default = "default_terminal_bench_timeout_secs")]
+    #[serde(default = "default_terminal_bench_timeout_secs", alias = "timeoutSecs")]
     pub timeout_secs: u64,
 }
 
@@ -413,8 +413,9 @@ impl AgentEnv for TerminalBenchEnv {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillBenchCase {
     pub name: String,
+    #[serde(alias = "skillContent")]
     pub skill_content: String,
-    #[serde(default)]
+    #[serde(default, alias = "requiredSubstrings")]
     pub required_substrings: Vec<String>,
 }
 
@@ -853,6 +854,30 @@ mod tests {
         assert_eq!(capture.logprobs, vec![-0.7, -0.8]);
         assert_eq!(capture.provider.as_deref(), Some("openai"));
         assert_eq!(capture.model.as_deref(), Some("gpt-test"));
+    }
+
+    #[test]
+    fn benchmark_cases_accept_webui_camel_case_fields() {
+        let terminal: TerminalBenchCase = serde_json::from_value(serde_json::json!({
+            "name": "smoke",
+            "command": "printf ok",
+            "expectedStdoutContains": ["ok"],
+            "expectedExitCode": 0,
+            "timeoutSecs": 7
+        }))
+        .expect("terminal bench camelCase");
+        assert_eq!(terminal.expected_stdout_contains, vec!["ok"]);
+        assert_eq!(terminal.expected_exit_code, Some(0));
+        assert_eq!(terminal.timeout_secs, 7);
+
+        let skill: SkillBenchCase = serde_json::from_value(serde_json::json!({
+            "name": "skill",
+            "skillContent": "# Skill",
+            "requiredSubstrings": ["Skill"]
+        }))
+        .expect("skill bench camelCase");
+        assert_eq!(skill.skill_content, "# Skill");
+        assert_eq!(skill.required_substrings, vec!["Skill"]);
     }
 
     #[tokio::test]

@@ -1,0 +1,51 @@
+{
+  "type": "channel",
+  "name": "wecom",
+  "description": "WeCom/Enterprise WeChat webhook channel",
+  "formatting_hints": "WeCom supports text and Markdown robot messages. Keep answers mobile-friendly.",
+  "setup": {
+    "required_secrets": [
+      { "name": "wecom_access_token", "prompt": "Enter your WeCom access token", "optional": false },
+      { "name": "wecom_webhook_secret", "prompt": "Enter your WeCom webhook secret", "optional": false }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [{ "host": "qyapi.weixin.qq.com", "path_prefix": "/cgi-bin/" }],
+      "credentials": {
+        "wecom_access_token": {
+          "secret_name": "wecom_access_token",
+          "location": { "type": "query_param", "name": "access_token" },
+          "host_patterns": ["qyapi.weixin.qq.com"]
+        }
+      },
+      "rate_limit": { "requests_per_minute": 60, "requests_per_hour": 2000 }
+    },
+    "secrets": { "allowed_names": ["wecom_*"] },
+    "channel": {
+      "allowed_paths": ["/webhook/wecom"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/wecom/",
+      "emit_rate_limit": { "messages_per_minute": 60, "messages_per_hour": 2000 }
+    }
+  },
+  "config": {
+    "channel_name": "wecom",
+    "display_name": "WeCom",
+    "webhook_path": "/webhook/wecom",
+    "mapping": {
+      "text": ["Text.Content", "text.content", "Content", "content"],
+      "user_id": ["FromUserName", "from_user_name", "user.id"],
+      "user_name": ["FromUserName", "user.name"],
+      "chat_id": ["ChatId", "chat_id", "FromUserName"],
+      "chat_type": ["MsgType", "chat_type"],
+      "message_id": ["MsgId", "msg_id"]
+    },
+    "response": {
+      "url": "https://qyapi.weixin.qq.com/cgi-bin/message/send",
+      "method": "POST",
+      "body_format": "json",
+      "body": { "touser": "{chat_id}", "msgtype": "text", "text": "{content}" }
+    }
+  }
+}

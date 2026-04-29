@@ -1,0 +1,51 @@
+{
+  "type": "channel",
+  "name": "dingtalk",
+  "description": "DingTalk robot webhook channel",
+  "formatting_hints": "DingTalk robot messages support Markdown. Keep replies structured and mobile-readable.",
+  "setup": {
+    "required_secrets": [
+      { "name": "dingtalk_access_token", "prompt": "Enter your DingTalk robot access token", "optional": false },
+      { "name": "dingtalk_webhook_secret", "prompt": "Enter your DingTalk webhook secret", "optional": false }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [{ "host": "oapi.dingtalk.com", "path_prefix": "/robot/" }],
+      "credentials": {
+        "dingtalk_access_token": {
+          "secret_name": "dingtalk_access_token",
+          "location": { "type": "query_param", "name": "access_token" },
+          "host_patterns": ["oapi.dingtalk.com"]
+        }
+      },
+      "rate_limit": { "requests_per_minute": 60, "requests_per_hour": 2000 }
+    },
+    "secrets": { "allowed_names": ["dingtalk_*"] },
+    "channel": {
+      "allowed_paths": ["/webhook/dingtalk"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/dingtalk/",
+      "emit_rate_limit": { "messages_per_minute": 60, "messages_per_hour": 2000 }
+    }
+  },
+  "config": {
+    "channel_name": "dingtalk",
+    "display_name": "DingTalk",
+    "webhook_path": "/webhook/dingtalk",
+    "mapping": {
+      "text": ["text.content", "markdown.text", "content", "text"],
+      "user_id": ["senderStaffId", "senderId", "user.id"],
+      "user_name": ["senderNick", "user.name"],
+      "chat_id": ["conversationId", "chat_id"],
+      "chat_type": ["conversationType", "chat_type"],
+      "message_id": ["msgId"]
+    },
+    "response": {
+      "url": "https://oapi.dingtalk.com/robot/send",
+      "method": "POST",
+      "body_format": "json",
+      "body": { "msgtype": "text", "text": "{content}" }
+    }
+  }
+}

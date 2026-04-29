@@ -308,11 +308,17 @@ impl Agent {
                     }
                 });
 
-                let stream_result = reasoning
-                    .respond_with_tools_streaming(&context, move |chunk: &str| {
+                let stream_result: Result<crate::llm::RespondOutput, crate::error::Error> = tokio::select! {
+                    biased;
+                    _ = self.wait_for_turn_cancellation(thread_id) => {
+                        Err(Self::turn_interrupted_error(thread_id))
+                    }
+                    result = reasoning.respond_with_tools_streaming(&context, move |chunk: &str| {
                         let _ = chunk_tx.try_send(chunk.to_string());
-                    })
-                    .await;
+                    }) => {
+                        result.map_err(crate::error::Error::from)
+                    }
+                };
 
                 let _ = consumer_handle.await;
 
@@ -397,12 +403,24 @@ impl Agent {
                             was_streamed && matches!(&output.result, RespondResult::Text(_));
                         Ok(output)
                     }
-                    Err(e) => Err(e.into()),
+                    Err(e) => Err(e),
                 }
             } else {
-                match reasoning.respond_with_tools(&context).await {
+                let first_attempt: Result<crate::llm::RespondOutput, crate::error::Error> = tokio::select! {
+                    biased;
+                    _ = self.wait_for_turn_cancellation(thread_id) => {
+                        Err(Self::turn_interrupted_error(thread_id))
+                    }
+                    result = reasoning.respond_with_tools(&context) => {
+                        result.map_err(crate::error::Error::from)
+                    }
+                };
+
+                match first_attempt {
                     Ok(output) => Ok(output),
-                    Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
+                    Err(crate::error::Error::Llm(
+                        crate::error::LlmError::ContextLengthExceeded { used, limit },
+                    )) => {
                         tracing::warn!(
                             used,
                             limit,
@@ -418,10 +436,13 @@ impl Agent {
                             &options,
                         );
 
-                        reasoning
-                            .respond_with_tools(&retry_context)
-                            .await
-                            .map_err(|retry_err| {
+                        tokio::select! {
+                            biased;
+                            _ = self.wait_for_turn_cancellation(thread_id) => {
+                                Err(Self::turn_interrupted_error(thread_id))
+                            }
+                            result = reasoning.respond_with_tools(&retry_context) => {
+                                result.map_err(|retry_err| {
                                 tracing::error!(
                                     original_used = used,
                                     original_limit = limit,
@@ -429,9 +450,11 @@ impl Agent {
                                     "Retry after auto-compaction also failed"
                                 );
                                 crate::error::Error::from(retry_err)
-                            })
+                                })
+                            }
+                        }
                     }
-                    Err(e) => Err(e.into()),
+                    Err(e) => Err(e),
                 }
             };
 

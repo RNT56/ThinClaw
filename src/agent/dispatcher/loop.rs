@@ -214,9 +214,10 @@ impl Agent {
                 }
             }
 
-            // Interrupts are cooperative at iteration boundaries. We check
-            // before each new LLM/tool step and after responses return, but we
-            // intentionally do not try to cancel an in-flight provider call.
+            // Interrupts are checked at iteration boundaries and the active
+            // provider/tool awaits also subscribe to the per-turn cancellation
+            // signal. This block preserves partial progress when cancellation
+            // is observed between steps.
             {
                 let sess = session.lock().await;
                 if let Some(thread) = sess.threads.get(&thread_id)
@@ -309,7 +310,15 @@ impl Agent {
                                 .await,
                         );
 
-                    match reasoning.respond_with_tools(&flush_ctx).await {
+                    let flush_result = tokio::select! {
+                        biased;
+                        _ = self.wait_for_turn_cancellation(thread_id) => {
+                            return Err(Self::turn_interrupted_error(thread_id));
+                        }
+                        result = reasoning.respond_with_tools(&flush_ctx) => result
+                    };
+
+                    match flush_result {
                         Ok(flush_out) => {
                             match flush_out.result {
                                 crate::llm::RespondResult::Text(t) => {

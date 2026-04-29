@@ -34,7 +34,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check lints (cargo clippy)
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
       - name: Guard Linux deploy port
         run: |
           if rg -n "18789" Dockerfile deploy docs/DEPLOYMENT.md docs/EXTERNAL_DEPENDENCIES.md; then
@@ -99,11 +99,11 @@ jobs:
           rustup target add wasm32-wasip2
           cargo install wasm-tools --locked
       - name: cargo check
-        run: cargo check ${{ matrix.cargo-args }}
+        run: cargo check --workspace ${{ matrix.cargo-args }}
       - name: cargo clippy
-        run: cargo clippy ${{ matrix.cargo-args }} -- -D warnings
+        run: cargo clippy --workspace ${{ matrix.cargo-args }} -- -D warnings
       - name: Compile tests (no run)
-        run: cargo test --no-run ${{ matrix.cargo-args }}
+        run: cargo test --workspace --no-run ${{ matrix.cargo-args }}
 
   linux-host-smoke:
     name: Linux Host Runtime Smoke
@@ -160,7 +160,7 @@ jobs:
           uname -a
           test "$(uname -m)" = "aarch64"
       - name: cargo check
-        run: cargo check --features full
+        run: cargo check --workspace --features full
       - name: Build ARM64 release artifact
         run: cargo build --release --features full --bin thinclaw
       - name: Pi OS Lite ARM64 artifact doctor
@@ -309,9 +309,9 @@ jobs:
         with:
           key: macos-host-regression
       - name: cargo check
-        run: cargo check --features full
+        run: cargo check --workspace --features full
       - name: Compile tests (no run)
-        run: cargo test --no-run --features full
+        run: cargo test --workspace --no-run --features full
       - name: Host runtime smoke
         run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
 
@@ -474,9 +474,9 @@ jobs:
         with:
           key: windows-${{ matrix.name }}
       - name: cargo check
-        run: cargo check ${{ matrix.cargo-args }}
+        run: cargo check --workspace ${{ matrix.cargo-args }}
       - name: Compile tests (no run)
-        run: cargo test --no-run ${{ matrix.cargo-args }}
+        run: cargo test --workspace --no-run ${{ matrix.cargo-args }}
 
   windows-smoke:
     name: Windows Smoke

@@ -1,0 +1,56 @@
+{
+  "type": "channel",
+  "name": "twilio_sms",
+  "description": "Twilio SMS webhook channel for two-way SMS conversations",
+  "formatting_hints": "SMS has strict length and formatting limits. Keep replies short and plain text.",
+  "setup": {
+    "required_secrets": [
+      { "name": "twilio_auth_token", "prompt": "Enter your Twilio Auth Token", "optional": false },
+      { "name": "twilio_account_sid", "prompt": "Enter your Twilio Account SID", "optional": false },
+      { "name": "twilio_from_number", "prompt": "Enter your Twilio sender number", "optional": false }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [{ "host": "api.twilio.com", "path_prefix": "/2010-04-01/" }],
+      "credentials": {
+        "twilio_auth_token": {
+          "secret_name": "twilio_auth_token",
+          "location": { "type": "basic", "username": "{twilio_account_sid}" },
+          "host_patterns": ["api.twilio.com"]
+        }
+      },
+      "rate_limit": { "requests_per_minute": 60, "requests_per_hour": 2000 }
+    },
+    "secrets": { "allowed_names": ["twilio_*"] },
+    "channel": {
+      "allowed_paths": ["/webhook/twilio_sms"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/twilio_sms/",
+      "emit_rate_limit": { "messages_per_minute": 60, "messages_per_hour": 2000 }
+    }
+  },
+  "config": {
+    "channel_name": "twilio_sms",
+    "display_name": "Twilio SMS",
+    "webhook_path": "/webhook/twilio_sms",
+    "mapping": {
+      "text": ["Body", "body", "text"],
+      "user_id": ["From", "from"],
+      "user_name": ["ProfileName", "From"],
+      "chat_id": ["From", "from"],
+      "chat_type": ["MessageType", "chat_type"],
+      "message_id": ["MessageSid", "SmsMessageSid"]
+    },
+    "template_values": {
+      "account_sid": "configure-twilio-account-sid",
+      "from_number": "configure-twilio-from-number"
+    },
+    "response": {
+      "url": "https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json",
+      "method": "POST",
+      "body_format": "form",
+      "body": { "To": "{chat_id}", "From": "{from_number}", "Body": "{content}" }
+    }
+  }
+}

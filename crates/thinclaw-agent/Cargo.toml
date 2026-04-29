@@ -1,0 +1,14 @@
+[package]
+name = "thinclaw-agent"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+thinclaw-channels-core = { version = "0.1.0", path = "../thinclaw-channels-core" }
+thinclaw-identity = { version = "0.1.0", path = "../thinclaw-identity" }
+thinclaw-llm-core = { version = "0.1.0", path = "../thinclaw-llm-core" }
+thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
+thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
+thinclaw-workspace = { version = "0.1.0", path = "../thinclaw-workspace" }

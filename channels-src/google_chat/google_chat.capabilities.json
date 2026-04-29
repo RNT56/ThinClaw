@@ -1,0 +1,51 @@
+{
+  "type": "channel",
+  "name": "google_chat",
+  "description": "Google Chat app event channel",
+  "formatting_hints": "Google Chat supports simple Markdown-like formatting. Keep replies concise and room-aware.",
+  "setup": {
+    "required_secrets": [
+      { "name": "google_chat_access_token", "prompt": "Enter your Google Chat app access token", "optional": false },
+      { "name": "google_chat_webhook_secret", "prompt": "Enter your Google Chat webhook secret", "optional": false }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [{ "host": "chat.googleapis.com", "path_prefix": "/v1/" }],
+      "credentials": {
+        "google_chat_access_token": {
+          "secret_name": "google_chat_access_token",
+          "location": { "type": "bearer" },
+          "host_patterns": ["chat.googleapis.com"]
+        }
+      },
+      "rate_limit": { "requests_per_minute": 60, "requests_per_hour": 3000 }
+    },
+    "secrets": { "allowed_names": ["google_chat_*"] },
+    "channel": {
+      "allowed_paths": ["/webhook/google_chat"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/google_chat/",
+      "emit_rate_limit": { "messages_per_minute": 60, "messages_per_hour": 3000 }
+    }
+  },
+  "config": {
+    "channel_name": "google_chat",
+    "display_name": "Google Chat",
+    "webhook_path": "/webhook/google_chat",
+    "mapping": {
+      "text": ["message.text", "text"],
+      "user_id": ["user.name", "message.sender.name"],
+      "user_name": ["user.displayName", "message.sender.displayName"],
+      "chat_id": ["space.name", "thread.name"],
+      "chat_type": ["space.type", "chat_type"],
+      "message_id": ["message.name"]
+    },
+    "response": {
+      "url": "https://chat.googleapis.com/v1/{chat_id}/messages",
+      "method": "POST",
+      "body_format": "json",
+      "body": { "text": "{content}" }
+    }
+  }
+}

@@ -2,15 +2,7 @@ use super::*;
 
 // ==================== Job Events ====================
 
-/// A persisted job streaming event (from worker or Claude Code bridge).
-#[derive(Debug, Clone)]
-pub struct JobEventRecord {
-    pub id: i64,
-    pub job_id: Uuid,
-    pub event_type: String,
-    pub data: serde_json::Value,
-    pub created_at: DateTime<Utc>,
-}
+pub use thinclaw_history::JobEventRecord;
 
 #[cfg(feature = "postgres")]
 impl Store {

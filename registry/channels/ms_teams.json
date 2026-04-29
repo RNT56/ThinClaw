@@ -1,0 +1,24 @@
+{
+  "name": "ms_teams",
+  "display_name": "Microsoft Teams",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "Microsoft Teams bot activity webhook channel",
+  "keywords": ["messaging", "chat", "teams", "microsoft"],
+  "source": {
+    "dir": "channels-src/ms_teams",
+    "capabilities": "ms_teams.capabilities.json",
+    "crate_name": "ms-teams-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Microsoft Teams",
+    "secrets": ["ms_teams_bot_token", "ms_teams_webhook_secret"],
+    "shared_auth": null,
+    "setup_url": "https://learn.microsoft.com/microsoftteams/platform/bots/"
+  },
+  "tags": ["messaging"]
+}

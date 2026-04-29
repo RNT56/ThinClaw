@@ -521,3 +521,180 @@ impl Tool for ExternalMemoryOffTool {
         false
     }
 }
+
+#[cfg(all(test, feature = "libsql"))]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct MockExternalMemoryState {
+        paths: Arc<Mutex<Vec<String>>>,
+    }
+
+    async fn mock_external_memory_handler(
+        axum::extract::State(state): axum::extract::State<MockExternalMemoryState>,
+        uri: axum::http::Uri,
+    ) -> axum::response::Response {
+        let path = uri.path().to_string();
+        state
+            .paths
+            .lock()
+            .expect("mock external memory paths")
+            .push(path.clone());
+        if path == "/" || path == "/search" || path == "/memories" {
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "results": [{
+                        "id": "external-1",
+                        "content": "external memory test recall"
+                    }]
+                })),
+            )
+                .into_response()
+        } else {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({"error": "not found"})),
+            )
+                .into_response()
+        }
+    }
+
+    async fn spawn_external_memory_server() -> (String, Arc<Mutex<Vec<String>>>) {
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let state = MockExternalMemoryState {
+            paths: Arc::clone(&paths),
+        };
+        let app = axum::Router::new()
+            .fallback(axum::routing::any(mock_external_memory_handler))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind external memory mock");
+        let addr = listener.local_addr().expect("external memory mock addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("external memory mock server");
+        });
+        (format!("http://{addr}"), paths)
+    }
+
+    #[tokio::test]
+    async fn external_memory_setup_status_recall_export_and_off_use_active_provider() {
+        let (store, _guard) = crate::testing::test_db().await;
+        let (base_url, paths) = spawn_external_memory_server().await;
+        let orchestrator = Arc::new(LearningOrchestrator::new(Arc::clone(&store), None, None));
+        let mut ctx = JobContext::default();
+        ctx.user_id = "external-memory-tool-user".to_string();
+
+        let setup = ExternalMemorySetupTool::new(Arc::clone(&orchestrator));
+        let status = ExternalMemoryStatusTool::new(Arc::clone(&orchestrator));
+        let recall = ExternalMemoryRecallTool::new(Arc::clone(&orchestrator));
+        let export = ExternalMemoryExportTool::new(Arc::clone(&orchestrator));
+        let off = ExternalMemoryOffTool::new(Arc::clone(&orchestrator));
+
+        let setup_output = setup
+            .execute(
+                serde_json::json!({
+                    "provider": "openmemory",
+                    "base_url": base_url,
+                    "api_key": "tool-secret",
+                    "enabled": true,
+                    "activate": true
+                }),
+                &ctx,
+            )
+            .await
+            .expect("setup openmemory");
+        assert_eq!(setup_output.result["provider"], "openmemory");
+        assert_eq!(
+            setup_output.result["active_status"]["readiness"],
+            serde_json::json!("ready")
+        );
+
+        let status_output = status
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect("status openmemory");
+        assert_eq!(status_output.result["active_provider"], "openmemory");
+        assert_eq!(status_output.result["active_status"]["readiness"], "ready");
+
+        let recall_output = recall
+            .execute(
+                serde_json::json!({"query": "what do you remember?", "limit": 3}),
+                &ctx,
+            )
+            .await
+            .expect("recall openmemory");
+        assert_eq!(recall_output.result["provider"], "openmemory");
+        assert_eq!(recall_output.result["count"], 1);
+
+        let export_output = export
+            .execute(serde_json::json!({"content": "remember this"}), &ctx)
+            .await
+            .expect("export openmemory");
+        assert_eq!(export_output.result["provider"], "openmemory");
+        assert_eq!(export_output.result["status"], "exported");
+
+        let off_output = off
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect("disable active provider");
+        assert_eq!(off_output.result["active"], false);
+
+        let status_after_off = status
+            .execute(serde_json::json!({}), &ctx)
+            .await
+            .expect("status after off");
+        assert_eq!(status_after_off.result["active"], false);
+        assert_eq!(
+            status_after_off.result["tool_extensions"],
+            serde_json::json!([])
+        );
+
+        let paths = paths.lock().expect("external memory mock paths");
+        assert!(paths.iter().any(|path| path == "/"));
+        assert!(paths.iter().any(|path| path == "/search"));
+        assert!(paths.iter().any(|path| path == "/memories"));
+    }
+
+    #[tokio::test]
+    async fn external_memory_recall_and_export_fail_closed_when_provider_unhealthy() {
+        let (store, _guard) = crate::testing::test_db().await;
+        let orchestrator = Arc::new(LearningOrchestrator::new(Arc::clone(&store), None, None));
+        let mut ctx = JobContext::default();
+        ctx.user_id = "external-memory-unhealthy-user".to_string();
+
+        let setup = ExternalMemorySetupTool::new(Arc::clone(&orchestrator));
+        setup
+            .execute(
+                serde_json::json!({
+                    "provider": "custom_http",
+                    "base_url": "http://127.0.0.1:1",
+                    "enabled": true,
+                    "activate": true
+                }),
+                &ctx,
+            )
+            .await
+            .expect("setup unavailable custom_http");
+
+        let recall = ExternalMemoryRecallTool::new(Arc::clone(&orchestrator));
+        let err = recall
+            .execute(serde_json::json!({"query": "unavailable"}), &ctx)
+            .await
+            .expect_err("unhealthy recall should fail before recall call");
+        assert!(err.to_string().contains("unavailable"));
+
+        let export = ExternalMemoryExportTool::new(orchestrator);
+        let err = export
+            .execute(serde_json::json!({"content": "unavailable"}), &ctx)
+            .await
+            .expect_err("unhealthy export should fail before export call");
+        assert!(err.to_string().contains("unavailable"));
+    }
+}

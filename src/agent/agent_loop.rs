@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use crate::agent::AgentRunDriver;
@@ -162,6 +162,11 @@ pub struct Agent {
     /// primarily trajectory artifact data.
     pub(super) latest_token_captures:
         Arc<Mutex<std::collections::HashMap<Uuid, ProviderTokenCapture>>>,
+    /// Per-thread cancellation signals for active turns. `/interrupt`, ACP
+    /// `session/cancel`, and close flows publish here so in-flight provider and
+    /// tool awaits can stop promptly instead of waiting for the next loop edge.
+    pub(super) active_turn_cancellations:
+        Arc<Mutex<std::collections::HashMap<Uuid, watch::Sender<bool>>>>,
 }
 
 impl Agent {
@@ -232,6 +237,7 @@ impl Agent {
             agent_router,
             subagent_executor,
             latest_token_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            active_turn_cancellations: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -301,6 +307,64 @@ impl Agent {
             .await
             .get(&thread_id)
             .cloned()
+    }
+
+    pub(super) async fn begin_turn_cancellation(&self, thread_id: Uuid) {
+        let (tx, _rx) = watch::channel(false);
+        self.active_turn_cancellations
+            .lock()
+            .await
+            .insert(thread_id, tx);
+    }
+
+    pub(super) async fn finish_turn_cancellation(&self, thread_id: Uuid) {
+        self.active_turn_cancellations
+            .lock()
+            .await
+            .remove(&thread_id);
+    }
+
+    pub(super) async fn signal_turn_cancellation(&self, thread_id: Uuid) {
+        let tx = self
+            .active_turn_cancellations
+            .lock()
+            .await
+            .get(&thread_id)
+            .cloned();
+        if let Some(tx) = tx {
+            let _ = tx.send(true);
+        }
+    }
+
+    pub(super) async fn wait_for_turn_cancellation(&self, thread_id: Uuid) {
+        let maybe_rx = self
+            .active_turn_cancellations
+            .lock()
+            .await
+            .get(&thread_id)
+            .map(|tx| tx.subscribe());
+        let Some(mut rx) = maybe_rx else {
+            futures::future::pending::<()>().await;
+            return;
+        };
+
+        loop {
+            if *rx.borrow() {
+                return;
+            }
+            if rx.changed().await.is_err() {
+                futures::future::pending::<()>().await;
+                return;
+            }
+        }
+    }
+
+    pub(super) fn turn_interrupted_error(thread_id: Uuid) -> Error {
+        crate::error::JobError::ContextError {
+            id: thread_id,
+            reason: "Interrupted".to_string(),
+        }
+        .into()
     }
 
     pub(super) fn safety(&self) -> &Arc<SafetyLayer> {

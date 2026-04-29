@@ -60,6 +60,26 @@ const KNOWN_CHANNELS: &[ChannelCheck] = &[
         description: "Signal messenger (signal-cli daemon)",
     },
     ChannelCheck {
+        name: "matrix",
+        env_key: "MATRIX_ENABLED",
+        description: "Matrix rooms and DMs (native lifecycle placeholder)",
+    },
+    ChannelCheck {
+        name: "voice-call",
+        env_key: "VOICE_CALL_ENABLED + --features voice",
+        description: "Voice-call lifecycle (native placeholder)",
+    },
+    ChannelCheck {
+        name: "apns",
+        env_key: "APNS_ENABLED",
+        description: "APNs device notifications (native lifecycle placeholder)",
+    },
+    ChannelCheck {
+        name: "browser-push",
+        env_key: "BROWSER_PUSH_ENABLED + --features browser",
+        description: "Browser push subscriptions (native lifecycle placeholder)",
+    },
+    ChannelCheck {
         name: "nostr",
         env_key: "NOSTR_ENABLED + NOSTR_PRIVATE_KEY",
         description: "Nostr owner DM control + social actions",
@@ -395,6 +415,12 @@ fn channel_is_configured(config: &crate::config::Config, name: &str) -> bool {
         "gateway" => config.channels.gateway.is_some(),
         "cli" => config.channels.cli.enabled,
         "signal" => config.channels.signal.is_some(),
+        "matrix" => config.channels.matrix_enabled,
+        "voice-call" => config.channels.voice_call_enabled && config.channels.voice_call_available,
+        "apns" => config.channels.apns_enabled,
+        "browser-push" => {
+            config.channels.browser_push_enabled && config.channels.browser_push_available
+        }
         "nostr" => config.channels.nostr.is_some(),
         "http" => config.channels.http.is_some(),
         "telegram" => config.channels.telegram.is_some(),

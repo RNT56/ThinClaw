@@ -1,0 +1,51 @@
+{
+  "type": "channel",
+  "name": "matrix",
+  "description": "Matrix appservice/webhook channel for receiving and responding to room messages",
+  "formatting_hints": "Matrix supports Markdown-style rich text in many clients. Keep replies concise and include room context when responding in busy rooms.",
+  "setup": {
+    "required_secrets": [
+      { "name": "matrix_access_token", "prompt": "Enter your Matrix access token", "optional": false },
+      { "name": "matrix_webhook_secret", "prompt": "Enter your Matrix webhook secret", "optional": false }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [{ "host": "matrix.org", "path_prefix": "/_matrix/" }],
+      "credentials": {
+        "matrix_access_token": {
+          "secret_name": "matrix_access_token",
+          "location": { "type": "bearer" },
+          "host_patterns": ["matrix.org", "*.matrix.org"]
+        }
+      },
+      "rate_limit": { "requests_per_minute": 60, "requests_per_hour": 3000 }
+    },
+    "secrets": { "allowed_names": ["matrix_*"] },
+    "channel": {
+      "allowed_paths": ["/webhook/matrix"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/matrix/",
+      "emit_rate_limit": { "messages_per_minute": 100, "messages_per_hour": 5000 }
+    }
+  },
+  "config": {
+    "channel_name": "matrix",
+    "display_name": "Matrix",
+    "webhook_path": "/webhook/matrix",
+    "mapping": {
+      "text": ["content.body", "body", "text"],
+      "user_id": ["sender", "user.id", "user_id"],
+      "user_name": ["unsigned.sender_display_name", "user.name", "sender_name"],
+      "chat_id": ["room_id", "room.id", "chat_id"],
+      "chat_type": ["room_type", "chat_type"],
+      "message_id": ["event_id"]
+    },
+    "response": {
+      "url": "https://matrix.org/_matrix/client/v3/rooms/{chat_id}/send/m.room.message/{provider_message_id}",
+      "method": "PUT",
+      "body_format": "json",
+      "body": { "msgtype": "m.text", "body": "{content}" }
+    }
+  }
+}

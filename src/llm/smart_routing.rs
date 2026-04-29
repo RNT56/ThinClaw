@@ -18,38 +18,7 @@ use crate::llm::provider::{
     CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role, StreamSupport,
     TokenCaptureSupport, ToolCompletionRequest, ToolCompletionResponse,
 };
-
-/// Classification of a request's complexity, determining which model handles it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskComplexity {
-    /// Short, simple queries -> cheap model
-    Simple,
-    /// Ambiguous complexity -> cheap model first, cascade to primary if uncertain
-    Moderate,
-    /// Code generation, analysis, multi-step reasoning -> primary model
-    Complex,
-}
-
-/// Configuration for the smart routing provider.
-#[derive(Debug, Clone)]
-pub struct SmartRoutingConfig {
-    /// Enable cascade mode: retry with primary if cheap model response seems uncertain.
-    pub cascade_enabled: bool,
-    /// Message length threshold below which a message may be classified as Simple (default: 200).
-    pub simple_max_chars: usize,
-    /// Message length threshold above which a message is classified as Complex (default: 1000).
-    pub complex_min_chars: usize,
-}
-
-impl Default for SmartRoutingConfig {
-    fn default() -> Self {
-        Self {
-            cascade_enabled: true,
-            simple_max_chars: 200,
-            complex_min_chars: 1000,
-        }
-    }
-}
+pub use thinclaw_llm_core::smart_routing::{SmartRoutingConfig, TaskComplexity, classify_message};
 
 /// Atomic counters for routing observability.
 struct SmartRoutingStats {
@@ -172,96 +141,6 @@ impl SmartRoutingProvider {
 
         hard_refusal_patterns.iter().any(|p| lower.contains(p))
     }
-}
-
-/// Classify a message's complexity based on content patterns and length.
-///
-/// Exposed as a free function for testability.
-pub(crate) fn classify_message(msg: &str, config: &SmartRoutingConfig) -> TaskComplexity {
-    let trimmed = msg.trim();
-    let len = trimmed.len();
-
-    // Empty or very short -> Simple
-    if len == 0 {
-        return TaskComplexity::Simple;
-    }
-
-    // Check for code blocks (triple backticks) -> Complex
-    if trimmed.contains("```") {
-        return TaskComplexity::Complex;
-    }
-
-    let lower = trimmed.to_lowercase();
-
-    // Complex keywords/patterns -> Complex regardless of length
-    const COMPLEX_KEYWORDS: &[&str] = &[
-        "implement",
-        "refactor",
-        "analyze",
-        "debug",
-        "create a",
-        "build a",
-        "design",
-        "fix the",
-        "fix this",
-        "write a",
-        "write the",
-        "explain how",
-        "explain why",
-        "explain the",
-        "compare",
-        "optimize",
-        "review",
-        "rewrite",
-        "migrate",
-        "architect",
-        "integrate",
-    ];
-
-    if COMPLEX_KEYWORDS.iter().any(|k| lower.contains(k)) {
-        return TaskComplexity::Complex;
-    }
-
-    // Long messages -> Complex
-    if len >= config.complex_min_chars {
-        return TaskComplexity::Complex;
-    }
-
-    // Simple keywords/patterns for short messages
-    const SIMPLE_KEYWORDS: &[&str] = &[
-        "list",
-        "show",
-        "what is",
-        "what's",
-        "status",
-        "help",
-        "yes",
-        "no",
-        "ok",
-        "thanks",
-        "thank you",
-        "hello",
-        "hi",
-        "hey",
-        "ping",
-        "version",
-        "how many",
-        "when",
-        "where is",
-        "who",
-    ];
-
-    if len <= config.simple_max_chars && SIMPLE_KEYWORDS.iter().any(|k| lower.contains(k)) {
-        return TaskComplexity::Simple;
-    }
-
-    // Short confirmations / single words -> Simple
-    if len <= 10 {
-        return TaskComplexity::Simple;
-    }
-
-    // Everything else -> Moderate
-    TaskComplexity::Moderate
 }
 
 #[async_trait]

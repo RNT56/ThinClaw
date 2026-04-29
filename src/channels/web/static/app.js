@@ -8933,6 +8933,9 @@ function renderCostSummary(data) {
   var providerCostReq = rangeSnapshot.providerCostRequests || 0;
   var fallbackCostReq = rangeSnapshot.localPricingFallbackRequests || 0;
   var capturedOutput = rangeSnapshot.capturedOutput || 0;
+  var capturedTokenIds = rangeSnapshot.capturedTokenIds || 0;
+  var capturedLogprobs = rangeSnapshot.capturedLogprobs || 0;
+  var tokenCaptureReq = rangeSnapshot.tokenCaptureRequests || 0;
 
   // Spend card with optional budget progress
   var spendHtml = '<div class="ui-panel ui-panel--feature ui-panel--compact ui-panel--interactive cost-card accent">'
@@ -8957,6 +8960,10 @@ function renderCostSummary(data) {
     + '<div class="cost-card-value">' + formatTokenCount(totalIn + totalOut) + '</div>'
     + '<div class="cost-card-sub">' + formatTokenCount(totalIn) + ' input · ' + formatTokenCount(totalOut) + ' output</div>'
     + '<div class="cost-card-sub">' + providerUsageReq + ' provider-usage requests' + (capturedOutput ? ' · ' + formatTokenCount(capturedOutput) + ' captured output' : '') + '</div>'
+    + '<div class="cost-card-sub">' + tokenCaptureReq + ' token-capture requests'
+      + (capturedTokenIds ? ' · ' + formatTokenCount(capturedTokenIds) + ' token ids' : '')
+      + (capturedLogprobs ? ' · ' + formatTokenCount(capturedLogprobs) + ' logprobs' : '')
+    + '</div>'
     + '</div>';
 
   // Active models
@@ -9117,13 +9124,16 @@ function renderCostTable(data) {
   if (table) table.style.display = '';
   if (empty) empty.style.display = 'none';
 
-  var totalInput = 0, totalOutput = 0, totalCost = 0, totalReq = 0, totalCaptured = 0;
+  var totalInput = 0, totalOutput = 0, totalCost = 0, totalReq = 0, totalCaptured = 0, totalCapturedTokenIds = 0, totalCapturedLogprobs = 0, totalTokenCaptureReq = 0;
   for (var i = 0; i < models.length; i++) {
     totalInput += models[i].input_tokens || 0;
     totalOutput += models[i].output_tokens || 0;
     totalCost += models[i].cost_usd || 0;
     totalReq += models[i].requests || 0;
     totalCaptured += models[i].captured_output_tokens || 0;
+    totalCapturedTokenIds += models[i].captured_token_ids || 0;
+    totalCapturedLogprobs += models[i].captured_logprobs || 0;
+    totalTokenCaptureReq += models[i].token_capture_requests || 0;
   }
 
   var html = '';
@@ -9134,11 +9144,18 @@ function renderCostTable(data) {
     var cost = m.cost_usd || 0;
     var req = m.requests || 0;
     var captured = m.captured_output_tokens || 0;
+    var capturedTokenIds = m.captured_token_ids || 0;
+    var capturedLogprobs = m.captured_logprobs || 0;
+    var tokenCaptureReq = m.token_capture_requests || 0;
     var share = totalCost > 0 ? (cost / totalCost * 100) : 0;
     var color = MODEL_COLORS[i % MODEL_COLORS.length];
     var provenance = (m.provider_usage_requests || 0) + ' usage src';
+    if (m.provider_cost_requests) provenance += ' · ' + m.provider_cost_requests + ' provider cost';
     if (m.local_pricing_fallback_requests) provenance += ' · ' + m.local_pricing_fallback_requests + ' priced locally';
     if (captured) provenance += ' · ' + formatTokenCount(captured) + ' captured';
+    if (tokenCaptureReq) provenance += ' · ' + tokenCaptureReq + ' capture req';
+    if (capturedTokenIds) provenance += ' · ' + formatTokenCount(capturedTokenIds) + ' token ids';
+    if (capturedLogprobs) provenance += ' · ' + formatTokenCount(capturedLogprobs) + ' logprobs';
 
     html += '<tr>'
       + '<td><span class="cost-model-dot" style="background:' + color + '"></span><span class="cost-model-name" title="' + escapeHtml(m.model) + '">' + escapeHtml(displayCostModelLabel(m.model, shortLabelCounts)) + '</span><div class="cost-card-sub">' + escapeHtml(provenance) + '</div></td>'
@@ -9159,7 +9176,13 @@ function renderCostTable(data) {
       + '<td>' + formatTokenCount(totalInput + totalOutput) + '</td>'
       + '<td>' + formatCost(String(totalCost)) + '</td>'
       + '<td>' + totalReq + '</td>'
-      + '<td>100%' + (totalCaptured ? '<div class="cost-card-sub">' + formatTokenCount(totalCaptured) + ' captured output</div>' : '') + '</td>'
+      + '<td>100%'
+        + (totalCaptured ? '<div class="cost-card-sub">' + formatTokenCount(totalCaptured) + ' captured output</div>' : '')
+        + (totalTokenCaptureReq ? '<div class="cost-card-sub">' + totalTokenCaptureReq + ' capture req'
+          + (totalCapturedTokenIds ? ' · ' + formatTokenCount(totalCapturedTokenIds) + ' ids' : '')
+          + (totalCapturedLogprobs ? ' · ' + formatTokenCount(totalCapturedLogprobs) + ' logprobs' : '')
+        + '</div>' : '')
+      + '</td>'
       + '</tr>';
   }
 }

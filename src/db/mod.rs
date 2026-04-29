@@ -28,7 +28,6 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::agent::BrokenTool;
 use crate::agent::routine::{
     Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
     RoutineTriggerDecision, RunStatus,
@@ -54,6 +53,7 @@ use crate::identity::{
 };
 use crate::tools::ToolProfile;
 pub use thinclaw_db::WorkspaceStore;
+use thinclaw_types::BrokenTool;
 
 /// Create a database backend from configuration, run migrations, and return it.
 ///

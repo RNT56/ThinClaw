@@ -28,6 +28,17 @@ Some delivery surfaces are compiled into the trusted Rust host. Others are packa
 | Slack | WASM package | stateless Events API path, host-managed credentials |
 | WhatsApp | WASM package | webhook-driven packaged channel |
 | Discord interactions | WASM package | slash-command / webhook path |
+| Mattermost | WASM package | webhook-driven workspace chat path |
+| Twilio SMS | WASM package | webhook-driven SMS path |
+| DingTalk | WASM package | HTTP callback and bot-reply path |
+| Feishu/Lark | WASM package | event callback and bot-reply path |
+| WeCom | WASM package | enterprise callback and bot-reply path |
+| Weixin | WASM package | Official Account callback and reply path |
+| QQ | WASM package | bot webhook and reply path |
+| LINE | WASM package | Messaging API webhook and reply path |
+| Google Chat | WASM package | app event and response path |
+| Microsoft Teams | WASM package | bot activity callback and reply path |
+| Twitch | WASM package | EventSub and chat-reply path |
 | ACP | native stdio | editor-native JSON-RPC agent subprocess |
 
 The installable WASM packages are represented in `registry/channels/`. The host runtime loads them from `~/.thinclaw/channels/`.
@@ -74,6 +85,7 @@ Examples:
 - Slack
 - WhatsApp
 - Discord interactions
+- Mattermost, Twilio SMS, DingTalk, Feishu/Lark, WeCom, Weixin, QQ, LINE, Google Chat, Microsoft Teams, and Twitch registry packages
 
 ## Why The Split Exists
 
@@ -118,7 +130,17 @@ New native messaging channels should convert platform payloads into `IncomingEve
 - `legacy_session_key_aliases` preserves lookup compatibility for older persisted keys.
 - `parse_slash_command` is the shared slash-command parser; channels should not open-code `/` prefix splitting.
 
-This is the foundation for Mattermost, Matrix, SMS/Twilio, browser-push, DingTalk, Feishu/Lark, WeCom, Weixin, and QQ drivers. Platform drivers should own authentication and transport details; the manager owns canonical session identity and command parsing.
+This is the foundation for Mattermost, Matrix, SMS/Twilio, browser-push, DingTalk, Feishu/Lark, WeCom, Weixin, QQ, LINE, Google Chat, Microsoft Teams, and Twitch drivers. Platform drivers should own authentication and transport details; the manager owns canonical session identity and command parsing.
+
+Matrix, voice-call, APNs, and browser-push currently exist as native lifecycle
+placeholders. They are config-gated descriptors that appear in channel status
+without starting a transport. This keeps setup/status continuity visible while
+the real drivers are still absent:
+
+- `MATRIX_ENABLED`
+- `VOICE_CALL_ENABLED` (`--features voice` required before a real transport can run)
+- `APNS_ENABLED`
+- `BROWSER_PUSH_ENABLED` (`--features browser` required before a real transport can run)
 
 ## Operator Docs
 

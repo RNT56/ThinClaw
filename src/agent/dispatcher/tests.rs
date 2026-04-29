@@ -822,3 +822,118 @@ async fn run_agentic_loop_uses_channel_formatting_hints_from_channel_manager() {
             .any(|doc| doc.contains("Test channel prefers plain text only."))
     }));
 }
+
+#[tokio::test]
+async fn run_agentic_loop_cancels_in_flight_provider_call() {
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    let blocking_llm = Arc::new(BlockingLlm::new("blocking-model", dropped_tx));
+    let tools = Arc::new(ToolRegistry::new());
+    let (agent, _) = make_test_agent(
+        blocking_llm.clone(),
+        None,
+        tools,
+        None,
+        StreamMode::None,
+        false,
+        10,
+    )
+    .await;
+    let agent = Arc::new(agent);
+    let (session, thread_id) = make_session_and_thread().await;
+    agent.begin_turn_cancellation(thread_id).await;
+    let message = IncomingMessage::new("test", "user-1", "hello");
+    let run_agent = Arc::clone(&agent);
+    let run_session = Arc::clone(&session);
+    let run_message = message.clone();
+
+    let run = tokio::spawn(async move {
+        run_agent
+            .run_agentic_loop(
+                &run_message,
+                run_session,
+                thread_id,
+                vec![ChatMessage::user("hello")],
+            )
+            .await
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        blocking_llm.wait_started(),
+    )
+    .await
+    .expect("provider call should start");
+    agent.signal_turn_cancellation(thread_id).await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+        .await
+        .expect("provider future should be dropped on cancellation")
+        .expect("drop signal should be sent");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), run)
+        .await
+        .expect("agent loop should return after cancellation")
+        .expect("join should succeed");
+    let err = match result {
+        Err(err) => err,
+        Ok(_) => panic!("cancelled turn should return an interrupted error"),
+    };
+    assert!(err.to_string().contains("Interrupted"));
+    agent.finish_turn_cancellation(thread_id).await;
+}
+
+#[tokio::test]
+async fn run_agentic_loop_cancels_in_flight_tool_call() {
+    let primary = Arc::new(ScriptedLlm::new(
+        "primary-model",
+        vec![ScriptedResponse::tool_calls(
+            vec![tool_call("blocking_tool")],
+            FinishReason::ToolUse,
+        )],
+    ));
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    let blocking_tool = Arc::new(BlockingTool::new("blocking_tool", dropped_tx));
+    let tools = Arc::new(ToolRegistry::new());
+    tools.register(blocking_tool.clone()).await;
+    let (agent, _) = make_test_agent(primary, None, tools, None, StreamMode::None, false, 10).await;
+    let agent = Arc::new(agent);
+    let (session, thread_id) = make_session_and_thread().await;
+    agent.begin_turn_cancellation(thread_id).await;
+    let message = IncomingMessage::new("test", "user-1", "hello");
+    let run_agent = Arc::clone(&agent);
+    let run_session = Arc::clone(&session);
+    let run_message = message.clone();
+
+    let run = tokio::spawn(async move {
+        run_agent
+            .run_agentic_loop(
+                &run_message,
+                run_session,
+                thread_id,
+                vec![ChatMessage::user("hello")],
+            )
+            .await
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        blocking_tool.wait_started(),
+    )
+    .await
+    .expect("tool call should start");
+    agent.signal_turn_cancellation(thread_id).await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), dropped_rx)
+        .await
+        .expect("tool future should be dropped on cancellation")
+        .expect("drop signal should be sent");
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), run)
+        .await
+        .expect("agent loop should return after cancellation")
+        .expect("join should succeed");
+    let err = match result {
+        Err(err) => err,
+        Ok(_) => panic!("cancelled turn should return an interrupted error"),
+    };
+    assert!(err.to_string().contains("Interrupted"));
+    agent.finish_turn_cancellation(thread_id).await;
+}

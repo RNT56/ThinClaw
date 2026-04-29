@@ -3494,6 +3494,8 @@ async fn finalize_trial(
         campaign.ended_at = Some(Utc::now());
     }
 
+    upsert_local_trial_artifact_refs(store, trial).await?;
+
     store
         .update_experiment_trial(trial)
         .await
@@ -3502,6 +3504,69 @@ async fn finalize_trial(
         .update_experiment_campaign(campaign)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(())
+}
+
+async fn upsert_local_trial_artifact_refs(
+    store: &Arc<dyn Database>,
+    trial: &ExperimentTrial,
+) -> ApiResult<()> {
+    let mut desired = Vec::new();
+    if let Some(path) = trial
+        .artifact_manifest_json
+        .get("trajectory_json_path")
+        .and_then(|value| value.as_str())
+    {
+        desired.push(("trajectory_json".to_string(), path.to_string()));
+    }
+    if let Some(path) = trial
+        .artifact_manifest_json
+        .get("summary_json_path")
+        .and_then(|value| value.as_str())
+    {
+        desired.push(("summary_json".to_string(), path.to_string()));
+    }
+    if let Some(path) = trial.log_preview_path.as_deref() {
+        desired.push(("log_preview".to_string(), path.to_string()));
+    }
+    if desired.is_empty() {
+        return Ok(());
+    }
+
+    let mut artifacts = store
+        .list_experiment_artifacts(trial.id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut changed = false;
+    for (kind, path) in desired {
+        if artifacts
+            .iter()
+            .any(|artifact| artifact.kind == kind && artifact.uri_or_local_path == path)
+        {
+            continue;
+        }
+        let size_bytes = std::fs::metadata(&path).ok().map(|metadata| metadata.len());
+        artifacts.push(ExperimentArtifactRef {
+            id: Uuid::new_v4(),
+            trial_id: trial.id,
+            kind,
+            uri_or_local_path: path,
+            size_bytes,
+            fetchable: false,
+            metadata: serde_json::json!({
+                "source": "local_runner_completion",
+            }),
+            created_at: Utc::now(),
+        });
+        changed = true;
+    }
+
+    if changed {
+        store
+            .replace_experiment_artifacts(trial.id, &artifacts)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -4648,6 +4713,7 @@ async fn execute_agent_env_benchmark_trial(
         artifact_manifest_json: serde_json::json!({
             "stage": "agent_env_benchmark",
             "trajectory_json_path": trajectory_path.to_string_lossy(),
+            "trajectory_summary": agent_env_trajectory_summary(&trajectories),
         }),
     })
 }
@@ -4662,6 +4728,47 @@ fn average_trajectory_score(trajectories: &[Trajectory]) -> f64 {
             .sum::<f64>()
             / trajectories.len() as f64
     }
+}
+
+fn agent_env_trajectory_summary(trajectories: &[Trajectory]) -> serde_json::Value {
+    let mut env_names = trajectories
+        .iter()
+        .map(|trajectory| trajectory.env_name.clone())
+        .collect::<Vec<_>>();
+    env_names.sort();
+    env_names.dedup();
+
+    let mut exact_tokens_supported = false;
+    let mut logprobs_supported = false;
+    let mut captured_token_ids = 0usize;
+    let mut captured_logprobs = 0usize;
+    let mut token_capture_steps = 0usize;
+    let mut step_count = 0usize;
+
+    for trajectory in trajectories {
+        step_count += trajectory.steps.len();
+        for step in &trajectory.steps {
+            if let Some(capture) = step.token_capture.as_ref() {
+                token_capture_steps += 1;
+                exact_tokens_supported |= capture.exact_tokens_supported;
+                logprobs_supported |= capture.logprobs_supported;
+                captured_token_ids += capture.token_ids.len();
+                captured_logprobs += capture.logprobs.len();
+            }
+        }
+    }
+
+    serde_json::json!({
+        "env_names": env_names,
+        "episode_count": trajectories.len(),
+        "step_count": step_count,
+        "score": average_trajectory_score(trajectories),
+        "exact_tokens_supported": exact_tokens_supported,
+        "logprobs_supported": logprobs_supported,
+        "token_capture_steps": token_capture_steps,
+        "captured_token_ids": captured_token_ids,
+        "captured_logprobs": captured_logprobs,
+    })
 }
 
 fn render_agent_env_log(trajectories: &[Trajectory]) -> String {
@@ -6841,6 +6948,14 @@ mod tests {
             completion.artifact_manifest_json["stage"],
             serde_json::json!("agent_env_benchmark")
         );
+        assert_eq!(
+            completion.artifact_manifest_json["trajectory_summary"]["env_names"][0],
+            serde_json::json!("terminal_bench")
+        );
+        assert_eq!(
+            completion.artifact_manifest_json["trajectory_summary"]["token_capture_steps"],
+            serde_json::json!(1)
+        );
         let trajectory_path = Path::new(
             completion.artifact_manifest_json["trajectory_json_path"]
                 .as_str()
@@ -6912,6 +7027,10 @@ mod tests {
             completion.artifact_manifest_json["stage"],
             serde_json::json!("agent_env_benchmark")
         );
+        assert_eq!(
+            completion.artifact_manifest_json["trajectory_summary"]["env_names"][0],
+            serde_json::json!("skill_bench")
+        );
         let trajectory_path = Path::new(
             completion.artifact_manifest_json["trajectory_json_path"]
                 .as_str()
@@ -6923,6 +7042,153 @@ mod tests {
         assert!(trajectory_json.contains("skill_bench"));
         let log = std::fs::read_to_string(log_path).expect("read log");
         assert!(log.contains("minimal-skill"));
+    }
+
+    #[tokio::test]
+    async fn local_trial_artifact_refs_include_agent_env_paths() {
+        let (store, _guard) = crate::testing::test_db().await;
+        let dir = TempDir::new().expect("tempdir");
+        let trajectory_path = dir.path().join("trajectory.json");
+        let log_path = dir.path().join("trial.log");
+        std::fs::write(&trajectory_path, "[]").expect("write trajectory");
+        std::fs::write(&log_path, "log").expect("write log");
+        let now = Utc::now();
+        let project = ExperimentProject {
+            id: Uuid::new_v4(),
+            name: "artifact-ref-project".to_string(),
+            workspace_path: dir.path().to_string_lossy().to_string(),
+            git_remote_name: "origin".to_string(),
+            base_branch: "main".to_string(),
+            preset: Default::default(),
+            strategy_prompt: "Verify artifact refs".to_string(),
+            workdir: ".".to_string(),
+            prepare_command: None,
+            run_command: "true".to_string(),
+            mutable_paths: Vec::new(),
+            fixed_paths: Vec::new(),
+            primary_metric: ExperimentMetricDefinition {
+                name: "score".to_string(),
+                regex: None,
+                json_path: Some("score".to_string()),
+                comparator: ExperimentMetricComparator::HigherIsBetter,
+            },
+            secondary_metrics: Vec::new(),
+            comparison_policy: Default::default(),
+            stop_policy: Default::default(),
+            default_runner_profile_id: None,
+            promotion_mode: "manual".to_string(),
+            autonomy_mode: Default::default(),
+            status: ExperimentProjectStatus::Ready,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_project(&project)
+            .await
+            .expect("store project");
+        let runner = ExperimentRunnerProfile {
+            id: Uuid::new_v4(),
+            name: "artifact-ref-runner".to_string(),
+            backend: ExperimentRunnerBackend::AgentEnv,
+            backend_config: serde_json::json!({}),
+            image_or_runtime: None,
+            gpu_requirements: serde_json::json!({}),
+            env_grants: serde_json::json!({}),
+            secret_references: Vec::new(),
+            cache_policy: serde_json::json!({}),
+            status: ExperimentRunnerStatus::Validated,
+            readiness_class: crate::experiments::ExperimentRunnerReadinessClass::LaunchReady,
+            launch_eligible: true,
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_runner_profile(&runner)
+            .await
+            .expect("store runner");
+        let campaign = ExperimentCampaign {
+            id: Uuid::new_v4(),
+            project_id: project.id,
+            runner_profile_id: runner.id,
+            owner_user_id: "owner-a".to_string(),
+            status: ExperimentCampaignStatus::Running,
+            baseline_commit: None,
+            best_commit: None,
+            best_metrics: serde_json::json!({}),
+            experiment_branch: None,
+            remote_ref: None,
+            worktree_path: None,
+            started_at: Some(now),
+            ended_at: None,
+            trial_count: 1,
+            failure_count: 0,
+            pause_reason: None,
+            queue_state: ExperimentCampaignQueueState::NotQueued,
+            queue_position: 0,
+            active_trial_id: None,
+            total_runtime_ms: 0,
+            total_cost_usd: 0.0,
+            total_llm_cost_usd: 0.0,
+            total_runner_cost_usd: 0.0,
+            consecutive_non_improving_trials: 0,
+            max_trials_override: None,
+            gateway_url: None,
+            metadata: serde_json::json!({}),
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_campaign(&campaign)
+            .await
+            .expect("store campaign");
+        let trial = ExperimentTrial {
+            id: Uuid::new_v4(),
+            campaign_id: campaign.id,
+            sequence: 1,
+            candidate_commit: None,
+            parent_best_commit: None,
+            status: ExperimentTrialStatus::Running,
+            runner_backend: ExperimentRunnerBackend::AgentEnv,
+            exit_code: Some(0),
+            metrics_json: serde_json::json!({}),
+            summary: None,
+            decision_reason: None,
+            artifact_manifest_json: serde_json::json!({
+                "trajectory_json_path": trajectory_path.to_string_lossy(),
+            }),
+            log_preview_path: Some(log_path.to_string_lossy().to_string()),
+            reviewer_decision: None,
+            runtime_ms: None,
+            attributed_cost_usd: None,
+            llm_cost_usd: None,
+            runner_cost_usd: None,
+            hypothesis: None,
+            mutation_summary: None,
+            provider_job_id: None,
+            provider_job_metadata: serde_json::json!({}),
+            started_at: Some(now),
+            completed_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .create_experiment_trial(&trial)
+            .await
+            .expect("store trial");
+
+        super::upsert_local_trial_artifact_refs(&store, &trial)
+            .await
+            .expect("upsert local refs");
+        let artifacts = store
+            .list_experiment_artifacts(trial.id)
+            .await
+            .expect("list refs");
+        let kinds = artifacts
+            .iter()
+            .map(|artifact| artifact.kind.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(kinds.contains("trajectory_json"));
+        assert!(kinds.contains("log_preview"));
     }
 
     #[tokio::test]

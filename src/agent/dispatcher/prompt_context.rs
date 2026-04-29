@@ -241,7 +241,7 @@ impl Agent {
                 false,
                 conversations,
             )
-            .compact_block()
+            .compact_block_for_channel(Some(&message.channel))
         } else {
             None
         };

@@ -1,0 +1,24 @@
+{
+  "name": "matrix",
+  "display_name": "Matrix",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "Matrix appservice/webhook channel for room messages",
+  "keywords": ["messaging", "chat", "matrix", "room"],
+  "source": {
+    "dir": "channels-src/matrix",
+    "capabilities": "matrix.capabilities.json",
+    "crate_name": "matrix-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Matrix",
+    "secrets": ["matrix_access_token", "matrix_webhook_secret"],
+    "shared_auth": null,
+    "setup_url": "https://matrix.org/docs"
+  },
+  "tags": ["messaging"]
+}

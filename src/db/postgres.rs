@@ -11,7 +11,6 @@ use deadpool_postgres::Pool;
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
-use crate::agent::BrokenTool;
 use crate::agent::routine::{
     Routine, RoutineEvent, RoutineEventEvaluation, RoutineRun, RoutineTrigger,
     RoutineTriggerDecision, RunStatus,
@@ -43,6 +42,7 @@ use crate::identity::{
 use crate::workspace::{
     MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult, WorkspaceEntry,
 };
+use thinclaw_types::BrokenTool;
 
 /// PostgreSQL database backend.
 ///

@@ -209,12 +209,20 @@ impl Agent {
                     )
                     .await;
 
-                let result = if tc.name == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
-                    self.execute_consult_advisor_call(tc, &context_messages, advisor_call_budget)
-                        .await
-                } else {
-                    self.execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
-                        .await
+                let result = tokio::select! {
+                    biased;
+                    _ = self.wait_for_turn_cancellation(thread_id) => {
+                        Err(Self::turn_interrupted_error(thread_id))
+                    }
+                    result = async {
+                        if tc.name == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
+                            self.execute_consult_advisor_call(tc, &context_messages, advisor_call_budget)
+                                .await
+                        } else {
+                            self.execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                                .await
+                        }
+                    } => result
                 };
 
                 let _ = self
@@ -326,7 +334,20 @@ impl Agent {
                 });
             }
 
-            while let Some(join_result) = join_set.join_next().await {
+            loop {
+                let join_result = tokio::select! {
+                    biased;
+                    _ = self.wait_for_turn_cancellation(thread_id) => {
+                        join_set.abort_all();
+                        while join_set.join_next().await.is_some() {}
+                        return Err(Self::turn_interrupted_error(thread_id));
+                    }
+                    join_result = join_set.join_next() => join_result
+                };
+
+                let Some(join_result) = join_result else {
+                    break;
+                };
                 match join_result {
                     Ok((pf_idx, result)) => {
                         exec_results[pf_idx] = Some(result);

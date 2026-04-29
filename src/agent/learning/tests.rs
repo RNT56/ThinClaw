@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::session::{Session, Thread, Turn};
 use crate::channels::IncomingMessage;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc;
@@ -76,6 +77,298 @@ fn provider_status(
         capabilities: Vec::new(),
         metadata: serde_json::json!({}),
     }
+}
+
+#[derive(Debug, Clone)]
+struct RecordedProviderRequest {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: Option<serde_json::Value>,
+}
+
+#[derive(Clone)]
+struct MockProviderState {
+    requests: Arc<Mutex<Vec<RecordedProviderRequest>>>,
+}
+
+struct MockProviderServer {
+    base_url: String,
+    requests: Arc<Mutex<Vec<RecordedProviderRequest>>>,
+}
+
+impl MockProviderServer {
+    fn requests(&self) -> Vec<RecordedProviderRequest> {
+        self.requests
+            .lock()
+            .expect("mock provider request log")
+            .clone()
+    }
+}
+
+async fn mock_provider_handler(
+    axum::extract::State(state): axum::extract::State<MockProviderState>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let path = uri.path().to_string();
+    let body_json = if body.is_empty() {
+        None
+    } else {
+        serde_json::from_slice::<serde_json::Value>(&body).ok()
+    };
+    let recorded_headers = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
+        })
+        .collect::<HashMap<_, _>>();
+    state
+        .requests
+        .lock()
+        .expect("mock provider request log")
+        .push(RecordedProviderRequest {
+            method: method.to_string(),
+            path: path.clone(),
+            headers: recorded_headers,
+            body: body_json,
+        });
+
+    if path.contains("/fail") {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({"error": "mock failure"})),
+        )
+            .into_response();
+    }
+
+    let value = if path == "/" || path == "/health" || path.contains("heartbeat") {
+        serde_json::json!({"ok": true})
+    } else if path == "/embed" {
+        serde_json::json!({"embedding": [0.1, 0.2, 0.3]})
+    } else if path.contains("/chroma/") && path.ends_with("/query") {
+        serde_json::json!({
+            "ids": [["chroma-1"]],
+            "documents": [["uses chroma for vector recall"]],
+            "distances": [[0.12]],
+            "metadatas": [[{"source": "mock"}]]
+        })
+    } else if path.contains("/qdrant/") && path.ends_with("/query") {
+        serde_json::json!({
+            "result": {
+                "points": [{
+                    "id": "qdrant-1",
+                    "score": 0.91,
+                    "payload": {"text": "uses qdrant for durable recall"}
+                }]
+            }
+        })
+    } else if method == axum::http::Method::GET && path.contains("/letta/") {
+        serde_json::json!({
+            "data": [{
+                "id": "letta-1",
+                "score": 0.74,
+                "text": "letta remembers archival facts"
+            }]
+        })
+    } else if path.contains("/custom/recall") {
+        serde_json::json!({
+            "results": [{
+                "id": "custom-1",
+                "summary": "custom http recalls preferences",
+                "score": 0.88
+            }]
+        })
+    } else if path.contains("/mem0/search") {
+        serde_json::json!({
+            "results": [{
+                "id": "mem0-1",
+                "memory": "mem0 recalls preferences",
+                "score": 0.82
+            }]
+        })
+    } else if path.contains("/openmemory/search") {
+        serde_json::json!({
+            "memories": [{
+                "id": "openmemory-1",
+                "content": "openmemory recalls local facts",
+                "score": 0.79
+            }]
+        })
+    } else {
+        serde_json::json!({"ok": true})
+    };
+
+    (axum::http::StatusCode::OK, axum::Json(value)).into_response()
+}
+
+async fn spawn_mock_provider_server() -> MockProviderServer {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let state = MockProviderState {
+        requests: Arc::clone(&requests),
+    };
+    let app = axum::Router::new()
+        .fallback(axum::routing::any(mock_provider_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind mock provider server");
+    let addr = listener.local_addr().expect("mock provider server address");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("mock provider server");
+    });
+    MockProviderServer {
+        base_url: format!("http://{addr}"),
+        requests,
+    }
+}
+
+fn configured_provider_settings(
+    provider_name: &str,
+    base_url: &str,
+    enabled: bool,
+) -> LearningSettings {
+    let mut settings = LearningSettings::default();
+    let mut provider = crate::settings::LearningProviderSettings {
+        enabled,
+        ..crate::settings::LearningProviderSettings::default()
+    };
+    provider
+        .config
+        .insert("base_url".to_string(), base_url.to_string());
+    provider
+        .config
+        .insert("api_key".to_string(), "secret-token".to_string());
+    match provider_name {
+        "mem0" => {
+            provider
+                .config
+                .insert("search_path".to_string(), "/mem0/search".to_string());
+            provider
+                .config
+                .insert("sync_path".to_string(), "/mem0/sync".to_string());
+        }
+        "openmemory" => {
+            provider
+                .config
+                .insert("search_path".to_string(), "/openmemory/search".to_string());
+            provider
+                .config
+                .insert("sync_path".to_string(), "/openmemory/sync".to_string());
+        }
+        "letta" => {
+            provider
+                .config
+                .insert("agent_id".to_string(), "agent-123".to_string());
+            provider.config.insert(
+                "search_path".to_string(),
+                "/letta/{agent_id}/search".to_string(),
+            );
+            provider.config.insert(
+                "sync_path".to_string(),
+                "/letta/{agent_id}/sync".to_string(),
+            );
+        }
+        "chroma" => {
+            provider
+                .config
+                .insert("collection_id".to_string(), "collection-123".to_string());
+            provider
+                .config
+                .insert("embedding_url".to_string(), format!("{base_url}/embed"));
+            provider.config.insert(
+                "query_path".to_string(),
+                "/chroma/{collection_id}/query".to_string(),
+            );
+            provider.config.insert(
+                "sync_path".to_string(),
+                "/chroma/{collection_id}/upsert".to_string(),
+            );
+        }
+        "qdrant" => {
+            provider
+                .config
+                .insert("collection".to_string(), "memories".to_string());
+            provider
+                .config
+                .insert("embedding_url".to_string(), format!("{base_url}/embed"));
+            provider.config.insert(
+                "query_path".to_string(),
+                "/qdrant/{collection}/query".to_string(),
+            );
+            provider.config.insert(
+                "sync_path".to_string(),
+                "/qdrant/{collection}/points".to_string(),
+            );
+        }
+        "custom_http" => {
+            provider.config.insert(
+                "recall_url".to_string(),
+                format!("{base_url}/custom/recall"),
+            );
+            provider
+                .config
+                .insert("sync_url".to_string(), format!("{base_url}/custom/sync"));
+        }
+        _ => {}
+    }
+    *settings.providers.provider_mut(provider_name) = provider;
+    settings
+}
+
+fn configured_provider_cases() -> Vec<(
+    &'static str,
+    Arc<dyn MemoryProvider>,
+    &'static str,
+    &'static str,
+)> {
+    vec![
+        (
+            "mem0",
+            Arc::new(Mem0Provider),
+            "authorization",
+            "Token secret-token",
+        ),
+        (
+            "openmemory",
+            Arc::new(OpenMemoryProvider),
+            "x-api-key",
+            "secret-token",
+        ),
+        (
+            "letta",
+            Arc::new(LettaProvider),
+            "authorization",
+            "Bearer secret-token",
+        ),
+        (
+            "chroma",
+            Arc::new(ChromaProvider),
+            "x-chroma-token",
+            "secret-token",
+        ),
+        (
+            "qdrant",
+            Arc::new(QdrantProvider),
+            "api-key",
+            "secret-token",
+        ),
+        (
+            "custom_http",
+            Arc::new(CustomHttpProvider),
+            "authorization",
+            "Bearer secret-token",
+        ),
+    ]
 }
 
 fn generated_skill_test_content(skill_name: &str) -> String {
@@ -1092,6 +1385,195 @@ fn provider_hit_parser_handles_memory_service_and_vector_shapes() {
     );
     assert_eq!(qdrant_hits[0].summary, "keeps OpenMemory local");
     assert_eq!(qdrant_hits[0].score, Some(0.77));
+}
+
+#[tokio::test]
+async fn configured_http_memory_providers_recall_export_and_apply_auth() {
+    let server = spawn_mock_provider_server().await;
+
+    for (provider_name, provider, auth_header, auth_value) in configured_provider_cases() {
+        let settings = configured_provider_settings(provider_name, &server.base_url, true);
+        let hits = provider
+            .recall(&settings, "user-123", "what do you remember?", 2)
+            .await
+            .unwrap_or_else(|err| panic!("{provider_name} recall failed: {err}"));
+        assert_eq!(
+            hits.len(),
+            1,
+            "{provider_name} should return one recall hit"
+        );
+        assert!(
+            hits[0].summary.to_ascii_lowercase().contains(
+                provider_name
+                    .strip_suffix("_http")
+                    .unwrap_or(provider_name)
+                    .split('_')
+                    .next()
+                    .unwrap()
+            ),
+            "{provider_name} recall should parse provider-specific response"
+        );
+
+        provider
+            .export_turn(
+                &settings,
+                "user-123",
+                &serde_json::json!({"content": "prefers direct answers"}),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{provider_name} export failed: {err}"));
+
+        let requests = server.requests();
+        let provider_requests = requests
+            .iter()
+            .filter(|request| {
+                request.path.contains(provider_name)
+                    || (provider_name == "custom_http" && request.path.contains("/custom/"))
+                    || (provider_name == "letta" && request.path.contains("/letta/"))
+                    || (provider_name == "chroma" && request.path.contains("/embed"))
+                    || (provider_name == "qdrant" && request.path.contains("/embed"))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            provider_requests.iter().any(|request| request
+                .headers
+                .get(auth_header)
+                .is_some_and(|value| value == auth_value)),
+            "{provider_name} should send configured provider auth"
+        );
+    }
+
+    let requests = server.requests();
+    let mem0_recall = requests
+        .iter()
+        .find(|request| request.path == "/mem0/search")
+        .expect("mem0 recall request");
+    assert_eq!(mem0_recall.method, "POST");
+    assert_eq!(mem0_recall.body.as_ref().unwrap()["user_id"], "user-123");
+    assert_eq!(mem0_recall.body.as_ref().unwrap()["top_k"], 2);
+
+    let letta_recall = requests
+        .iter()
+        .find(|request| request.path == "/letta/agent-123/search")
+        .expect("letta recall request");
+    assert_eq!(letta_recall.method, "GET");
+
+    let chroma_upsert = requests
+        .iter()
+        .find(|request| request.path == "/chroma/collection-123/upsert")
+        .expect("chroma export request");
+    assert_eq!(
+        chroma_upsert.body.as_ref().unwrap()["documents"][0],
+        "prefers direct answers"
+    );
+
+    let qdrant_upsert = requests
+        .iter()
+        .find(|request| request.path == "/qdrant/memories/points")
+        .expect("qdrant export request");
+    assert_eq!(qdrant_upsert.method, "PUT");
+    assert_eq!(
+        qdrant_upsert.body.as_ref().unwrap()["points"][0]["payload"]["user_id"],
+        "user-123"
+    );
+}
+
+#[tokio::test]
+async fn disabled_http_memory_providers_are_off_and_do_not_call_out() {
+    let server = spawn_mock_provider_server().await;
+
+    for (provider_name, provider, _, _) in configured_provider_cases() {
+        let settings = configured_provider_settings(provider_name, &server.base_url, false);
+        let health = provider.health(&settings).await;
+        assert_eq!(
+            health.readiness,
+            ProviderReadiness::Disabled,
+            "{provider_name} should report disabled health"
+        );
+        assert!(
+            provider
+                .recall(&settings, "user-123", "ignored", 2)
+                .await
+                .unwrap()
+                .is_empty(),
+            "{provider_name} disabled recall should be empty"
+        );
+        provider
+            .export_turn(
+                &settings,
+                "user-123",
+                &serde_json::json!({"content": "ignored"}),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{provider_name} disabled export failed: {err}"));
+    }
+
+    assert!(
+        server.requests().is_empty(),
+        "disabled providers should not perform health, recall, or export HTTP requests"
+    );
+}
+
+#[tokio::test]
+async fn http_memory_providers_surface_recall_and_export_failures() {
+    let server = spawn_mock_provider_server().await;
+
+    for (provider_name, provider, _, _) in configured_provider_cases() {
+        let mut settings = configured_provider_settings(provider_name, &server.base_url, true);
+        let provider_settings = settings.providers.provider_mut(provider_name);
+        match provider_name {
+            "custom_http" => {
+                provider_settings.config.insert(
+                    "recall_url".to_string(),
+                    format!("{}/fail", server.base_url),
+                );
+                provider_settings
+                    .config
+                    .insert("sync_url".to_string(), format!("{}/fail", server.base_url));
+            }
+            "letta" => {
+                provider_settings
+                    .config
+                    .insert("search_path".to_string(), "/fail".to_string());
+                provider_settings
+                    .config
+                    .insert("sync_path".to_string(), "/fail".to_string());
+            }
+            _ => {
+                provider_settings
+                    .config
+                    .insert("search_path".to_string(), "/fail".to_string());
+                provider_settings
+                    .config
+                    .insert("query_path".to_string(), "/fail".to_string());
+                provider_settings
+                    .config
+                    .insert("sync_path".to_string(), "/fail".to_string());
+            }
+        }
+
+        let recall_err = provider
+            .recall(&settings, "user-123", "fail please", 2)
+            .await
+            .expect_err("recall should fail");
+        assert!(
+            recall_err.contains("500") || recall_err.contains("mock failure"),
+            "{provider_name} recall failure should include HTTP failure context: {recall_err}"
+        );
+
+        let export_err = provider
+            .export_turn(
+                &settings,
+                "user-123",
+                &serde_json::json!({"content": "fail please"}),
+            )
+            .await
+            .expect_err("export should fail");
+        assert!(
+            export_err.contains("500") || export_err.contains("mock failure"),
+            "{provider_name} export failure should include HTTP failure context: {export_err}"
+        );
+    }
 }
 
 #[tokio::test]

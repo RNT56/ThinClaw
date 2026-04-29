@@ -5,7 +5,6 @@ use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
 use deadpool_postgres::{Config, Pool, Runtime};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 #[cfg(feature = "postgres")]
 use tokio_postgres::NoTls;
 use uuid::Uuid;

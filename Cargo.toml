@@ -43,9 +43,17 @@ dist = true
 thinclaw-types = { version = "0.1.0", path = "crates/thinclaw-types", default-features = false }
 thinclaw-db = { version = "0.1.0", path = "crates/thinclaw-db" }
 thinclaw-channels-core = { version = "0.1.0", path = "crates/thinclaw-channels-core" }
+thinclaw-config = { version = "0.1.0", path = "crates/thinclaw-config" }
+thinclaw-context = { version = "0.1.0", path = "crates/thinclaw-context" }
+thinclaw-experiments = { version = "0.1.0", path = "crates/thinclaw-experiments" }
+thinclaw-history = { version = "0.1.0", path = "crates/thinclaw-history" }
 thinclaw-identity = { version = "0.1.0", path = "crates/thinclaw-identity" }
 thinclaw-llm-core = { version = "0.1.0", path = "crates/thinclaw-llm-core" }
+thinclaw-media = { version = "0.1.0", path = "crates/thinclaw-media" }
+thinclaw-platform = { version = "0.1.0", path = "crates/thinclaw-platform" }
 thinclaw-safety = { version = "0.1.0", path = "crates/thinclaw-safety" }
+thinclaw-secrets = { version = "0.1.0", path = "crates/thinclaw-secrets", default-features = false }
+thinclaw-settings = { version = "0.1.0", path = "crates/thinclaw-settings" }
 thinclaw-tools-core = { version = "0.1.0", path = "crates/thinclaw-tools-core" }
 thinclaw-workspace = { version = "0.1.0", path = "crates/thinclaw-workspace" }
 
@@ -275,6 +283,7 @@ full = [
 ]
 postgres = [
     "thinclaw-types/postgres",
+    "thinclaw-secrets/postgres",
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
     "dep:tokio-postgres-rustls",
@@ -285,7 +294,7 @@ postgres = [
     "dep:pgvector",
     "rust_decimal/db-tokio-postgres",
 ]
-libsql = ["thinclaw-types/libsql", "dep:libsql"]
+libsql = ["thinclaw-types/libsql", "thinclaw-secrets/libsql", "dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 # Document text extraction — PDF (pdf-extract), DOCX/PPTX/XLSX (zip crate)

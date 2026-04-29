@@ -69,7 +69,7 @@ Master-key rotation is exposed as `thinclaw secrets rotate-master`. The command 
 
 Backups need both pieces: the database and the OS secure-store master key. Losing the secure-store item makes encrypted local secret values unrecoverable. A host compromise while ThinClaw is running can still access secrets that the trusted host is authorized to inject; encryption protects at-rest storage, not a fully compromised runtime.
 
-The codebase now has a `SecretBackend` boundary for future remote backends. The first supported implementation remains `local_encrypted`; planned external implementations should store only metadata/references locally while preserving the same audit, leak-detection, Provider Vault, and sensitive-route policy path. The intended next providers are HashiCorp Vault KV v2, AWS Secrets Manager, and 1Password Connect.
+The codebase has a `SecretBackend` boundary, but the only supported runtime backend today is `local_encrypted`. Remote secret-manager integrations such as HashiCorp Vault KV v2, AWS Secrets Manager, or 1Password Connect are not implemented yet; when added, they should store only metadata/references locally while preserving the same audit, leak-detection, Provider Vault, and sensitive-route policy path.
 
 ## Desktop Autonomy Trust Boundary
 

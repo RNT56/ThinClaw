@@ -87,8 +87,8 @@ pub use http::HttpChannel;
 #[cfg(target_os = "macos")]
 pub use imessage::{IMessageChannel, IMessageConfig, IMessageDiagnostic};
 pub use manager::{
-    ChannelManager, IncomingEvent, SlashCommand, legacy_session_key_aliases, mint_session_key,
-    normalize_incoming_event, parse_slash_command,
+    ChannelDescriptor, ChannelManager, IncomingEvent, SlashCommand, legacy_session_key_aliases,
+    mint_session_key, normalize_incoming_event, parse_slash_command,
 };
 #[cfg(feature = "nostr")]
 pub use nostr::NostrChannel;

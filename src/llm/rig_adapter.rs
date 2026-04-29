@@ -731,6 +731,10 @@ fn json_to_f32(value: &JsonValue) -> Option<f32> {
     value.as_f64().filter(|v| v.is_finite()).map(|v| v as f32)
 }
 
+fn json_to_f64(value: &JsonValue) -> Option<f64> {
+    value.as_f64().filter(|v| v.is_finite())
+}
+
 fn nested<'a>(value: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValue> {
     let mut cur = value;
     for part in path {
@@ -741,6 +745,26 @@ fn nested<'a>(value: &'a JsonValue, path: &[&str]) -> Option<&'a JsonValue> {
         };
     }
     Some(cur)
+}
+
+fn extract_provider_cost_usd_from_raw(raw: &JsonValue) -> Option<f64> {
+    let candidates = [
+        nested(raw, &["usage", "cost"]),
+        nested(raw, &["usage", "cost_usd"]),
+        nested(raw, &["usage", "total_cost"]),
+        nested(raw, &["usage", "total_cost_usd"]),
+        nested(raw, &["usage", "totalCost"]),
+        nested(raw, &["usage", "totalCostUsd"]),
+        raw.get("cost"),
+        raw.get("cost_usd"),
+        raw.get("total_cost"),
+        raw.get("total_cost_usd"),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find_map(json_to_f64)
+        .filter(|cost| *cost >= 0.0)
 }
 
 fn extract_openai_logprobs(raw: &JsonValue) -> Option<(Vec<u32>, Vec<String>, Vec<f32>)> {
@@ -1002,26 +1026,22 @@ where
             extract_response(&response.choice, &response.usage);
         let input_tokens = saturate_u32(response.usage.input_tokens);
         let output_tokens = saturate_u32(response.usage.output_tokens);
-        let token_capture = serde_json::to_value(&response.raw_response)
-            .ok()
-            .and_then(|raw| {
-                extract_provider_token_capture_from_raw(
-                    &raw,
-                    self.provider_label.clone(),
-                    self.model_name.clone(),
-                )
-            });
-        let cost_usd = {
-            use rust_decimal::prelude::ToPrimitive;
-            self.calculate_cost(input_tokens, output_tokens)
-                .to_f64()
-                .unwrap_or(0.0)
-        };
+        let raw_response = serde_json::to_value(&response.raw_response).ok();
+        let token_capture = raw_response.as_ref().and_then(|raw| {
+            extract_provider_token_capture_from_raw(
+                raw,
+                self.provider_label.clone(),
+                self.model_name.clone(),
+            )
+        });
+        let cost_usd = raw_response
+            .as_ref()
+            .and_then(extract_provider_cost_usd_from_raw);
 
         Ok(CompletionResponse {
             content: text.unwrap_or_default(),
             provider_model: Some(self.model_name.clone()),
-            cost_usd: Some(cost_usd),
+            cost_usd,
             thinking_content: thinking,
             input_tokens,
             output_tokens,
@@ -1171,26 +1191,22 @@ where
 
         let input_tokens = saturate_u32(response.usage.input_tokens);
         let output_tokens = saturate_u32(response.usage.output_tokens);
-        let token_capture = serde_json::to_value(&response.raw_response)
-            .ok()
-            .and_then(|raw| {
-                extract_provider_token_capture_from_raw(
-                    &raw,
-                    self.provider_label.clone(),
-                    self.model_name.clone(),
-                )
-            });
-        let cost_usd = {
-            use rust_decimal::prelude::ToPrimitive;
-            self.calculate_cost(input_tokens, output_tokens)
-                .to_f64()
-                .unwrap_or(0.0)
-        };
+        let raw_response = serde_json::to_value(&response.raw_response).ok();
+        let token_capture = raw_response.as_ref().and_then(|raw| {
+            extract_provider_token_capture_from_raw(
+                raw,
+                self.provider_label.clone(),
+                self.model_name.clone(),
+            )
+        });
+        let cost_usd = raw_response
+            .as_ref()
+            .and_then(extract_provider_cost_usd_from_raw);
 
         Ok(ToolCompletionResponse {
             content: text,
             provider_model: Some(self.model_name.clone()),
-            cost_usd: Some(cost_usd),
+            cost_usd,
             tool_calls,
             thinking_content: thinking,
             input_tokens,
@@ -1686,6 +1702,45 @@ mod tests {
             "choices": [{"message": {"content": "hello"}}]
         });
         assert!(extract_provider_token_capture_from_raw(&raw, "openai", "gpt-test").is_none());
+    }
+
+    #[test]
+    fn provider_cost_extracts_known_raw_provider_shapes() {
+        let openrouter = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "cost": 0.00125
+            }
+        });
+        assert_eq!(
+            extract_provider_cost_usd_from_raw(&openrouter),
+            Some(0.00125)
+        );
+
+        let camel = serde_json::json!({
+            "usage": {
+                "totalCostUsd": 0.02
+            }
+        });
+        assert_eq!(extract_provider_cost_usd_from_raw(&camel), Some(0.02));
+
+        let top_level = serde_json::json!({
+            "cost_usd": 0.5
+        });
+        assert_eq!(extract_provider_cost_usd_from_raw(&top_level), Some(0.5));
+    }
+
+    #[test]
+    fn provider_cost_ignores_usage_without_real_cost() {
+        let raw = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        });
+        assert!(extract_provider_cost_usd_from_raw(&raw).is_none());
     }
 
     #[test]

@@ -1095,6 +1095,9 @@ mod tests {
         assert_eq!(summary.model_details[0].provider_usage_requests, 1);
         assert_eq!(summary.model_details[0].local_pricing_fallback_requests, 1);
         assert_eq!(summary.model_details[0].captured_output_tokens, 2);
+        assert_eq!(summary.model_details[0].captured_token_ids, 2);
+        assert_eq!(summary.model_details[0].captured_logprobs, 2);
+        assert_eq!(summary.model_details[0].token_capture_requests, 1);
     }
 
     #[test]

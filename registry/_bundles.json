@@ -15,11 +15,22 @@
     },
     "messaging": {
       "display_name": "Messaging Channels",
-      "description": "Discord, Telegram, Slack, and WhatsApp channels",
+      "description": "Packaged messaging channels for chat, SMS, team, and community platforms",
       "extensions": [
         "channels/discord",
+        "channels/dingtalk",
+        "channels/feishu_lark",
+        "channels/google_chat",
+        "channels/line",
+        "channels/mattermost",
+        "channels/ms_teams",
+        "channels/qq",
         "channels/telegram",
         "channels/slack",
+        "channels/twitch",
+        "channels/twilio_sms",
+        "channels/wecom",
+        "channels/weixin",
         "channels/whatsapp"
       ],
       "shared_auth": null

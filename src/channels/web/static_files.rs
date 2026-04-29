@@ -126,4 +126,15 @@ mod tests {
         let escaped = escape_json_for_html("{\"x\":\"</script>\"}");
         assert!(escaped.contains("<\\/script>"));
     }
+
+    #[test]
+    fn cost_dashboard_script_displays_provider_and_token_capture_provenance() {
+        let js = include_str!("static/app.js");
+        assert!(js.contains("provider-usage requests"));
+        assert!(js.contains("provider cost"));
+        assert!(js.contains("priced locally"));
+        assert!(js.contains("token-capture requests"));
+        assert!(js.contains("token ids"));
+        assert!(js.contains("logprobs"));
+    }
 }

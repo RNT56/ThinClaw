@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify, oneshot};
 use uuid::Uuid;
 
 use crate::agent::agent_loop::{Agent, AgentDeps};
@@ -92,6 +92,96 @@ pub(super) struct ScriptedLlm {
     responses: Mutex<VecDeque<ScriptedResponse>>,
     requests: Mutex<Vec<CapturedRequest>>,
     stream_support: StreamSupport,
+}
+
+struct DropSignal(Option<oneshot::Sender<()>>);
+
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        if let Some(tx) = self.0.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+pub(super) struct BlockingLlm {
+    model_name: String,
+    started: Notify,
+    release: Notify,
+    dropped_tx: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl BlockingLlm {
+    pub(super) fn new(model_name: impl Into<String>, dropped_tx: oneshot::Sender<()>) -> Self {
+        Self {
+            model_name: model_name.into(),
+            started: Notify::new(),
+            release: Notify::new(),
+            dropped_tx: Mutex::new(Some(dropped_tx)),
+        }
+    }
+
+    pub(super) async fn wait_started(&self) {
+        self.started.notified().await;
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn release(&self) {
+        self.release.notify_waiters();
+    }
+
+    async fn wait_until_released(&self) {
+        let _drop_signal = DropSignal(self.dropped_tx.lock().await.take());
+        self.started.notify_waiters();
+        self.release.notified().await;
+    }
+}
+
+#[async_trait]
+impl LlmProvider for BlockingLlm {
+    fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    fn stream_support(&self) -> StreamSupport {
+        StreamSupport::Unsupported
+    }
+
+    async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.wait_until_released().await;
+        Ok(CompletionResponse {
+            content: "released".to_string(),
+            provider_model: Some(self.model_name.clone()),
+            cost_usd: Some(0.0),
+            thinking_content: None,
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            token_capture: None,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.wait_until_released().await;
+        Ok(ToolCompletionResponse {
+            content: Some("released".to_string()),
+            provider_model: Some(self.model_name.clone()),
+            cost_usd: Some(0.0),
+            tool_calls: Vec::new(),
+            thinking_content: None,
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            token_capture: None,
+        })
+    }
 }
 
 impl ScriptedLlm {
@@ -340,6 +430,72 @@ pub(super) struct TestTool {
     name: String,
     approval: ApprovalRequirement,
     result: String,
+}
+
+pub(super) struct BlockingTool {
+    name: String,
+    started: Notify,
+    release: Notify,
+    dropped_tx: Mutex<Option<oneshot::Sender<()>>>,
+}
+
+impl BlockingTool {
+    pub(super) fn new(name: impl Into<String>, dropped_tx: oneshot::Sender<()>) -> Self {
+        Self {
+            name: name.into(),
+            started: Notify::new(),
+            release: Notify::new(),
+            dropped_tx: Mutex::new(Some(dropped_tx)),
+        }
+    }
+
+    pub(super) async fn wait_started(&self) {
+        self.started.notified().await;
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn release(&self) {
+        self.release.notify_waiters();
+    }
+}
+
+#[async_trait]
+impl Tool for BlockingTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "Blocking test tool"
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &crate::context::JobContext,
+    ) -> Result<ToolOutput, crate::tools::ToolError> {
+        let _drop_signal = DropSignal(self.dropped_tx.lock().await.take());
+        self.started.notify_waiters();
+        self.release.notified().await;
+        Ok(ToolOutput::text("released", Duration::from_millis(1)))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
 }
 
 impl TestTool {

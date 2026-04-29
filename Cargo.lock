@@ -7490,10 +7490,18 @@ dependencies = [
  "termimad",
  "textwrap",
  "thinclaw-channels-core",
+ "thinclaw-config",
+ "thinclaw-context",
  "thinclaw-db",
+ "thinclaw-experiments",
+ "thinclaw-history",
  "thinclaw-identity",
  "thinclaw-llm-core",
+ "thinclaw-media",
+ "thinclaw-platform",
  "thinclaw-safety",
+ "thinclaw-secrets",
+ "thinclaw-settings",
  "thinclaw-tools-core",
  "thinclaw-types",
  "thinclaw-workspace",
@@ -7524,6 +7532,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "thinclaw-agent"
+version = "0.1.0"
+dependencies = [
+ "thinclaw-channels-core",
+ "thinclaw-identity",
+ "thinclaw-llm-core",
+ "thinclaw-tools-core",
+ "thinclaw-types",
+ "thinclaw-workspace",
+]
+
+[[package]]
+name = "thinclaw-app"
+version = "0.1.0"
+dependencies = [
+ "thinclaw-agent",
+ "thinclaw-channels",
+ "thinclaw-config",
+ "thinclaw-db",
+ "thinclaw-gateway",
+ "thinclaw-llm",
+ "thinclaw-tools",
+]
+
+[[package]]
+name = "thinclaw-channels"
+version = "0.1.0"
+dependencies = [
+ "thinclaw-channels-core",
+]
+
+[[package]]
 name = "thinclaw-channels-core"
 version = "0.1.0"
 dependencies = [
@@ -7538,12 +7578,58 @@ dependencies = [
 ]
 
 [[package]]
+name = "thinclaw-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thinclaw-settings",
+ "thinclaw-types",
+]
+
+[[package]]
+name = "thinclaw-context"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thinclaw-types",
+]
+
+[[package]]
 name = "thinclaw-db"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "thinclaw-types",
  "thinclaw-workspace",
+]
+
+[[package]]
+name = "thinclaw-experiments"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "regex",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "thinclaw-gateway"
+version = "0.1.0"
+dependencies = [
+ "thinclaw-channels-core",
+]
+
+[[package]]
+name = "thinclaw-history"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thinclaw-types",
  "uuid",
 ]
 
@@ -7559,6 +7645,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "thinclaw-llm"
+version = "0.1.0"
+dependencies = [
+ "thinclaw-llm-core",
+]
+
+[[package]]
 name = "thinclaw-llm-core"
 version = "0.1.0"
 dependencies = [
@@ -7571,6 +7664,25 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "thinclaw-media"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "thinclaw-platform",
+ "thinclaw-types",
+ "tracing",
+]
+
+[[package]]
+name = "thinclaw-platform"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7593,6 +7705,59 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "url",
+]
+
+[[package]]
+name = "thinclaw-secrets"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "async-trait",
+ "chrono",
+ "deadpool-postgres",
+ "hkdf",
+ "libsql",
+ "rand 0.8.6",
+ "secrecy",
+ "secret-service",
+ "security-framework",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "uuid",
+ "windows-sys 0.52.0",
+ "zbus",
+]
+
+[[package]]
+name = "thinclaw-settings"
+version = "0.1.0"
+dependencies = [
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thinclaw-llm-core",
+ "thinclaw-platform",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "thinclaw-soul"
+version = "0.1.0"
+dependencies = [
+ "thinclaw-identity",
+]
+
+[[package]]
+name = "thinclaw-tools"
+version = "0.1.0"
+dependencies = [
+ "thinclaw-tools-core",
 ]
 
 [[package]]
@@ -7631,9 +7796,11 @@ dependencies = [
 name = "thinclaw-workspace"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "serde",
  "serde_json",
+ "thinclaw-types",
  "uuid",
 ]
 

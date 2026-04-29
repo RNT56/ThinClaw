@@ -365,6 +365,10 @@ pub async fn inspect_skill_report(
         "provenance_lock": provenance,
         "finding_count": findings.len(),
         "findings": skill_finding_json(&findings),
+        "inventory": {
+            "file_count": files.len(),
+            "files": files.clone(),
+        },
         "files": files,
     });
     if include_content {
@@ -3207,6 +3211,26 @@ mod tests {
         Arc::new(QuarantineManager::new(path))
     }
 
+    async fn install_publishable_test_skill(
+        registry: &Arc<tokio::sync::RwLock<SkillRegistry>>,
+        name: &str,
+    ) {
+        registry
+            .write()
+            .await
+            .install_skill(&format!(
+                "---\nname: {name}\ndescription: Publishable skill\nactivation:\n  keywords: [\"publish\"]\n---\nUse this skill for publish tests.\n"
+            ))
+            .await
+            .unwrap();
+
+        let root = {
+            let guard = registry.read().await;
+            source_path_for_skill(guard.find_by_name(name).unwrap()).unwrap()
+        };
+        std::fs::write(root.join("README.md"), "supporting notes").unwrap();
+    }
+
     #[test]
     fn test_skill_list_schema() {
         use crate::tools::tool::ApprovalRequirement;
@@ -3337,6 +3361,140 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("not available"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_skill_publish_dry_run_reports_plan_inventory_and_source() {
+        let (store, _guard) = crate::testing::test_db().await;
+        let registry = test_registry();
+        install_publishable_test_skill(&registry, "publishable-skill").await;
+        let mut ctx = JobContext::default();
+        ctx.user_id = "skill-publish-dry-run-user".to_string();
+        store
+            .set_setting(
+                &ctx.user_id,
+                "skill_taps",
+                &serde_json::json!([{
+                    "repo": "owner/skills",
+                    "path": "community",
+                    "branch": "main",
+                    "trust_level": "community"
+                }]),
+            )
+            .await
+            .unwrap();
+
+        let tool = SkillPublishTool::new(
+            Arc::clone(&registry),
+            None,
+            test_quarantine(),
+            Some(Arc::clone(&store)),
+        );
+        let output = tool
+            .execute(
+                serde_json::json!({
+                    "name": "publishable-skill",
+                    "target_repo": "owner/skills",
+                    "dry_run": true
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output.result["status"], "dry_run");
+        assert_eq!(output.result["target_repo"], "owner/skills");
+        assert_eq!(output.result["tap_path"], "community");
+        assert_eq!(output.result["package_path"], "community/publishable-skill");
+        assert!(
+            output.result["package_hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert!(
+            output.result["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file["path"] == "SKILL.md")
+        );
+        assert!(
+            output.result["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file["path"] == "README.md")
+        );
+        assert_eq!(
+            output.result["remote_write_plan"]["pull_request"]["draft"],
+            true
+        );
+        assert!(output.result["source"].is_object());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_skill_publish_remote_write_requires_configured_tap_and_confirmation() {
+        let (store, _guard) = crate::testing::test_db().await;
+        let registry = test_registry();
+        install_publishable_test_skill(&registry, "remote-write-skill").await;
+        let mut ctx = JobContext::default();
+        ctx.user_id = "skill-publish-remote-write-user".to_string();
+        let tool = SkillPublishTool::new(
+            Arc::clone(&registry),
+            None,
+            test_quarantine(),
+            Some(Arc::clone(&store)),
+        );
+
+        let missing_tap = tool
+            .execute(
+                serde_json::json!({
+                    "name": "remote-write-skill",
+                    "target_repo": "owner/missing",
+                    "remote_write": true,
+                    "dry_run": false,
+                    "confirm_remote_write": true
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(missing_tap.to_string().contains("not configured"));
+
+        store
+            .set_setting(
+                &ctx.user_id,
+                "skill_taps",
+                &serde_json::json!([{
+                    "repo": "owner/skills",
+                    "path": "skills",
+                    "branch": "main",
+                    "trust_level": "community"
+                }]),
+            )
+            .await
+            .unwrap();
+
+        let unconfirmed = tool
+            .execute(
+                serde_json::json!({
+                    "name": "remote-write-skill",
+                    "target_repo": "owner/skills",
+                    "remote_write": true,
+                    "dry_run": false
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            unconfirmed
+                .to_string()
+                .contains("confirm_remote_write=true")
+        );
     }
 
     #[tokio::test]
@@ -3527,6 +3685,84 @@ mod tests {
                 .iter()
                 .any(|file| file["path"] == "notes.md")
         );
+        assert!(
+            report["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file["path"] == "SKILL.md")
+        );
+        assert!(report["source"]["kind"].as_str().is_some());
+        assert!(report["inventory"].is_object());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_skill_tap_add_list_refresh_and_remove_round_trip() {
+        let (store, _guard) = crate::testing::test_db().await;
+        let remote_hub = SharedRemoteSkillHub::default();
+        let mut ctx = JobContext::default();
+        ctx.user_id = "skill-tap-e2e-user".to_string();
+
+        let add = SkillTapAddTool::new(Some(Arc::clone(&store)), Some(remote_hub.clone()));
+        let list = SkillTapListTool::new(Some(Arc::clone(&store)), Some(remote_hub.clone()));
+        let refresh = SkillTapRefreshTool::new(Some(Arc::clone(&store)), Some(remote_hub.clone()));
+        let remove = SkillTapRemoveTool::new(Some(Arc::clone(&store)), Some(remote_hub.clone()));
+
+        let added = add
+            .execute(
+                serde_json::json!({
+                    "repo": "owner/tap",
+                    "path": "/skills/community/",
+                    "branch": "main",
+                    "trust_level": "trusted"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(added.result["status"], "added");
+        assert_eq!(added.result["tap"]["path"], "skills/community");
+        assert_eq!(added.result["tap_count"], 1);
+        assert!(remote_hub.is_enabled().await);
+
+        let listed = list
+            .execute(serde_json::json!({"include_health": true}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(listed.result["count"], 1);
+        assert_eq!(listed.result["taps"][0]["repo"], "owner/tap");
+        assert_eq!(listed.result["hub_enabled"], true);
+
+        let refreshed = refresh
+            .execute(
+                serde_json::json!({
+                    "repo": "owner/tap",
+                    "path": "skills/community"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed.result["status"], "refreshed");
+        assert_eq!(refreshed.result["tap_count"], 1);
+
+        let removed = remove
+            .execute(
+                serde_json::json!({
+                    "repo": "owner/tap",
+                    "path": "skills/community",
+                    "branch": "main"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(removed.result["status"], "removed");
+        assert_eq!(removed.result["tap_count"], 0);
+
+        let listed_after_remove = list.execute(serde_json::json!({}), &ctx).await.unwrap();
+        assert_eq!(listed_after_remove.result["count"], 0);
     }
 
     #[test]

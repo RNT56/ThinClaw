@@ -50,8 +50,8 @@ use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
 use crate::channels::{
-    Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
-    StreamMode,
+    Channel, DraftReplyState, IncomingEvent, IncomingMessage, MessageStream, OutgoingResponse,
+    StatusUpdate, StreamMode, normalize_incoming_event, parse_slash_command,
 };
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
@@ -1952,32 +1952,13 @@ impl WasmChannel {
                 });
             }
 
-            // Convert to IncomingMessage
-            let mut msg = IncomingMessage::new(&self.name, &emitted.user_id, &emitted.content);
-
-            if let Some(name) = emitted.user_name {
-                msg = msg.with_user_name(name);
-            }
-
-            if let Some(thread_id) = emitted.thread_id {
-                msg = msg.with_thread(thread_id);
-            }
-
-            // Parse metadata JSON
-            if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
-                msg = msg.with_metadata(metadata);
-            }
-
-            // Convert media attachments
-            for att in &emitted.attachments {
-                msg.attachments.push(att.to_media_content());
-            }
+            let msg = emitted_message_to_incoming_message(&self.name, emitted);
 
             // Send to stream
             tracing::info!(
                 channel = %self.name,
-                user_id = %emitted.user_id,
-                content_len = emitted.content.len(),
+                user_id = %msg.user_id,
+                content_len = msg.content.len(),
                 "Sending emitted message to agent"
             );
 
@@ -2202,32 +2183,13 @@ impl WasmChannel {
                 });
             }
 
-            // Convert to IncomingMessage
-            let mut msg = IncomingMessage::new(channel_name, &emitted.user_id, &emitted.content);
-
-            if let Some(name) = emitted.user_name {
-                msg = msg.with_user_name(name);
-            }
-
-            if let Some(thread_id) = emitted.thread_id {
-                msg = msg.with_thread(thread_id);
-            }
-
-            // Parse metadata JSON
-            if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
-                msg = msg.with_metadata(metadata);
-            }
-
-            // Convert media attachments
-            for att in &emitted.attachments {
-                msg.attachments.push(att.to_media_content());
-            }
+            let msg = emitted_message_to_incoming_message(channel_name, emitted);
 
             // Send to stream
             tracing::info!(
                 channel = %channel_name,
-                user_id = %emitted.user_id,
-                content_len = emitted.content.len(),
+                user_id = %msg.user_id,
+                content_len = msg.content.len(),
                 "Sending polled message to agent"
             );
 
@@ -3951,6 +3913,214 @@ fn clone_wit_status_update(update: &wit_channel::StatusUpdate) -> wit_channel::S
     }
 }
 
+fn emitted_message_to_incoming_message(
+    channel_name: &str,
+    emitted: EmittedMessage,
+) -> IncomingMessage {
+    let parsed_metadata = serde_json::from_str::<serde_json::Value>(&emitted.metadata_json)
+        .unwrap_or(serde_json::Value::Null);
+    let legacy_thread_id = emitted.thread_id.clone();
+
+    let mut msg = wasm_emitted_incoming_event(channel_name, &emitted, &parsed_metadata)
+        .map(normalize_incoming_event)
+        .unwrap_or_else(|| {
+            let mut msg = IncomingMessage::new(channel_name, &emitted.user_id, &emitted.content);
+            if let Some(thread_id) = emitted.thread_id.clone() {
+                msg = msg.with_thread(thread_id);
+            }
+            msg
+        });
+
+    if let Some(name) = emitted.user_name {
+        msg = msg.with_user_name(name);
+    }
+
+    let mut metadata = metadata_object(&parsed_metadata, "package_metadata");
+    for (key, value) in metadata_object(&msg.metadata, "normalized_metadata") {
+        let collision_key = match key.as_str() {
+            "chat_id" if metadata.contains_key("chat_id") => Some("canonical_chat_id"),
+            "chat_type" if metadata.contains_key("chat_type") => Some("canonical_chat_type"),
+            _ => None,
+        };
+        if let Some(collision_key) = collision_key {
+            metadata.insert(collision_key.to_string(), value);
+        } else {
+            metadata.insert(key, value);
+        }
+    }
+    if let Some(legacy_thread_id) = legacy_thread_id.as_deref() {
+        add_legacy_thread_aliases(&mut metadata, channel_name, legacy_thread_id);
+        metadata.insert(
+            "package_thread_id".to_string(),
+            serde_json::Value::String(legacy_thread_id.to_string()),
+        );
+    }
+    if let Some(command) = parse_slash_command(&msg.content) {
+        metadata.insert(
+            "slash_command".to_string(),
+            serde_json::json!({
+                "command": command.command,
+                "args": command.args,
+            }),
+        );
+    }
+    if !metadata.contains_key("conversation_kind")
+        && let Some(chat_type) = metadata.get("chat_type").and_then(|value| value.as_str())
+    {
+        let conversation_kind = if chat_type == "dm" { "direct" } else { "group" };
+        metadata.insert(
+            "conversation_kind".to_string(),
+            serde_json::Value::String(conversation_kind.to_string()),
+        );
+    }
+    msg = msg.with_metadata(serde_json::Value::Object(metadata));
+
+    for att in &emitted.attachments {
+        msg.attachments.push(att.to_media_content());
+    }
+
+    msg
+}
+
+fn wasm_emitted_incoming_event(
+    channel_name: &str,
+    emitted: &EmittedMessage,
+    metadata: &serde_json::Value,
+) -> Option<IncomingEvent> {
+    let chat_type = wasm_emitted_chat_type(channel_name, metadata);
+    let chat_id = wasm_emitted_chat_id(channel_name, &chat_type, emitted, metadata)?;
+
+    Some(IncomingEvent {
+        platform: channel_name.to_string(),
+        chat_type,
+        chat_id,
+        user_id: emitted.user_id.clone(),
+        user_name: emitted.user_name.clone(),
+        text: emitted.content.clone(),
+        metadata: metadata.clone(),
+    })
+}
+
+fn wasm_emitted_chat_type(channel_name: &str, metadata: &serde_json::Value) -> String {
+    if let Some(chat_type) = metadata_string(metadata, "chat_type") {
+        return normalize_chat_type(&chat_type);
+    }
+    if let Some(kind) = metadata_string(metadata, "conversation_kind") {
+        return normalize_chat_type(&kind);
+    }
+    if let Some(is_private) = metadata_bool(metadata, "is_private") {
+        return if is_private { "dm" } else { "group" }.to_string();
+    }
+    if metadata_bool(metadata, "is_group").unwrap_or(false) {
+        return "group".to_string();
+    }
+    match channel_name {
+        "whatsapp" => "dm".to_string(),
+        "discord" | "slack" => "group".to_string(),
+        _ => "chat".to_string(),
+    }
+}
+
+fn normalize_chat_type(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "direct" | "private" | "dm" => "dm".to_string(),
+        "group" | "supergroup" | "channel" | "room" => "group".to_string(),
+        other if other.is_empty() => "chat".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn wasm_emitted_chat_id(
+    channel_name: &str,
+    chat_type: &str,
+    emitted: &EmittedMessage,
+    metadata: &serde_json::Value,
+) -> Option<String> {
+    match channel_name {
+        "telegram" => {
+            let chat_id = metadata_string(metadata, "chat_id")?;
+            if chat_type == "group"
+                && let Some(thread_id) = metadata_string(metadata, "message_thread_id")
+            {
+                return Some(format!("{chat_id}:topic:{thread_id}"));
+            }
+            Some(chat_id)
+        }
+        "slack" => {
+            let channel = metadata_string(metadata, "channel")
+                .or_else(|| metadata_string(metadata, "channel_id"))?;
+            metadata_string(metadata, "thread_ts")
+                .filter(|thread_ts| !thread_ts.is_empty())
+                .map(|thread_ts| format!("{channel}:thread:{thread_ts}"))
+                .or(Some(channel))
+        }
+        "whatsapp" => metadata_string(metadata, "sender_phone")
+            .or_else(|| metadata_string(metadata, "chat_id"))
+            .or_else(|| metadata_string(metadata, "phone_number_id")),
+        "discord" => metadata_string(metadata, "thread_id")
+            .or_else(|| metadata_string(metadata, "channel_id"))
+            .or_else(|| emitted.thread_id.clone()),
+        _ => metadata_string(metadata, "chat_id")
+            .or_else(|| metadata_string(metadata, "channel_id"))
+            .or_else(|| metadata_string(metadata, "conversation_id"))
+            .or_else(|| emitted.thread_id.clone()),
+    }
+}
+
+fn metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    let value = metadata.get(key)?;
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+fn metadata_bool(metadata: &serde_json::Value, key: &str) -> Option<bool> {
+    match metadata.get(key)? {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" => Some(true),
+            "false" | "0" | "no" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn add_legacy_thread_aliases(
+    metadata: &mut serde_json::Map<String, serde_json::Value>,
+    channel_name: &str,
+    legacy_thread_id: &str,
+) {
+    let legacy_thread_id = legacy_thread_id.trim();
+    if legacy_thread_id.is_empty() {
+        return;
+    }
+
+    let aliases = metadata
+        .entry("legacy_session_key_aliases".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let Some(alias_values) = aliases.as_array_mut() else {
+        return;
+    };
+
+    for alias in [
+        legacy_thread_id.to_string(),
+        format!("{channel_name}:{legacy_thread_id}"),
+        format!("agent:main:{channel_name}:{legacy_thread_id}"),
+    ] {
+        let value = serde_json::Value::String(alias);
+        if !alias_values.contains(&value) {
+            alias_values.push(value);
+        }
+    }
+}
+
 /// HTTP response from a WASM channel callback.
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
@@ -4287,6 +4457,85 @@ mod tests {
 
         // No more messages
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn test_wasm_emitted_whatsapp_message_uses_incoming_event_session_key() {
+        use super::emitted_message_to_incoming_message;
+        use crate::channels::wasm::host::EmittedMessage;
+        use crate::identity::ConversationKind;
+
+        let metadata = serde_json::json!({
+            "sender_phone": "+15551234567",
+            "phone_number_id": "biz-1",
+            "conversation_kind": "direct",
+            "conversation_scope_id": "whatsapp:direct:biz-1:+15551234567",
+            "external_conversation_key": "whatsapp://direct/biz-1/+15551234567"
+        });
+        let emitted =
+            EmittedMessage::new("+15551234567", "hello").with_metadata(metadata.to_string());
+
+        let msg = emitted_message_to_incoming_message("whatsapp", emitted);
+
+        assert_eq!(msg.channel, "whatsapp");
+        assert_eq!(
+            msg.thread_id.as_deref(),
+            Some("agent:main:whatsapp:dm:+15551234567")
+        );
+        assert_eq!(msg.metadata["session_key"], msg.thread_id.clone().unwrap());
+        assert_eq!(msg.metadata["raw"]["sender_phone"], "+15551234567");
+        assert_eq!(msg.metadata["sender_phone"], "+15551234567");
+
+        let identity = msg.resolved_identity();
+        assert_eq!(identity.conversation_kind, ConversationKind::Direct);
+        assert_eq!(identity.principal_id, "+15551234567");
+    }
+
+    #[test]
+    fn test_wasm_emitted_telegram_group_topic_keeps_legacy_alias_and_slash_parse() {
+        use super::emitted_message_to_incoming_message;
+        use crate::channels::wasm::host::EmittedMessage;
+        use crate::identity::ConversationKind;
+
+        let metadata = serde_json::json!({
+            "chat_id": -100123,
+            "message_thread_id": 99,
+            "is_private": false,
+            "conversation_kind": "group",
+            "conversation_scope_id": "telegram:group:-100123:topic:99",
+            "external_conversation_key": "telegram://group/-100123/topic/99"
+        });
+        let emitted = EmittedMessage::new("42", "/Summarize   sprint notes")
+            .with_thread_id("99")
+            .with_metadata(metadata.to_string());
+
+        let msg = emitted_message_to_incoming_message("telegram", emitted);
+
+        assert_eq!(
+            msg.thread_id.as_deref(),
+            Some("agent:main:telegram:group:-100123_topic_99")
+        );
+        assert_eq!(msg.metadata["chat_id"], -100123);
+        assert_eq!(msg.metadata["canonical_chat_id"], "-100123:topic:99");
+        assert_eq!(msg.metadata["message_thread_id"], 99);
+        assert_eq!(msg.metadata["slash_command"]["command"], "summarize");
+        assert_eq!(msg.metadata["slash_command"]["args"], "sprint notes");
+
+        let aliases = msg
+            .metadata
+            .get("legacy_session_key_aliases")
+            .and_then(|value| value.as_array())
+            .expect("legacy aliases should be present");
+        assert!(aliases.contains(&serde_json::json!("telegram:group:-100123_topic_99")));
+        assert!(aliases.contains(&serde_json::json!("99")));
+        assert!(aliases.contains(&serde_json::json!("telegram:99")));
+
+        let identity = msg.resolved_identity();
+        assert_eq!(identity.conversation_kind, ConversationKind::Group);
+        assert_eq!(
+            identity.stable_external_conversation_key,
+            "telegram://group/-100123/topic/99"
+        );
     }
 
     #[tokio::test]

@@ -19,6 +19,35 @@ use crate::error::ChannelError;
 const LEGACY_WEB_CHANNEL_ALIAS: &str = "web";
 const GATEWAY_CHANNEL_NAME: &str = "gateway";
 
+/// Descriptor for a native channel surface that the runtime should expose even
+/// when a full transport has not landed yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelDescriptor {
+    pub name: String,
+    pub channel_type: String,
+    pub enabled: bool,
+    pub available: bool,
+    pub description: String,
+}
+
+impl ChannelDescriptor {
+    pub fn native_placeholder(
+        name: impl Into<String>,
+        enabled: bool,
+        available: bool,
+        description: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        Self {
+            name: name.clone(),
+            channel_type: "native-placeholder".to_string(),
+            enabled,
+            available,
+            description: description.into(),
+        }
+    }
+}
+
 /// Raw platform-neutral event shape used by channel drivers before an event is
 /// turned into ThinClaw's canonical [`IncomingMessage`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +184,7 @@ impl Default for ChannelCounters {
 /// push messages into the agent loop without being a full `Channel` impl.
 pub struct ChannelManager {
     channels: Arc<RwLock<HashMap<String, Box<dyn Channel>>>>,
+    descriptors: Arc<RwLock<HashMap<String, ChannelDescriptor>>>,
     inject_tx: mpsc::Sender<IncomingMessage>,
     /// Taken once in `start_all()` and merged into the stream.
     inject_rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
@@ -172,6 +202,7 @@ impl ChannelManager {
         let (inject_tx, inject_rx) = mpsc::channel(64);
         Self {
             channels: Arc::new(RwLock::new(HashMap::new())),
+            descriptors: Arc::new(RwLock::new(HashMap::new())),
             inject_tx,
             inject_rx: tokio::sync::Mutex::new(Some(inject_rx)),
             counters: Arc::new(RwLock::new(HashMap::new())),
@@ -254,6 +285,18 @@ impl ChannelManager {
         self.channels.write().await.insert(name.clone(), channel);
         let _ = self.counter_for(&name).await;
         tracing::debug!("Added channel: {}", name);
+    }
+
+    /// Add or update a channel descriptor that is visible in status output even
+    /// when there is no active `Channel` transport registered.
+    pub async fn add_descriptor(&self, descriptor: ChannelDescriptor) {
+        let name = descriptor.name.clone();
+        self.descriptors
+            .write()
+            .await
+            .insert(name.clone(), descriptor);
+        let _ = self.counter_for(&name).await;
+        tracing::debug!("Added channel descriptor: {}", name);
     }
 
     /// Hot-add a channel to a running agent.
@@ -531,6 +574,10 @@ impl ChannelManager {
         self.channels.read().await.keys().cloned().collect()
     }
 
+    pub async fn channel_descriptors(&self) -> Vec<ChannelDescriptor> {
+        self.descriptors.read().await.values().cloned().collect()
+    }
+
     /// Return formatting guidance from the active channel implementation.
     pub async fn formatting_hints_for(&self, channel_name: &str) -> Option<String> {
         let channels = self.channels.read().await;
@@ -556,7 +603,8 @@ impl ChannelManager {
         let uptime_secs = self.started_at.elapsed().as_secs();
         let names = self.channel_names().await;
         let counters_guard = self.counters.read().await;
-        let mut entries = Vec::with_capacity(names.len());
+        let descriptors = self.channel_descriptors().await;
+        let mut entries = Vec::with_capacity(names.len() + descriptors.len());
         for name in &names {
             let (received, sent, errors) = if let Some(c) = counters_guard.get(name.as_str()) {
                 (
@@ -600,6 +648,43 @@ impl ChannelManager {
                 errors,
             });
         }
+        for descriptor in descriptors {
+            if names.iter().any(|name| name == &descriptor.name) {
+                continue;
+            }
+            let (received, sent, errors) =
+                if let Some(c) = counters_guard.get(descriptor.name.as_str()) {
+                    (
+                        c.received.load(Ordering::Relaxed),
+                        c.sent.load(Ordering::Relaxed),
+                        c.errors.load(Ordering::Relaxed) as u32,
+                    )
+                } else {
+                    (0, 0, 0)
+                };
+            let last_error = match (descriptor.enabled, descriptor.available) {
+                (true, true) => Some(format!(
+                    "{} is configured as a native lifecycle placeholder; transport not implemented yet",
+                    descriptor.description
+                )),
+                (true, false) => Some(format!(
+                    "{} is configured, but this build does not include the required feature",
+                    descriptor.description
+                )),
+                (false, _) => None,
+            };
+            entries.push(ChannelStatusEntry {
+                name: descriptor.name,
+                channel_type: descriptor.channel_type,
+                state: ChannelViewState::Disabled,
+                last_message_at: None,
+                last_error,
+                messages_received: received,
+                messages_sent: sent,
+                errors,
+            });
+        }
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
         entries
     }
 
@@ -822,6 +907,45 @@ mod normalization_tests {
         );
         assert_eq!(message.metadata["raw"]["provider"], "twilio");
     }
+
+    #[test]
+    fn native_lifecycle_placeholders_use_shared_ingress_helpers() {
+        for (platform, chat_type, chat_id) in [
+            ("matrix", "room", "!room:example.org"),
+            ("voice-call", "call", "call-123"),
+            ("apns", "device", "device-token"),
+            ("browser-push", "subscription", "endpoint-123"),
+        ] {
+            let expected = mint_session_key(platform, chat_type, chat_id);
+            let message = normalize_incoming_event(IncomingEvent {
+                platform: platform.to_string(),
+                chat_type: chat_type.to_string(),
+                chat_id: chat_id.to_string(),
+                user_id: "user-1".to_string(),
+                user_name: None,
+                text: "/status now".to_string(),
+                metadata: serde_json::json!({"placeholder": true}),
+            });
+
+            assert_eq!(message.channel, platform);
+            assert_eq!(message.thread_id.as_deref(), Some(expected.as_str()));
+            assert_eq!(
+                message.metadata["session_key"].as_str(),
+                Some(expected.as_str())
+            );
+            assert!(
+                message
+                    .metadata
+                    .get("legacy_session_key_aliases")
+                    .and_then(|value| value.as_array())
+                    .is_some_and(|aliases| !aliases.is_empty())
+            );
+            let command = parse_slash_command(&message.content)
+                .expect("placeholder ingress should use shared slash parsing");
+            assert_eq!(command.command, "status");
+            assert_eq!(command.args, "now");
+        }
+    }
 }
 
 impl Default for ChannelManager {
@@ -937,5 +1061,59 @@ mod tests {
             Some("gateway")
         );
         assert_eq!(*state.diagnostics_calls.lock().await, 1);
+    }
+
+    #[tokio::test]
+    async fn status_entries_include_native_placeholders_without_shadowing_active_channels() {
+        let manager = ChannelManager::new();
+        manager
+            .add_descriptor(ChannelDescriptor::native_placeholder(
+                "matrix",
+                true,
+                true,
+                "Matrix rooms and DMs",
+            ))
+            .await;
+        manager
+            .add_descriptor(ChannelDescriptor::native_placeholder(
+                "gateway",
+                true,
+                true,
+                "Gateway placeholder should be shadowed",
+            ))
+            .await;
+        manager
+            .add(Box::new(MockChannel::new(
+                "gateway",
+                Arc::new(MockChannelState::default()),
+            )))
+            .await;
+
+        let entries = manager.status_entries().await;
+        let matrix = entries
+            .iter()
+            .find(|entry| entry.name == "matrix")
+            .expect("matrix placeholder should be visible");
+        assert_eq!(matrix.channel_type, "native-placeholder");
+        assert_eq!(matrix.state, ChannelViewState::Disabled);
+        assert!(
+            matrix
+                .last_error
+                .as_deref()
+                .is_some_and(|err| err.contains("placeholder"))
+        );
+
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry.name == "gateway")
+                .count(),
+            1
+        );
+        let gateway = entries
+            .iter()
+            .find(|entry| entry.name == "gateway")
+            .expect("active gateway entry should remain");
+        assert_eq!(gateway.channel_type, "gateway");
     }
 }

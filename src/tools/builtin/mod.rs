@@ -44,6 +44,7 @@ pub(crate) mod shell;
 pub mod shell_security;
 pub mod skill_tools;
 mod slack_actions;
+mod smart_approve;
 pub mod subagent;
 mod telegram_actions;
 mod time;
@@ -115,6 +116,7 @@ pub use skill_tools::{
     SkillTapRemoveTool, SkillUpdateTool,
 };
 pub use slack_actions::SlackActionsTool;
+pub use smart_approve::{ApprovalDecision, SmartApprovalMode, SmartApprover};
 pub use subagent::{CancelSubagentTool, ListSubagentsTool, SpawnSubagentTool};
 pub use telegram_actions::TelegramActionsTool;
 pub use time::TimeTool;

@@ -5,7 +5,7 @@ use super::*;
 // ==================== Tool Failures ====================
 
 #[cfg(feature = "postgres")]
-use crate::agent::BrokenTool;
+use thinclaw_types::BrokenTool;
 
 #[cfg(feature = "postgres")]
 impl Store {

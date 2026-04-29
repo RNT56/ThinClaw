@@ -17,8 +17,8 @@ use thinclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, DiscordChannel, GatewayChannel, HttpChannel, ReplChannel, SignalChannel,
-        TuiChannel, WebhookServer, WebhookServerConfig,
+        ChannelDescriptor, ChannelManager, DiscordChannel, GatewayChannel, HttpChannel,
+        ReplChannel, SignalChannel, TuiChannel, WebhookServer, WebhookServerConfig,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
     },
@@ -664,6 +664,9 @@ async fn async_main() -> anyhow::Result<()> {
     // ── Channel setup ──────────────────────────────────────────────────
 
     let channels = Arc::new(ChannelManager::new());
+    for descriptor in native_lifecycle_channel_descriptors(&config) {
+        channels.add_descriptor(descriptor).await;
+    }
     let mut channel_names: Vec<String> = Vec::new();
     #[cfg(feature = "nostr")]
     let mut nostr_channel: Option<thinclaw::channels::NostrChannel> = None;
@@ -1896,6 +1899,35 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn native_lifecycle_channel_descriptors(config: &Config) -> Vec<ChannelDescriptor> {
+    vec![
+        ChannelDescriptor::native_placeholder(
+            "matrix",
+            config.channels.matrix_enabled,
+            true,
+            "Matrix rooms and DMs",
+        ),
+        ChannelDescriptor::native_placeholder(
+            "voice-call",
+            config.channels.voice_call_enabled,
+            config.channels.voice_call_available,
+            "Voice-call lifecycle",
+        ),
+        ChannelDescriptor::native_placeholder(
+            "apns",
+            config.channels.apns_enabled,
+            true,
+            "APNs device notifications",
+        ),
+        ChannelDescriptor::native_placeholder(
+            "browser-push",
+            config.channels.browser_push_enabled,
+            config.channels.browser_push_available,
+            "Browser push subscriptions",
+        ),
+    ]
 }
 
 #[cfg(test)]

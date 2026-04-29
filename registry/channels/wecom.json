@@ -1,0 +1,24 @@
+{
+  "name": "wecom",
+  "display_name": "WeCom",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "WeCom/Enterprise WeChat webhook channel",
+  "keywords": ["messaging", "chat", "wecom", "enterprise-wechat"],
+  "source": {
+    "dir": "channels-src/wecom",
+    "capabilities": "wecom.capabilities.json",
+    "crate_name": "wecom-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "WeCom",
+    "secrets": ["wecom_access_token", "wecom_webhook_secret"],
+    "shared_auth": null,
+    "setup_url": "https://developer.work.weixin.qq.com/"
+  },
+  "tags": ["messaging"]
+}

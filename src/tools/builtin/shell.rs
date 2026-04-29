@@ -55,7 +55,6 @@ use async_trait::async_trait;
 use crate::config::SafetyConfig;
 use crate::config::helpers::optional_env;
 use crate::context::JobContext;
-use crate::safety::{ApprovalDecision, SmartApprovalMode, SmartApprover};
 use crate::sandbox::{SandboxManager, SandboxPolicy};
 #[cfg(test)]
 use crate::tools::execution_backend::MAX_CAPTURED_OUTPUT_SIZE;
@@ -75,6 +74,7 @@ use super::shell_security::{
 };
 #[cfg(test)]
 use super::shell_security::{contains_shell_pipe, extract_binary_name, has_command_token};
+use super::smart_approve::{ApprovalDecision, SmartApprovalMode, SmartApprover};
 // Re-export public security functions for external consumers
 pub use super::shell_security::{
     detect_command_injection, detect_library_injection, requires_explicit_approval,

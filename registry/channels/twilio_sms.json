@@ -1,0 +1,24 @@
+{
+  "name": "twilio_sms",
+  "display_name": "Twilio SMS",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "Twilio SMS channel for two-way SMS conversations",
+  "keywords": ["messaging", "sms", "twilio", "phone"],
+  "source": {
+    "dir": "channels-src/twilio_sms",
+    "capabilities": "twilio_sms.capabilities.json",
+    "crate_name": "twilio-sms-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Twilio",
+    "secrets": ["twilio_account_sid", "twilio_auth_token", "twilio_from_number"],
+    "shared_auth": null,
+    "setup_url": "https://www.twilio.com/console/sms"
+  },
+  "tags": ["messaging"]
+}

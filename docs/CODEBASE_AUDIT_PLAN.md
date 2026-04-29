@@ -57,8 +57,8 @@ These are the strongest likely drift or incomplete-code signals found during the
 | Extension/plugin manifest logic appears split across `src/extensions/*` and `src/registry/*` | Parallel manifest systems can drift or duplicate validation/install responsibilities | Lanes 13, 17 |
 | `history`, `route_planner`, and other areas contain `allow(dead_code)` or explicit future/legacy notes | Strong stale-or-partially-wired signal | Lanes 9, 10, 16 |
 | Packaged tool/channel naming differs for Slack and Telegram | Name collisions or ambiguous install/auth UX can break routing and docs | Lanes 7, 13, 17 |
-| `channels-src/telegram/target/` exists inside the source tree | Generated artifacts inside package source are a repo-hygiene and stale-code smell | Lanes 7, 17 |
-| `src/api/system.rs` exposes placeholder-style status fields | User-facing status may not be authoritative yet | Lanes 5, 17 |
+| Generated `target/` artifacts can be accidentally tracked inside package source areas | Generated artifacts inside `channels-src`, `tools-src`, or registry package trees are a repo-hygiene and stale-code smell; tracked-file guard lives in `tests/repo_hygiene.rs` | Lanes 7, 17 |
+| `src/api/system.rs` status fields need runtime-source checks when changed | User-facing status should distinguish API reachability from LLM runtime health, revision, and last error | Lanes 5, 17 |
 
 ## Repo Shape Snapshot
 

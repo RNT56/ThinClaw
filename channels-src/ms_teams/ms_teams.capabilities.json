@@ -1,0 +1,51 @@
+{
+  "type": "channel",
+  "name": "ms_teams",
+  "description": "Microsoft Teams bot activity webhook channel",
+  "formatting_hints": "Teams supports Markdown in bot activities. Keep replies structured and avoid unsupported HTML.",
+  "setup": {
+    "required_secrets": [
+      { "name": "ms_teams_bot_token", "prompt": "Enter your Microsoft Teams bot token", "optional": false },
+      { "name": "ms_teams_webhook_secret", "prompt": "Enter your Teams webhook secret", "optional": false }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [{ "host": "smba.trafficmanager.net", "path_prefix": "/" }],
+      "credentials": {
+        "ms_teams_bot_token": {
+          "secret_name": "ms_teams_bot_token",
+          "location": { "type": "bearer" },
+          "host_patterns": ["smba.trafficmanager.net", "*.botframework.com"]
+        }
+      },
+      "rate_limit": { "requests_per_minute": 60, "requests_per_hour": 3000 }
+    },
+    "secrets": { "allowed_names": ["ms_teams_*"] },
+    "channel": {
+      "allowed_paths": ["/webhook/ms_teams"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/ms_teams/",
+      "emit_rate_limit": { "messages_per_minute": 60, "messages_per_hour": 3000 }
+    }
+  },
+  "config": {
+    "channel_name": "ms_teams",
+    "display_name": "Microsoft Teams",
+    "webhook_path": "/webhook/ms_teams",
+    "mapping": {
+      "text": ["text", "message.text"],
+      "user_id": ["from.id", "from.aadObjectId", "user.id"],
+      "user_name": ["from.name", "user.name"],
+      "chat_id": ["conversation.id", "channelData.channel.id"],
+      "chat_type": ["conversation.conversationType", "chat_type"],
+      "message_id": ["id", "replyToId"]
+    },
+    "response": {
+      "url": "https://smba.trafficmanager.net/amer/v3/conversations/{chat_id}/activities",
+      "method": "POST",
+      "body_format": "json",
+      "body": { "type": "message", "text": "{content}" }
+    }
+  }
+}
