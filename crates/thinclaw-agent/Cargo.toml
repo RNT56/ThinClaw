@@ -32,3 +32,6 @@ thinclaw-workspace = { version = "0.1.0", path = "../thinclaw-workspace" }
 tokio = { version = "1", features = ["sync"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

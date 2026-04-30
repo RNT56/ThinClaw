@@ -1,5 +1,6 @@
 //! Agent runtime crate.
 
+pub mod checkpoint;
 pub mod command_catalog;
 pub mod context_monitor;
 pub mod cost_guard;
