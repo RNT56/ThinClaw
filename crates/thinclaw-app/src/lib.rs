@@ -14,8 +14,8 @@ pub use assembly::{
     ToolRuntimeAssemblyPlan, WorkspaceDirectoryPlan, WorkspaceFilesystemScope,
 };
 pub use runtime::{
-    AppBuilderFlags, RuntimeEntryMode, RuntimeExecRegistrationMode, block_on_async_main,
-    desktop_autonomy_headless_blocker, desktop_autonomy_headless_blocker_for,
+    AppBuilderFlags, QuietStartupSpinner, RuntimeEntryMode, RuntimeExecRegistrationMode,
+    block_on_async_main, desktop_autonomy_headless_blocker, desktop_autonomy_headless_blocker_for,
     execute_code_registration_mode, init_cli_tracing, process_registration_mode,
-    relaunch_current_process, restart_is_managed_by_service,
+    relaunch_current_process, restart_is_managed_by_service, should_show_quiet_startup_spinner,
 };

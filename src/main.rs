@@ -15,8 +15,9 @@ use thinclaw::orchestrator::{
 use thinclaw::{
     agent::{Agent, AgentDeps},
     app::{
-        AppBuilder, AppBuilderFlags, RuntimeEntryMode, block_on_async_main, init_cli_tracing,
-        relaunch_current_process, restart_is_managed_by_service,
+        AppBuilder, AppBuilderFlags, QuietStartupSpinner, RuntimeEntryMode, block_on_async_main,
+        init_cli_tracing, relaunch_current_process, restart_is_managed_by_service,
+        should_show_quiet_startup_spinner,
     },
     channels::{
         ChannelDescriptor, ChannelManager, DiscordChannel, GatewayChannel, HttpChannel,

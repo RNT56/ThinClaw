@@ -3,12 +3,8 @@
 //! Extracted from main.rs to keep the entry point focused on CLI dispatch
 //! and agent startup orchestration.
 
-use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::JoinHandle;
-use std::time::Duration;
 
 #[cfg(feature = "docker-sandbox")]
 use tracing_subscriber::EnvFilter;
@@ -22,73 +18,6 @@ use thinclaw::pairing::PairingStore;
 #[cfg(all(feature = "docker-sandbox", target_os = "macos"))]
 use thinclaw::secrets::CreateSecretParams;
 use thinclaw::secrets::SecretsStore;
-
-const STARTUP_SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/// Minimal terminal spinner shown during quiet interactive startup.
-pub(crate) struct QuietStartupSpinner {
-    running: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl QuietStartupSpinner {
-    pub(crate) fn start() -> Self {
-        let running = Arc::new(AtomicBool::new(true));
-        let running_for_thread = Arc::clone(&running);
-
-        let handle = std::thread::spawn(move || {
-            let mut frame_idx = 0usize;
-            let mut stdout = std::io::stdout();
-
-            while running_for_thread.load(Ordering::Relaxed) {
-                let frame = STARTUP_SPINNER_FRAMES[frame_idx % STARTUP_SPINNER_FRAMES.len()];
-                let _ = write!(stdout, "\r\x1b[2K  {frame} Starting ThinClaw...");
-                let _ = stdout.flush();
-                frame_idx += 1;
-                std::thread::sleep(Duration::from_millis(80));
-            }
-
-            let _ = write!(stdout, "\r\x1b[2K");
-            let _ = stdout.flush();
-        });
-
-        Self {
-            running,
-            handle: Some(handle),
-        }
-    }
-
-    pub(crate) fn stop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-impl Drop for QuietStartupSpinner {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-pub(crate) fn should_show_quiet_startup_spinner(
-    should_run_agent: bool,
-    debug: bool,
-    has_single_message: bool,
-    cli_enabled: bool,
-    has_rust_log_override: bool,
-    stdin_is_tty: bool,
-    stdout_is_tty: bool,
-) -> bool {
-    should_run_agent
-        && !debug
-        && !has_single_message
-        && cli_enabled
-        && !has_rust_log_override
-        && stdin_is_tty
-        && stdout_is_tty
-}
 
 #[cfg(feature = "docker-sandbox")]
 /// Initialize tracing for worker/bridge processes (info level).
@@ -559,38 +488,6 @@ pub(crate) async fn setup_wasm_channels(
         wasm_channel_loader: loader,
         channels_dir,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::should_show_quiet_startup_spinner;
-
-    #[test]
-    fn quiet_spinner_shows_for_interactive_quiet_agent_runs() {
-        assert!(should_show_quiet_startup_spinner(
-            true, false, false, true, false, true, true
-        ));
-    }
-
-    #[test]
-    fn quiet_spinner_stays_off_for_debug_runs() {
-        assert!(!should_show_quiet_startup_spinner(
-            true, true, false, true, false, true, true
-        ));
-    }
-
-    #[test]
-    fn quiet_spinner_stays_off_for_non_tty_or_message_runs() {
-        assert!(!should_show_quiet_startup_spinner(
-            true, false, true, true, false, true, true
-        ));
-        assert!(!should_show_quiet_startup_spinner(
-            true, false, false, true, false, false, true
-        ));
-        assert!(!should_show_quiet_startup_spinner(
-            true, false, false, true, false, true, false
-        ));
-    }
 }
 
 /// Check if onboarding is needed and return the reason.
