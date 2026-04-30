@@ -42,6 +42,7 @@ dist = true
 [dependencies]
 thinclaw-types = { version = "0.1.0", path = "crates/thinclaw-types", default-features = false }
 thinclaw-agent = { version = "0.1.0", path = "crates/thinclaw-agent" }
+thinclaw-app = { version = "0.1.0", path = "crates/thinclaw-app" }
 thinclaw-db = { version = "0.1.0", path = "crates/thinclaw-db" }
 thinclaw-channels = { version = "0.1.0", path = "crates/thinclaw-channels" }
 thinclaw-channels-core = { version = "0.1.0", path = "crates/thinclaw-channels-core" }

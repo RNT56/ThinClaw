@@ -7490,6 +7490,7 @@ dependencies = [
  "termimad",
  "textwrap",
  "thinclaw-agent",
+ "thinclaw-app",
  "thinclaw-channels",
  "thinclaw-channels-core",
  "thinclaw-config",
@@ -7573,29 +7574,32 @@ dependencies = [
 name = "thinclaw-app"
 version = "0.1.0"
 dependencies = [
- "thinclaw-agent",
- "thinclaw-channels",
- "thinclaw-config",
- "thinclaw-db",
- "thinclaw-gateway",
- "thinclaw-llm",
- "thinclaw-tools",
+ "anyhow",
+ "thinclaw-platform",
+ "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "thinclaw-channels"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum 0.8.9",
+ "base64 0.22.1",
  "chrono",
+ "futures",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thinclaw-channels-core",
+ "thinclaw-platform",
  "thinclaw-types",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tracing",
+ "urlencoding",
 ]
 
 [[package]]

@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 
 #[cfg(feature = "docker-sandbox")]
 use thinclaw::orchestrator::{
@@ -15,7 +14,10 @@ use thinclaw::orchestrator::{
 };
 use thinclaw::{
     agent::{Agent, AgentDeps},
-    app::{AppBuilder, AppBuilderFlags},
+    app::{
+        AppBuilder, AppBuilderFlags, RuntimeEntryMode, block_on_async_main, init_cli_tracing,
+        relaunch_current_process, restart_is_managed_by_service,
+    },
     channels::{
         ChannelDescriptor, ChannelManager, DiscordChannel, GatewayChannel, HttpChannel,
         ReplChannel, SignalChannel, TuiChannel, WebhookServer, WebhookServerConfig,
@@ -41,69 +43,21 @@ use thinclaw::setup::{SetupConfig, SetupWizard, UiMode};
 
 use main_helpers::*;
 
-/// Initialize tracing for simple CLI commands (warn level, no fancy layers).
-fn init_cli_tracing(debug: bool) {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            if debug {
-                EnvFilter::new("debug")
-            } else {
-                EnvFilter::new("warn")
-            }
-        }))
-        .init();
-}
-
-fn restart_is_managed_by_service() -> bool {
-    std::env::var_os("INVOCATION_ID").is_some()
-        || std::env::var_os("JOURNAL_STREAM").is_some()
-        || std::env::var_os("SYSTEMD_EXEC_PID").is_some()
-        || std::env::var_os("LAUNCH_JOB_NAME").is_some()
-        || std::env::var_os("THINCLAW_SERVICE_MANAGER").is_some()
-}
-
-fn relaunch_current_process() -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.args(std::env::args_os().skip(1));
-    let child = cmd.spawn()?;
-    eprintln!(
-        "Restarting ThinClaw (spawned PID {} from {})...",
-        child.id(),
-        exe.display()
-    );
-    Ok(())
-}
-
 fn main() -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     {
         return std::thread::Builder::new()
             .name("thinclaw-main".to_string())
             .stack_size(8 * 1024 * 1024)
-            .spawn(run_async_main)?
+            .spawn(|| block_on_async_main(async_main()))?
             .join()
             .map_err(|_| anyhow::anyhow!("ThinClaw main thread panicked"))?;
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        run_async_main()
+        block_on_async_main(async_main())
     }
-}
-
-fn run_async_main() -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(Box::pin(async_main()))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimeEntryMode {
-    Default,
-    Cli,
-    Tui,
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]

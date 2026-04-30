@@ -32,53 +32,12 @@ use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingProvider, Workspace};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimeExecRegistrationMode {
-    Disabled,
-    LocalHost,
-    DockerSandbox,
-}
-
-fn process_registration_mode(workspace_mode: &str) -> RuntimeExecRegistrationMode {
-    match workspace_mode {
-        "sandboxed" | "project" => RuntimeExecRegistrationMode::Disabled,
-        _ => RuntimeExecRegistrationMode::LocalHost,
-    }
-}
-
-fn execute_code_registration_mode(
-    workspace_mode: &str,
-    sandbox_enabled: bool,
-) -> RuntimeExecRegistrationMode {
-    match workspace_mode {
-        "sandboxed" if sandbox_enabled => RuntimeExecRegistrationMode::DockerSandbox,
-        "sandboxed" | "project" => RuntimeExecRegistrationMode::Disabled,
-        _ => RuntimeExecRegistrationMode::LocalHost,
-    }
-}
-
-fn desktop_autonomy_headless_blocker() -> Option<&'static str> {
-    let runtime_profile = std::env::var("THINCLAW_RUNTIME_PROFILE").unwrap_or_default();
-    desktop_autonomy_headless_blocker_for(
-        runtime_profile.trim(),
-        crate::platform::env_flag_enabled("THINCLAW_HEADLESS"),
-    )
-}
-
-fn desktop_autonomy_headless_blocker_for(
-    runtime_profile: &str,
-    headless_enabled: bool,
-) -> Option<&'static str> {
-    let normalized_profile = runtime_profile
-        .trim()
-        .to_ascii_lowercase()
-        .replace('_', "-");
-    match normalized_profile.as_str() {
-        "pi" | "pi-os-lite" | "pi-os-lite-64" | "raspberry-pi-os-lite" => Some("pi-os-lite-64"),
-        _ if headless_enabled => Some("headless"),
-        _ => None,
-    }
-}
+pub use thinclaw_app::{
+    AppBuilderFlags, RuntimeEntryMode, RuntimeExecRegistrationMode, block_on_async_main,
+    desktop_autonomy_headless_blocker, desktop_autonomy_headless_blocker_for,
+    execute_code_registration_mode, init_cli_tracing, process_registration_mode,
+    relaunch_current_process, restart_is_managed_by_service,
+};
 
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
@@ -121,12 +80,6 @@ pub struct AppComponents {
     pub response_cache: Arc<tokio::sync::RwLock<CachedResponseStore>>,
     /// Live smart routing policy owned by the runtime manager.
     pub routing_policy: Arc<std::sync::RwLock<crate::llm::routing_policy::RoutingPolicy>>,
-}
-
-/// Options that control optional init phases.
-#[derive(Default)]
-pub struct AppBuilderFlags {
-    pub no_db: bool,
 }
 
 /// Builder that orchestrates the 5 mechanical init phases.

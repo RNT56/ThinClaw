@@ -1,4 +1,14 @@
-//! Application assembly crate placeholder.
+//! Application assembly helpers.
 //!
-//! Dependency wiring remains in the root `app` facade until runtime crates own
-//! their implementation modules.
+//! This crate owns root-independent startup policy and process wiring. The
+//! root crate keeps adapters for assembly steps that still depend on root-only
+//! subsystems while those subsystems are being extracted.
+
+pub mod runtime;
+
+pub use runtime::{
+    AppBuilderFlags, RuntimeEntryMode, RuntimeExecRegistrationMode, block_on_async_main,
+    desktop_autonomy_headless_blocker, desktop_autonomy_headless_blocker_for,
+    execute_code_registration_mode, init_cli_tracing, process_registration_mode,
+    relaunch_current_process, restart_is_managed_by_service,
+};
