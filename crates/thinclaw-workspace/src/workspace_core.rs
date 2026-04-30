@@ -2067,8 +2067,8 @@ Know when to stay silent.
             personality_pack_content("balanced")
         );
         let mentor = personality_pack_content("MENTOR");
-        assert!(mentor.contains("- **Seed Pack:** mentor"));
-        assert!(mentor.contains("## Core Truths"));
+        assert!(mentor.contains("# Mentor Personality Pack"));
+        assert!(mentor.contains("## Vibe"));
         assert!(mentor.contains("## Default Behaviors"));
     }
 

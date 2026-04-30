@@ -12,6 +12,12 @@ ThinClaw has three related but distinct extension surfaces:
 
 Do not document or implement those as if they were the same thing.
 
+The root-independent pieces of this system live in `thinclaw-tools`: registry
+core, MCP protocol/config/session primitives, and WASM tool
+capabilities/schema/allowlist/runtime primitives. Root `src/tools` remains the
+compatibility and host-boundary layer for built-ins, execution backends, MCP
+client/auth, WASM wrapper/loader/oauth/storage, and app-specific registration.
+
 ## Built-In Tools
 
 Add a built-in Rust tool when the capability belongs inside the core runtime.

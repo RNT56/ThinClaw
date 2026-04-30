@@ -235,6 +235,7 @@ Full details, custom combinations, and CI matrix: [docs/BUILD_PROFILES.md](docs/
 | Path | Purpose |
 |---|---|
 | [src/](src/) | Core runtime, CLI, gateway, channels, tools, memory, policy, and platform integration |
+| [crates/](crates/) | Workspace crates that own extracted subsystem traits, DTOs, and runtime helpers |
 | [docs/](docs/) | Canonical user, operator, architecture, security, and deployment docs |
 | [deploy/](deploy/) | Linux, Docker, Raspberry Pi, and service helper assets |
 | [channels-src/](channels-src/) | Source crates for packaged channel integrations |
@@ -257,6 +258,7 @@ Full details, custom combinations, and CI matrix: [docs/BUILD_PROFILES.md](docs/
 | Deep network model | [src/NETWORK_SECURITY.md](src/NETWORK_SECURITY.md) |
 | Extensions, WASM, MCP, and registries | [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md) |
 | Channel architecture | [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md) |
+| Crate ownership and thin-shell boundaries | [docs/CRATE_OWNERSHIP.md](docs/CRATE_OWNERSHIP.md) |
 | Shared surface commands | [docs/SURFACES_AND_COMMANDS.md](docs/SURFACES_AND_COMMANDS.md) |
 | Terminal and WebUI skins | [docs/TERMINAL_SKINS.md](docs/TERMINAL_SKINS.md) |
 | Identity and personality | [docs/IDENTITY_AND_PERSONALITY.md](docs/IDENTITY_AND_PERSONALITY.md) |

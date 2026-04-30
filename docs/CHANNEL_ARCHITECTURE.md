@@ -111,6 +111,19 @@ For example:
 - Slack should be documented as a WASM channel package in ThinClaw.
 - Discord needs both paths documented clearly: native Gateway and packaged interactions.
 
+## Code Ownership
+
+`thinclaw-channels` owns root-independent channel primitives: channel manager,
+health/status helpers, reaction helpers, selected native runtime slices, and
+WASM channel capabilities/schema/runtime/limits/error helpers.
+
+Root `src/channels` keeps compatibility facades plus host-boundary adapters:
+native transports that depend on root config/platform/media/pairing, gateway
+route wiring, ACP submission wiring, and WASM channel wrapper/loader/router code
+that still touches root services.
+
+For the full crate map, see [CRATE_OWNERSHIP.md](CRATE_OWNERSHIP.md).
+
 ## Formatting Guidance Ownership
 
 Channel-specific formatting behavior belongs to the channel layer, not to generic prompt assembly.

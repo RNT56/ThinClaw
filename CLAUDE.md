@@ -40,6 +40,7 @@ Use these as the current documentation authority before updating surrounding doc
 | Deployment and remote access | `docs/DEPLOYMENT.md` |
 | Channel architecture | `docs/CHANNEL_ARCHITECTURE.md` |
 | Extension architecture | `docs/EXTENSION_SYSTEM.md` |
+| Crate ownership and thin-shell boundaries | `docs/CRATE_OWNERSHIP.md` |
 | Tool implementation guidance | `src/tools/README.md` |
 | Workspace and memory model | `src/workspace/README.md` |
 | Security and network model | `src/NETWORK_SECURITY.md` |
@@ -54,18 +55,24 @@ When these docs disagree with broad overview docs, code and canonical docs win.
 
 The codebase is easier to reason about by subsystem than by file count.
 
-- `src/agent/`: agent loop, sessions, subagents, routines, cost guard, dispatcher
-- `src/channels/`: native channels, gateway, HTTP ingress, WASM channel runtime
+- `crates/thinclaw-*`: canonical crate-owned traits, DTOs, runtime helpers, and extracted subsystem pieces
+- `src/lib.rs` and root `src/<module>/mod.rs`: compatibility facades for `thinclaw::...` imports
+- `src/app.rs`, `src/main.rs`, `src/bin/`: root package entrypoints and host app wiring
+- `src/agent/`: remaining root-owned agent loop, sessions, dispatcher, subagents, learning, routines, and worker orchestration
+- `src/channels/`: native channel adapters/transports, gateway route wiring, and root WASM channel adapters
 - `src/cli/`: operator-facing CLI commands
-- `src/config/`: config loading, overlays, defaults, feature-specific settings
-- `src/context/`: compaction, memory injection, read audit
+- `src/config/`: compatibility facades plus root-specific config entrypoints
+- `src/context/`: compatibility facades plus root-specific context wiring
 - `src/extensions/`: extension lifecycle, registry integration, manifest handling
-- `src/llm/`: provider selection, routing, failover, pricing, caching, discovery
+- `src/llm/`: compatibility facades plus reasoning and root-specific provider wiring
 - `src/skills/`: skill registry, workspace/bundled skill loading, hot-reload
 - `src/safety/`, `src/sandbox/`, `src/secrets/`: trust boundaries and execution controls
 - `src/setup/`: onboarding wizard and first-run configuration
-- `src/tools/`: built-in tools, extension tools, WASM runtime, MCP client
-- `src/workspace/`: persistent memory, search, citations, chunking, repository support
+- `src/tools/`: root-dependent built-ins, execution pipeline/backends, WASM/MCP host adapters
+- `src/workspace/`: compatibility facades plus root-specific workspace adapters
+
+See `docs/CRATE_OWNERSHIP.md` for the current crate split, dependency-direction
+rules, and root-owned runtime areas that still require port/adaptor work.
 
 ## Architecture Hygiene
 
@@ -96,6 +103,10 @@ For a deeper walkthrough of startup and workspace shaping, use `src/setup/README
 ## Current Architecture Notes
 
 - The web gateway is the control plane. It is operator-facing infrastructure, not just another chat channel.
+- The root package is now a compatibility facade plus binary/app wiring for many subsystems. New internal code should import extracted crates directly as `thinclaw_*`, not through root `thinclaw`.
+- `thinclaw-tools` owns tool registry core, MCP protocol/config/session primitives, and WASM tool primitives. Root `src/tools` still owns the host execution pipeline, root-dependent built-ins, WASM wrapper/loader/oauth/storage, and app-specific registration.
+- `thinclaw-channels` owns shared channel manager/runtime helpers and WASM channel primitives. Root `src/channels` still owns native transports and app/gateway adapters that depend on root services.
+- `thinclaw-agent` owns support types and agent-owned port traits. The full agent loop/session/dispatcher runtime remains root-owned until DB, tool, hook, skill, context, and channel dependencies are injected through ports.
 - Channel delivery is hybrid. Some channels are native Rust modules; others are packaged WASM channel artifacts.
 - Channel-specific formatting/rendering guidance is owned by the channel layer, not prompt assembly. Native channels should override `Channel::formatting_hints()`, and packaged WASM channels should declare `formatting_hints` in their `*.capabilities.json` metadata. Do not add channel-name switches back into `src/llm/reasoning.rs`.
 - Extension flows are split. `tool`, `mcp`, and registry installs are related but not interchangeable surfaces.
@@ -151,6 +162,7 @@ Temporary dev note:
 - If you change delivery architecture, update `docs/CHANNEL_ARCHITECTURE.md` and the affected channel guides.
 - If you change channel formatting behavior, update the owning native channel or WASM channel manifest first, then update `docs/CHANNEL_ARCHITECTURE.md` if the operator-facing behavior changed.
 - If you change extension flows, update `docs/EXTENSION_SYSTEM.md`, `src/tools/README.md`, and any affected tool docs.
+- If you change crate boundaries, update `docs/CRATE_OWNERSHIP.md` and keep this file's repo-shape notes aligned.
 - If you change security boundaries, update `src/NETWORK_SECURITY.md` and any top-level trust/safety wording.
 
 ## Preferred Maintainer Workflow

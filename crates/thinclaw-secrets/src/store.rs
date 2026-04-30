@@ -12,15 +12,19 @@ use async_trait::async_trait;
 use chrono::Utc;
 #[cfg(feature = "postgres")]
 use deadpool_postgres::Pool;
+#[cfg(any(feature = "postgres", feature = "libsql"))]
 use secrecy::ExposeSecret;
+#[cfg(any(feature = "postgres", feature = "libsql"))]
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::crypto::SecretsCrypto;
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+use crate::types::CURRENT_KEY_VERSION;
 use crate::types::{
     CURRENT_AAD_VERSION, CURRENT_CIPHER, CURRENT_ENCRYPTION_VERSION, CURRENT_KDF,
-    CURRENT_KEY_VERSION, CreateSecretParams, DecryptedSecret, MasterKeyRotationReport, Secret,
-    SecretAccessContext, SecretError, SecretRef,
+    CreateSecretParams, DecryptedSecret, MasterKeyRotationReport, Secret, SecretAccessContext,
+    SecretError, SecretRef,
 };
 
 /// Trait for secret storage operations.
@@ -149,6 +153,7 @@ fn rotated_secret_metadata(
     rotated
 }
 
+#[cfg(any(feature = "postgres", feature = "libsql"))]
 fn error_for_audit(error: &SecretError) -> String {
     let msg = error.to_string();
     if msg.len() > 240 {

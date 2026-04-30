@@ -22,6 +22,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 - Choosing or configuring providers: go to [LLM_PROVIDERS.md](LLM_PROVIDERS.md)
 - Understanding channels: go to [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md)
 - Understanding extensions and tools: go to [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md)
+- Understanding crate ownership and thin-shell boundaries: go to [CRATE_OWNERSHIP.md](CRATE_OWNERSHIP.md)
 - Understanding security and trust: go to [SECURITY.md](SECURITY.md)
 
 ## By Audience
@@ -64,6 +65,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 
 - [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md)
 - [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md)
+- [CRATE_OWNERSHIP.md](CRATE_OWNERSHIP.md)
 - [BUILD_PROFILES.md](BUILD_PROFILES.md)
 
 ## Canonical Ownership
@@ -88,6 +90,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 | Channel architecture | [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md) |
 | Security and trust | [SECURITY.md](SECURITY.md) |
 | Extension architecture | [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md) |
+| Crate ownership and thin-shell boundaries | [CRATE_OWNERSHIP.md](CRATE_OWNERSHIP.md) |
 | LLM provider configuration | [LLM_PROVIDERS.md](LLM_PROVIDERS.md) |
 | Secrets, Provider Vault, and trust boundaries | [SECURITY.md](SECURITY.md) |
 | Provider catalog (code) | [../src/config/provider_catalog.rs](../src/config/provider_catalog.rs) |

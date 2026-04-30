@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod protocol;
+pub mod session;
 pub mod stdio;
 
 pub use config::{
@@ -20,4 +21,5 @@ pub use protocol::{
     ReadResourceResult, ResourceUpdatedNotification, SamplingCreateMessageRequest,
     SamplingCreateMessageResult, SamplingResponseContent,
 };
+pub use session::{McpSession, McpSessionManager};
 pub use stdio::{McpInboundHandler, StdioTransport};

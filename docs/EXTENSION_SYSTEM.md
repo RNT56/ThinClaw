@@ -69,6 +69,22 @@ Use the CLI that matches the extension kind:
 
 Do not document these as interchangeable.
 
+## Code Ownership
+
+The root-independent extension primitives live in `thinclaw-tools`:
+
+- MCP protocol DTOs, stdio helpers, explicit-path config load/save, and session management
+- WASM tool capabilities, schemas, allowlist validation, limits, errors, host state, and runtime cache types
+- tool registry core and shared tool metadata helpers
+
+Root `src/tools` keeps host-boundary behavior that still depends on app services:
+
+- MCP client/auth flows and DB-backed MCP config adapters
+- WASM wrapper, loader, OAuth refresh, credential injection, storage backends, and dev-tool watcher
+- execution pipeline, execution backends, and root-dependent built-ins
+
+For the broader crate split, see [CRATE_OWNERSHIP.md](CRATE_OWNERSHIP.md).
+
 ## MCP Operator Surfaces
 
 The MCP surface is now split by task instead of a single flat command set:

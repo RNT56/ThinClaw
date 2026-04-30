@@ -545,12 +545,11 @@ impl ShellTool {
 
 async fn shared_smart_approver() -> Option<Arc<SmartApprover>> {
     #[cfg(test)]
-    if optional_env("SAFETY_SMART_APPROVAL_TEST_RESPONSE")
+    if let Some(response) = optional_env("SAFETY_SMART_APPROVAL_TEST_RESPONSE")
         .ok()
         .flatten()
-        .is_some()
     {
-        return SmartApprover::from_env().await.ok().map(Arc::new);
+        return Some(Arc::new(SmartApprover::from_test_response(response)));
     }
 
     if let Some(existing) = SMART_APPROVER.get() {
