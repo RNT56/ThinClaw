@@ -14,6 +14,7 @@ use crate::channels::IncomingMessage;
 use crate::channels::web::identity_helpers::{GatewayRequestIdentity, gateway_identity};
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use thinclaw_gateway::web::submission::submit_gateway_message;
 
 async fn refresh_event_cache_if_present(state: &GatewayState) {
     if let Some(ref engine) = state.routine_engine {
@@ -539,18 +540,9 @@ pub(crate) async fn webhook_routine_trigger_handler(
             None,
         ));
 
-        let tx_guard = state.msg_tx.read().await;
-        let tx = tx_guard.as_ref().ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Channel not started".to_string(),
-        ))?;
-
-        tx.send(msg).await.map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Channel closed".to_string(),
-            )
-        })?;
+        submit_gateway_message(state.as_ref(), msg)
+            .await
+            .map_err(crate::channels::web::handlers::chat::gateway_submission_error)?;
 
         Ok(Json(serde_json::json!({
             "status": "triggered",

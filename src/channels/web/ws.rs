@@ -20,15 +20,17 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::agent::submission::Submission;
+#[cfg(test)]
 use crate::channels::IncomingMessage;
 use crate::channels::web::handlers::chat::{
-    active_thread_id_for_identity, clear_auth_mode_for_identity,
+    active_thread_id_for_identity, clear_auth_mode_for_identity, gateway_submission_error,
 };
 use crate::channels::web::identity_helpers::{
     GatewayRequestIdentity, sse_event_visible_to_identity,
 };
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::{ModelInfo, SseEvent, WsClientMessage, WsServerMessage};
+use thinclaw_gateway::web::submission::{build_gateway_message, submit_gateway_message};
 
 /// Tracks active WebSocket connections.
 pub struct WsConnectionTracker {
@@ -195,40 +197,16 @@ async fn handle_client_message(
 ) {
     match msg {
         WsClientMessage::Message { content, thread_id } => {
-            let user_id = request_identity.principal_id.clone();
-            let actor_id = request_identity.actor_id.clone();
-            let mut incoming = IncomingMessage::new("gateway", &user_id, &content);
-            incoming =
-                incoming.with_identity(request_identity.resolved_identity(thread_id.as_deref()));
-            if let Some(ref tid) = thread_id {
-                incoming = incoming.with_thread(tid);
-                incoming = incoming.with_metadata(serde_json::json!({
-                    "thread_id": tid,
-                    "actor_id": actor_id,
-                    "browser_origin": browser_origin,
-                }));
-            } else if browser_origin.is_some() {
-                incoming = incoming.with_metadata(serde_json::json!({
-                    "actor_id": actor_id,
-                    "browser_origin": browser_origin,
-                }));
-            }
-
-            let tx_guard = state.msg_tx.read().await;
-            if let Some(ref tx) = *tx_guard {
-                if tx.send(incoming).await.is_err() {
-                    let _ = direct_tx
-                        .send(WsServerMessage::Error {
-                            message: "Channel closed".to_string(),
-                        })
-                        .await;
-                }
-            } else {
-                let _ = direct_tx
-                    .send(WsServerMessage::Error {
-                        message: "Channel not started".to_string(),
-                    })
-                    .await;
+            let incoming = build_gateway_message(
+                "gateway",
+                request_identity,
+                content,
+                thread_id.as_deref(),
+                browser_origin,
+            );
+            if let Err(error) = submit_gateway_message(state, incoming).await {
+                let (_, message) = gateway_submission_error(error);
+                let _ = direct_tx.send(WsServerMessage::Error { message }).await;
             }
         }
         WsClientMessage::Approval {
@@ -279,26 +257,19 @@ async fn handle_client_message(
                 }
             };
 
-            let user_id = request_identity.principal_id.clone();
-            let actor_id = request_identity.actor_id.clone();
-            let mut msg = IncomingMessage::new("gateway", &user_id, content);
-            msg = msg.with_identity(request_identity.resolved_identity(thread_id.as_deref()));
-            if let Some(ref tid) = thread_id {
-                msg = msg.with_thread(tid);
-                msg = msg.with_metadata(serde_json::json!({
-                    "thread_id": tid,
-                    "actor_id": actor_id,
-                    "browser_origin": browser_origin,
-                }));
-            } else if browser_origin.is_some() {
-                msg = msg.with_metadata(serde_json::json!({
-                    "actor_id": actor_id,
-                    "browser_origin": browser_origin,
-                }));
-            }
-            let tx_guard = state.msg_tx.read().await;
-            if let Some(ref tx) = *tx_guard {
-                let _ = tx.send(msg).await;
+            let msg = build_gateway_message(
+                "gateway",
+                request_identity,
+                content,
+                thread_id.as_deref(),
+                browser_origin,
+            );
+            if let Err(error) = submit_gateway_message(state, msg).await {
+                let _ = direct_tx
+                    .send(WsServerMessage::Error {
+                        message: gateway_submission_error(error).1,
+                    })
+                    .await;
             }
         }
         WsClientMessage::AuthToken {

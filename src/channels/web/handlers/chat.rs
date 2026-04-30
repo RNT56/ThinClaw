@@ -13,13 +13,14 @@ use futures::StreamExt;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::channels::IncomingMessage;
 use crate::channels::web::identity_helpers::{
     GatewayRequestIdentity, get_or_create_gateway_assistant_conversation,
     request_identity_with_overrides, sse_event_visible_to_identity,
 };
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use thinclaw_gateway::web::ports::RouteStatePort;
+use thinclaw_gateway::web::submission::{build_gateway_message, submit_gateway_message};
 
 #[derive(Deserialize)]
 pub(crate) struct HistoryQuery {
@@ -50,40 +51,17 @@ pub(crate) async fn chat_send_handler(
         req.actor_id.as_deref(),
     )
     .await;
-    let user_id = request_identity.principal_id.clone();
-    let actor_id = request_identity.actor_id.clone();
-    let mut msg = IncomingMessage::new("gateway", &user_id, &req.content);
-    msg = msg.with_identity(request_identity.resolved_identity(req.thread_id.as_deref()));
     let browser_origin = request_origin(&headers);
-
-    if let Some(ref thread_id) = req.thread_id {
-        msg = msg.with_thread(thread_id);
-        msg = msg.with_metadata(serde_json::json!({
-            "thread_id": thread_id,
-            "actor_id": actor_id,
-            "browser_origin": browser_origin,
-        }));
-    } else if browser_origin.is_some() {
-        msg = msg.with_metadata(serde_json::json!({
-            "actor_id": actor_id,
-            "browser_origin": browser_origin,
-        }));
-    }
-
-    let msg_id = msg.id;
-
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
-
-    tx.send(msg).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Channel closed".to_string(),
-        )
-    })?;
+    let msg = build_gateway_message(
+        "gateway",
+        &request_identity,
+        req.content.as_str(),
+        req.thread_id.as_deref(),
+        browser_origin.as_deref(),
+    );
+    let msg_id = submit_gateway_message(state.as_ref(), msg)
+        .await
+        .map_err(gateway_submission_error)?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -138,40 +116,17 @@ pub(crate) async fn chat_approval_handler(
         req.actor_id.as_deref(),
     )
     .await;
-    let user_id = request_identity.principal_id.clone();
-    let actor_id = request_identity.actor_id.clone();
     let browser_origin = request_origin(&headers);
-    let mut msg = IncomingMessage::new("gateway", &user_id, content);
-    msg = msg.with_identity(request_identity.resolved_identity(req.thread_id.as_deref()));
-
-    if let Some(ref thread_id) = req.thread_id {
-        msg = msg.with_thread(thread_id);
-        msg = msg.with_metadata(serde_json::json!({
-            "thread_id": thread_id,
-            "actor_id": actor_id,
-            "browser_origin": browser_origin,
-        }));
-    } else if browser_origin.is_some() {
-        msg = msg.with_metadata(serde_json::json!({
-            "actor_id": actor_id,
-            "browser_origin": browser_origin,
-        }));
-    }
-
-    let msg_id = msg.id;
-
-    let tx_guard = state.msg_tx.read().await;
-    let tx = tx_guard.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Channel not started".to_string(),
-    ))?;
-
-    tx.send(msg).await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Channel closed".to_string(),
-        )
-    })?;
+    let msg = build_gateway_message(
+        "gateway",
+        &request_identity,
+        content,
+        req.thread_id.as_deref(),
+        browser_origin.as_deref(),
+    );
+    let msg_id = submit_gateway_message(state.as_ref(), msg)
+        .await
+        .map_err(gateway_submission_error)?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -180,6 +135,15 @@ pub(crate) async fn chat_approval_handler(
             status: "accepted",
         }),
     ))
+}
+
+pub(crate) fn gateway_submission_error(error: String) -> (StatusCode, String) {
+    let status = if error == "Channel not started" {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    (status, error)
 }
 
 pub(crate) async fn chat_auth_token_handler(
@@ -758,11 +722,10 @@ pub(crate) async fn chat_new_thread_handler(
     sess.insert_thread(thread);
     drop(sess);
 
-    state.sse.broadcast(SseEvent::ConversationUpdated {
-        thread_id: thread_id.to_string(),
-        reason: "thread_created".to_string(),
-        channel: Some("gateway".to_string()),
-    });
+    state
+        .mark_conversation_updated(&thread_id.to_string(), "thread_created", Some("gateway"))
+        .await
+        .map_err(gateway_submission_error)?;
 
     Ok(Json(info))
 }
@@ -868,11 +831,10 @@ pub(crate) async fn chat_delete_thread_handler(
     tracing::info!(thread_id = %thread_id, deleted = deleted, "Thread deleted");
 
     if deleted {
-        state.sse.broadcast(SseEvent::ConversationDeleted {
-            thread_id: thread_id.to_string(),
-            principal_id: user_id,
-            actor_id,
-        });
+        state
+            .mark_conversation_deleted(&request_identity, &thread_id.to_string())
+            .await
+            .map_err(gateway_submission_error)?;
     }
 
     Ok(Json(serde_json::json!({

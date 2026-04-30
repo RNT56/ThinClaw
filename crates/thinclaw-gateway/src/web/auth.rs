@@ -7,7 +7,6 @@
 //!    requires `TRUSTED_PROXY_IPS` to restrict which source IPs can use it (CIDR notation,
 //!    comma-separated). If TRUSTED_PROXY_IPS is empty/unset, only loopback IPs are trusted.
 
-use async_trait::async_trait;
 use axum::{
     extract::{ConnectInfo, Request, State},
     http::{HeaderMap, StatusCode},
@@ -19,14 +18,7 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
 use crate::web::identity::{GatewayAuthSource, GatewayRequestIdentity};
-
-#[async_trait]
-pub trait GatewayIdentityStore: Send + Sync {
-    async fn infer_primary_user_id_for_channel(
-        &self,
-        channel: &str,
-    ) -> Result<Option<String>, String>;
-}
+use crate::web::ports::IdentityLookupPort;
 
 /// Shared auth state injected via axum middleware state.
 #[derive(Clone)]
@@ -43,7 +35,7 @@ pub struct AuthState {
     /// Default gateway actor when auth alone cannot identify the caller.
     pub fallback_actor_id: String,
     /// Optional store so bearer-token requests can infer the primary principal.
-    pub store: Option<Arc<dyn GatewayIdentityStore>>,
+    pub store: Option<Arc<dyn IdentityLookupPort>>,
 }
 
 /// Check if an IP is trusted for proxy auth.

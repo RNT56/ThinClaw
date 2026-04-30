@@ -5,4 +5,5 @@ pub mod ports;
 pub mod rate_limiter;
 pub mod sse;
 pub mod static_files;
+pub mod submission;
 pub mod types;

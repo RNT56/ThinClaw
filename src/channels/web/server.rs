@@ -19,19 +19,19 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::agent::SessionManager;
 use crate::channels::IncomingMessage;
-use crate::channels::web::auth::{
-    AuthState, GatewayIdentityStore, auth_middleware, load_trusted_proxy_config,
-};
+use crate::channels::web::auth::{AuthState, auth_middleware, load_trusted_proxy_config};
 use crate::channels::web::handlers::*;
 use crate::channels::web::log_layer::LogBroadcaster;
 pub(crate) use crate::channels::web::rate_limiter::RateLimiter;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::static_files::*;
+use crate::channels::web::types::SseEvent;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::sandbox_types::{ContainerJobManager, PendingPrompt};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+use thinclaw_gateway::web::ports::{AgentSubmissionPort, IdentityLookupPort, RouteStatePort};
 
 pub(crate) use crate::channels::web::handlers::chat::build_turns_from_db_messages;
 #[cfg(test)]
@@ -56,7 +56,7 @@ pub type PromptQueue = Arc<
 struct DatabaseGatewayIdentityStore(Arc<dyn Database>);
 
 #[async_trait]
-impl GatewayIdentityStore for DatabaseGatewayIdentityStore {
+impl IdentityLookupPort for DatabaseGatewayIdentityStore {
     async fn infer_primary_user_id_for_channel(
         &self,
         channel: &str,
@@ -135,6 +135,65 @@ pub struct GatewayState {
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// Channel manager for hot-reloading channel settings (e.g., stream mode).
     pub channel_manager: Option<Arc<crate::channels::ChannelManager>>,
+}
+
+#[async_trait]
+impl AgentSubmissionPort for GatewayState {
+    async fn submit_agent_message(&self, message: IncomingMessage) -> Result<(), String> {
+        let tx_guard = self.msg_tx.read().await;
+        let tx = tx_guard
+            .as_ref()
+            .ok_or_else(|| "Channel not started".to_string())?;
+        tx.send(message)
+            .await
+            .map_err(|_| "Channel closed".to_string())
+    }
+}
+
+#[async_trait]
+impl IdentityLookupPort for GatewayState {
+    async fn infer_primary_user_id_for_channel(
+        &self,
+        channel: &str,
+    ) -> Result<Option<String>, String> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
+        store
+            .infer_primary_user_id_for_channel(channel)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[async_trait]
+impl RouteStatePort for GatewayState {
+    async fn mark_conversation_updated(
+        &self,
+        thread_id: &str,
+        reason: &str,
+        channel: Option<&str>,
+    ) -> Result<(), String> {
+        self.sse.broadcast(SseEvent::ConversationUpdated {
+            thread_id: thread_id.to_string(),
+            reason: reason.to_string(),
+            channel: channel.map(ToOwned::to_owned),
+        });
+        Ok(())
+    }
+
+    async fn mark_conversation_deleted(
+        &self,
+        identity: &crate::channels::web::identity_helpers::GatewayRequestIdentity,
+        thread_id: &str,
+    ) -> Result<(), String> {
+        self.sse.broadcast(SseEvent::ConversationDeleted {
+            thread_id: thread_id.to_string(),
+            principal_id: identity.principal_id.clone(),
+            actor_id: identity.actor_id.clone(),
+        });
+        Ok(())
+    }
 }
 
 /// Start the gateway HTTP server.
@@ -220,7 +279,7 @@ pub async fn start_server(
             fallback_actor_id: state.actor_id.clone(),
             store: state.store.as_ref().map(|store| {
                 Arc::new(DatabaseGatewayIdentityStore(Arc::clone(store)))
-                    as Arc<dyn GatewayIdentityStore>
+                    as Arc<dyn IdentityLookupPort>
             }),
         }
     };
