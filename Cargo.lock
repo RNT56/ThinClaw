@@ -7876,6 +7876,7 @@ dependencies = [
  "blake3",
  "chrono",
  "rust_decimal",
+ "secrecy",
  "serde",
  "serde_json",
  "thinclaw-llm-core",

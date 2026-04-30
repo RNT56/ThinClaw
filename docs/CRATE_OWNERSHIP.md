@@ -32,7 +32,7 @@ the compatibility facade and binary entrypoint.
 | `thinclaw-llm-core` | provider traits and transport-neutral LLM DTOs |
 | `thinclaw-llm` | provider factory/runtime, routing, usage tracking, provider presets, rig adapter |
 | `thinclaw-tools-core` | core tool traits, descriptors, rate limiting, URL guard |
-| `thinclaw-tools` | tool registry core, smart approval, browser args, intent display, MCP primitives, WASM tool primitives and WASM rate limiter |
+| `thinclaw-tools` | tool registry core, smart approval, browser args, intent display, MCP primitives, WASM tool primitives, WASM rate limiter, credential injection |
 | `thinclaw-channels-core` | core channel traits and message/status types |
 | `thinclaw-channels` | channel manager, Gmail/HTTP slices, reactions/status helpers, WASM channel primitives |
 | `thinclaw-gateway` | gateway DTOs, auth helpers, SSE/log/static-file primitives |

@@ -24,3 +24,6 @@ url = "2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"] }
+
+[dev-dependencies]
+secrecy = "0.10"

@@ -3,6 +3,7 @@
 pub mod allowlist;
 pub mod capabilities;
 pub mod capabilities_schema;
+pub mod credential_injector;
 pub mod error;
 pub mod host;
 pub mod limits;
@@ -17,6 +18,10 @@ pub use capabilities::{
 pub use capabilities_schema::{
     AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema, RateLimitSchema,
     ValidationEndpointSchema,
+};
+pub use credential_injector::{
+    CredentialInjector, InjectedCredentials, InjectionError, SharedCredentialRegistry,
+    inject_credential,
 };
 pub use error::{TrapCode, TrapInfo, WasmError};
 pub use host::{HostState, LogEntry, LogLevel};
