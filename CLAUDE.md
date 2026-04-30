@@ -104,9 +104,9 @@ For a deeper walkthrough of startup and workspace shaping, use `src/setup/README
 
 - The web gateway is the control plane. It is operator-facing infrastructure, not just another chat channel.
 - The root package is now a compatibility facade plus binary/app wiring for many subsystems. New internal code should import extracted crates directly as `thinclaw_*`, not through root `thinclaw`.
-- `thinclaw-tools` owns tool registry core, MCP protocol/config/session primitives, and WASM tool primitives. Root `src/tools` still owns the host execution pipeline, root-dependent built-ins, WASM wrapper/loader/oauth/storage, and app-specific registration.
+- `thinclaw-tools` owns tool registry core, MCP protocol/config/session primitives, WASM tool primitives, and the WASM rate limiter. Root `src/tools` still owns the host execution pipeline, root-dependent built-ins, WASM wrapper/loader/oauth/storage, and app-specific registration.
 - `thinclaw-channels` owns shared channel manager/runtime helpers and WASM channel primitives. Root `src/channels` still owns native transports and app/gateway adapters that depend on root services.
-- `thinclaw-agent` owns support types and agent-owned port traits. The full agent loop/session/dispatcher runtime remains root-owned until DB, tool, hook, skill, context, and channel dependencies are injected through ports.
+- `thinclaw-agent` owns support types, context monitoring, message command routing, and agent-owned port traits. The full agent loop/session/dispatcher runtime remains root-owned until DB, tool, hook, skill, and channel dependencies are injected through ports.
 - Channel delivery is hybrid. Some channels are native Rust modules; others are packaged WASM channel artifacts.
 - Channel-specific formatting/rendering guidance is owned by the channel layer, not prompt assembly. Native channels should override `Channel::formatting_hints()`, and packaged WASM channels should declare `formatting_hints` in their `*.capabilities.json` metadata. Do not add channel-name switches back into `src/llm/reasoning.rs`.
 - Extension flows are split. `tool`, `mcp`, and registry installs are related but not interchangeable surfaces.

@@ -32,11 +32,11 @@ the compatibility facade and binary entrypoint.
 | `thinclaw-llm-core` | provider traits and transport-neutral LLM DTOs |
 | `thinclaw-llm` | provider factory/runtime, routing, usage tracking, provider presets, rig adapter |
 | `thinclaw-tools-core` | core tool traits, descriptors, rate limiting, URL guard |
-| `thinclaw-tools` | tool registry core, smart approval, browser args, intent display, MCP primitives, WASM tool primitives |
+| `thinclaw-tools` | tool registry core, smart approval, browser args, intent display, MCP primitives, WASM tool primitives and WASM rate limiter |
 | `thinclaw-channels-core` | core channel traits and message/status types |
 | `thinclaw-channels` | channel manager, Gmail/HTTP slices, reactions/status helpers, WASM channel primitives |
 | `thinclaw-gateway` | gateway DTOs, auth helpers, SSE/log/static-file primitives |
-| `thinclaw-agent` | extracted agent support types, prompt helpers, cost guard, routine records, agent-owned ports |
+| `thinclaw-agent` | extracted agent support types, context monitoring, command routing, prompt helpers, cost guard, routine records, agent-owned ports |
 | `thinclaw-app` | root-independent startup/runtime helper functions |
 
 ## Root-Owned Runtime Still In Root
