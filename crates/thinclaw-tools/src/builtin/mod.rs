@@ -8,6 +8,7 @@ pub mod device_info;
 pub mod echo;
 pub mod html_converter;
 pub mod json;
+pub mod shell_security;
 
 pub use agent_control::{AgentThinkTool, EmitUserMessageTool};
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};
