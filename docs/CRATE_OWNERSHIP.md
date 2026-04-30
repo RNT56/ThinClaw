@@ -32,23 +32,23 @@ the compatibility facade and binary entrypoint.
 | `thinclaw-llm-core` | provider traits and transport-neutral LLM DTOs |
 | `thinclaw-llm` | provider factory/runtime, routing, usage tracking, provider presets, rig adapter |
 | `thinclaw-tools-core` | core tool traits, descriptors, rate limiting, URL guard |
-| `thinclaw-tools` | tool registry core, smart approval, browser args, intent display, MCP primitives, WASM tool primitives, WASM rate limiter, credential injection, WASM tool storage, WASM OAuth helpers |
+| `thinclaw-tools` | tool registry core, smart approval, browser args, intent display, MCP primitives/OAuth helpers, execution DTO/local execution, WASM tool primitives/runtime wrapper/loader/watcher, shell-security policy, root-independent built-ins |
 | `thinclaw-channels-core` | core channel traits and message/status types |
-| `thinclaw-channels` | channel manager, Gmail/HTTP slices, reactions/status helpers, WASM channel primitives |
-| `thinclaw-gateway` | gateway DTOs, auth helpers, SSE/log/static-file primitives |
-| `thinclaw-agent` | extracted agent support types, context monitoring, command routing, prompt helpers, cost guard, routine records, agent-owned ports |
-| `thinclaw-app` | root-independent startup/runtime helper functions |
+| `thinclaw-channels` | channel manager, Gmail/HTTP slices, reactions/status helpers, pairing store support, WASM channel primitives/runtime wrapper/loader/router/watcher |
+| `thinclaw-gateway` | gateway DTOs, auth helpers, SSE/log/static-file primitives, submission helpers, gateway service ports |
+| `thinclaw-agent` | extracted agent support types, session domain, filesystem checkpoints, context monitoring, command routing, prompt helpers, cost guard, routine records, agent-owned ports |
+| `thinclaw-app` | root-independent startup/runtime policy, app assembly DTOs, quiet startup spinner behavior |
 
 ## Root-Owned Runtime Still In Root
 
 The following areas are intentionally still root-owned until their dependency
 cycles are removed through narrow ports/adapters:
 
-- agent loop, dispatcher, sessions, subagents, learning, outcomes, scheduler,
-  routine engine, and worker orchestration
-- tool execution pipeline, execution backends, root-dependent built-ins, WASM
-  wrapper/loader, MCP client/auth adapters
-- native channel transports that depend on root config, media, pairing, TUI,
+- agent loop, dispatcher, subagents, learning, outcomes, scheduler, routine
+  engine, worker orchestration, and root adapters for session persistence
+- root-dependent tool built-ins, app-specific registration, DB-backed MCP
+  adapters, and sandbox/job orchestration adapters
+- native channel transports that depend on root config, media, TUI,
   platform-specific helpers, or agent submission wiring
 - `AppBuilder` and full dependency assembly
 
