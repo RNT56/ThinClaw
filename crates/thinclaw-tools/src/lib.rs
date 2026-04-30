@@ -4,6 +4,8 @@
 //! execution, MCP, WASM, and built-ins will move here next.
 
 pub mod browser_args;
+pub mod builder;
+pub mod builtin;
 pub mod intent_display;
 pub mod mcp;
 pub mod registry;

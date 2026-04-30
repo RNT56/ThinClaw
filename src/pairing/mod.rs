@@ -5,6 +5,6 @@
 //!
 //! OpenClaw reference: src/pairing/pairing-store.ts
 
-mod store;
-
-pub use store::{PairingRequest, PairingStore, PairingStoreError, UpsertResult};
+pub use thinclaw_channels::pairing::{
+    PairingRequest, PairingStore, PairingStoreError, UpsertResult,
+};

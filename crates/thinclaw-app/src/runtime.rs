@@ -50,7 +50,7 @@ pub fn desktop_autonomy_headless_blocker_for(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuntimeEntryMode {
     Default,
     Cli,

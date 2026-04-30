@@ -9,6 +9,7 @@ pub mod group_priming;
 pub mod health_monitor;
 pub mod http;
 pub mod manager;
+pub mod pairing;
 pub mod reaction_machine;
 pub mod self_message;
 pub mod status_view;

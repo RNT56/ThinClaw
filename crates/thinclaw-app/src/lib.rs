@@ -4,8 +4,15 @@
 //! root crate keeps adapters for assembly steps that still depend on root-only
 //! subsystems while those subsystems are being extracted.
 
+pub mod assembly;
 pub mod runtime;
 
+pub use assembly::{
+    DescribesRuntimeAssembly, LocalRuntimeChannel, RuntimeAssemblyPlan, RuntimeAssemblyRequirement,
+    RuntimeDependencyPlan, RuntimeDependencyProvider, RuntimeEntrypointPlan, RuntimeLifecyclePhase,
+    RuntimeLifecyclePolicy, RuntimeWorkspaceMode, ToolRuntimeAssemblyInput,
+    ToolRuntimeAssemblyPlan, WorkspaceDirectoryPlan, WorkspaceFilesystemScope,
+};
 pub use runtime::{
     AppBuilderFlags, RuntimeEntryMode, RuntimeExecRegistrationMode, block_on_async_main,
     desktop_autonomy_headless_blocker, desktop_autonomy_headless_blocker_for,

@@ -153,7 +153,6 @@ pgvector = { version = "0.4", features = ["postgres"], optional = true }
 # WASM sandbox for untrusted tool execution
 wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"] }
 wasmtime-wasi = "36"  # WASI support for component model
-wasmparser = "0.220"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
 aes-gcm = "0.10"
@@ -187,9 +186,6 @@ clap_complete = "4.5.0"
 lru = "0.16.3"
 libloading = "0.8"
 
-# HTML to Markdown conversion (feature gated)
-html-to-markdown-rs = { version = "2.3", optional = true }
-readabilityrs = { version = "0.1.2", optional = true }
 sysinfo = "0.38.2"
 nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }
 chromiumoxide = { version = "0.9.1", optional = true }
@@ -312,7 +308,7 @@ libsql = [
     "dep:libsql",
 ]
 integration = []
-html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+html-to-markdown = ["thinclaw-tools/html-to-markdown"]
 # Document text extraction — PDF (pdf-extract), DOCX/PPTX/XLSX (zip crate)
 document-extraction = ["dep:pdf-extract", "dep:zip"]
 # Embed all WASM extensions into the binary for air-gapped / zero-network deployments.

@@ -19,6 +19,7 @@ rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+sysinfo = "0.38.2"
 thinclaw-llm-core = { version = "0.1.0", path = "../thinclaw-llm-core" }
 thinclaw-secrets = { version = "0.1.0", path = "../thinclaw-secrets", default-features = false }
 thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
@@ -31,6 +32,9 @@ url = "2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"] }
+wasmparser = "0.220"
+html-to-markdown-rs = { version = "2.3", optional = true }
+readabilityrs = { version = "0.1.2", optional = true }
 
 [dev-dependencies]
 secrecy = "0.10"
@@ -39,3 +43,4 @@ secrecy = "0.10"
 default = []
 postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 libsql = ["dep:libsql"]
+html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]

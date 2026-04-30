@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Default)]
@@ -7,7 +8,7 @@ pub struct PromptAssemblyV2 {
     provider_context_refs: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptAssemblyResult {
     pub stable_snapshot: String,
     pub stable_hash: String,
