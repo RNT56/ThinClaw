@@ -7871,14 +7871,24 @@ dependencies = [
 name = "thinclaw-tools"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "blake3",
+ "chrono",
  "rust_decimal",
  "serde",
  "serde_json",
  "thinclaw-llm-core",
+ "thinclaw-secrets",
  "thinclaw-tools-core",
  "thinclaw-types",
+ "thiserror 2.0.18",
  "tokio",
+ "tracing",
+ "url",
+ "urlencoding",
+ "uuid",
+ "wasmtime",
 ]
 
 [[package]]
