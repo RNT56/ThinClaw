@@ -292,6 +292,7 @@ postgres = [
     "thinclaw-types/postgres",
     "thinclaw-db/postgres",
     "thinclaw-secrets/postgres",
+    "thinclaw-tools/postgres",
     "thinclaw-workspace/postgres",
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
@@ -307,6 +308,7 @@ libsql = [
     "thinclaw-types/libsql",
     "thinclaw-db/libsql",
     "thinclaw-secrets/libsql",
+    "thinclaw-tools/libsql",
     "dep:libsql",
 ]
 integration = []

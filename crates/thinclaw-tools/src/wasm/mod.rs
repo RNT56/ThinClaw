@@ -9,6 +9,7 @@ pub mod host;
 pub mod limits;
 pub mod rate_limiter;
 pub mod runtime;
+pub mod storage;
 
 pub use allowlist::{AllowlistResult, AllowlistValidator, DenyReason};
 pub use capabilities::{
@@ -34,3 +35,11 @@ pub use rate_limiter::{
     WasmRateLimiter,
 };
 pub use runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmRuntimeConfig, WasmToolRuntime};
+#[cfg(feature = "libsql")]
+pub use storage::LibSqlWasmToolStore;
+#[cfg(feature = "postgres")]
+pub use storage::PostgresWasmToolStore;
+pub use storage::{
+    StoreToolParams, StoredCapabilities, StoredWasmTool, StoredWasmToolWithBinary, ToolStatus,
+    TrustLevel, WasmStorageError, WasmToolStore, compute_binary_hash, verify_binary_integrity,
+};

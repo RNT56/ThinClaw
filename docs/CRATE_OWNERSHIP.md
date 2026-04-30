@@ -32,7 +32,7 @@ the compatibility facade and binary entrypoint.
 | `thinclaw-llm-core` | provider traits and transport-neutral LLM DTOs |
 | `thinclaw-llm` | provider factory/runtime, routing, usage tracking, provider presets, rig adapter |
 | `thinclaw-tools-core` | core tool traits, descriptors, rate limiting, URL guard |
-| `thinclaw-tools` | tool registry core, smart approval, browser args, intent display, MCP primitives, WASM tool primitives, WASM rate limiter, credential injection |
+| `thinclaw-tools` | tool registry core, smart approval, browser args, intent display, MCP primitives, WASM tool primitives, WASM rate limiter, credential injection, WASM tool storage |
 | `thinclaw-channels-core` | core channel traits and message/status types |
 | `thinclaw-channels` | channel manager, Gmail/HTTP slices, reactions/status helpers, WASM channel primitives |
 | `thinclaw-gateway` | gateway DTOs, auth helpers, SSE/log/static-file primitives |
@@ -47,7 +47,7 @@ cycles are removed through narrow ports/adapters:
 - agent loop, dispatcher, sessions, subagents, learning, outcomes, scheduler,
   routine engine, and worker orchestration
 - tool execution pipeline, execution backends, root-dependent built-ins, WASM
-  wrapper/loader/oauth/storage, MCP client/auth adapters
+  wrapper/loader/oauth, MCP client/auth adapters
 - native channel transports that depend on root config, media, pairing, TUI,
   platform-specific helpers, or agent submission wiring
 - `AppBuilder` and full dependency assembly

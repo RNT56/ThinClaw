@@ -15,9 +15,9 @@ Do not document or implement those as if they were the same thing.
 The root-independent pieces of this system live in `thinclaw-tools`: registry
 core, MCP protocol/config/session primitives, and WASM tool
 capabilities/schema/allowlist/runtime primitives, including the WASM rate
-limiter and credential injection. Root `src/tools` remains the compatibility
+limiter, credential injection, and tool storage. Root `src/tools` remains the compatibility
 and host-boundary layer for built-ins, execution backends, MCP client/auth,
-WASM wrapper/loader/oauth/storage, and app-specific registration.
+WASM wrapper/loader/oauth, and app-specific registration.
 
 ## Built-In Tools
 

@@ -1188,7 +1188,9 @@ impl ToolRegistry {
             .await
             .map_err(WasmRegistrationError::Storage)?;
 
-        let capabilities = stored_caps.map(|c| c.to_capabilities()).unwrap_or_default();
+        let capabilities = stored_caps
+            .map(|c| c.to_capabilities().into())
+            .unwrap_or_default();
 
         // Register the tool
         self.register_wasm(WasmToolRegistration {
