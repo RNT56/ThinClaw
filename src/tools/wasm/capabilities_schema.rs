@@ -45,3 +45,15 @@ impl CapabilitiesFile {
         extracted.to_capabilities().into()
     }
 }
+
+impl From<&CapabilitiesFile> for thinclaw_tools::wasm::CapabilitiesFile {
+    fn from(value: &CapabilitiesFile) -> Self {
+        Self {
+            http: value.http.clone(),
+            secrets: value.secrets.clone(),
+            tool_invoke: value.tool_invoke.clone(),
+            workspace: value.workspace.clone(),
+            auth: value.auth.clone(),
+        }
+    }
+}

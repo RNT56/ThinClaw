@@ -104,7 +104,7 @@ For a deeper walkthrough of startup and workspace shaping, use `src/setup/README
 
 - The web gateway is the control plane. It is operator-facing infrastructure, not just another chat channel.
 - The root package is now a compatibility facade plus binary/app wiring for many subsystems. New internal code should import extracted crates directly as `thinclaw_*`, not through root `thinclaw`.
-- `thinclaw-tools` owns tool registry core, MCP protocol/config/session primitives, WASM tool primitives, the WASM rate limiter, WASM credential injection, and WASM tool storage. Root `src/tools` still owns the host execution pipeline, root-dependent built-ins, WASM wrapper/loader/oauth, and app-specific registration.
+- `thinclaw-tools` owns tool registry core, MCP protocol/config/session primitives, WASM tool primitives, the WASM rate limiter, WASM credential injection, WASM tool storage, and WASM OAuth helpers. Root `src/tools` still owns the host execution pipeline, root-dependent built-ins, WASM wrapper/loader, and app-specific registration.
 - `thinclaw-channels` owns shared channel manager/runtime helpers and WASM channel primitives. Root `src/channels` still owns native transports and app/gateway adapters that depend on root services.
 - `thinclaw-agent` owns support types, context monitoring, message command routing, and agent-owned port traits. The full agent loop/session/dispatcher runtime remains root-owned until DB, tool, hook, skill, and channel dependencies are injected through ports.
 - Channel delivery is hybrid. Some channels are native Rust modules; others are packaged WASM channel artifacts.

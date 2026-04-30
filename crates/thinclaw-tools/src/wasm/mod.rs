@@ -7,6 +7,7 @@ pub mod credential_injector;
 pub mod error;
 pub mod host;
 pub mod limits;
+pub mod oauth;
 pub mod rate_limiter;
 pub mod runtime;
 pub mod storage;
@@ -29,6 +30,14 @@ pub use host::{HostState, LogEntry, LogLevel};
 pub use limits::{
     DEFAULT_FUEL_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TIMEOUT, FuelConfig, ResourceLimits,
     WasmResourceLimiter,
+};
+pub use oauth::{
+    GOOGLE_OAUTH_TOKEN, LEGACY_GMAIL_OAUTH_TOKEN, OAuthCredentials, OAuthPkcePair,
+    OAuthRefreshConfig, ResolvedOAuthConfig, WasmOAuthTokenExchange, WasmToolAuthCheck,
+    WasmToolAuthMode, WasmToolAuthStatus, WasmToolAuthorizationRequest, WasmToolOAuthError,
+    WasmToolOAuthFlow, build_authorization_url, builtin_credentials, canonical_secret_name,
+    is_google_secret_name, refresh_secret_name, resolve_oauth_refresh_config, scopes_secret_name,
+    shared_auth_provider,
 };
 pub use rate_limiter::{
     LimitType, RateLimitError, RateLimitResult, RateLimiter, WasmDenyReason, WasmRateLimitConfig,
