@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 
-use crate::db::{AgentRegistryStore, AgentWorkspaceRecord};
-use crate::error::DatabaseError;
+use crate::{AgentRegistryStore, AgentWorkspaceRecord};
+use thinclaw_types::error::DatabaseError;
 
 use super::{LibSqlBackend, fmt_ts, get_i64, get_opt_text, get_text, get_ts};
 
@@ -35,9 +35,9 @@ fn row_to_agent_workspace(row: &libsql::Row) -> AgentWorkspaceRecord {
             .as_deref()
             .and_then(|json| serde_json::from_str(json).ok()),
         tool_profile: tool_profile.as_deref().and_then(|value| match value {
-            "standard" => Some(crate::tools::ToolProfile::Standard),
-            "restricted" => Some(crate::tools::ToolProfile::Restricted),
-            "explicit_only" => Some(crate::tools::ToolProfile::ExplicitOnly),
+            "standard" => Some(thinclaw_types::ToolProfile::Standard),
+            "restricted" => Some(thinclaw_types::ToolProfile::Restricted),
+            "explicit_only" => Some(thinclaw_types::ToolProfile::ExplicitOnly),
             _ => None,
         }),
         is_default: get_i64(row, 10) != 0,
@@ -221,7 +221,7 @@ impl AgentRegistryStore for LibSqlBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Database;
+    use crate::Database;
     use chrono::Utc;
     use uuid::Uuid;
 

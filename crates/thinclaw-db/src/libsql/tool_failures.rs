@@ -5,9 +5,9 @@ use libsql::params;
 use uuid::Uuid;
 
 use super::{LibSqlBackend, fmt_ts, get_i64, get_opt_text, get_text, get_ts};
-use crate::db::ToolFailureStore;
-use crate::error::DatabaseError;
+use crate::ToolFailureStore;
 use thinclaw_types::BrokenTool;
+use thinclaw_types::error::DatabaseError;
 
 use chrono::Utc;
 

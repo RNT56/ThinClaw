@@ -53,24 +53,13 @@ mod search;
 pub mod sqlite_vec;
 mod workspace_core;
 
-pub use chunker::{ChunkConfig, ChunkingStrategy, chunk, chunk_document};
-pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
 #[cfg(feature = "bedrock")]
-pub use embeddings::BedrockEmbeddings;
-pub use embeddings::{EmbeddingProvider, MockEmbeddings, OllamaEmbeddings, OpenAiEmbeddings};
+pub use thinclaw_workspace::BedrockEmbeddings;
 #[cfg(feature = "postgres")]
-pub use repository::Repository;
-pub use search::{
-    RankedResult, SearchConfig, SearchResult, apply_temporal_decay, expand_query_keywords,
-    mmr_rerank, reciprocal_rank_fusion,
+pub use thinclaw_workspace::Repository;
+pub use thinclaw_workspace::{
+    ChunkConfig, ChunkingStrategy, EmbeddingProvider, MemoryChunk, MemoryDocument, MockEmbeddings,
+    OllamaEmbeddings, OpenAiEmbeddings, RankedResult, SearchConfig, SearchResult, Workspace,
+    WorkspaceBackend, WorkspaceEntry, WorkspaceStore, apply_temporal_decay, chunk, chunk_document,
+    expand_query_keywords, mmr_rerank, paths, reciprocal_rank_fusion,
 };
-pub use workspace_core::Workspace;
-
-use std::sync::Arc;
-
-/// Storage backend for workspace operations.
-///
-/// Any type implementing `WorkspaceStore` can serve as a backend. Both
-/// `Repository` (PostgreSQL) and `Arc<dyn Database>` compatibility paths use
-/// this trait object.
-pub type WorkspaceBackend = Arc<dyn crate::db::WorkspaceStore>;

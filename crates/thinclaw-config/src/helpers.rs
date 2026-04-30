@@ -16,14 +16,12 @@ static BRIDGE_VARS: LazyLock<RwLock<HashMap<String, String>>> =
 /// Per-module mutexes do NOT prevent races between modules running in
 /// parallel.  Every `unsafe { set_var / remove_var }` call in tests
 /// MUST hold this single lock.
-#[cfg(test)]
 pub static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Acquire the crate-wide env-variable mutex for tests.
 ///
 /// Recovers a poisoned mutex rather than panicking — a single failing test
 /// should never cascade into mass failures across the entire test suite.
-#[cfg(test)]
 pub fn lock_env() -> std::sync::MutexGuard<'static, ()> {
     ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -92,7 +90,6 @@ pub fn clear_synced_oauth_vars() {
 }
 
 /// Clear all injected overlays. Intended for tests and legacy compatibility.
-#[cfg(test)]
 pub fn clear_injected_vars_for_tests() {
     clear_map(&INJECTED_VARS);
     clear_map(&SYNCED_OAUTH_VARS);

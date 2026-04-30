@@ -1321,18 +1321,26 @@ impl AppBuilder {
                 .await;
         }
 
+        let usage_sink = self.db.as_ref().map(|db| {
+            Arc::new(crate::llm::usage_tracking::DatabaseUsageSink::new(
+                Arc::clone(db),
+            )) as Arc<dyn crate::llm::usage_tracking::LlmUsageSink>
+        });
+        let budget_recorder =
+            Arc::clone(&cost_guard) as Arc<dyn crate::llm::usage_tracking::LlmBudgetRecorder>;
+
         let llm: Arc<dyn LlmProvider> = Arc::new(UsageTrackingProvider::new(
             runtime_llm,
             Arc::clone(&cost_tracker),
-            self.db.clone(),
-            Some(Arc::clone(&cost_guard)),
+            usage_sink.clone(),
+            Some(Arc::clone(&budget_recorder)),
         ));
         let cheap_llm = runtime_cheap_llm.map(|cheap| {
             Arc::new(UsageTrackingProvider::new(
                 cheap,
                 Arc::clone(&cost_tracker),
-                self.db.clone(),
-                Some(Arc::clone(&cost_guard)),
+                usage_sink.clone(),
+                Some(Arc::clone(&budget_recorder)),
             )) as Arc<dyn LlmProvider>
         });
 

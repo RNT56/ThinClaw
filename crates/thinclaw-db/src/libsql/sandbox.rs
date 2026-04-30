@@ -9,16 +9,16 @@ use super::{
     LibSqlBackend, fmt_opt_ts, fmt_ts, get_i64, get_json, get_opt_bool, get_opt_text, get_opt_ts,
     get_text, get_ts, opt_text,
 };
-use crate::db::SandboxStore;
-use crate::error::DatabaseError;
-use crate::history::{JobEventRecord, SandboxJobRecord, SandboxJobSummary};
-use crate::sandbox_jobs::SandboxJobSpec;
+use crate::SandboxStore;
+use thinclaw_history::JobEventRecord;
+use thinclaw_types::error::DatabaseError;
+use thinclaw_types::{SandboxJobRecord, SandboxJobSpec, SandboxJobSummary};
 
-fn parse_job_mode(raw: &str) -> crate::sandbox_types::JobMode {
+fn parse_job_mode(raw: &str) -> thinclaw_types::JobMode {
     match raw {
-        "claude_code" => crate::sandbox_types::JobMode::ClaudeCode,
-        "codex_code" => crate::sandbox_types::JobMode::CodexCode,
-        _ => crate::sandbox_types::JobMode::Worker,
+        "claude_code" => thinclaw_types::JobMode::ClaudeCode,
+        "codex_code" => thinclaw_types::JobMode::CodexCode,
+        _ => thinclaw_types::JobMode::Worker,
     }
 }
 

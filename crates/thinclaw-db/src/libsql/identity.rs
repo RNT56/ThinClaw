@@ -5,12 +5,12 @@ use libsql::params;
 use uuid::Uuid;
 
 use super::{LibSqlBackend, fmt_ts, get_json, get_opt_text, get_text, get_ts, opt_text};
-use crate::db::IdentityRegistryStore;
-use crate::error::DatabaseError;
-use crate::identity::{
+use crate::IdentityRegistryStore;
+use thinclaw_identity::{
     ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, EndpointApprovalStatus,
     NewActorEndpointRecord, NewActorRecord,
 };
+use thinclaw_types::error::DatabaseError;
 
 const ACTOR_COLUMNS: &str = "\
     actor_id, principal_id, display_name, status, \
@@ -503,8 +503,8 @@ impl IdentityRegistryStore for LibSqlBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Database;
-    use crate::identity::{ActorEndpointRef, ActorStatus, EndpointApprovalStatus};
+    use crate::Database;
+    use thinclaw_identity::{ActorEndpointRef, ActorStatus, EndpointApprovalStatus};
 
     async fn test_backend() -> (LibSqlBackend, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("failed to create temp dir");

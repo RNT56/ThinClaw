@@ -1,19 +1,12 @@
 use std::sync::Arc;
 
-use axum::{extract::State, http::header, response::IntoResponse};
+use axum::{extract::State, response::IntoResponse};
 
 use super::server::GatewayState;
 
 pub(crate) async fn index_handler(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
     let webchat = load_webchat_config(state.as_ref()).await;
-    let html = render_index_html(&webchat);
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        html,
-    )
+    thinclaw_gateway::web::static_files::render_index_response(&gateway_webchat_config(&webchat))
 }
 
 pub(crate) async fn load_webchat_config(state: &GatewayState) -> crate::config::WebChatConfig {
@@ -28,85 +21,51 @@ pub(crate) async fn load_webchat_config(state: &GatewayState) -> crate::config::
 }
 
 pub(crate) fn render_index_html(webchat: &crate::config::WebChatConfig) -> String {
-    let theme = match webchat.theme {
-        crate::config::WebChatTheme::Light => "light",
-        crate::config::WebChatTheme::Dark => "dark",
-        crate::config::WebChatTheme::System => "system",
-    };
-    let branding = if webchat.show_branding {
-        "true"
-    } else {
-        "false"
-    };
-    let mut html = include_str!("static/index.html").replace(
-        "<html lang=\"en\">",
-        &format!(
-            "<html lang=\"en\" data-webchat-theme=\"{theme}\" data-show-branding=\"{branding}\">"
-        ),
-    );
-
-    let runtime_css = webchat.runtime_css();
-    if !runtime_css.is_empty() {
-        html = html.replace(
-            "</head>",
-            &format!("  <style id=\"webchat-runtime-theme\">{runtime_css}</style>\n</head>"),
-        );
-    }
-
-    let payload = webchat.bootstrap_payload();
-    let payload_json = escape_json_for_html(
-        &serde_json::to_string(&payload).expect("webchat bootstrap payload serializes"),
-    );
-    html.replace(
-        "<script src=\"/app.js\"></script>",
-        &format!(
-            "<script id=\"webchat-bootstrap\" type=\"application/json\">{payload_json}</script>\n  <script src=\"/app.js\"></script>"
-        ),
-    )
+    thinclaw_gateway::web::static_files::render_index_html(&gateway_webchat_config(webchat))
 }
 
+fn gateway_webchat_config(
+    webchat: &crate::config::WebChatConfig,
+) -> thinclaw_gateway::web::static_files::WebChatRuntimeConfig {
+    let theme = match webchat.theme {
+        crate::config::WebChatTheme::Light => {
+            thinclaw_gateway::web::static_files::WebChatTheme::Light
+        }
+        crate::config::WebChatTheme::Dark => {
+            thinclaw_gateway::web::static_files::WebChatTheme::Dark
+        }
+        crate::config::WebChatTheme::System => {
+            thinclaw_gateway::web::static_files::WebChatTheme::System
+        }
+    };
+    thinclaw_gateway::web::static_files::WebChatRuntimeConfig {
+        theme,
+        show_branding: webchat.show_branding,
+        runtime_css: webchat.runtime_css(),
+        bootstrap_payload: serde_json::to_value(webchat.bootstrap_payload())
+            .unwrap_or_else(|_| serde_json::Value::Null),
+    }
+}
+
+#[cfg(test)]
 fn escape_json_for_html(value: &str) -> String {
     value.replace("</", "<\\/")
 }
 
 pub(crate) async fn css_handler() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/css"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("static/style.css"),
-    )
+    thinclaw_gateway::web::static_files::css_handler().await
 }
 
 pub(crate) async fn js_handler() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        include_str!("static/app.js"),
-    )
+    thinclaw_gateway::web::static_files::js_handler().await
 }
 
 pub(crate) async fn favicon_handler() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "image/x-icon"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
-        include_bytes!("static/favicon.ico").as_slice(),
-    )
+    thinclaw_gateway::web::static_files::favicon_handler().await
 }
 
 pub(crate) async fn apple_touch_icon_handler() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "image/png"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
-        include_bytes!("static/apple-touch-icon.png").as_slice(),
-    )
+    thinclaw_gateway::web::static_files::apple_touch_icon_handler().await
 }
 
 #[cfg(test)]

@@ -8,13 +8,13 @@ use super::{
     LibSqlBackend, fmt_opt_ts, fmt_ts, get_i64, get_json, get_opt_text, get_opt_ts, get_text,
     get_ts, row_json_to,
 };
-use crate::db::ExperimentStore;
-use crate::error::DatabaseError;
-use crate::experiments::{
+use crate::ExperimentStore;
+use thinclaw_experiments::{
     ExperimentArtifactRef, ExperimentCampaign, ExperimentLease, ExperimentModelUsageRecord,
     ExperimentProject, ExperimentRunnerProfile, ExperimentTarget, ExperimentTargetLink,
     ExperimentTrial,
 };
+use thinclaw_types::error::DatabaseError;
 
 #[async_trait]
 impl ExperimentStore for LibSqlBackend {
@@ -1359,8 +1359,8 @@ fn row_to_runner(row: &libsql::Row) -> Result<ExperimentRunnerProfile, DatabaseE
         cache_policy: get_json(row, 8),
         status: row_json_to(row, 9)?,
         readiness_class: row_json_to(row, 10)
-            .unwrap_or(crate::experiments::ExperimentRunnerReadinessClass::ManualOnly),
-        launch_eligible: crate::db::libsql::get_i64(row, 11) != 0,
+            .unwrap_or(thinclaw_experiments::ExperimentRunnerReadinessClass::ManualOnly),
+        launch_eligible: crate::libsql::get_i64(row, 11) != 0,
         created_at: get_ts(row, 12),
         updated_at: get_ts(row, 13),
     })

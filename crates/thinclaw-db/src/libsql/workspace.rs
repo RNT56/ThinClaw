@@ -10,9 +10,9 @@ use super::{
     LibSqlBackend, fmt_ts, get_i64, get_opt_text, get_opt_ts, get_text, get_ts,
     row_to_memory_document,
 };
-use crate::db::WorkspaceStore;
-use crate::error::WorkspaceError;
-use crate::workspace::{
+use crate::WorkspaceStore;
+use thinclaw_types::error::WorkspaceError;
+use thinclaw_workspace::{
     MemoryChunk, MemoryDocument, RankedResult, SearchConfig, SearchResult, WorkspaceEntry,
     apply_temporal_decay, expand_query_keywords, mmr_rerank, reciprocal_rank_fusion,
 };

@@ -8,11 +8,13 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use async_trait::async_trait;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use tokio::sync::Mutex;
 
 use thinclaw_llm::costs;
+use thinclaw_llm::usage_tracking::LlmBudgetRecorder;
 
 /// Configuration for cost guardrails.
 #[derive(Debug, Clone, Default)]
@@ -338,6 +340,21 @@ impl CostGuard {
     /// Configured hourly action limit, if any.
     pub fn hourly_action_limit(&self) -> Option<u64> {
         self.config.max_actions_per_hour
+    }
+}
+
+#[async_trait]
+impl LlmBudgetRecorder for CostGuard {
+    async fn record_llm_call_with_cost(
+        &self,
+        model: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+        cost: Decimal,
+    ) {
+        let _ =
+            CostGuard::record_llm_call_with_cost(self, model, input_tokens, output_tokens, cost)
+                .await;
     }
 }
 

@@ -13,6 +13,7 @@ pub mod gemini;
 pub mod llms_txt;
 pub mod model_guidance;
 pub mod model_metadata_sync;
+pub mod provider_factory;
 pub mod provider_presets;
 pub mod reasoning_tags;
 pub mod response_cache;
@@ -21,6 +22,7 @@ pub mod retry;
 pub mod rig_adapter;
 pub mod route_planner;
 pub mod smart_routing;
+pub mod usage_tracking;
 
 pub use rig_adapter::RigAdapter;
 pub use smart_routing::SmartRoutingProvider;

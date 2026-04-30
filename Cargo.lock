@@ -7541,6 +7541,7 @@ dependencies = [
 name = "thinclaw-agent"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "chrono-tz",
  "cron",
@@ -7639,15 +7640,26 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "deadpool-postgres",
+ "libsql",
+ "pgvector",
+ "refinery",
  "rust_decimal",
+ "rustls 0.23.39",
+ "rustls-native-certs",
  "serde",
  "serde_json",
+ "tempfile",
  "thinclaw-agent",
  "thinclaw-experiments",
  "thinclaw-history",
  "thinclaw-identity",
  "thinclaw-types",
  "thinclaw-workspace",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tracing",
  "uuid",
 ]
 
@@ -7667,7 +7679,21 @@ dependencies = [
 name = "thinclaw-gateway"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "subtle",
  "thinclaw-channels-core",
+ "thinclaw-identity",
+ "thinclaw-safety",
+ "thinclaw-types",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -7712,6 +7738,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thinclaw-config",
+ "thinclaw-experiments",
  "thinclaw-llm-core",
  "thinclaw-settings",
  "thinclaw-types",
@@ -7880,17 +7907,28 @@ dependencies = [
 name = "thinclaw-workspace"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "aws-config",
  "aws-sdk-bedrockruntime",
  "aws-smithy-types",
  "chrono",
+ "chrono-tz",
+ "deadpool-postgres",
+ "pgvector",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tempfile",
+ "thinclaw-identity",
+ "thinclaw-platform",
+ "thinclaw-safety",
+ "thinclaw-soul",
  "thinclaw-types",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
+ "tracing",
  "uuid",
 ]
 

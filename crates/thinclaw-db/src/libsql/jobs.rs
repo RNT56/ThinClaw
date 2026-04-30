@@ -9,10 +9,10 @@ use super::{
     LibSqlBackend, fmt_opt_ts, fmt_ts, get_decimal, get_i64, get_json, get_opt_decimal,
     get_opt_text, get_opt_ts, get_text, get_ts, opt_text, opt_text_owned, parse_job_state,
 };
-use crate::context::{ActionRecord, JobContext, JobState, StateTransition};
-use crate::db::JobStore;
-use crate::error::DatabaseError;
-use crate::history::LlmCallRecord;
+use crate::JobStore;
+use thinclaw_history::LlmCallRecord;
+use thinclaw_types::error::DatabaseError;
+use thinclaw_types::{ActionRecord, JobContext, JobState, StateTransition};
 
 use chrono::Utc;
 

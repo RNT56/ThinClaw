@@ -6,15 +6,15 @@ use libsql::params;
 use uuid::Uuid;
 
 use super::{LibSqlBackend, fmt_ts, get_i64, get_json, get_opt_text, get_text, get_ts, opt_text};
-use crate::db::ConversationStore;
-use crate::error::DatabaseError;
-use crate::history::{
+use crate::ConversationStore;
+use thinclaw_history::{
     ConversationHandoffMetadata, ConversationKind, ConversationMessage, ConversationSummary,
     LearningArtifactVersion, LearningCandidate, LearningCodeProposal, LearningEvaluation,
     LearningEvent, LearningFeedbackRecord, LearningRollbackRecord, OutcomeContract,
     OutcomeContractQuery, OutcomeEvaluatorHealth, OutcomeObservation, OutcomePendingUser,
     OutcomeSummaryStats, SessionSearchHit,
 };
+use thinclaw_types::error::DatabaseError;
 
 fn handoff_from_metadata(metadata: &serde_json::Value) -> Option<ConversationHandoffMetadata> {
     let value = metadata.get("handoff").cloned().or_else(|| {

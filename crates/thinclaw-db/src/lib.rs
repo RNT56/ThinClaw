@@ -27,11 +27,22 @@ use thinclaw_identity::{
     ActorEndpointRecord, ActorEndpointRef, ActorRecord, ActorStatus, NewActorEndpointRecord,
     NewActorRecord,
 };
-use thinclaw_types::error::DatabaseError;
+pub use thinclaw_types::error::{DatabaseError, WorkspaceError};
 use thinclaw_types::{
     ActionRecord, BrokenTool, JobContext, JobState, SandboxJobRecord, SandboxJobSummary,
     ToolProfile,
 };
+
+#[cfg(feature = "libsql")]
+pub mod libsql;
+#[cfg(feature = "libsql")]
+pub mod libsql_migrations;
+#[cfg(feature = "postgres")]
+pub mod postgres;
+#[cfg(feature = "postgres")]
+mod postgres_store;
+#[cfg(feature = "postgres")]
+mod postgres_workspace;
 
 pub use thinclaw_workspace::WorkspaceStore;
 

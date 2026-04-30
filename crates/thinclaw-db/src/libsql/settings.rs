@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use libsql::params;
 
 use super::{LibSqlBackend, fmt_ts, get_i64, get_json, get_text, get_ts};
-use crate::db::SettingsStore;
-use crate::error::DatabaseError;
-use crate::history::SettingRow;
+use crate::SettingsStore;
+use thinclaw_history::SettingRow;
+use thinclaw_types::error::DatabaseError;
 
 use chrono::Utc;
 

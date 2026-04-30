@@ -5,6 +5,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -18,7 +19,9 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::agent::SessionManager;
 use crate::channels::IncomingMessage;
-use crate::channels::web::auth::{AuthState, auth_middleware, load_trusted_proxy_config};
+use crate::channels::web::auth::{
+    AuthState, GatewayIdentityStore, auth_middleware, load_trusted_proxy_config,
+};
 use crate::channels::web::handlers::*;
 use crate::channels::web::log_layer::LogBroadcaster;
 pub(crate) use crate::channels::web::rate_limiter::RateLimiter;
@@ -49,6 +52,21 @@ pub type PromptQueue = Arc<
         std::collections::HashMap<uuid::Uuid, std::collections::VecDeque<PendingPrompt>>,
     >,
 >;
+
+struct DatabaseGatewayIdentityStore(Arc<dyn Database>);
+
+#[async_trait]
+impl GatewayIdentityStore for DatabaseGatewayIdentityStore {
+    async fn infer_primary_user_id_for_channel(
+        &self,
+        channel: &str,
+    ) -> Result<Option<String>, String> {
+        self.0
+            .infer_primary_user_id_for_channel(channel)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
 
 /// Shared state for all gateway handlers.
 pub struct GatewayState {
@@ -200,7 +218,10 @@ pub async fn start_server(
             trusted_proxy_ips,
             fallback_principal_id: state.user_id.clone(),
             fallback_actor_id: state.actor_id.clone(),
-            store: state.store.clone(),
+            store: state.store.as_ref().map(|store| {
+                Arc::new(DatabaseGatewayIdentityStore(Arc::clone(store)))
+                    as Arc<dyn GatewayIdentityStore>
+            }),
         }
     };
     let protected = Router::new()

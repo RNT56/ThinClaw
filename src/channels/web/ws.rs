@@ -28,7 +28,7 @@ use crate::channels::web::identity_helpers::{
     GatewayRequestIdentity, sse_event_visible_to_identity,
 };
 use crate::channels::web::server::GatewayState;
-use crate::channels::web::types::{SseEvent, WsClientMessage, WsServerMessage};
+use crate::channels::web::types::{ModelInfo, SseEvent, WsClientMessage, WsServerMessage};
 
 /// Tracks active WebSocket connections.
 pub struct WsConnectionTracker {
@@ -496,12 +496,12 @@ async fn handle_client_message(
                 match llm.list_models().await {
                     Ok(list) if !list.is_empty() => list
                         .into_iter()
-                        .map(|name| crate::api::system::ModelInfo {
+                        .map(|name| ModelInfo {
                             is_primary: name == active,
                             name,
                         })
                         .collect(),
-                    _ => vec![crate::api::system::ModelInfo {
+                    _ => vec![ModelInfo {
                         name: active,
                         is_primary: true,
                     }],

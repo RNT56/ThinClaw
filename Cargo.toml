@@ -289,7 +289,9 @@ full = [
 ]
 postgres = [
     "thinclaw-types/postgres",
+    "thinclaw-db/postgres",
     "thinclaw-secrets/postgres",
+    "thinclaw-workspace/postgres",
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
     "dep:tokio-postgres-rustls",
@@ -300,7 +302,12 @@ postgres = [
     "dep:pgvector",
     "rust_decimal/db-tokio-postgres",
 ]
-libsql = ["thinclaw-types/libsql", "thinclaw-secrets/libsql", "dep:libsql"]
+libsql = [
+    "thinclaw-types/libsql",
+    "thinclaw-db/libsql",
+    "thinclaw-secrets/libsql",
+    "dep:libsql",
+]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 # Document text extraction — PDF (pdf-extract), DOCX/PPTX/XLSX (zip crate)
