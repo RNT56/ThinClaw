@@ -1195,10 +1195,9 @@ impl Workspace {
         //   - confidence > 0.6 → full profile summary
         if let Ok(doc) = self.read(paths::PROFILE).await
             && !doc.content.is_empty()
+            && let Some(summary) = summarize_profile_json(&doc.content)
         {
-            if let Some(summary) = summarize_profile_json(&doc.content) {
-                parts.push(format!("## User Profile\n\n{}", summary));
-            }
+            parts.push(format!("## User Profile\n\n{}", summary));
         }
 
         if !is_group_chat

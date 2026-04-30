@@ -12,6 +12,7 @@ pub mod manager;
 pub mod reaction_machine;
 pub mod self_message;
 pub mod status_view;
+pub mod wasm;
 pub mod webhook_server;
 
 pub use gmail::GmailChannel;

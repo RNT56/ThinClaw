@@ -21,6 +21,7 @@ pub struct NotificationSettings {
     /// - iMessage: phone number or Apple ID (e.g. "+4917612345678")
     /// - Signal: phone number (e.g. "+4917612345678")
     /// - Web: "default" (always works, no setup needed)
+    ///
     /// None = use "default" (web-only, no external messaging).
     #[serde(default)]
     pub recipient: Option<String>,

@@ -88,7 +88,7 @@ fi
 
 echo ""
 echo "Building ThinClaw..."
-cargo build --release $EXTRA_FEATURES
+cargo build --release $EXTRA_FEATURES --bin thinclaw
 
 echo ""
 if [[ "${1:-}" == "--bundled" ]]; then
@@ -98,4 +98,3 @@ else
     echo "Done. Binary: target/release/thinclaw"
     echo "WASM channels deployed to: ${DEPLOY_DIR}/"
 fi
-

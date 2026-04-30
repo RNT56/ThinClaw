@@ -116,6 +116,7 @@ async fn record_guard_only(
         .await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn record_usage(
     tracker: &Arc<tokio::sync::Mutex<CostTracker>>,
     db: Option<&Arc<dyn LlmUsageSink>>,
@@ -217,6 +218,7 @@ enum StreamUsageMode {
 }
 
 impl StreamUsageMode {
+    #[allow(clippy::too_many_arguments)]
     async fn record(
         &self,
         provider_model: Option<String>,
@@ -433,6 +435,7 @@ impl UsageTrackingProvider {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn track_completion(
         &self,
         metadata: &HashMap<String, String>,

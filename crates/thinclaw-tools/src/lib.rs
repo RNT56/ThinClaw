@@ -5,6 +5,8 @@
 
 pub mod browser_args;
 pub mod intent_display;
+pub mod registry;
 pub mod smart_approve;
 
+pub use registry::{ToolRegistry, descriptor_allowed_for_profile, tool_allowed_for_lane};
 pub use thinclaw_tools_core::*;

@@ -108,6 +108,7 @@ impl ProviderPreset {
     }
 
     /// Parse from string (case-insensitive).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "nvidia" | "nvidia_api" => Some(Self::Nvidia),
@@ -182,12 +183,9 @@ impl ProviderPresetConfig {
 ///
 /// Returns the first preset that has an API key set.
 pub fn detect_preset() -> Option<ProviderPreset> {
-    for preset in ProviderPreset::all() {
-        if optional_env(preset.api_key_env()).is_some() {
-            return Some(preset);
-        }
-    }
-    None
+    ProviderPreset::all()
+        .into_iter()
+        .find(|preset| optional_env(preset.api_key_env()).is_some())
 }
 
 /// List all presets with their configuration status.

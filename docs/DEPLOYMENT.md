@@ -45,7 +45,7 @@ artifact for native installs, or the multi-arch Docker image for Compose:
 
 ```bash
 thinclaw doctor --profile pi-os-lite-64
-cargo build --release --features full
+cargo build --release --features full --bin thinclaw
 docker compose pull thinclaw
 ```
 

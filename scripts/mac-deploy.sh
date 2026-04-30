@@ -272,7 +272,7 @@ if [ "$INSTALL_ONLY" = true ]; then
     echo ""
     echo "  Next steps:"
     echo "    git clone https://github.com/RNT56/ThinClaw.git && cd ThinClaw"
-    echo "    cargo build --release --features $FEATURES"
+    echo "    cargo build --release --features $FEATURES --bin thinclaw"
     echo "    ./target/release/thinclaw"
     exit 0
 fi
@@ -351,7 +351,7 @@ else
     # who have channel sources checked out. The standard build downloads
     # WASM extensions from GitHub Releases on first install.
     step "Building binary..."
-    cargo build --release --features "$FEATURES"
+    cargo build --release --features "$FEATURES" --bin thinclaw
 
     success "Build complete: $THINCLAW_DIR/target/release/thinclaw"
 fi

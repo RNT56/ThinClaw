@@ -624,6 +624,7 @@ fn saturate_u32(val: u64) -> u32 {
 }
 
 /// Build a rig-core CompletionRequest from our internal types.
+#[allow(clippy::too_many_arguments)]
 fn build_rig_request(
     preamble: Option<String>,
     mut history: Vec<RigMessage>,

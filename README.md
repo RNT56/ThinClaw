@@ -210,14 +210,19 @@ Read the deep docs before relying on a surface for sensitive workflows:
 
 ## Build From Source
 
-ThinClaw uses Cargo feature flags to control binary size and capabilities. The default build (`light`) is lean; opt into more with `--features`.
+ThinClaw uses Cargo feature flags to control binary size and capabilities. Use `--release` for source builds you intend to run or install; plain `cargo build` is a development/debug build and keeps large debug and incremental compiler artifacts under `target/debug`.
 
 | Profile | Command | What It Adds |
 |---|---|---|
-| **light** (default) | `cargo build` | PostgreSQL, libSQL, local gateway, HTML-to-Markdown, doc extraction, timezones |
-| **full** | `cargo build --release --features full` | ACP, REPL/TUI, tunnel, Docker sandbox, browser, Nostr |
-| **desktop** | `cargo build --features desktop` | libSQL, HTML-to-Markdown, doc extraction, REPL, timezones |
-| **minimal** | `cargo build --no-default-features --features libsql` | Single DB backend, nothing else |
+| **light** (default) | `cargo build --release --bin thinclaw` | PostgreSQL, libSQL, local gateway, HTML-to-Markdown, doc extraction, timezones |
+| **full** | `cargo build --release --features full --bin thinclaw` | ACP, REPL/TUI, tunnel, Docker sandbox, browser, Nostr |
+| **desktop** | `cargo build --release --features desktop --bin thinclaw` | libSQL, HTML-to-Markdown, doc extraction, REPL, timezones |
+| **minimal** | `cargo build --release --no-default-features --features libsql --bin thinclaw` | Single DB backend, nothing else |
+
+A cold `full` source build should have roughly 15-20 GiB free so Cargo has room
+for release dependencies, linker scratch space, and the final binary. The
+installed binary is much smaller than the build tree; after copying or installing
+`target/release/thinclaw`, reclaim build artifacts with `cargo clean --release`.
 
 Additional opt-in flags not included in `full`: `voice`, `bedrock`, `bundled-wasm`.
 

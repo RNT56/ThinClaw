@@ -44,6 +44,8 @@
 //! - **Prompt injection defense** - Sanitize all external data
 //! - **Continuous learning** - Improve estimates from historical data
 
+#![allow(clippy::unwrap_used)]
+
 pub mod agent;
 pub mod api;
 pub mod app;

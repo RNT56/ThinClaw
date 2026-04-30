@@ -20,6 +20,7 @@ pub(crate) async fn load_webchat_config(state: &GatewayState) -> crate::config::
     crate::config::WebChatConfig::from_env()
 }
 
+#[cfg(test)]
 pub(crate) fn render_index_html(webchat: &crate::config::WebChatConfig) -> String {
     thinclaw_gateway::web::static_files::render_index_html(&gateway_webchat_config(webchat))
 }
@@ -43,7 +44,7 @@ fn gateway_webchat_config(
         show_branding: webchat.show_branding,
         runtime_css: webchat.runtime_css(),
         bootstrap_payload: serde_json::to_value(webchat.bootstrap_payload())
-            .unwrap_or_else(|_| serde_json::Value::Null),
+            .unwrap_or(serde_json::Value::Null),
     }
 }
 

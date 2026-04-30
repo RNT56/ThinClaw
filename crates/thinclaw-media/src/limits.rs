@@ -8,7 +8,8 @@
 //! - `TELEGRAM_MAX_MEDIA_MB` — override for Telegram
 //! - `DISCORD_MAX_MEDIA_MB` — override for Discord
 //! - `SLACK_MAX_MEDIA_MB` — override for Slack
-//! etc.
+//!
+//! Additional channel-specific variables follow the same naming pattern.
 
 use std::collections::HashMap;
 

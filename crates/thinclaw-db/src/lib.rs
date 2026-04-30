@@ -67,6 +67,7 @@ pub trait ConversationStore: Send + Sync {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError>;
+    #[allow(clippy::too_many_arguments)]
     async fn add_conversation_message_with_attribution(
         &self,
         conversation_id: Uuid,

@@ -93,7 +93,9 @@ mod wrapper;
 
 // Core types
 pub use bundled::{available_channel_names, bundled_channel_names, install_bundled_channel};
-pub use capabilities::{ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig};
+pub use capabilities::{
+    ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig, ToolCapabilities,
+};
 pub use error::WasmChannelError;
 pub use host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage, MediaAttachment};
 pub use loader::{
@@ -111,4 +113,5 @@ pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
     WebhookSecretValidation,
 };
+pub use thinclaw_channels::wasm::{FuelConfig, ResourceLimits};
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};

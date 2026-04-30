@@ -7,7 +7,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::channels::wasm::capabilities::{ChannelCapabilities, EmitRateLimitConfig};
+use crate::channels::wasm::capabilities::{
+    ChannelCapabilities, EmitRateLimitConfig, to_root_tool_capabilities,
+};
 use crate::channels::wasm::error::WasmChannelError;
 use crate::tools::wasm::{HostState, LogLevel};
 
@@ -163,8 +165,32 @@ impl std::fmt::Debug for ChannelHostState {
 impl ChannelHostState {
     /// Create a new channel host state.
     pub fn new(channel_name: impl Into<String>, capabilities: ChannelCapabilities) -> Self {
-        let base = HostState::new(capabilities.tool_capabilities.clone());
+        let base = HostState::new(to_root_tool_capabilities(
+            &capabilities.tool_capabilities,
+            None,
+        ));
 
+        Self::with_base(channel_name, capabilities, base)
+    }
+
+    /// Create channel host state with root tool capabilities supplied by an adapter.
+    pub(crate) fn with_root_tool_capabilities(
+        channel_name: impl Into<String>,
+        capabilities: ChannelCapabilities,
+        tool_capabilities: crate::tools::wasm::Capabilities,
+    ) -> Self {
+        Self::with_base(
+            channel_name,
+            capabilities,
+            HostState::new(tool_capabilities),
+        )
+    }
+
+    fn with_base(
+        channel_name: impl Into<String>,
+        capabilities: ChannelCapabilities,
+        base: HostState,
+    ) -> Self {
         Self {
             base,
             channel_name: channel_name.into(),

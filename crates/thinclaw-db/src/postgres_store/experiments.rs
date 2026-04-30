@@ -1386,7 +1386,7 @@ fn optional_decimal_from_f64(
 }
 
 #[cfg(feature = "postgres")]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments)]
 fn _type_use_sanity(
     _a: ExperimentCampaignStatus,
     _b: ExperimentLeaseStatus,

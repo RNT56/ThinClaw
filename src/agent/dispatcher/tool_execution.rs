@@ -216,10 +216,10 @@ impl Agent {
                     }
                     result = async {
                         if tc.name == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
-                            self.execute_consult_advisor_call(tc, &context_messages, advisor_call_budget)
+                            self.execute_consult_advisor_call(tc, context_messages, advisor_call_budget)
                                 .await
                         } else {
-                            self.execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                            self.execute_chat_tool(&tc.name, &tc.arguments, job_ctx)
                                 .await
                         }
                     } => result
@@ -259,7 +259,7 @@ impl Agent {
                         .await;
 
                     let result = self
-                        .execute_consult_advisor_call(tc, &context_messages, advisor_call_budget)
+                        .execute_consult_advisor_call(tc, context_messages, advisor_call_budget)
                         .await;
 
                     let _ = self
@@ -607,7 +607,7 @@ impl Agent {
                                         &message.channel,
                                         &spawn_metadata,
                                         &message.user_id,
-                                        Some(&identity),
+                                        Some(identity),
                                         Some(&thread_id.to_string()),
                                     )
                                     .await;

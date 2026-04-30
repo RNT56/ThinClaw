@@ -118,7 +118,7 @@ rustup target add wasm32-wasip2
 
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
-cargo build --release --features full
+cargo build --release --features full --bin thinclaw
 ./target/release/thinclaw onboard
 ```
 
@@ -132,12 +132,12 @@ rustup target add wasm32-wasip2
 
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
-cargo build --release --features full
+cargo build --release --features full --bin thinclaw
 ./target/release/thinclaw onboard
 ```
 
-Use `cargo build --release` only when you intentionally want the smaller
-default `light` profile. See [../BUILD_PROFILES.md](../BUILD_PROFILES.md).
+Use `cargo build --release --bin thinclaw` only when you intentionally want the
+smaller default `light` profile. See [../BUILD_PROFILES.md](../BUILD_PROFILES.md).
 
 ## Run As A systemd User Service
 
@@ -220,7 +220,7 @@ Use [../DESKTOP_AUTONOMY.md](../DESKTOP_AUTONOMY.md) as the canonical guide.
 If the source build runs but integrations are missing, rebuild with:
 
 ```bash
-cargo build --release --features full
+cargo build --release --features full --bin thinclaw
 ```
 
 If the gateway is reachable locally but not from another machine, check:

@@ -69,6 +69,7 @@ impl Store {
     }
 
     /// Add a message with actor attribution and message-level metadata.
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_conversation_message_with_attribution(
         &self,
         conversation_id: Uuid,

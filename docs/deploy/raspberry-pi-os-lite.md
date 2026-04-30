@@ -222,16 +222,16 @@ rustup target add wasm32-wasip2
 
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
-cargo build --release --features full
+cargo build --release --features full --bin thinclaw
 
 sudo bash deploy/setup.sh --mode native \
   --binary target/release/thinclaw \
   --token "$(openssl rand -hex 32)"
 ```
 
-Use `cargo build --release` only if you intentionally want the smaller `light`
-profile. The `light` profile includes the gateway and libSQL but excludes ACP,
-tunnels, Docker sandbox, browser automation, and Nostr.
+Use `cargo build --release --bin thinclaw` only if you intentionally want the
+smaller `light` profile. The `light` profile includes the gateway and libSQL but
+excludes ACP, tunnels, Docker sandbox, browser automation, and Nostr.
 
 ## Private Access With Tailscale
 

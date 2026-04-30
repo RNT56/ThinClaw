@@ -373,6 +373,10 @@ impl PlatformCapabilities {
     }
 }
 
+pub fn platform_capabilities() -> PlatformCapabilities {
+    PlatformCapabilities::current()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,8 +406,4 @@ mod tests {
             assert!(names.contains(&"microsoft-edge"));
         }
     }
-}
-
-pub fn platform_capabilities() -> PlatformCapabilities {
-    PlatformCapabilities::current()
 }

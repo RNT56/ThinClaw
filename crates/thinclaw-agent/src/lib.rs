@@ -5,6 +5,7 @@ pub mod cost_guard;
 pub mod cron_stagger;
 pub mod global_session;
 pub mod personality;
+pub mod ports;
 pub mod prompt_assembly;
 pub mod prompt_sanitation;
 pub mod routine;

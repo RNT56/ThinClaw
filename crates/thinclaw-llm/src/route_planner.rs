@@ -267,6 +267,7 @@ impl RouteScorer {
     }
 
     /// Score a candidate. Returns `None` if the candidate fails a hard gate.
+    #[allow(clippy::too_many_arguments)]
     pub fn score(
         &self,
         candidate: &RouteCandidate,

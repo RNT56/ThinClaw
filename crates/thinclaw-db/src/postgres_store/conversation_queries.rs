@@ -1,7 +1,7 @@
 use super::*;
 // ==================== Conversation Persistence ====================
 
-pub use thinclaw_history::{ConversationMessage, ConversationSummary, LinkedConversationRecall};
+pub use thinclaw_history::{ConversationMessage, ConversationSummary};
 
 #[cfg(feature = "postgres")]
 pub(super) fn conversation_stable_key(

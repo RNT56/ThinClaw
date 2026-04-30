@@ -20,7 +20,6 @@ pub mod libsql_migrations;
 
 use std::sync::Arc;
 
-use crate::error::DatabaseError;
 pub use thinclaw_db::*;
 
 /// Create a database backend from configuration, run migrations, and return it.

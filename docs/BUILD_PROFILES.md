@@ -1,17 +1,24 @@
 # Build Profiles
 
 ThinClaw supports multiple build profiles to optimize binary size and compile time
-for different deployment scenarios.
+for different deployment scenarios. Use `--release` for source builds you intend
+to run or install; plain `cargo build` is a development/debug build and can leave
+large debug and incremental compiler artifacts under `target/debug`.
+
+For the normal user-facing CLI, build only `--bin thinclaw`. That avoids
+compiling auxiliary binaries that are useful for development or protocol-specific
+testing but are not needed for a standard install. Build auxiliary binaries such
+as `thinclaw-acp` explicitly when you need them.
 
 ## Quick Reference
 
 | Profile | Command | Use Case |
 |---------|---------|----------|
-| **light** (default) | `cargo build` | CLI agent, local gateway, API-only, cron agents |
-| **full** | `cargo build --features full` | Production runtime with tunnel, Docker sandbox, browser, Nostr |
-| **desktop** | `cargo build --features desktop` | Tauri/Scrappy desktop embedding |
-| **minimal** | `cargo build --no-default-features --features libsql` | Embedded, air-gapped, IoT |
-| **custom** | `cargo build --features light,browser` | Mix and match |
+| **light** (default) | `cargo build --release --bin thinclaw` | CLI agent, local gateway, API-only, cron agents |
+| **full** | `cargo build --release --features full --bin thinclaw` | Production runtime with tunnel, Docker sandbox, browser, Nostr |
+| **desktop** | `cargo build --release --features desktop --bin thinclaw` | Tauri/Scrappy desktop embedding |
+| **minimal** | `cargo build --release --no-default-features --features libsql --bin thinclaw` | Embedded, air-gapped, IoT |
+| **custom** | `cargo build --release --features light,browser --bin thinclaw` | Mix and match |
 
 ## Profile Details
 
@@ -24,9 +31,9 @@ for different deployment scenarios.
 Best for: CLI-only usage, cron-driven agents, headless deployments, API-only servers.
 
 ```bash
-# Default build — this is what you get with plain cargo commands
-cargo build --release
-cargo install thinclaw
+# Default release build
+cargo build --release --bin thinclaw
+cargo install --path . --locked --bin thinclaw
 
 # Run
 thinclaw
@@ -44,7 +51,7 @@ support. This is the expected native build profile for Raspberry Pi OS Lite
 64-bit.
 
 ```bash
-cargo build --release --features full
+cargo build --release --features full --bin thinclaw
 
 # Or for development
 cargo run --features full
@@ -56,7 +63,7 @@ Minimal footprint for Tauri/Scrappy desktop app embedding. Includes libSQL (no
 PostgreSQL), HTML-to-Markdown, document extraction, and REPL mode.
 
 ```bash
-cargo build --release --features desktop
+cargo build --release --features desktop --bin thinclaw
 ```
 
 ### Minimal
@@ -66,10 +73,10 @@ no web capabilities. Useful for embedded systems or edge deployments.
 
 ```bash
 # libSQL only (embedded database, zero external deps)
-cargo build --release --no-default-features --features libsql
+cargo build --release --no-default-features --features libsql --bin thinclaw
 
 # PostgreSQL only
-cargo build --release --no-default-features --features postgres
+cargo build --release --no-default-features --features postgres --bin thinclaw
 ```
 
 ## Custom Combinations
@@ -78,22 +85,45 @@ Individual features can be combined freely:
 
 ```bash
 # Light + browser automation only (no tunnel, no Docker sandbox)
-cargo build --features light,browser
+cargo build --release --features light,browser --bin thinclaw
 
 # Light + tunnel for public webhook access
-cargo build --features light,tunnel
+cargo build --release --features light,tunnel --bin thinclaw
 
 # Light + voice wake word detection
-cargo build --features light,voice
+cargo build --release --features light,voice --bin thinclaw
 
 # Light + AWS Bedrock embeddings
-cargo build --features light,bedrock
+cargo build --release --features light,bedrock --bin thinclaw
 
 # Embed WASM extensions into binary (air-gapped deploy)
-cargo build --features full,bundled-wasm
+cargo build --release --features full,bundled-wasm --bin thinclaw
 
 # All features including voice, Bedrock, and bundled WASM
-cargo build --all-features
+cargo build --release --all-features --bin thinclaw
+```
+
+## Disk Usage
+
+A clean `cargo build --release --features full --bin thinclaw` build should have
+roughly 15-20 GiB free. Cargo needs space for optimized dependency artifacts,
+native build outputs, linker scratch files, and the final binary. This is far
+smaller than a full debug/test tree, but it is still a large Rust build because
+`full` includes Wasmtime/Cranelift, browser automation, libSQL, networking, and
+database backends.
+
+The installed artifact is only `target/release/thinclaw`. After copying or
+installing that binary, reclaim the release build tree with:
+
+```bash
+cargo clean --release
+```
+
+If a previous debug build has filled the checkout, remove only the debug artifacts
+with:
+
+```bash
+rm -rf target/debug target/flycheck0
 ```
 
 ## Feature Flag Reference
@@ -121,7 +151,7 @@ Linux notes:
 
 - The default `light` profile includes the local gateway and does not need any extra system packages beyond the normal Rust build toolchain.
 - `full` needs Docker for Docker sandbox jobs and Docker Chromium fallback. The default `CHROMIUM_IMAGE=chromedp/headless-shell:latest` is multi-arch; use a local Chrome/Chromium/Brave/Edge browser if you set `BROWSER_DOCKER=never`.
-- Raspberry Pi OS Lite 64-bit should use the `aarch64-unknown-linux-gnu` release artifact or `cargo build --release --features full` for native installs.
+- Raspberry Pi OS Lite 64-bit should use the `aarch64-unknown-linux-gnu` release artifact or `cargo build --release --features full --bin thinclaw` for native installs.
 - `--features light,voice` or `--all-features` requires `libasound2-dev`.
 - `--features bedrock` or `--all-features` requires AWS credentials (`AWS_PROFILE` or AWS access keys).
 - `--features bundled-wasm` or `--all-features` requires `rustup target add wasm32-wasip2` and `cargo install wasm-tools --locked`.
@@ -142,7 +172,7 @@ tar -xzf thinclaw-pi.tar.gz
 Build from source on a Pi only when you need local patches:
 
 ```bash
-cargo build --release --features full
+cargo build --release --features full --bin thinclaw
 ```
 
 Docker users should prefer the multi-arch image:
@@ -203,7 +233,7 @@ passes clippy, and compiles tests:
 | Host/deploy smoke | Linux host runtime, Docker image build, Docker Compose `/api/health` |
 
 - **Feature matrix:** Catches broken `#[cfg(feature = "...")]` gates before they ship.
-  The `light` profile is especially important since it's what `cargo install thinclaw` produces.
+  The `light` profile is especially important since it's what `cargo install --path . --bin thinclaw` produces.
 - **Full test suite:** Runs with `--all-features` and a live PostgreSQL service for
   integration coverage.
 - **Release builds:** Produce binaries with the `full` profile for maximum compatibility.
@@ -212,15 +242,15 @@ passes clippy, and compiles tests:
 ## Migration from `full` Default
 
 Prior to v0.14, the default build profile was `full` (all features enabled).
-Starting with v0.14, the default is `light`. If you were previously running
-`cargo build` without feature flags:
+Starting with v0.14, the default is `light`. If you were previously building
+release artifacts without feature flags:
 
 ```bash
 # Old behavior (< v0.14)
-cargo build  # was equivalent to --features full
+cargo build --release --bin thinclaw  # was equivalent to --features full
 
 # New behavior (>= v0.14) — same result, explicit flag
-cargo build --features full
+cargo build --release --features full --bin thinclaw
 ```
 
 Deployment scripts use explicit feature flags appropriate to their context:

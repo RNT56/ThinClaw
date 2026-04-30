@@ -41,7 +41,7 @@ use wasmtime::Store;
 use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use crate::channels::wasm::capabilities::ChannelCapabilities;
+use crate::channels::wasm::capabilities::{ChannelCapabilities, WorkspaceCapability};
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::host::{
     ChannelEmitRateLimiter, ChannelHostState, ChannelWorkspaceStore, EmittedMessage,
@@ -115,13 +115,22 @@ impl ChannelStoreData {
         capabilities: ChannelCapabilities,
         credentials: HashMap<String, String>,
         pairing_store: Arc<PairingStore>,
+        workspace_store: Arc<ChannelWorkspaceStore>,
     ) -> Self {
         // Create a minimal WASI context (no filesystem, no env vars for security)
         let wasi = WasiCtxBuilder::new().build();
+        let tool_capabilities = crate::channels::wasm::capabilities::to_root_tool_capabilities(
+            &capabilities.tool_capabilities,
+            Some(workspace_store as Arc<dyn crate::tools::wasm::WorkspaceReader>),
+        );
 
         Self {
             limiter: WasmResourceLimiter::new(memory_limit),
-            host_state: ChannelHostState::new(channel_name, capabilities),
+            host_state: ChannelHostState::with_root_tool_capabilities(
+                channel_name,
+                capabilities,
+                tool_capabilities,
+            ),
             wasi,
             table: ResourceTable::new(),
             credentials,
@@ -913,11 +922,10 @@ impl WasmChannel {
         let ws_cap = caps
             .tool_capabilities
             .workspace_read
-            .get_or_insert_with(|| crate::tools::wasm::WorkspaceCapability {
+            .get_or_insert_with(|| WorkspaceCapability {
                 allowed_prefixes: Vec::new(),
-                reader: None,
             });
-        ws_cap.reader = Some(Arc::clone(store) as Arc<dyn crate::tools::wasm::WorkspaceReader>);
+        let _ = (store, ws_cap);
         caps
     }
 
@@ -948,6 +956,7 @@ impl WasmChannel {
         capabilities: &ChannelCapabilities,
         credentials: HashMap<String, String>,
         pairing_store: Arc<PairingStore>,
+        workspace_store: Arc<ChannelWorkspaceStore>,
     ) -> Result<Store<ChannelStoreData>, WasmChannelError> {
         let engine = runtime.engine();
         let limits = &prepared.limits;
@@ -959,6 +968,7 @@ impl WasmChannel {
             capabilities.clone(),
             credentials,
             pairing_store,
+            workspace_store,
         );
         let mut store = Store::new(engine, store_data);
 
@@ -1083,6 +1093,7 @@ impl WasmChannel {
                     &capabilities,
                     credentials,
                     pairing_store,
+                    workspace_store.clone(),
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -1228,6 +1239,7 @@ impl WasmChannel {
                     &capabilities,
                     credentials,
                     pairing_store,
+                    workspace_store.clone(),
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -1318,6 +1330,7 @@ impl WasmChannel {
                     &capabilities,
                     credentials,
                     pairing_store,
+                    workspace_store.clone(),
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -1428,6 +1441,7 @@ impl WasmChannel {
                     &capabilities,
                     credentials,
                     pairing_store,
+                    workspace_store.clone(),
                 )?;
 
                 tracing::info!("Instantiating WASM component for on_respond");
@@ -1538,6 +1552,7 @@ impl WasmChannel {
                     &capabilities,
                     credentials,
                     pairing_store,
+                    workspace_store.clone(),
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -1614,6 +1629,7 @@ impl WasmChannel {
                     &capabilities,
                     credentials_snapshot,
                     pairing_store,
+                    workspace_store.clone(),
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -2099,6 +2115,7 @@ impl WasmChannel {
                     &capabilities,
                     credentials_snapshot,
                     pairing_store,
+                    workspace_store.clone(),
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
@@ -4025,7 +4042,7 @@ fn normalize_chat_type(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "direct" | "private" | "dm" => "dm".to_string(),
         "group" | "supergroup" | "channel" | "room" => "group".to_string(),
-        other if other.is_empty() => "chat".to_string(),
+        "" => "chat".to_string(),
         other => other.to_string(),
     }
 }
@@ -4230,21 +4247,15 @@ mod tests {
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{
-        HttpResponse, WasmChannel, default_wasm_channel_formatting_hints,
+        ChannelWorkspaceStore, HttpResponse, WasmChannel, default_wasm_channel_formatting_hints,
     };
     use crate::pairing::PairingStore;
-    use crate::tools::wasm::ResourceLimits;
 
     fn create_test_channel() -> WasmChannel {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
 
-        let prepared = Arc::new(PreparedChannelModule {
-            name: "test".to_string(),
-            description: "Test channel".to_string(),
-            component: None,
-            limits: ResourceLimits::default(),
-        });
+        let prepared = Arc::new(PreparedChannelModule::for_testing("test", "Test channel"));
 
         let capabilities = ChannelCapabilities::for_channel("test").with_path("/webhook/test");
 
@@ -4269,12 +4280,10 @@ mod tests {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
 
-        let prepared = Arc::new(PreparedChannelModule {
-            name: "custom".to_string(),
-            description: "Custom channel".to_string(),
-            component: None,
-            limits: ResourceLimits::default(),
-        });
+        let prepared = Arc::new(PreparedChannelModule::for_testing(
+            "custom",
+            "Custom channel",
+        ));
 
         let channel = WasmChannel::new(
             runtime,
@@ -4296,12 +4305,10 @@ mod tests {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
 
-        let prepared = Arc::new(PreparedChannelModule {
-            name: "telegram".to_string(),
-            description: "Telegram channel".to_string(),
-            component: None,
-            limits: ResourceLimits::default(),
-        });
+        let prepared = Arc::new(PreparedChannelModule::for_testing(
+            "telegram",
+            "Telegram channel",
+        ));
 
         let channel = WasmChannel::new(
             runtime,
@@ -4389,12 +4396,10 @@ mod tests {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
 
-        let prepared = Arc::new(PreparedChannelModule {
-            name: "poll-test".to_string(),
-            description: "Test channel".to_string(),
-            component: None, // No WASM module
-            limits: ResourceLimits::default(),
-        });
+        let prepared = Arc::new(PreparedChannelModule::for_testing(
+            "poll-test",
+            "Test channel",
+        ));
 
         let capabilities = ChannelCapabilities::for_channel("poll-test").with_polling(1000);
         let credentials = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
@@ -4570,12 +4575,10 @@ mod tests {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
 
-        let prepared = Arc::new(PreparedChannelModule {
-            name: "poll-channel".to_string(),
-            description: "Polling test channel".to_string(),
-            component: None,
-            limits: ResourceLimits::default(),
-        });
+        let prepared = Arc::new(PreparedChannelModule::for_testing(
+            "poll-channel",
+            "Polling test channel",
+        ));
 
         // Enable polling with a 1 second minimum interval
         let capabilities = ChannelCapabilities::for_channel("poll-channel")
@@ -5463,6 +5466,7 @@ mod tests {
             ChannelCapabilities::default(),
             creds,
             Arc::new(PairingStore::new()),
+            Arc::new(ChannelWorkspaceStore::new()),
         );
 
         let error = "HTTP request failed: error sending request for url \
@@ -5494,6 +5498,7 @@ mod tests {
             ChannelCapabilities::default(),
             std::collections::HashMap::new(),
             Arc::new(PairingStore::new()),
+            Arc::new(ChannelWorkspaceStore::new()),
         );
 
         let input = "some error message";
@@ -5513,6 +5518,7 @@ mod tests {
             ChannelCapabilities::default(),
             creds,
             Arc::new(PairingStore::new()),
+            Arc::new(ChannelWorkspaceStore::new()),
         );
 
         let input = "should not match anything";

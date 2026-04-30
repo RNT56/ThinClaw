@@ -93,6 +93,7 @@ pub struct AgentSettings {
     /// - "project": shell cwd = workspace_root, files accessible anywhere; host-side
     ///   `execute_code` and background `process` are disabled because they do not
     ///   have hard execution isolation in this mode
+    ///
     /// Set by the wizard based on autonomy level. Defaults to None (= "sandboxed").
     #[serde(default)]
     pub workspace_mode: Option<String>,

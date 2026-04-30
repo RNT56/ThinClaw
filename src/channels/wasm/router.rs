@@ -723,18 +723,15 @@ mod tests {
     use crate::channels::wasm::wrapper::WasmChannel;
     use crate::hooks::webhook_signing;
     use crate::pairing::PairingStore;
-    use crate::tools::wasm::ResourceLimits;
 
     fn create_test_channel(name: &str) -> Arc<WasmChannel> {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
 
-        let prepared = Arc::new(PreparedChannelModule {
-            name: name.to_string(),
-            description: format!("Test channel: {}", name),
-            component: None,
-            limits: ResourceLimits::default(),
-        });
+        let prepared = Arc::new(PreparedChannelModule::for_testing(
+            name,
+            format!("Test channel: {}", name),
+        ));
 
         let capabilities =
             ChannelCapabilities::for_channel(name).with_path(format!("/webhook/{}", name));

@@ -124,6 +124,7 @@ impl ModelCompat {
 ///
 /// This returns a concrete score for every input shape so routing never falls
 /// back to an "unknown/generic" bucket.
+#[allow(clippy::too_many_arguments)]
 pub fn estimate_routing_quality(
     supports_streaming: Option<bool>,
     supports_tools: Option<bool>,
@@ -290,16 +291,12 @@ fn find_registry_dir() -> Option<PathBuf> {
     }
 
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for candidate in [
+    [
         manifest_dir.join("registry"),
         manifest_dir.join("../../registry"),
-    ] {
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-
-    None
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_dir())
 }
 
 fn load_catalog() -> ModelCatalogSnapshot {
