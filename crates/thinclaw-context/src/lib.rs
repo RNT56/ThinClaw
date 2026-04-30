@@ -2,4 +2,4 @@
 
 pub mod read_audit;
 
-pub use thinclaw_types::{JobContext, JobState, StateTransition};
+pub use thinclaw_types::{ActionRecord, JobContext, JobState, StateTransition};

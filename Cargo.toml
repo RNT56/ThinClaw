@@ -41,19 +41,25 @@ dist = true
 
 [dependencies]
 thinclaw-types = { version = "0.1.0", path = "crates/thinclaw-types", default-features = false }
+thinclaw-agent = { version = "0.1.0", path = "crates/thinclaw-agent" }
 thinclaw-db = { version = "0.1.0", path = "crates/thinclaw-db" }
+thinclaw-channels = { version = "0.1.0", path = "crates/thinclaw-channels" }
 thinclaw-channels-core = { version = "0.1.0", path = "crates/thinclaw-channels-core" }
 thinclaw-config = { version = "0.1.0", path = "crates/thinclaw-config" }
 thinclaw-context = { version = "0.1.0", path = "crates/thinclaw-context" }
 thinclaw-experiments = { version = "0.1.0", path = "crates/thinclaw-experiments" }
+thinclaw-gateway = { version = "0.1.0", path = "crates/thinclaw-gateway" }
 thinclaw-history = { version = "0.1.0", path = "crates/thinclaw-history" }
 thinclaw-identity = { version = "0.1.0", path = "crates/thinclaw-identity" }
+thinclaw-llm = { version = "0.1.0", path = "crates/thinclaw-llm" }
 thinclaw-llm-core = { version = "0.1.0", path = "crates/thinclaw-llm-core" }
 thinclaw-media = { version = "0.1.0", path = "crates/thinclaw-media" }
 thinclaw-platform = { version = "0.1.0", path = "crates/thinclaw-platform" }
 thinclaw-safety = { version = "0.1.0", path = "crates/thinclaw-safety" }
 thinclaw-secrets = { version = "0.1.0", path = "crates/thinclaw-secrets", default-features = false }
 thinclaw-settings = { version = "0.1.0", path = "crates/thinclaw-settings" }
+thinclaw-soul = { version = "0.1.0", path = "crates/thinclaw-soul" }
+thinclaw-tools = { version = "0.1.0", path = "crates/thinclaw-tools" }
 thinclaw-tools-core = { version = "0.1.0", path = "crates/thinclaw-tools-core" }
 thinclaw-workspace = { version = "0.1.0", path = "crates/thinclaw-workspace" }
 
@@ -307,7 +313,12 @@ bundled-wasm = []
 # Only enable for headless/remote mode; in desktop mode Scrappy owns the mic.
 voice = ["dep:cpal"]
 # AWS Bedrock embeddings — adds aws-config + aws-sdk-bedrockruntime.
-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+bedrock = [
+    "thinclaw-workspace/bedrock",
+    "dep:aws-config",
+    "dep:aws-sdk-bedrockruntime",
+    "dep:aws-smithy-types",
+]
 
 [[test]]
 name = "html_to_markdown"

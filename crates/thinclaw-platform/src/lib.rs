@@ -5,6 +5,7 @@
 
 pub mod paths;
 pub mod shell;
+pub mod timezone;
 
 pub use paths::{
     StatePaths, expand_home_dir, resolve_data_dir, resolve_temp_path, resolve_thinclaw_home,

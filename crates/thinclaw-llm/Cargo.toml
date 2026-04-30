@@ -6,4 +6,24 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+async-stream = "0.3"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+rand = "0.8"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
+rust_decimal_macros = "1"
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thinclaw-config = { version = "0.1.0", path = "../thinclaw-config" }
 thinclaw-llm-core = { version = "0.1.0", path = "../thinclaw-llm-core" }
+thinclaw-settings = { version = "0.1.0", path = "../thinclaw-settings" }
+thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
+tokio = { version = "1", features = ["sync", "time", "rt"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
