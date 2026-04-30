@@ -18,7 +18,8 @@ use crate::agent::dispatcher::{AgenticLoopResult, check_auth_required, parse_aut
 use crate::agent::learning::{ImprovementClass, LearningEvent, LearningOrchestrator, RiskTier};
 use crate::agent::outcomes;
 use crate::agent::session::{
-    PendingApproval, PendingAuthMode, PersistedSubagentState, Session, Thread, ThreadState,
+    PendingApproval, PendingAuthMode, PersistedSubagentState, Session, Thread,
+    ThreadRuntimeStateExt, ThreadState,
 };
 use crate::agent::submission::SubmissionResult;
 use crate::agent::{load_thread_runtime, mutate_thread_runtime};

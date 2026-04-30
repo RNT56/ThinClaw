@@ -12,6 +12,7 @@ pub mod prompt_sanitation;
 pub mod router;
 pub mod routine;
 pub mod runtime_behavior;
+pub mod session;
 pub mod submission;
 pub mod thread_inheritance;
 pub mod undo;

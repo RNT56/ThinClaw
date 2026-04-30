@@ -12,6 +12,7 @@ base64 = "0.22"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 deadpool-postgres = { version = "0.14", optional = true }
+futures = "0.3"
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
@@ -32,12 +33,14 @@ url = "2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"] }
+wasmtime-wasi = "36"
 wasmparser = "0.220"
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 
 [dev-dependencies]
 secrecy = "0.10"
+tempfile = "3"
 
 [features]
 default = []

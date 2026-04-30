@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use crate::secrets::SecretsStore;
+use thinclaw_secrets::{SecretAccessContext, SecretsStore};
 
 use super::wrapper::WasmChannel;
 
@@ -66,7 +66,7 @@ fn is_private_ip(ip: &IpAddr) -> bool {
 
 fn telegram_webhook_host_status(
     public_url: Option<&str>,
-    tunnel_provider: Option<&crate::config::tunnel::TunnelProviderConfig>,
+    tailscale_serve_tailnet_only: bool,
 ) -> TelegramWebhookHostStatus {
     let Some(raw_public_url) = public_url.map(str::trim).filter(|value| !value.is_empty()) else {
         return TelegramWebhookHostStatus::unusable("no public HTTPS webhook URL is configured");
@@ -90,11 +90,7 @@ fn telegram_webhook_host_status(
         return TelegramWebhookHostStatus::unusable("public webhook URL is missing a host");
     };
 
-    if tunnel_provider
-        .filter(|provider| provider.provider.eq_ignore_ascii_case("tailscale"))
-        .and_then(|provider| provider.tailscale.as_ref())
-        .is_some_and(|tailscale| !tailscale.funnel)
-    {
+    if tailscale_serve_tailnet_only {
         let looks_like_tailnet_url = match host {
             url::Host::Domain(domain) => domain.trim().to_ascii_lowercase().ends_with(".ts.net"),
             _ => false,
@@ -142,41 +138,33 @@ fn telegram_webhook_host_status(
 }
 
 impl WasmChannelHostConfig {
-    pub fn as_core(&self) -> thinclaw_channels::wasm::WasmChannelHostConfig {
-        thinclaw_channels::wasm::WasmChannelHostConfig {
-            tunnel_url: self.tunnel_url.clone(),
-            telegram_tunnel_url: self.telegram_tunnel_url.clone(),
-            telegram_owner_id: self.telegram_owner_id,
-            telegram_stream_mode: self.telegram_stream_mode.clone(),
-            telegram_transport_mode: self.telegram_transport_mode.clone(),
-            telegram_host_webhook_capable: self.telegram_host_webhook_capable,
-            telegram_host_transport_reason: self.telegram_host_transport_reason.clone(),
-            discord_stream_mode: self.discord_stream_mode.clone(),
-        }
-    }
-
-    pub fn from_config(config: &crate::config::Config) -> Self {
-        let telegram_transport_mode = config.channels.telegram_transport_mode.clone();
-        let host_status = telegram_webhook_host_status(
-            config.tunnel.public_url.as_deref(),
-            config.tunnel.provider.as_ref(),
-        );
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_runtime_inputs(
+        tunnel_url: Option<String>,
+        telegram_owner_id: Option<i64>,
+        telegram_stream_mode: Option<String>,
+        telegram_transport_mode: String,
+        discord_stream_mode: Option<String>,
+        tailscale_serve_tailnet_only: bool,
+    ) -> Self {
+        let host_status =
+            telegram_webhook_host_status(tunnel_url.as_deref(), tailscale_serve_tailnet_only);
         let host_webhook_capable = host_status.usable;
         let telegram_tunnel_url = if telegram_transport_mode == "polling" || !host_webhook_capable {
             None
         } else {
-            config.tunnel.public_url.clone()
+            tunnel_url.clone()
         };
 
         Self {
-            tunnel_url: config.tunnel.public_url.clone(),
+            tunnel_url,
             telegram_tunnel_url,
-            telegram_owner_id: config.channels.telegram_owner_id,
-            telegram_stream_mode: config.channels.telegram_stream_mode.clone(),
+            telegram_owner_id,
+            telegram_stream_mode,
             telegram_transport_mode,
             telegram_host_webhook_capable: host_webhook_capable,
             telegram_host_transport_reason: host_status.reason,
-            discord_stream_mode: config.channels.discord_stream_mode.clone(),
+            discord_stream_mode,
         }
     }
 
@@ -326,7 +314,7 @@ pub async fn inject_channel_credentials_from_secrets(
             .get_for_injection(
                 user_id,
                 &secret_meta.name,
-                crate::secrets::SecretAccessContext::new(
+                SecretAccessContext::new(
                     "wasm.channel_runtime_config",
                     "channel_credential_injection",
                 ),
@@ -500,16 +488,7 @@ mod tests {
 
     #[test]
     fn telegram_webhook_host_status_rejects_tailscale_serve() {
-        let provider = crate::config::tunnel::TunnelProviderConfig {
-            provider: "tailscale".to_string(),
-            tailscale: Some(crate::config::tunnel::TailscaleTunnelConfig {
-                funnel: false,
-                hostname: None,
-            }),
-            ..Default::default()
-        };
-
-        let status = telegram_webhook_host_status(Some("https://agent.ts.net"), Some(&provider));
+        let status = telegram_webhook_host_status(Some("https://agent.ts.net"), true);
 
         assert!(!status.usable);
         assert!(
@@ -523,7 +502,7 @@ mod tests {
 
     #[test]
     fn telegram_webhook_host_status_rejects_private_addresses() {
-        let status = telegram_webhook_host_status(Some("https://127.0.0.1"), None);
+        let status = telegram_webhook_host_status(Some("https://127.0.0.1"), false);
         assert!(!status.usable);
         assert!(
             status

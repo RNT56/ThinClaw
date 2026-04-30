@@ -78,7 +78,7 @@ pub use scheduler::Scheduler;
 pub use self_repair::{BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob};
 pub use session::{
     PendingApproval, PendingAuth, PersistedSubagentState, Session, Thread, ThreadRuntimeState,
-    ThreadState, Turn, TurnState,
+    ThreadRuntimeStateExt, ThreadState, Turn, TurnState,
 };
 pub use session_manager::SessionManager;
 pub use subagent_executor::{

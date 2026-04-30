@@ -7581,30 +7581,41 @@ dependencies = [
 name = "thinclaw-channels"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
  "fs4",
  "futures",
+ "hex",
+ "hmac 0.12.1",
  "rand 0.8.6",
+ "regex",
  "reqwest 0.12.28",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "subtle",
  "tempfile",
  "thinclaw-channels-core",
+ "thinclaw-identity",
+ "thinclaw-media",
  "thinclaw-platform",
+ "thinclaw-safety",
+ "thinclaw-secrets",
  "thinclaw-types",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tower 0.5.3",
  "tracing",
+ "url",
  "urlencoding",
  "uuid",
  "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]
@@ -7876,6 +7887,7 @@ dependencies = [
  "blake3",
  "chrono",
  "deadpool-postgres",
+ "futures",
  "html-to-markdown-rs",
  "libsql",
  "rand 0.8.6",
@@ -7887,6 +7899,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sysinfo",
+ "tempfile",
  "thinclaw-llm-core",
  "thinclaw-secrets",
  "thinclaw-tools-core",
@@ -7900,6 +7913,7 @@ dependencies = [
  "uuid",
  "wasmparser 0.220.1",
  "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]

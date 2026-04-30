@@ -6,6 +6,7 @@
 pub mod browser_args;
 pub mod builder;
 pub mod builtin;
+pub mod execution;
 pub mod intent_display;
 pub mod mcp;
 pub mod registry;

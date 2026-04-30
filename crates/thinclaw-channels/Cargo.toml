@@ -8,27 +8,38 @@ publish = false
 [dependencies]
 thinclaw-channels-core = { version = "0.1.0", path = "../thinclaw-channels-core" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
+anyhow = "1"
 axum = "0.8"
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
 fs4 = "0.6"
+hmac = "0.12"
+hex = "0.4"
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots"] }
+regex = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
 thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
+thinclaw-media = { version = "0.1.0", path = "../thinclaw-media" }
+thinclaw-safety = { version = "0.1.0", path = "../thinclaw-safety" }
+thinclaw-secrets = { version = "0.1.0", path = "../thinclaw-secrets", default-features = false }
 tokio = { version = "1", features = ["fs", "net", "rt", "sync", "time"] }
 tokio-stream = "0.1"
 tracing = "0.1"
 urlencoding = "2"
+url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"] }
+wasmtime-wasi = "36"
 
 [dev-dependencies]
 tempfile = "3"
+thinclaw-identity = { version = "0.1.0", path = "../thinclaw-identity" }
 tower = { version = "0.5", features = ["util"] }
