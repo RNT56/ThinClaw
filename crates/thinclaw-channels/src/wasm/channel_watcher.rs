@@ -224,6 +224,7 @@ impl ChannelWatcher {
     }
 
     /// Perform a single poll cycle.
+    #[allow(clippy::too_many_arguments)]
     async fn poll_once(
         dir: &Path,
         config: &ChannelWatcherConfig,
@@ -379,6 +380,7 @@ impl ChannelWatcher {
     }
 
     /// Load a WASM channel from disk and hot-add it to the channel manager.
+    #[allow(clippy::too_many_arguments)]
     async fn load_and_add(
         dir: &Path,
         name: &str,

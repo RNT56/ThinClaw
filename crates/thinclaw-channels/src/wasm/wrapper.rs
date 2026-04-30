@@ -2465,6 +2465,7 @@ impl WasmChannel {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn telegram_webhook_unhealthy_reason(
         now_ms: u64,
         expected_webhook_url: Option<&str>,

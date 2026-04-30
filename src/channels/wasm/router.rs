@@ -47,43 +47,41 @@ async fn oauth_callback_handler(
         );
     }
 
-    if !oauth_state.is_empty() {
-        if let Some(ref ext_mgr) = state.extension_manager {
-            let is_valid = ext_mgr.validate_pending_auth_nonce(&oauth_state).await;
-            if !is_valid {
-                tracing::warn!("OAuth callback: invalid or expired state nonce");
+    if !oauth_state.is_empty()
+        && let Some(ref ext_mgr) = state.extension_manager
+    {
+        let is_valid = ext_mgr.validate_pending_auth_nonce(&oauth_state).await;
+        if !is_valid {
+            tracing::warn!("OAuth callback: invalid or expired state nonce");
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::response::Html(crate::cli::oauth_defaults::landing_html("ThinClaw", false)),
+            );
+        }
+
+        match ext_mgr.complete_oauth_callback(&oauth_state, &code).await {
+            Ok((extension_name, _thread_id, _auth_result, activate_result)) => {
+                tracing::info!(
+                    extension = %extension_name,
+                    tools = activate_result.tools_loaded.len(),
+                    "OAuth callback completed and tool activated"
+                );
+                return (
+                    StatusCode::OK,
+                    axum::response::Html(crate::cli::oauth_defaults::landing_html(
+                        &extension_name,
+                        true,
+                    )),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "OAuth callback completion failed");
                 return (
                     StatusCode::BAD_REQUEST,
                     axum::response::Html(crate::cli::oauth_defaults::landing_html(
                         "ThinClaw", false,
                     )),
                 );
-            }
-
-            match ext_mgr.complete_oauth_callback(&oauth_state, &code).await {
-                Ok((extension_name, _thread_id, _auth_result, activate_result)) => {
-                    tracing::info!(
-                        extension = %extension_name,
-                        tools = activate_result.tools_loaded.len(),
-                        "OAuth callback completed and tool activated"
-                    );
-                    return (
-                        StatusCode::OK,
-                        axum::response::Html(crate::cli::oauth_defaults::landing_html(
-                            &extension_name,
-                            true,
-                        )),
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, "OAuth callback completion failed");
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        axum::response::Html(crate::cli::oauth_defaults::landing_html(
-                            "ThinClaw", false,
-                        )),
-                    );
-                }
             }
         }
     }

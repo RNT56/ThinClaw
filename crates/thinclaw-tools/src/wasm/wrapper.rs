@@ -104,6 +104,7 @@ struct StoreData {
 }
 
 impl StoreData {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         memory_limit: u64,
         capabilities: Capabilities,

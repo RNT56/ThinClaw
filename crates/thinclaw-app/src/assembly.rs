@@ -140,10 +140,11 @@ impl RuntimeEntrypointPlan {
 }
 
 /// Root-independent workspace mode names understood by the app runtime.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum RuntimeWorkspaceMode {
     Sandboxed,
     Project,
+    #[default]
     Unrestricted,
     Custom(String),
 }
@@ -167,12 +168,6 @@ impl RuntimeWorkspaceMode {
             Self::Unrestricted => "unrestricted",
             Self::Custom(value) => value.as_str(),
         }
-    }
-}
-
-impl Default for RuntimeWorkspaceMode {
-    fn default() -> Self {
-        Self::Unrestricted
     }
 }
 

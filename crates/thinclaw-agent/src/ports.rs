@@ -509,6 +509,7 @@ pub struct OutcomeObservationRecord {
 }
 
 /// Request to run routine behavior without moving the engine implementation yet.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum RoutineExecutionRequest {
     IncomingEvent(IncomingMessage),

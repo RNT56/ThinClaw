@@ -720,6 +720,12 @@ impl ChannelWorkspaceStore {
     }
 }
 
+impl Default for ChannelWorkspaceStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WorkspaceReader for ChannelWorkspaceStore {
     fn read(&self, path: &str) -> Option<String> {
         self.data.read().ok()?.get(path).cloned()

@@ -21,15 +21,20 @@ use crate::mcp::config::McpServerConfig;
 /// Default OAuth callback port used by ThinClaw flows.
 pub const DEFAULT_OAUTH_CALLBACK_PORT: u16 = 9876;
 
+pub type HtmlRenderer = Arc<dyn Fn(&str) -> String + Send + Sync>;
+pub type AuthorizationUrlOpener = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+pub type AuthorizationUrlReporter = Arc<dyn Fn(&str) + Send + Sync>;
+pub type RemotePlainHttpCallbackReporter = Arc<dyn Fn(&str, u16) + Send + Sync>;
+
 /// Host-application hooks for interactive OAuth authorization.
 pub struct OAuthFlowOptions {
     pub callback_host: String,
     pub callback_port: u16,
-    pub success_html: Arc<dyn Fn(&str) -> String + Send + Sync>,
-    pub failure_html: Arc<dyn Fn(&str) -> String + Send + Sync>,
-    pub open_authorization_url: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
-    pub on_manual_authorization_url: Arc<dyn Fn(&str) + Send + Sync>,
-    pub on_remote_plain_http_callback: Arc<dyn Fn(&str, u16) + Send + Sync>,
+    pub success_html: HtmlRenderer,
+    pub failure_html: HtmlRenderer,
+    pub open_authorization_url: AuthorizationUrlOpener,
+    pub on_manual_authorization_url: AuthorizationUrlReporter,
+    pub on_remote_plain_http_callback: RemotePlainHttpCallbackReporter,
 }
 
 impl Default for OAuthFlowOptions {
@@ -738,6 +743,7 @@ pub async fn bind_callback_listener(
 }
 
 /// Build the authorization URL with all required parameters.
+#[allow(clippy::too_many_arguments)]
 pub fn build_authorization_url(
     base_url: &str,
     client_id: &str,
