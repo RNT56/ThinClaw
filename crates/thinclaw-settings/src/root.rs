@@ -102,6 +102,10 @@ pub struct Settings {
     #[serde(default)]
     pub prompt: PromptSettings,
 
+    /// ComfyUI media generation settings.
+    #[serde(default)]
+    pub comfyui: ComfyUiSettings,
+
     /// Operator-trusted extension fast-path settings.
     #[serde(default)]
     pub extensions: ExtensionsSettings,

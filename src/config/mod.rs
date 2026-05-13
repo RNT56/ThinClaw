@@ -8,6 +8,7 @@
 mod agent;
 mod builder;
 mod channels;
+mod comfyui;
 mod database;
 mod desktop_autonomy;
 mod embeddings;
@@ -48,6 +49,7 @@ pub use self::channels::{
     BlueBubblesChannelConfig, ChannelsConfig, CliConfig, DiscordChannelConfig, GatewayConfig,
     HttpConfig, SignalConfig, SlackChannelConfig, TelegramConfig,
 };
+pub use self::comfyui::ComfyUiConfig;
 pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
 pub use self::desktop_autonomy::DesktopAutonomyConfig;
 pub use self::embeddings::EmbeddingsConfig;
@@ -122,6 +124,7 @@ pub struct Config {
     pub embeddings: EmbeddingsConfig,
     pub tunnel: TunnelConfig,
     pub channels: ChannelsConfig,
+    pub comfyui: ComfyUiConfig,
     pub agent: AgentConfig,
     pub desktop_autonomy: DesktopAutonomyConfig,
     pub safety: SafetyConfig,
@@ -268,6 +271,7 @@ impl Config {
             embeddings: EmbeddingsConfig::resolve(settings)?,
             tunnel: TunnelConfig::resolve(settings)?,
             channels: ChannelsConfig::resolve(settings)?,
+            comfyui: ComfyUiConfig::resolve(settings)?,
             agent: AgentConfig::resolve(settings)?,
             desktop_autonomy: DesktopAutonomyConfig::resolve(settings)?,
             safety: SafetyConfig::resolve(settings)?,

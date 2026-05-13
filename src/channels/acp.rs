@@ -1730,7 +1730,7 @@ async fn status_to_acp_messages(
                 ),
             )]
         }
-        StatusUpdate::ToolResult { name, preview } => {
+        StatusUpdate::ToolResult { name, preview, .. } => {
             let tool_call_id = state.tool_call_update_id(session_id, &name, false).await;
             vec![session_update(
                 session_id,
@@ -2973,6 +2973,7 @@ mod tests {
                 StatusUpdate::ToolResult {
                     name: "shell".to_string(),
                     preview: "stdout".to_string(),
+                    artifacts: Vec::new(),
                 },
                 "tool_call_update",
             ),

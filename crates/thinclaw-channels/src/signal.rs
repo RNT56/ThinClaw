@@ -983,7 +983,7 @@ impl Channel for SignalChannel {
 
         // Send tool result previews to user (debug mode only)
         if self.is_debug()
-            && let StatusUpdate::ToolResult { name, preview } = &status
+            && let StatusUpdate::ToolResult { name, preview, .. } = &status
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
             let truncated = if preview.chars().count() > 500 {

@@ -111,6 +111,22 @@ expression: settings
     "session_freeze_enabled": true,
     "project_context_max_tokens": 8000
   },
+  "comfyui": {
+    "enabled": false,
+    "mode": "local_existing",
+    "host": "http://127.0.0.1:8188",
+    "port": 8188,
+    "workspace_dir": "[home]/.thinclaw/comfyui",
+    "output_dir": "[home]/.thinclaw/media_cache/generated",
+    "default_workflow": "sdxl_txt2img",
+    "default_aspect_ratio": "square",
+    "cloud_api_key_secret": "comfy_cloud_api_key",
+    "allow_lifecycle_management": false,
+    "allow_untrusted_workflows": false,
+    "request_timeout_secs": 600,
+    "max_output_bytes": 104857600,
+    "max_concurrent_jobs": 1
+  },
   "extensions": {
     "user_tools_dir": "[home]/.thinclaw/user-tools",
     "allow_native_plugins": false,

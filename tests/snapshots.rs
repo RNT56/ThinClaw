@@ -15,6 +15,8 @@ mod tests {
     #[test]
     fn test_settings_default_snapshot() {
         let mut settings = thinclaw::settings::Settings::default();
+        settings.comfyui.workspace_dir = "[home]/.thinclaw/comfyui".to_string();
+        settings.comfyui.output_dir = "[home]/.thinclaw/media_cache/generated".to_string();
         settings.extensions.user_tools_dir = "[home]/.thinclaw/user-tools".to_string();
         assert_json_snapshot!("settings_default", settings);
     }

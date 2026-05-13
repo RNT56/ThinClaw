@@ -355,7 +355,7 @@ impl Agent {
                                             Ok(output) => {
                                                 tracing::info!(
                                                     tool = %tc.name,
-                                                    output_len = output.len(),
+                                                    output_len = output.content.len(),
                                                     "Memory flush: executed {} successfully",
                                                     tc.name
                                                 );

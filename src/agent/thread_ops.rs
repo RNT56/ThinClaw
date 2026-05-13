@@ -14,7 +14,9 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::context_monitor::{ContextPressure, pressure_message, pressure_transition};
-use crate::agent::dispatcher::{AgenticLoopResult, check_auth_required, parse_auth_result};
+use crate::agent::dispatcher::{
+    AgenticLoopResult, check_auth_required_content, parse_auth_result_content,
+};
 use crate::agent::learning::{ImprovementClass, LearningEvent, LearningOrchestrator, RiskTier};
 use crate::agent::outcomes;
 use crate::agent::session::{
@@ -2143,9 +2145,7 @@ impl Agent {
             .await
             {
                 Ok(execution::ToolPrepareOutcome::Ready(prepared)) => {
-                    execution::execute_tool_call(&prepared, self.safety(), &job_ctx)
-                        .await
-                        .map(|output| output.sanitized_content)
+                    execution::execute_tool_call(&prepared, self.safety(), &job_ctx).await
                 }
                 Ok(execution::ToolPrepareOutcome::NeedsApproval(_)) => {
                     Err(crate::error::ToolError::AuthRequired {
@@ -2163,17 +2163,19 @@ impl Agent {
                     StatusUpdate::ToolCompleted {
                         name: pending.tool_name.clone(),
                         success: tool_result.is_ok(),
-                        result_preview: tool_result
-                            .as_ref()
-                            .ok()
-                            .map(|s| crate::agent::dispatcher::truncate_preview(s, 500)),
+                        result_preview: tool_result.as_ref().ok().map(|output| {
+                            crate::agent::dispatcher::truncate_preview(
+                                &output.sanitized_content,
+                                500,
+                            )
+                        }),
                     },
                     &message.metadata,
                 )
                 .await;
 
             if let Ok(ref output) = tool_result
-                && !output.is_empty()
+                && !output.sanitized_content.is_empty()
             {
                 let _ = self
                     .channels
@@ -2181,7 +2183,8 @@ impl Agent {
                         &message.channel,
                         StatusUpdate::ToolResult {
                             name: pending.tool_name.clone(),
-                            preview: output.clone(),
+                            preview: output.sanitized_content.clone(),
+                            artifacts: output.artifacts.clone(),
                         },
                         &message.metadata,
                     )
@@ -2208,7 +2211,7 @@ impl Agent {
                 {
                     match &tool_result {
                         Ok(output) => {
-                            turn.record_tool_result(serde_json::json!(output));
+                            turn.record_tool_result(serde_json::json!(output.sanitized_content));
                         }
                         Err(e) => {
                             turn.record_tool_error(e.to_string());
@@ -2219,12 +2222,21 @@ impl Agent {
 
             // If tool auth returned an auth-required state, enter auth mode when needed and
             // return instructions directly (skip agentic loop continuation).
-            if let Some(auth_request) = check_auth_required(&pending.tool_name, &tool_result) {
+            if let Some(auth_request) = check_auth_required_content(
+                &pending.tool_name,
+                tool_result
+                    .as_ref()
+                    .ok()
+                    .map(|output| output.sanitized_content.as_str()),
+            ) {
                 self.handle_auth_intercept(
                     &session,
                     thread_id,
                     message,
-                    &tool_result,
+                    tool_result
+                        .as_ref()
+                        .ok()
+                        .map(|output| output.sanitized_content.as_str()),
                     auth_request.extension_name,
                     auth_request.instructions.clone(),
                     auth_request.auth_mode,
@@ -2238,7 +2250,7 @@ impl Agent {
                 Ok(output) => {
                     let sanitized = self
                         .safety()
-                        .sanitize_tool_output(&pending.tool_name, &output);
+                        .sanitize_tool_output(&pending.tool_name, &output.sanitized_content);
                     self.safety().wrap_for_llm(
                         &pending.tool_name,
                         &sanitized.content,
@@ -2276,7 +2288,8 @@ impl Agent {
             // hooks, approval checks, validation, and rate limits stay
             // aligned with the live dispatcher path.
             let mut preflight_tool_calls: Vec<crate::llm::ToolCall> = Vec::new();
-            let mut immediate_results: Vec<(usize, Result<String, Error>)> = Vec::new();
+            let mut immediate_results: Vec<(usize, Result<execution::ToolExecutionOutput, Error>)> =
+                Vec::new();
             let mut runnable: Vec<(usize, crate::llm::ToolCall, execution::PreparedToolCall)> =
                 Vec::new();
             let mut approval_needed: Option<(
@@ -2334,7 +2347,7 @@ impl Agent {
             }
 
             // === Phase 2: Parallel execution ===
-            let mut exec_results: Vec<Option<Result<String, Error>>> =
+            let mut exec_results: Vec<Option<Result<execution::ToolExecutionOutput, Error>>> =
                 (0..preflight_tool_calls.len()).map(|_| None).collect();
             for (idx, result) in immediate_results {
                 exec_results[idx] = Some(result);
@@ -2359,24 +2372,26 @@ impl Agent {
                         )
                         .await;
 
-                    let result = execution::execute_tool_call(&prepared, self.safety(), &job_ctx)
-                        .await
-                        .map(|output| output.sanitized_content);
+                    let result =
+                        execution::execute_tool_call(&prepared, self.safety(), &job_ctx).await;
 
-                    let _ =
-                        self.channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::ToolCompleted {
-                                    name: tc.name.clone(),
-                                    success: result.is_ok(),
-                                    result_preview: result.as_ref().ok().map(|s| {
-                                        crate::agent::dispatcher::truncate_preview(s, 500)
-                                    }),
-                                },
-                                &message.metadata,
-                            )
-                            .await;
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ToolCompleted {
+                                name: tc.name.clone(),
+                                success: result.is_ok(),
+                                result_preview: result.as_ref().ok().map(|output| {
+                                    crate::agent::dispatcher::truncate_preview(
+                                        &output.sanitized_content,
+                                        500,
+                                    )
+                                }),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
 
                     exec_results[pf_idx] = Some(result);
                 }
@@ -2407,9 +2422,8 @@ impl Agent {
                             )
                             .await;
 
-                        let result = execution::execute_tool_call(&prepared, &safety, &job_ctx)
-                            .await
-                            .map(|output| output.sanitized_content);
+                        let result =
+                            execution::execute_tool_call(&prepared, &safety, &job_ctx).await;
 
                         let _ = channels
                             .send_status(
@@ -2417,8 +2431,11 @@ impl Agent {
                                 StatusUpdate::ToolCompleted {
                                     name: tc.name.clone(),
                                     success: result.is_ok(),
-                                    result_preview: result.as_ref().ok().map(|s| {
-                                        crate::agent::dispatcher::truncate_preview(s, 500)
+                                    result_preview: result.as_ref().ok().map(|output| {
+                                        crate::agent::dispatcher::truncate_preview(
+                                            &output.sanitized_content,
+                                            500,
+                                        )
                                     }),
                                 },
                                 &metadata,
@@ -2429,8 +2446,9 @@ impl Agent {
                     });
                 }
 
-                let mut ordered: Vec<Option<(usize, Result<String, Error>)>> =
-                    (0..runnable_count).map(|_| None).collect();
+                let mut ordered: Vec<
+                    Option<(usize, Result<execution::ToolExecutionOutput, Error>)>,
+                > = (0..runnable_count).map(|_| None).collect();
                 while let Some(join_result) = join_set.join_next().await {
                     match join_result {
                         Ok((spawn_idx, pf_idx, result)) => {
@@ -2480,7 +2498,7 @@ impl Agent {
                 })
             {
                 if let Ok(ref output) = deferred_result
-                    && !output.is_empty()
+                    && !output.sanitized_content.is_empty()
                 {
                     let _ = self
                         .channels
@@ -2488,7 +2506,8 @@ impl Agent {
                             &message.channel,
                             StatusUpdate::ToolResult {
                                 name: tc.name.clone(),
-                                preview: output.clone(),
+                                preview: output.sanitized_content.clone(),
+                                artifacts: output.artifacts.clone(),
                             },
                             &message.metadata,
                         )
@@ -2502,7 +2521,9 @@ impl Agent {
                         && let Some(turn) = thread.last_turn_mut()
                     {
                         match &deferred_result {
-                            Ok(output) => turn.record_tool_result(serde_json::json!(output)),
+                            Ok(output) => {
+                                turn.record_tool_result(serde_json::json!(output.sanitized_content))
+                            }
                             Err(e) => turn.record_tool_error(e.to_string()),
                         }
                     }
@@ -2510,13 +2531,22 @@ impl Agent {
 
                 // Auth detection — defer return until all results are recorded
                 if deferred_auth.is_none()
-                    && let Some(auth_request) = check_auth_required(&tc.name, &deferred_result)
+                    && let Some(auth_request) = check_auth_required_content(
+                        &tc.name,
+                        deferred_result
+                            .as_ref()
+                            .ok()
+                            .map(|output| output.sanitized_content.as_str()),
+                    )
                 {
                     self.handle_auth_intercept(
                         &session,
                         thread_id,
                         message,
-                        &deferred_result,
+                        deferred_result
+                            .as_ref()
+                            .ok()
+                            .map(|output| output.sanitized_content.as_str()),
                         auth_request.extension_name,
                         auth_request.instructions.clone(),
                         auth_request.auth_mode,
@@ -2527,7 +2557,9 @@ impl Agent {
 
                 let deferred_content = match deferred_result {
                     Ok(output) => {
-                        let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
+                        let sanitized = self
+                            .safety()
+                            .sanitize_tool_output(&tc.name, &output.sanitized_content);
                         self.safety().wrap_for_llm(
                             &tc.name,
                             &sanitized.content,
@@ -2733,12 +2765,12 @@ impl Agent {
         session: &Arc<Mutex<Session>>,
         thread_id: Uuid,
         message: &IncomingMessage,
-        tool_result: &Result<String, Error>,
+        tool_result_content: Option<&str>,
         ext_name: String,
         instructions: String,
         auth_mode: PendingAuthMode,
     ) {
-        let auth_data = parse_auth_result(tool_result);
+        let auth_data = parse_auth_result_content(tool_result_content);
         let thread_snapshot = {
             let mut sess = session.lock().await;
             let session_id = sess.id;

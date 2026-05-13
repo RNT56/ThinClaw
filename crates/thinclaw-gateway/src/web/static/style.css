@@ -1816,6 +1816,29 @@ html[data-surface-pattern="cloud"] .chat-workspace::before {
   word-break: break-all;
 }
 
+.activity-tool-artifacts {
+  display: grid;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  background: var(--code-bg);
+}
+
+.activity-tool-artifact-image {
+  display: block;
+  max-width: min(100%, 520px);
+  max-height: 520px;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.activity-tool-artifact-link {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
 /* Collapsed summary */
 
 .activity-summary {

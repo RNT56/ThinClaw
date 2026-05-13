@@ -14,9 +14,14 @@ pub fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String
             success,
             thread_id,
         },
-        StatusUpdate::ToolResult { name, preview } => SseEvent::ToolResult {
+        StatusUpdate::ToolResult {
             name,
             preview,
+            artifacts,
+        } => SseEvent::ToolResult {
+            name,
+            preview,
+            artifacts,
             thread_id,
         },
         StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk { content, thread_id },

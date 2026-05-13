@@ -1092,6 +1092,13 @@ impl AppBuilder {
         let tts_secrets = self.secrets_store.clone();
         tools.register_tts_tool(tts_secrets, tts_output_dir);
 
+        tools.register_comfyui_tools(self.config.comfyui.clone(), self.secrets_store.clone());
+        if !self.config.comfyui.enabled {
+            tracing::info!(
+                "ComfyUI generation starts disabled; image_generate will report setup guidance until enabled"
+            );
+        }
+
         // Register Apple Mail tool if on macOS and Apple Mail channel is configured
         #[cfg(target_os = "macos")]
         if self.config.channels.apple_mail.is_some() {
@@ -1481,7 +1488,11 @@ impl AppBuilder {
         let (skill_registry, skill_catalog, skill_remote_hub, skill_quarantine) =
             if self.config.skills.enabled {
                 let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
-                    .with_installed_dir(self.config.skills.installed_dir.clone());
+                    .with_installed_dir(self.config.skills.installed_dir.clone())
+                    .with_bundled_skill(
+                        std::path::PathBuf::from("skills/creative-comfyui/SKILL.md"),
+                        include_str!("../skills/creative-comfyui/SKILL.md"),
+                    );
 
                 // Wire workspace skills dir: <workspace_root>/skills/
                 //

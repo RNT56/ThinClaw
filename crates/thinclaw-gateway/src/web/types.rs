@@ -48,6 +48,8 @@ pub enum SseEvent {
     ToolResult {
         name: String,
         preview: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        artifacts: Vec<thinclaw_tools_core::ToolArtifact>,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },

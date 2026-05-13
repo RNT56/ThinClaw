@@ -669,7 +669,9 @@ impl Channel for ReplChannel {
                     eprintln!("  {bad}\u{2717} {} (failed){reset}", skin.tool_label(&name));
                 }
             }
-            StatusUpdate::ToolResult { name: _, preview } => {
+            StatusUpdate::ToolResult {
+                name: _, preview, ..
+            } => {
                 let display = truncate_for_terminal_preview(&preview, CLI_TOOL_RESULT_MAX);
                 eprintln!("    {muted}{display}{reset}");
             }

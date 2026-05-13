@@ -868,7 +868,7 @@ function connectSSE() {
   eventSource.addEventListener('tool_result', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setToolCardOutput(data.name, data.preview);
+    setToolCardOutput(data.name, data.preview, data.artifacts || []);
   });
 
   eventSource.addEventListener('stream_chunk', (e) => {
@@ -2107,7 +2107,7 @@ function completeToolCard(name, success) {
   entry.card.setAttribute('data-status', success ? 'success' : 'fail');
 }
 
-function setToolCardOutput(name, preview) {
+function setToolCardOutput(name, preview, artifacts) {
   const entries = _activeToolCards[name];
   if (!entries || entries.length === 0) return;
   // Find first card with empty output
@@ -2125,7 +2125,26 @@ function setToolCardOutput(name, preview) {
   if (output) {
     const truncated = preview.length > 2000 ? preview.substring(0, 2000) + '\n... (truncated)' : preview;
     output.textContent = truncated;
+    const rendered = renderToolArtifacts(artifacts || []);
+    if (rendered) output.insertAdjacentHTML('afterend', rendered);
   }
+}
+
+function renderToolArtifacts(artifacts) {
+  if (!Array.isArray(artifacts) || artifacts.length === 0) return '';
+  const items = artifacts.map((artifact) => {
+    if (!artifact || typeof artifact !== 'object') return '';
+    if (artifact.type === 'image' && artifact.data) {
+      const mime = artifact.mime_type || artifact.mimeType || 'image/png';
+      return '<img class="activity-tool-artifact-image" alt="Generated image" src="data:' + escapeHtml(mime) + ';base64,' + artifact.data + '">';
+    }
+    if (artifact.type === 'resource_link' && artifact.uri) {
+      const label = artifact.title || artifact.name || artifact.uri;
+      return '<div class="activity-tool-artifact-link">' + escapeHtml(label) + '<br><code>' + escapeHtml(artifact.uri) + '</code></div>';
+    }
+    return '';
+  }).filter(Boolean).join('');
+  return items ? '<div class="activity-tool-artifacts">' + items + '</div>' : '';
 }
 
 function finalizeActivityGroup() {

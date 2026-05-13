@@ -15,6 +15,7 @@ mod browser_cloud;
 mod camera_capture;
 mod canvas;
 mod clarify;
+mod comfyui;
 mod desktop_autonomy;
 mod device_info;
 mod discord_actions;
@@ -65,6 +66,9 @@ pub use browser_a11y::AgentBrowserTool;
 pub use camera_capture::CameraCaptureTool;
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};
 pub use clarify::ClarifyTool;
+pub use comfyui::{
+    ComfyCheckDepsTool, ComfyHealthTool, ComfyManageTool, ComfyRunWorkflowTool, ImageGenerateTool,
+};
 pub use desktop_autonomy::{DesktopAutonomyPort, DesktopAutonomyTool};
 pub use device_info::DeviceInfoTool;
 pub use discord_actions::DiscordActionsTool;

@@ -20,18 +20,19 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 #[cfg(feature = "browser")]
 use crate::tools::builtin::{AgentBrowserTool, BrowserTool};
 use crate::tools::builtin::{
-    CancelJobTool, CreateJobTool, DesktopAutonomyPort, ExecuteCodeTool, ExtensionManagementPort,
+    CancelJobTool, ComfyCheckDepsTool, ComfyHealthTool, ComfyManageTool, ComfyRunWorkflowTool,
+    CreateJobTool, DesktopAutonomyPort, ExecuteCodeTool, ExtensionManagementPort,
     ExternalMemoryExportTool, ExternalMemoryOffTool, ExternalMemoryPort, ExternalMemoryRecallTool,
-    ExternalMemorySetupTool, ExternalMemoryStatusTool, FileToolHost, JobEventsTool, JobPromptTool,
-    JobStatusTool, LearningFeedbackTool, LearningHistoryTool, LearningOutcomesTool,
-    LearningProposalReviewTool, LearningStatusTool, ListJobsTool, MemoryDeleteTool, MemoryReadTool,
-    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptManageTool, PromptQueue,
-    RootFileToolHost, RootProcessBackendAdapter, SessionSearchTool, SharedModelOverride,
-    SharedProcessRegistry, SharedTodoStore, ShellTool, SkillAuditTool, SkillCheckTool,
-    SkillInspectTool, SkillInstallTool, SkillListTool, SkillManageTool, SkillPromoteTrustTool,
-    SkillPublishTool, SkillReadTool, SkillReloadTool, SkillRemoveTool, SkillSearchTool,
-    SkillSnapshotTool, SkillTapAddTool, SkillTapListTool, SkillTapRefreshTool, SkillTapRemoveTool,
-    SkillUpdateTool,
+    ExternalMemorySetupTool, ExternalMemoryStatusTool, FileToolHost, ImageGenerateTool,
+    JobEventsTool, JobPromptTool, JobStatusTool, LearningFeedbackTool, LearningHistoryTool,
+    LearningOutcomesTool, LearningProposalReviewTool, LearningStatusTool, ListJobsTool,
+    MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
+    PromptManageTool, PromptQueue, RootFileToolHost, RootProcessBackendAdapter, SessionSearchTool,
+    SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, SkillAuditTool,
+    SkillCheckTool, SkillInspectTool, SkillInstallTool, SkillListTool, SkillManageTool,
+    SkillPromoteTrustTool, SkillPublishTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
+    SkillSearchTool, SkillSnapshotTool, SkillTapAddTool, SkillTapListTool, SkillTapRefreshTool,
+    SkillTapRemoveTool, SkillUpdateTool,
 };
 use crate::tools::execution::HostMediatedToolInvoker;
 use crate::tools::rate_limiter::RateLimiter;
@@ -740,6 +741,36 @@ impl ToolRegistry {
     ) {
         self.inner.register_tts_tool(secrets, output_dir);
         tracing::info!("Registered TTS tool");
+    }
+
+    /// Register ComfyUI media-generation tools.
+    pub fn register_comfyui_tools(
+        &self,
+        config: crate::config::ComfyUiConfig,
+        secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    ) {
+        self.register_sync(Arc::new(ImageGenerateTool::new(
+            config.clone(),
+            secrets.clone(),
+        )));
+        self.register_sync(Arc::new(ComfyHealthTool::new(
+            config.clone(),
+            secrets.clone(),
+        )));
+        self.register_sync(Arc::new(ComfyCheckDepsTool::new(
+            config.clone(),
+            secrets.clone(),
+        )));
+        self.register_sync(Arc::new(ComfyRunWorkflowTool::new(
+            config.clone(),
+            secrets.clone(),
+        )));
+        if config.allow_lifecycle_management {
+            self.register_sync(Arc::new(ComfyManageTool::new(config, secrets)));
+            tracing::info!("Registered ComfyUI media tools with lifecycle management");
+        } else {
+            tracing::info!("Registered ComfyUI media tools");
+        }
     }
 
     /// Register the Apple Mail tool (macOS only).

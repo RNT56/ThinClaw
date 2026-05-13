@@ -6,8 +6,8 @@ impl Agent {
         tool_name: &str,
         params: &serde_json::Value,
         job_ctx: &JobContext,
-    ) -> Result<String, Error> {
-        execute_chat_tool_standalone(
+    ) -> Result<ChatToolExecution, Error> {
+        execute_chat_tool_standalone_with_artifacts(
             self.tools(),
             self.safety(),
             tool_name,
@@ -174,7 +174,7 @@ impl Agent {
         // === Phase 2: Parallel execution ===
         // Execute runnable tools and slot results back by preflight
         // index so Phase 3 can iterate in original order.
-        let mut exec_results: Vec<Option<Result<String, Error>>> =
+        let mut exec_results: Vec<Option<Result<ChatToolExecution, Error>>> =
             (0..preflight.len()).map(|_| None).collect();
 
         let mut parallel_safe = runnable.len() > 1;
@@ -218,6 +218,7 @@ impl Agent {
                         if tc.name == crate::tools::builtin::advisor::ADVISOR_TOOL_NAME {
                             self.execute_consult_advisor_call(tc, context_messages, advisor_call_budget)
                                 .await
+                                .map(ChatToolExecution::text)
                         } else {
                             self.execute_chat_tool(&tc.name, &tc.arguments, job_ctx)
                                 .await
@@ -232,7 +233,10 @@ impl Agent {
                         StatusUpdate::ToolCompleted {
                             name: tc.name.clone(),
                             success: result.is_ok(),
-                            result_preview: result.as_ref().ok().map(|s| truncate_preview(s, 500)),
+                            result_preview: result
+                                .as_ref()
+                                .ok()
+                                .map(|output| truncate_preview(&output.content, 500)),
                         },
                         &message.metadata,
                     )
@@ -261,6 +265,7 @@ impl Agent {
                     let result = self
                         .execute_consult_advisor_call(tc, context_messages, advisor_call_budget)
                         .await;
+                    let result = result.map(ChatToolExecution::text);
 
                     let _ = self
                         .channels
@@ -272,7 +277,7 @@ impl Agent {
                                 result_preview: result
                                     .as_ref()
                                     .ok()
-                                    .map(|s| truncate_preview(s, 500)),
+                                    .map(|output| truncate_preview(&output.content, 500)),
                             },
                             &message.metadata,
                         )
@@ -304,7 +309,7 @@ impl Agent {
                         )
                         .await;
 
-                    let result = execute_chat_tool_standalone(
+                    let result = execute_chat_tool_standalone_with_artifacts(
                         &tools,
                         &safety,
                         &tc.name,
@@ -324,7 +329,7 @@ impl Agent {
                                 result_preview: result
                                     .as_ref()
                                     .ok()
-                                    .map(|s| truncate_preview(s, 500)),
+                                    .map(|output| truncate_preview(&output.content, 500)),
                             },
                             &metadata,
                         )
@@ -432,7 +437,7 @@ impl Agent {
 
                     // Send ToolResult preview
                     if let Ok(ref output) = tool_result
-                        && !output.is_empty()
+                        && !output.content.is_empty()
                     {
                         let _ = self
                             .channels
@@ -440,7 +445,8 @@ impl Agent {
                                 &message.channel,
                                 StatusUpdate::ToolResult {
                                     name: tc.name.clone(),
-                                    preview: output.clone(),
+                                    preview: output.content.clone(),
+                                    artifacts: output.artifacts.clone(),
                                 },
                                 &message.metadata,
                             )
@@ -453,8 +459,9 @@ impl Agent {
                     // update, and persist it in the CanvasStore.
                     if tc.name == "canvas"
                         && let Ok(ref output) = tool_result
-                        && let Ok(action) =
-                            serde_json::from_str::<crate::tools::builtin::CanvasAction>(output)
+                        && let Ok(action) = serde_json::from_str::<
+                            crate::tools::builtin::CanvasAction,
+                        >(&output.content)
                     {
                         // Emit the action to the channel for
                         // real-time rendering in the frontend.
@@ -522,7 +529,8 @@ impl Agent {
                     // status update. The loop continues normally.
                     if tc.name == "emit_user_message"
                         && let Ok(ref output) = tool_result
-                        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output)
+                        && let Ok(parsed) =
+                            serde_json::from_str::<serde_json::Value>(&output.content)
                         && let Some(msg) = parsed.get("message").and_then(|v| v.as_str())
                     {
                         let msg_type = parsed
@@ -550,7 +558,8 @@ impl Agent {
                     // with the sub-agent's output.
                     if tc.name == "spawn_subagent"
                         && let Ok(ref output) = tool_result
-                        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output)
+                        && let Ok(parsed) =
+                            serde_json::from_str::<serde_json::Value>(&output.content)
                         && parsed.get("action").and_then(|v| v.as_str()) == Some("spawn_subagent")
                     {
                         if let Some(executor) = self.subagent_executor.as_ref() {
@@ -639,21 +648,27 @@ impl Agent {
                                             )
                                             .await;
                                         }
-                                        Ok(serde_json::to_string(&result).unwrap_or_default())
+                                        Ok(ChatToolExecution::text(
+                                            serde_json::to_string(&result).unwrap_or_default(),
+                                        ))
                                     }
-                                    Err(e) => Ok(serde_json::json!({
-                                        "error": e.to_string(),
-                                        "success": false,
-                                    })
-                                    .to_string()),
+                                    Err(e) => Ok(ChatToolExecution::text(
+                                        serde_json::json!({
+                                            "error": e.to_string(),
+                                            "success": false,
+                                        })
+                                        .to_string(),
+                                    )),
                                 };
                             }
                         } else {
-                            tool_result = Ok(serde_json::json!({
-                                "error": "Sub-agent system not initialized",
-                                "success": false,
-                            })
-                            .to_string());
+                            tool_result = Ok(ChatToolExecution::text(
+                                serde_json::json!({
+                                    "error": "Sub-agent system not initialized",
+                                    "success": false,
+                                })
+                                .to_string(),
+                            ));
                         }
                     }
 
@@ -664,7 +679,8 @@ impl Agent {
                     // system prompt and model.
                     if tc.name == "message_agent"
                         && let Ok(ref output) = tool_result
-                        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(output)
+                        && let Ok(parsed) =
+                            serde_json::from_str::<serde_json::Value>(&output.content)
                         && parsed.get("a2a_request").and_then(|v| v.as_bool()) == Some(true)
                     {
                         let target_id = parsed
@@ -766,30 +782,34 @@ impl Agent {
                                 .await;
 
                             tool_result = match exec_result {
-                                Ok(result) => Ok(serde_json::json!({
-                                    "a2a_response": true,
-                                    "from_agent": target_id,
-                                    "from_display_name": target_name,
-                                    "response": result.response,
-                                    "success": result.success,
-                                    "iterations": result.iterations,
-                                    "duration_ms": result.duration_ms,
-                                })
-                                .to_string()),
-                                Err(e) => Ok(serde_json::json!({
-                                    "a2a_response": true,
-                                    "from_agent": target_id,
-                                    "error": e.to_string(),
-                                    "success": false,
-                                })
-                                .to_string()),
+                                Ok(result) => Ok(ChatToolExecution::text(
+                                    serde_json::json!({
+                                        "a2a_response": true,
+                                        "from_agent": target_id,
+                                        "from_display_name": target_name,
+                                        "response": result.response,
+                                        "success": result.success,
+                                        "iterations": result.iterations,
+                                        "duration_ms": result.duration_ms,
+                                    })
+                                    .to_string(),
+                                )),
+                                Err(e) => Ok(ChatToolExecution::text(
+                                    serde_json::json!({
+                                        "a2a_response": true,
+                                        "from_agent": target_id,
+                                        "error": e.to_string(),
+                                        "success": false,
+                                    })
+                                    .to_string(),
+                                )),
                             };
                         } else {
-                            tool_result = Ok(serde_json::json!({
+                            tool_result = Ok(ChatToolExecution::text(serde_json::json!({
                                 "error": "Sub-agent system not initialized — cannot route A2A message",
                                 "a2a_response": true,
                             })
-                            .to_string());
+                            .to_string()));
                         }
 
                         tracing::info!(
@@ -806,7 +826,7 @@ impl Agent {
                         {
                             match &tool_result {
                                 Ok(output) => {
-                                    turn.record_tool_result(serde_json::json!(output));
+                                    turn.record_tool_result(serde_json::json!(output.content));
                                 }
                                 Err(e) => {
                                     turn.record_tool_error(e.to_string());
@@ -818,9 +838,20 @@ impl Agent {
                     // Check for auth awaiting — defer the return
                     // until all results are recorded.
                     if deferred_auth.is_none()
-                        && let Some(auth_request) = check_auth_required(&tc.name, &tool_result)
+                        && let Some(auth_request) = check_auth_required_content(
+                            &tc.name,
+                            tool_result
+                                .as_ref()
+                                .ok()
+                                .map(|output| output.content.as_str()),
+                        )
                     {
-                        let auth_data = parse_auth_result(&tool_result);
+                        let auth_data = parse_auth_result_content(
+                            tool_result
+                                .as_ref()
+                                .ok()
+                                .map(|output| output.content.as_str()),
+                        );
                         {
                             let mut sess = session.lock().await;
                             if let Some(thread) = sess.threads.get_mut(&thread_id) {
@@ -864,18 +895,18 @@ impl Agent {
                         tool_result
                             .as_ref()
                             .ok()
-                            .and_then(|output| self.parse_advisor_envelope(output))
+                            .and_then(|output| self.parse_advisor_envelope(&output.content))
                             .and_then(|envelope| envelope.advisor_decision)
                     } else {
                         advisor_state.real_tool_result_count += 1;
                         match &tool_result {
                             Ok(output) => {
-                                if output.contains("\"success\":false")
-                                    || output.contains("\"status\":\"error\"")
+                                if output.content.contains("\"success\":false")
+                                    || output.content.contains("\"status\":\"error\"")
                                 {
                                     advisor_state.last_failure = Some(AdvisorFailureContext {
                                         tool_name: tc.name.clone(),
-                                        message: truncate_preview(output, 240),
+                                        message: truncate_preview(&output.content, 240),
                                         signature: Some(tool_call_signature(std::slice::from_ref(
                                             &tc,
                                         ))),
@@ -900,7 +931,9 @@ impl Agent {
                     // Sanitize and add tool result to context
                     let result_content = match tool_result {
                         Ok(output) => {
-                            let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
+                            let sanitized = self
+                                .safety()
+                                .sanitize_tool_output(&tc.name, &output.content);
                             self.safety().wrap_for_llm(
                                 &tc.name,
                                 &sanitized.content,

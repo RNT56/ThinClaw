@@ -10,8 +10,8 @@ use crate::safety::SafetyLayer;
 use crate::tools::policy::ToolPolicyManager;
 use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{
-    ApprovalRequirement, Tool, ToolApprovalClass, ToolDescriptor, ToolExecutionLane, ToolProfile,
-    ToolRegistry,
+    ApprovalRequirement, Tool, ToolApprovalClass, ToolArtifact, ToolDescriptor, ToolExecutionLane,
+    ToolProfile, ToolRegistry,
 };
 pub use thinclaw_tools::execution::ToolApprovalMode;
 
@@ -135,6 +135,7 @@ pub struct ToolExecutionOutput {
     pub result_json: serde_json::Value,
     pub sanitized_content: String,
     pub sanitized_value: serde_json::Value,
+    pub artifacts: Vec<ToolArtifact>,
     pub was_modified: bool,
     pub warnings: Vec<String>,
     pub elapsed: Duration,
@@ -301,6 +302,7 @@ pub async fn execute_tool_call(
                 sanitized_value,
                 result_json: output.result,
                 sanitized_content: sanitized.content,
+                artifacts: output.artifacts,
                 was_modified: sanitized.was_modified,
                 warnings,
                 elapsed,

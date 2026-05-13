@@ -9,13 +9,29 @@
 
 use crate::error::Error;
 use crate::llm::ChatMessage;
-use crate::tools::{ToolExecutionLane, ToolProfile, execution};
+use crate::tools::{ToolArtifact, ToolExecutionLane, ToolProfile, execution};
+
+#[derive(Debug, Clone)]
+pub(crate) struct ChatToolExecution {
+    pub content: String,
+    pub artifacts: Vec<ToolArtifact>,
+}
+
+impl ChatToolExecution {
+    pub(crate) fn text(content: String) -> Self {
+        Self {
+            content,
+            artifacts: Vec::new(),
+        }
+    }
+}
 
 /// Execute a chat tool without requiring `&Agent`.
 ///
 /// This standalone function enables parallel invocation from spawned JoinSet
 /// tasks, which cannot borrow `&self`. It replicates the logic from
 /// `Agent::execute_chat_tool`.
+#[cfg(test)]
 pub(crate) async fn execute_chat_tool_standalone(
     tools: &crate::tools::ToolRegistry,
     safety: &crate::safety::SafetyLayer,
@@ -25,6 +41,28 @@ pub(crate) async fn execute_chat_tool_standalone(
     lane: ToolExecutionLane,
     default_profile: ToolProfile,
 ) -> Result<String, Error> {
+    Ok(execute_chat_tool_standalone_with_artifacts(
+        tools,
+        safety,
+        tool_name,
+        params,
+        job_ctx,
+        lane,
+        default_profile,
+    )
+    .await?
+    .content)
+}
+
+pub(crate) async fn execute_chat_tool_standalone_with_artifacts(
+    tools: &crate::tools::ToolRegistry,
+    safety: &crate::safety::SafetyLayer,
+    tool_name: &str,
+    params: &serde_json::Value,
+    job_ctx: &crate::context::JobContext,
+    lane: ToolExecutionLane,
+    default_profile: ToolProfile,
+) -> Result<ChatToolExecution, Error> {
     let profile_override = job_ctx
         .metadata
         .get("tool_profile")
@@ -55,22 +93,23 @@ pub(crate) async fn execute_chat_tool_standalone(
     };
 
     let output = execution::execute_tool_call(&prepared, safety, job_ctx).await?;
-    Ok(output.sanitized_content)
+    Ok(ChatToolExecution {
+        content: output.sanitized_content,
+        artifacts: output.artifacts,
+    })
 }
 
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
 pub(crate) use thinclaw_agent::dispatcher_helpers::{ParsedAuthData, PendingAuthRequest};
 
-/// Extract auth_url and setup_url from a tool_auth result JSON string.
-pub(crate) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthData {
-    thinclaw_agent::dispatcher_helpers::parse_auth_result_json(
-        result.as_ref().ok().map(String::as_str),
-    )
+pub(crate) fn parse_auth_result_content(result: Option<&str>) -> ParsedAuthData {
+    thinclaw_agent::dispatcher_helpers::parse_auth_result_json(result)
 }
 
 /// Check if a tool auth/activation result indicates authentication is required.
 ///
 /// Returns auth interception details for either manual token entry or external OAuth.
+#[cfg(test)]
 pub(crate) fn check_auth_required(
     tool_name: &str,
     result: &Result<String, Error>,
@@ -79,6 +118,13 @@ pub(crate) fn check_auth_required(
         tool_name,
         result.as_ref().ok().map(String::as_str),
     )
+}
+
+pub(crate) fn check_auth_required_content(
+    tool_name: &str,
+    result: Option<&str>,
+) -> Option<PendingAuthRequest> {
+    thinclaw_agent::dispatcher_helpers::check_auth_required_json(tool_name, result)
 }
 
 /// Compact messages for retry after a context-length-exceeded error.

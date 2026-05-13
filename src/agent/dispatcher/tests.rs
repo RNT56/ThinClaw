@@ -707,7 +707,7 @@ async fn advisor_interception_runs_in_parallel_path_and_enforces_budget() {
     )));
     assert!(events.iter().any(|event| matches!(
         event,
-        RecordedChannelEvent::Status(StatusUpdate::ToolResult { name, preview })
+        RecordedChannelEvent::Status(StatusUpdate::ToolResult { name, preview, .. })
             if name == "consult_advisor" && preview.contains("advisor_call_limit_reached")
     )));
 }

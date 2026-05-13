@@ -75,7 +75,7 @@ impl From<StatusUpdate> for TuiUpdate {
             StatusUpdate::StreamChunk(chunk) => TuiUpdate::StreamChunk(chunk),
             StatusUpdate::Thinking(text) => TuiUpdate::Thinking(text),
             StatusUpdate::ToolStarted { name, .. } => TuiUpdate::ToolStarted { name },
-            StatusUpdate::ToolResult { name, preview } => TuiUpdate::ToolResult {
+            StatusUpdate::ToolResult { name, preview, .. } => TuiUpdate::ToolResult {
                 name,
                 result: preview,
                 is_error: false,

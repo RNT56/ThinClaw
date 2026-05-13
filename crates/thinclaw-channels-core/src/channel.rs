@@ -245,7 +245,11 @@ pub enum StatusUpdate {
         result_preview: Option<String>,
     },
     /// Brief preview of tool execution output.
-    ToolResult { name: String, preview: String },
+    ToolResult {
+        name: String,
+        preview: String,
+        artifacts: Vec<thinclaw_tools_core::ToolArtifact>,
+    },
     /// Streaming text chunk.
     StreamChunk(String),
     /// General status message.

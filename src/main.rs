@@ -209,6 +209,10 @@ async fn async_main() -> anyhow::Result<()> {
             thinclaw::bootstrap::load_thinclaw_env();
             return run_channels_command(ch_cmd.clone()).await;
         }
+        Some(Command::Comfy(comfy_cmd)) => {
+            init_cli_tracing(cli.debug);
+            return thinclaw::cli::run_comfy_command(comfy_cmd.clone()).await;
+        }
         Some(Command::Message(msg_cmd)) => {
             init_cli_tracing(cli.debug);
             let _ = dotenvy::dotenv();

@@ -3682,7 +3682,7 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             ),
             metadata_json,
         },
-        StatusUpdate::ToolResult { name, preview } => wit_channel::StatusUpdate {
+        StatusUpdate::ToolResult { name, preview, .. } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolResult,
             message: format!(
                 "Tool result: {}\n{}",
@@ -5179,6 +5179,7 @@ mod tests {
             &thinclaw_channels_core::StatusUpdate::ToolResult {
                 name: "http_request".to_string(),
                 preview: "{".to_string() + "\"temperature\": 22}",
+                artifacts: Vec::new(),
             },
             &metadata,
         );
@@ -5200,6 +5201,7 @@ mod tests {
             &thinclaw_channels_core::StatusUpdate::ToolResult {
                 name: "big_tool".to_string(),
                 preview: long_preview,
+                artifacts: Vec::new(),
             },
             &metadata,
         );

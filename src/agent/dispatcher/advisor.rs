@@ -417,6 +417,7 @@ impl Agent {
                 StatusUpdate::ToolResult {
                     name: tool_call.name.clone(),
                     preview: serialized.clone(),
+                    artifacts: Vec::new(),
                 },
                 &message.metadata,
             )
