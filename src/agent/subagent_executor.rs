@@ -26,7 +26,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+pub use thinclaw_agent::subagent::{
+    DEFAULT_MAX_CONCURRENT, DEFAULT_TIMEOUT_SECS, SUBAGENT_MAX_ITERATIONS, SubagentConfig,
+    SubagentInfo, SubagentResult, SubagentResultMessage, SubagentSpawnRequest, SubagentStatus,
+};
+use thinclaw_agent::subagent::{
+    SubagentSystemPromptSections, extract_subagent_message, filter_tools_for_memory_mode,
+    llm_metadata_from_json, normalize_subagent_progress_category, render_subagent_system_prompt,
+    should_reinject_subagent_result, subagent_learning_completion, subagent_memory_mode_label,
+    subagent_routine_actor, subagent_routine_completion, subagent_skill_mode_label,
+    subagent_status_from_result, subagent_tool_activity_message, subagent_tool_mode_label,
+    subagent_tool_warning_message, with_subagent_thread_metadata,
+};
 pub use thinclaw_types::{
     SubagentMemoryMode, SubagentProvidedContext, SubagentSkillMode, SubagentTaskPacket,
     SubagentToolMode,
@@ -39,7 +50,7 @@ use crate::agent::learning::{
     ImprovementClass, LearningEvent as RuntimeLearningEvent, LearningOrchestrator, RiskTier,
 };
 use crate::agent::routine::{
-    RunStatus, routine_state_has_runtime_advance_for_run, routine_state_with_runtime_advance,
+    routine_state_has_runtime_advance_for_run, routine_state_with_runtime_advance,
 };
 use crate::agent::routine_engine::persist_routine_runtime_update;
 use crate::channels::web::types::SseEvent;
@@ -54,16 +65,6 @@ use crate::skills::{LoadedSkill, SkillRegistry, prefilter_skills};
 use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
 use crate::workspace::Workspace;
 
-/// Maximum tool iterations for a sub-agent (less than the main agent).
-const SUBAGENT_MAX_ITERATIONS: usize = 30;
-
-/// Default sub-agent timeout.
-const DEFAULT_TIMEOUT_SECS: u64 = 300;
-
-/// Maximum number of concurrent sub-agents.
-const DEFAULT_MAX_CONCURRENT: usize = 5;
-
-const SUBAGENT_PROGRESS_PREVIEW_MAX: usize = 80;
 const SUBAGENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Shared heartbeat task for a running sub-agent.
@@ -140,177 +141,6 @@ fn touch_subagent_activity(activity_tx: &watch::Sender<Instant>) {
     let _ = activity_tx.send(Instant::now());
 }
 
-/// Configuration for the sub-agent system.
-#[derive(Debug, Clone)]
-pub struct SubagentConfig {
-    /// Maximum number of concurrent sub-agents.
-    pub max_concurrent: usize,
-    /// Default timeout for sub-agents in seconds.
-    pub default_timeout_secs: u64,
-    /// Whether sub-agents can spawn other sub-agents.
-    pub allow_nested: bool,
-    /// Maximum tool iterations per sub-agent.
-    pub max_tool_iterations: usize,
-    /// Default execution profile for delegated sub-agents.
-    pub default_tool_profile: ToolProfile,
-}
-
-impl Default for SubagentConfig {
-    fn default() -> Self {
-        Self {
-            max_concurrent: DEFAULT_MAX_CONCURRENT,
-            default_timeout_secs: DEFAULT_TIMEOUT_SECS,
-            allow_nested: false,
-            max_tool_iterations: SUBAGENT_MAX_ITERATIONS,
-            default_tool_profile: ToolProfile::ExplicitOnly,
-        }
-    }
-}
-
-fn truncate_progress_preview(value: &str, max_len: usize) -> String {
-    if value.chars().count() <= max_len {
-        return value.to_string();
-    }
-
-    let truncated: String = value.chars().take(max_len.saturating_sub(3)).collect();
-    format!("{truncated}...")
-}
-
-fn extract_subagent_message(arguments: &serde_json::Value) -> Option<String> {
-    ["message", "content"]
-        .into_iter()
-        .find_map(|key| arguments.get(key).and_then(|value| value.as_str()))
-        .map(str::trim)
-        .filter(|message| !message.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn with_subagent_thread_metadata(
-    metadata: &serde_json::Value,
-    parent_thread_id: &str,
-    channel_name: &str,
-) -> serde_json::Value {
-    let mut merged = if metadata.is_object() {
-        metadata.clone()
-    } else {
-        serde_json::json!({})
-    };
-
-    if let Some(object) = merged.as_object_mut() {
-        object.insert(
-            "channel".to_string(),
-            serde_json::Value::String(channel_name.to_string()),
-        );
-        object.insert(
-            "thread_id".to_string(),
-            serde_json::Value::String(parent_thread_id.to_string()),
-        );
-    }
-
-    merged
-}
-
-fn normalize_subagent_progress_category(message_type: &str) -> &'static str {
-    match message_type {
-        "progress" => "milestone",
-        "interim_result" => "finding",
-        "question" => "question",
-        "warning" => "warning",
-        "tool" => "activity",
-        _ => "update",
-    }
-}
-
-fn first_argument_preview(arguments: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| arguments.get(*key))
-        .and_then(|value| match value {
-            serde_json::Value::String(s) => Some(truncate_progress_preview(
-                s.trim(),
-                SUBAGENT_PROGRESS_PREVIEW_MAX,
-            )),
-            serde_json::Value::Number(n) => Some(n.to_string()),
-            serde_json::Value::Bool(b) => Some(b.to_string()),
-            _ => None,
-        })
-        .filter(|value| !value.is_empty())
-}
-
-fn subagent_tool_activity_message(tool_name: &str, arguments: &serde_json::Value) -> String {
-    let tool_label = tool_name.replace('_', " ");
-
-    if let Some(path) = first_argument_preview(arguments, &["path", "target", "file"]) {
-        return format!("Running {tool_label} on {path}");
-    }
-
-    if let Some(query) = first_argument_preview(arguments, &["query", "q", "pattern", "task"]) {
-        return format!("Running {tool_label} for {query}");
-    }
-
-    if let Some(url) = first_argument_preview(arguments, &["url"]) {
-        return format!("Running {tool_label} on {url}");
-    }
-
-    if let Some(command) = first_argument_preview(arguments, &["command", "cmd"]) {
-        return format!("Running {tool_label}: {command}");
-    }
-
-    format!("Running {tool_label}")
-}
-
-fn subagent_tool_warning_message(tool_name: &str, detail: &str) -> String {
-    format!(
-        "{tool_name} needs attention: {}",
-        truncate_progress_preview(detail.trim(), SUBAGENT_PROGRESS_PREVIEW_MAX)
-    )
-}
-
-/// A completed sub-agent result ready for injection into the main agent loop.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubagentResultMessage {
-    /// The sub-agent result.
-    pub result: SubagentResult,
-    /// Channel the parent agent was on when it spawned this sub-agent.
-    pub channel_name: String,
-    /// User ID to re-inject the result under.
-    pub parent_user_id: String,
-    /// Resolved identity so the re-injected message lands in the same session scope.
-    pub parent_identity: Option<ResolvedIdentity>,
-    /// Metadata for routing (contains thread_id etc).
-    pub channel_metadata: serde_json::Value,
-    /// Thread ID of the parent conversation.
-    pub parent_thread_id: String,
-}
-
-/// Result from a completed sub-agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubagentResult {
-    /// The sub-agent's unique ID.
-    pub agent_id: Uuid,
-    /// Display name of the sub-agent.
-    pub name: String,
-    /// The sub-agent's final response text.
-    pub response: String,
-    /// How many tool iterations were used.
-    pub iterations: usize,
-    /// Duration the sub-agent ran.
-    pub duration_ms: u64,
-    /// Whether the sub-agent completed successfully.
-    pub success: bool,
-    /// Error message if the sub-agent failed.
-    pub error: Option<String>,
-}
-
-/// Status of a running sub-agent.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum SubagentStatus {
-    Running,
-    Completed,
-    Failed(String),
-    TimedOut,
-    Cancelled,
-}
-
 /// Handle to a running sub-agent.
 pub struct SubagentHandle {
     pub id: Uuid,
@@ -322,248 +152,6 @@ pub struct SubagentHandle {
     join_handle: Option<JoinHandle<SubagentResult>>,
     /// Send messages from the parent to this sub-agent.
     pub parent_to_sub_tx: mpsc::Sender<String>,
-}
-
-/// Request to spawn a sub-agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubagentSpawnRequest {
-    /// Display name for the sub-agent.
-    pub name: String,
-    /// Task description — becomes the user message in the sub-agent's context.
-    pub task: String,
-    /// Optional custom system prompt. If None, a task-focused default is used.
-    pub system_prompt: Option<String>,
-    /// Optional model override for the sub-agent.
-    pub model: Option<String>,
-    /// Structured task packet used as the canonical bounded assignment.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_packet: Option<SubagentTaskPacket>,
-    /// How the sub-agent may source memory/context beyond the provided task packet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub memory_mode: Option<SubagentMemoryMode>,
-    /// Tool gating policy for the sub-agent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_mode: Option<SubagentToolMode>,
-    /// Skill gating policy for the sub-agent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skill_mode: Option<SubagentSkillMode>,
-    /// Optional execution profile override for the sub-agent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_profile: Option<ToolProfile>,
-    /// Optional list of allowed tool names. If None, all tools are available.
-    pub allowed_tools: Option<Vec<String>>,
-    /// Optional list of allowed skill names. If None, all skills remain visible.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_skills: Option<Vec<String>>,
-    /// Optional principal owner for workspace-scoped tool access.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub principal_id: Option<String>,
-    /// Optional actor owner for actor-scoped memory overlays.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actor_id: Option<String>,
-    /// Optional routed agent workspace UUID for memory/tool isolation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_workspace_id: Option<Uuid>,
-    /// Timeout in seconds. Falls back to config default.
-    pub timeout_secs: Option<u64>,
-    /// If true, wait for the sub-agent to complete and return its result inline.
-    /// If false, return immediately and re-inject the result on completion.
-    #[serde(default)]
-    pub wait: bool,
-}
-
-impl SubagentSpawnRequest {
-    pub fn normalize_strict(
-        &mut self,
-        inherited_tools: Option<&[String]>,
-        inherited_skills: Option<&[String]>,
-        default_tool_profile: ToolProfile,
-    ) {
-        let objective = self
-            .task_packet
-            .as_ref()
-            .map(|packet| packet.objective.trim().to_string())
-            .filter(|objective| !objective.is_empty())
-            .unwrap_or_else(|| self.task.trim().to_string());
-
-        let packet = self
-            .task_packet
-            .get_or_insert_with(SubagentTaskPacket::default);
-        packet.objective = objective.clone();
-        packet.todos.retain(|item| !item.trim().is_empty());
-        packet
-            .acceptance_criteria
-            .retain(|item| !item.trim().is_empty());
-        packet.constraints.retain(|item| !item.trim().is_empty());
-        packet
-            .provided_context
-            .retain(|item| !item.title.trim().is_empty() || !item.content.trim().is_empty());
-        if packet
-            .parent_summary
-            .as_ref()
-            .is_some_and(|value| value.trim().is_empty())
-        {
-            packet.parent_summary = None;
-        }
-
-        self.task = objective;
-        self.memory_mode = Some(self.memory_mode.clone().unwrap_or_default());
-        self.tool_mode = Some(self.tool_mode.clone().unwrap_or_default());
-        self.skill_mode = Some(self.skill_mode.clone().unwrap_or_default());
-        self.tool_profile = Some(self.tool_profile.unwrap_or(default_tool_profile));
-
-        let requested_tools = self.allowed_tools.take();
-        let normalized_tools = normalize_capability_allowlist(inherited_tools, requested_tools);
-        self.allowed_tools = if inherited_tools.is_some()
-            || self.tool_profile == Some(ToolProfile::ExplicitOnly)
-            || !normalized_tools.is_empty()
-        {
-            Some(normalized_tools)
-        } else {
-            None
-        };
-        self.allowed_skills = Some(normalize_capability_allowlist(
-            inherited_skills,
-            self.allowed_skills.take(),
-        ));
-    }
-
-    pub fn task_packet(&self) -> SubagentTaskPacket {
-        let mut packet = self.task_packet.clone().unwrap_or_default();
-        if packet.objective.trim().is_empty() {
-            packet.objective = self.task.clone();
-        }
-        packet
-    }
-}
-
-fn normalize_capability_allowlist(
-    inherited: Option<&[String]>,
-    requested: Option<Vec<String>>,
-) -> Vec<String> {
-    let mut merged = match (inherited, requested) {
-        (Some(inherited), Some(requested)) => {
-            let inherited: std::collections::HashSet<&str> =
-                inherited.iter().map(String::as_str).collect();
-            requested
-                .into_iter()
-                .filter(|name| inherited.contains(name.as_str()))
-                .collect::<Vec<_>>()
-        }
-        (Some(inherited), None) => inherited.to_vec(),
-        (None, Some(requested)) => requested,
-        (None, None) => Vec::new(),
-    };
-    merged.sort();
-    merged.dedup();
-    merged
-}
-
-fn subagent_memory_tool_names() -> &'static [&'static str] {
-    &[
-        "session_search",
-        "memory_search",
-        "memory_read",
-        "external_memory_recall",
-        "external_memory_status",
-    ]
-}
-
-fn filter_tools_for_memory_mode(
-    tools: Vec<String>,
-    memory_mode: &SubagentMemoryMode,
-) -> Vec<String> {
-    if *memory_mode == SubagentMemoryMode::GrantedToolsOnly {
-        return tools;
-    }
-
-    let blocked: std::collections::HashSet<&str> =
-        subagent_memory_tool_names().iter().copied().collect();
-    tools
-        .into_iter()
-        .filter(|tool| !blocked.contains(tool.as_str()))
-        .collect()
-}
-
-fn subagent_memory_mode_label(mode: &SubagentMemoryMode) -> &'static str {
-    match mode {
-        SubagentMemoryMode::ProvidedContextOnly => "provided_context_only",
-        SubagentMemoryMode::GrantedToolsOnly => "granted_tools_only",
-    }
-}
-
-fn subagent_tool_mode_label(mode: &SubagentToolMode) -> &'static str {
-    match mode {
-        SubagentToolMode::ExplicitOnly => "explicit_only",
-    }
-}
-
-fn subagent_skill_mode_label(mode: &SubagentSkillMode) -> &'static str {
-    match mode {
-        SubagentSkillMode::ExplicitOnly => "explicit_only",
-    }
-}
-
-fn render_task_packet(packet: &SubagentTaskPacket) -> String {
-    let mut sections = vec![format!("Objective: {}", packet.objective.trim())];
-
-    if !packet.todos.is_empty() {
-        sections.push(format!(
-            "Todos:\n{}",
-            packet
-                .todos
-                .iter()
-                .map(|item| format!("- {}", item.trim()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-
-    if !packet.acceptance_criteria.is_empty() {
-        sections.push(format!(
-            "Acceptance Criteria:\n{}",
-            packet
-                .acceptance_criteria
-                .iter()
-                .map(|item| format!("- {}", item.trim()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-
-    if !packet.constraints.is_empty() {
-        sections.push(format!(
-            "Constraints:\n{}",
-            packet
-                .constraints
-                .iter()
-                .map(|item| format!("- {}", item.trim()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-
-    if !packet.provided_context.is_empty() {
-        sections.push(format!(
-            "Provided Context:\n{}",
-            packet
-                .provided_context
-                .iter()
-                .map(|item| format!("### {}\n{}", item.title.trim(), item.content.trim()))
-                .collect::<Vec<_>>()
-                .join("\n\n")
-        ));
-    }
-
-    if let Some(summary) = packet
-        .parent_summary
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        sections.push(format!("Parent Summary:\n{}", summary.trim()));
-    }
-
-    sections.join("\n\n")
 }
 
 /// The sub-agent executor manages sub-agent lifecycle.
@@ -1018,6 +606,7 @@ impl SubagentExecutor {
                     .map(|identity| identity.actor_id.clone())
                     .or_else(|| actor_id.clone());
 
+                let completion = subagent_learning_completion(&subagent_result);
                 let event = RuntimeLearningEvent::new(
                     "subagent_executor::completion",
                     ImprovementClass::Skill,
@@ -1026,27 +615,11 @@ impl SubagentExecutor {
                     } else {
                         RiskTier::Medium
                     },
-                    if subagent_result.success {
-                        "Sub-agent completed successfully"
-                    } else {
-                        "Sub-agent failed to complete task"
-                    },
+                    completion.summary,
                 )
                 .with_target("subagent")
-                .with_confidence(if subagent_result.success { 0.82 } else { 0.38 })
-                .with_metadata(serde_json::json!({
-                    "subagent_id": subagent_result.agent_id,
-                    "subagent_name": subagent_result.name,
-                    "success": subagent_result.success,
-                    "iterations": subagent_result.iterations,
-                    "duration_ms": subagent_result.duration_ms,
-                    "error": subagent_result.error,
-                    "response_preview": truncate_progress_preview(&subagent_result.response, 240),
-                    "target_type": "subagent",
-                    "target": subagent_result.name,
-                    "correction_count": if subagent_result.success { 0 } else { 1 },
-                    "repeated_failures": if subagent_result.success { 0 } else { 1 },
-                }));
+                .with_confidence(completion.confidence)
+                .with_metadata(completion.metadata);
 
                 let persisted = event.into_persisted(
                     parent_user_id.clone(),
@@ -1085,21 +658,9 @@ impl SubagentExecutor {
                 ch_meta.get("routine_name").and_then(|v| v.as_str()),
                 ch_meta.get("routine_run_id").and_then(|v| v.as_str()),
             ) {
-                let run_status = if subagent_result.success {
-                    RunStatus::Ok
-                } else {
-                    RunStatus::Failed
-                };
-                let summary = if subagent_result.success {
-                    Some(subagent_result.response.clone())
-                } else {
-                    Some(
-                        subagent_result
-                            .error
-                            .clone()
-                            .unwrap_or_else(|| "Unknown error".to_string()),
-                    )
-                };
+                let completion = subagent_routine_completion(&subagent_result);
+                let run_status = completion.run_status;
+                let summary = Some(completion.summary.clone());
 
                 if let Some(ref store) = store_for_task
                     && let Ok(run_id) = run_id_str.parse::<Uuid>()
@@ -1122,11 +683,13 @@ impl SubagentExecutor {
                         );
                     }
 
-                    let routine_actor = parent_identity
-                        .as_ref()
-                        .map(|identity| identity.actor_id.as_str())
-                        .or(actor_id.as_deref())
-                        .unwrap_or(parent_user_id.as_str());
+                    let routine_actor = subagent_routine_actor(
+                        parent_identity
+                            .as_ref()
+                            .map(|identity| identity.actor_id.as_str()),
+                        actor_id.as_deref(),
+                        &parent_user_id,
+                    );
                     let routine = ch_meta
                         .get("routine_id")
                         .and_then(|value| value.as_str())
@@ -1143,7 +706,7 @@ impl SubagentExecutor {
                         && let Ok(Some(found)) = store
                             .get_routine_by_name_for_actor(
                                 &parent_user_id,
-                                routine_actor,
+                                &routine_actor,
                                 routine_name,
                             )
                             .await
@@ -1169,11 +732,12 @@ impl SubagentExecutor {
                         } else {
                             routine.run_count + 1
                         };
-                        let consecutive_failures = if run_status == RunStatus::Failed {
-                            routine.consecutive_failures + 1
-                        } else {
-                            0
-                        };
+                        let consecutive_failures =
+                            if run_status == crate::agent::routine::RunStatus::Failed {
+                                routine.consecutive_failures + 1
+                            } else {
+                                0
+                            };
                         let state = routine_state_with_runtime_advance(
                             &routine.state,
                             run_id,
@@ -1202,14 +766,9 @@ impl SubagentExecutor {
 
                 // Emit SSE lifecycle event
                 if let Some(ref sse_tx) = sse_tx_for_task {
-                    let event_type = if subagent_result.success {
-                        "completed"
-                    } else {
-                        "failed"
-                    };
                     let _ = sse_tx.send(SseEvent::RoutineLifecycle {
                         routine_name: routine_name.to_string(),
-                        event: event_type.to_string(),
+                        event: completion.lifecycle_event.to_string(),
                         run_id: Some(run_id_str.to_string()),
                         result_summary: summary.clone(),
                     });
@@ -1219,18 +778,7 @@ impl SubagentExecutor {
             {
                 let mut active = active_for_task.write().await;
                 if let Some(handle) = active.get_mut(&id) {
-                    handle.status = if subagent_result.success {
-                        SubagentStatus::Completed
-                    } else if subagent_result.error.as_deref() == Some("Timed out") {
-                        SubagentStatus::TimedOut
-                    } else {
-                        SubagentStatus::Failed(
-                            subagent_result
-                                .error
-                                .clone()
-                                .unwrap_or_else(|| "Unknown error".to_string()),
-                        )
-                    };
+                    handle.status = subagent_status_from_result(&subagent_result);
                     handle.join_handle = None;
                 }
             }
@@ -1238,11 +786,7 @@ impl SubagentExecutor {
             let _ = completion_tx.send(subagent_result.clone());
 
             // Inject result back to parent agent via the result channel
-            let reinject_result = ch_meta
-                .get("reinject_result")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            if !wait_for_completion && reinject_result {
+            if !wait_for_completion && should_reinject_subagent_result(&ch_meta) {
                 let _ = result_tx
                     .send(SubagentResultMessage {
                         result: subagent_result.clone(),
@@ -1364,16 +908,6 @@ impl SubagentExecutor {
             };
         }
     }
-}
-
-/// Info about a sub-agent (serializable).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubagentInfo {
-    pub id: Uuid,
-    pub name: String,
-    pub task: String,
-    pub status: SubagentStatus,
-    pub spawned_at: String,
 }
 
 /// Run a mini agentic loop for a sub-agent.
@@ -1767,9 +1301,7 @@ async fn build_subagent_system_prompt(
     safety: &SafetyLayer,
     agent_id: &str,
 ) -> String {
-    let mut sections = Vec::new();
-
-    if let Some(workspace_prompt) = build_subagent_workspace_prompt(
+    let workspace_prompt = build_subagent_workspace_prompt(
         workspace,
         channel_name,
         channel_metadata,
@@ -1779,65 +1311,27 @@ async fn build_subagent_system_prompt(
         safety,
         agent_id,
     )
-    .await
-    {
-        sections.push(workspace_prompt);
-    }
-
-    sections.push(format!("## Sub-agent Mission\n\n{base_system_prompt}"));
-    sections.push(format!(
-        "## Task Packet\n\n{}",
-        render_task_packet(task_packet)
-    ));
-    sections.push(format!(
-        "## Operating Contract\n\n\
-         - Use the supplied task packet as the primary source of truth.\n\
-         - Do not assume access to the parent agent's broader memory, transcript history, or personal context.\n\
-         - Do not browse or search for additional context unless the parent explicitly granted the necessary tools.\n\
-         - If the packet is insufficient, ask the parent for what is missing instead of widening scope.\n\
-         - Complete the bounded assignment against the acceptance criteria and todos.\n\n\
-         Memory mode: `{}`\n\
-         Tool mode: `{}`\n\
-         Tool profile: `{}`\n\
-         Skill mode: `{}`\n\
-         Explicit tool grants: {}\n\
-         Explicit skill grants: {}",
-        subagent_memory_mode_label(memory_mode),
-        subagent_tool_mode_label(tool_mode),
-        tool_profile.as_str(),
-        subagent_skill_mode_label(skill_mode),
-        allowed_tools
-            .map(|items| {
-                if items.is_empty() {
-                    "none".to_string()
-                } else {
-                    items.join(", ")
-                }
-            })
-            .unwrap_or_else(|| "none".to_string()),
-        allowed_skills
-            .map(|items| {
-                if items.is_empty() {
-                    "none".to_string()
-                } else {
-                    items.join(", ")
-                }
-            })
-            .unwrap_or_else(|| "none".to_string()),
-    ));
-
-    if let Some(skill_context) = build_subagent_skill_context(
+    .await;
+    let skill_context = build_subagent_skill_context(
         skill_registry,
         skills_config,
         &task_packet.objective,
         allowed_skills,
     )
-    .await
-    {
-        sections.push(format!("## Skills\n{skill_context}"));
-    }
+    .await;
 
-    sections.join("\n\n")
+    render_subagent_system_prompt(SubagentSystemPromptSections {
+        workspace_prompt: workspace_prompt.as_deref(),
+        base_system_prompt,
+        task_packet,
+        skill_context: skill_context.as_deref(),
+        allowed_tools,
+        allowed_skills,
+        memory_mode,
+        tool_mode,
+        skill_mode,
+        tool_profile_label: tool_profile.as_str(),
+    })
 }
 
 async fn build_subagent_workspace_prompt(
@@ -1976,28 +1470,6 @@ async fn build_subagent_skill_context(
     } else {
         Some(sections.join("\n"))
     }
-}
-
-fn llm_metadata_from_json(value: &serde_json::Value) -> HashMap<String, String> {
-    value
-        .as_object()
-        .map(|object| {
-            object
-                .iter()
-                .filter_map(|(key, value)| match value {
-                    serde_json::Value::Null => None,
-                    serde_json::Value::String(text) => Some((key.clone(), text.clone())),
-                    serde_json::Value::Bool(boolean) => Some((key.clone(), boolean.to_string())),
-                    serde_json::Value::Number(number) => Some((key.clone(), number.to_string())),
-                    serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                        serde_json::to_string(value)
-                            .ok()
-                            .map(|json| (key.clone(), json))
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -2363,6 +1835,7 @@ mod tests {
             smart_approval_mode: "off".to_string(),
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
+            external_scanner_require_verified: false,
         }));
         let tools = Arc::new(ToolRegistry::new());
         let channels = Arc::new(ChannelManager::new());

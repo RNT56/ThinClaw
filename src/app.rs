@@ -33,11 +33,33 @@ use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingProvider, Workspace};
 
 pub use thinclaw_app::{
-    AppBuilderFlags, QuietStartupSpinner, RuntimeEntryMode, RuntimeExecRegistrationMode,
-    block_on_async_main, desktop_autonomy_headless_blocker, desktop_autonomy_headless_blocker_for,
+    AcpRuntimeConfigInput, AcpRuntimeConfigPlan, AppBuilderFlags, LocalRuntimeChannel,
+    MainToolProfilePlan, NativeChannelActivationInput, NativeChannelActivationPlan,
+    PeriodicPersistencePlan, QuietStartupSpinner, RuntimeCommandIntent, RuntimeEntryMode,
+    RuntimeEntrypointPlan, RuntimeEnvBootstrapPlan, RuntimeExecRegistrationMode,
+    RuntimeShutdownAction, RuntimeShutdownPlan, RuntimeWorkspaceMode, ToolRuntimeAssemblyInput,
+    ToolRuntimeAssemblyPlan, apply_model_override, block_on_async_main,
+    desktop_autonomy_headless_blocker, desktop_autonomy_headless_blocker_for,
     execute_code_registration_mode, init_cli_tracing, process_registration_mode,
-    relaunch_current_process, restart_is_managed_by_service, should_show_quiet_startup_spinner,
+    relaunch_current_process, restart_is_managed_by_service, run_async_entrypoint,
+    should_show_quiet_startup_spinner,
 };
+
+pub fn apply_acp_runtime_config(config: &mut Config, plan: AcpRuntimeConfigPlan) {
+    config.channels.acp_enabled = plan.acp_channel_enabled;
+    config.agent.main_tool_profile = match plan.main_tool_profile {
+        MainToolProfilePlan::Acp => crate::tools::ToolProfile::Acp,
+    };
+    if let Some(workspace_mode) = plan.workspace_mode {
+        config.agent.workspace_mode = workspace_mode.as_config_value().to_string();
+    }
+    if let Some(workspace_root) = plan.workspace_root {
+        config.agent.workspace_root = Some(workspace_root);
+    }
+    if let Some(model) = plan.model_override {
+        apply_model_override(&mut config.llm, model);
+    }
+}
 
 /// Fully initialized application components, ready for channel wiring
 /// and agent construction.
@@ -178,6 +200,33 @@ impl AppBuilder {
     /// Inspect the initialized secrets store while using the builder incrementally.
     pub fn secrets_store(&self) -> Option<&Arc<dyn SecretsStore + Send + Sync>> {
         self.secrets_store.as_ref()
+    }
+
+    fn default_sandbox_workspace_dir() -> std::path::PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("Library")
+            .join("Application Support")
+            .join("OpenClaw")
+            .join("agent_workspace")
+    }
+
+    fn default_project_workspace_dir() -> std::path::PathBuf {
+        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
+    fn tool_runtime_assembly_plan(&self) -> ToolRuntimeAssemblyPlan {
+        ToolRuntimeAssemblyPlan::from_input(ToolRuntimeAssemblyInput {
+            workspace_mode: RuntimeWorkspaceMode::from_config_value(
+                &self.config.agent.workspace_mode,
+            ),
+            workspace_root: self.config.agent.workspace_root.clone(),
+            sandbox_enabled: self.config.sandbox.enabled,
+            allow_local_tools: self.config.agent.allow_local_tools,
+            builder_enabled: self.config.builder.enabled,
+            default_sandbox_workspace: Self::default_sandbox_workspace_dir(),
+            default_project_workspace: Self::default_project_workspace_dir(),
+        })
     }
 
     /// Phase 1: Initialize database backend.
@@ -511,53 +560,33 @@ impl AppBuilder {
         };
 
         // Register builder tool if enabled
-        if self.config.builder.enabled
-            && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled)
-        {
-            // Resolve workspace directories — same logic as the non-builder path below.
-            // The builder must respect sandboxed/project/unrestricted just like raw dev tools.
-            let mode = self.config.agent.workspace_mode.as_str();
-            let root = self.config.agent.workspace_root.clone();
-
-            let (builder_base_dir, builder_working_dir) = match mode {
-                "sandboxed" => {
-                    let dir = root.unwrap_or_else(|| {
-                        dirs::home_dir()
-                            .unwrap_or_else(|| std::path::PathBuf::from("."))
-                            .join("Library")
-                            .join("Application Support")
-                            .join("OpenClaw")
-                            .join("agent_workspace")
-                    });
-                    let _ = std::fs::create_dir_all(&dir);
-                    tracing::info!("[app] Builder workspace: sandboxed → {}", dir.display());
-                    (Some(dir.clone()), Some(dir))
-                }
-                "project" => {
-                    let dir = root.unwrap_or_else(|| {
-                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
-                    });
-                    let _ = std::fs::create_dir_all(&dir);
-                    tracing::info!("[app] Builder workspace: project → {}", dir.display());
-                    (None, Some(dir))
-                }
-                _ => {
-                    // Unrestricted: full filesystem access — no restrictions at all.
-                    // Intended for remote/server deployments or power users.
-                    tracing::info!(
-                        "[app] Builder workspace: unrestricted (full filesystem access)"
-                    );
-                    (None, None)
-                }
-            };
+        let tool_plan = self.tool_runtime_assembly_plan();
+        if let Some(builder_workspace) = tool_plan.builder_workspace.clone() {
+            if let Some(dir) = builder_workspace.create_dir.as_ref() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            tracing::info!(
+                workspace_mode = tool_plan.workspace_mode.as_config_value(),
+                base_dir = builder_workspace
+                    .base_dir
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                working_dir = builder_workspace
+                    .working_dir
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                "[app] Builder workspace resolved"
+            );
 
             tools
                 .register_builder_tool(
                     llm.clone(),
                     safety.clone(),
                     Some(self.config.builder.to_builder_config()),
-                    builder_base_dir,
-                    builder_working_dir,
+                    builder_workspace.base_dir,
+                    builder_workspace.working_dir,
                     (self.config.agent.workspace_mode == "sandboxed"
                         && self.config.sandbox.enabled)
                         .then(|| {
@@ -592,11 +621,13 @@ impl AppBuilder {
         anyhow::Error,
     > {
         use crate::tools::mcp::{McpClient, config::load_mcp_servers_from_db, is_authenticated};
+        #[cfg(feature = "wasm-runtime")]
         use crate::tools::wasm::{WasmToolLoader, load_dev_tools};
 
         let mcp_session_manager = Arc::new(McpSessionManager::new());
 
         // Create WASM tool runtime
+        #[cfg(feature = "wasm-runtime")]
         let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> =
             if self.config.wasm.enabled && self.config.wasm.tools_dir.exists() {
                 match WasmToolRuntime::new(self.config.wasm.to_runtime_config()) {
@@ -609,6 +640,8 @@ impl AppBuilder {
             } else {
                 None
             };
+        #[cfg(not(feature = "wasm-runtime"))]
+        let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> = None;
 
         let wasm_tool_invoker = Arc::new(crate::tools::execution::HostMediatedToolInvoker::new(
             Arc::clone(tools),
@@ -618,6 +651,7 @@ impl AppBuilder {
         ));
 
         // Load WASM tools and MCP servers concurrently
+        #[cfg(feature = "wasm-runtime")]
         let wasm_tools_future = {
             let wasm_tool_runtime = wasm_tool_runtime.clone();
             let secrets_store = self.secrets_store.clone();
@@ -675,6 +709,8 @@ impl AppBuilder {
                 dev_loaded_tool_names
             }
         };
+        #[cfg(not(feature = "wasm-runtime"))]
+        let wasm_tools_future = async { Vec::<String>::new() };
 
         let mcp_servers_future = {
             let secrets_store = self.secrets_store.clone();
@@ -718,7 +754,8 @@ impl AppBuilder {
                             let config_store = crate::tools::mcp::config::McpConfigStore::new(
                                 db.clone(),
                                 "default",
-                            );
+                            )
+                            .into_inner();
 
                             join_set.spawn(async move {
                                 let server_name = server.name.clone();
@@ -874,67 +911,41 @@ impl AppBuilder {
 
         // register_builder_tool() now registers dev tools with the correct workspace dirs
         // internally (sandbox/project/unrestricted). Only register here when builder is off.
-        let builder_registered_dev_tools = self.config.builder.enabled
-            && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled);
-        if self.config.agent.allow_local_tools && !builder_registered_dev_tools {
-            // Resolve workspace mode → (base_dir, working_dir) for tool registration
-            let mode = self.config.agent.workspace_mode.as_str();
-            let root = self.config.agent.workspace_root.clone();
-
-            match mode {
-                "sandboxed" => {
-                    // Full sandbox: file tools restricted + shell cwd set
-                    let dir = root.unwrap_or_else(|| {
-                        // Resolve from TAURI app data dir via env — set during bridge init
-                        dirs::home_dir()
-                            .unwrap_or_else(|| std::path::PathBuf::from("."))
-                            .join("Library")
-                            .join("Application Support")
-                            .join("OpenClaw")
-                            .join("agent_workspace")
-                    });
-                    // Ensure directory exists
-                    let _ = std::fs::create_dir_all(&dir);
-                    tracing::info!("[app] Workspace mode: sandboxed → {}", dir.display());
-                    tools.register_dev_tools_with_runtime(
-                        Some(dir.clone()),
-                        Some(dir),
-                        Some(&self.config.safety),
-                        Some(Arc::new(crate::sandbox::SandboxManager::new(
-                            self.config.sandbox.to_sandbox_config(),
-                        ))),
-                        Some(crate::sandbox::SandboxPolicy::WorkspaceWrite),
-                    );
-                }
-                "project" => {
-                    // Project mode: working dir set, no file sandbox
-                    let dir = root.unwrap_or_else(|| {
-                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
-                    });
-                    let _ = std::fs::create_dir_all(&dir);
-                    tracing::info!("[app] Workspace mode: project → {}", dir.display());
-                    tools.register_dev_tools_with_runtime(
-                        None,
-                        Some(dir),
-                        Some(&self.config.safety),
-                        None,
-                        None,
-                    );
-                }
-                _ => {
-                    // Unrestricted: full filesystem access — no base_dir, no working_dir forced.
-                    // The agent can write to any absolute path the user/LLM specifies.
-                    // (This mode is intended for remote/server deployments or power users.)
-                    tracing::info!("[app] Workspace mode: unrestricted (full filesystem access)");
-                    tools.register_dev_tools_with_runtime(
-                        None,
-                        None,
-                        Some(&self.config.safety),
-                        None,
-                        None,
-                    );
-                }
+        let tool_plan = self.tool_runtime_assembly_plan();
+        if let Some(dev_workspace) = tool_plan.dev_tools_workspace.clone() {
+            if let Some(dir) = dev_workspace.create_dir.as_ref() {
+                let _ = std::fs::create_dir_all(dir);
             }
+            tracing::info!(
+                workspace_mode = tool_plan.workspace_mode.as_config_value(),
+                base_dir = dev_workspace
+                    .base_dir
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                working_dir = dev_workspace
+                    .working_dir
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "none".to_string()),
+                "[app] Development tool workspace resolved"
+            );
+            let sandbox =
+                matches!(tool_plan.workspace_mode, RuntimeWorkspaceMode::Sandboxed).then(|| {
+                    Arc::new(crate::sandbox::SandboxManager::new(
+                        self.config.sandbox.to_sandbox_config(),
+                    ))
+                });
+            let sandbox_policy = sandbox
+                .as_ref()
+                .map(|_| crate::sandbox::SandboxPolicy::WorkspaceWrite);
+            tools.register_dev_tools_with_runtime(
+                dev_workspace.base_dir,
+                dev_workspace.working_dir,
+                Some(&self.config.safety),
+                sandbox,
+                sandbox_policy,
+            );
         }
 
         // Register host device tools only after explicit user opt-in.
@@ -1009,106 +1020,68 @@ impl AppBuilder {
         // Hermes-parity runtime tools.
         tools.register_todo_tool(crate::tools::builtin::new_shared_todo_store());
 
-        if self.config.agent.allow_local_tools {
+        let tool_plan = self.tool_runtime_assembly_plan();
+        if tool_plan.local_tools_enabled {
             let process_registry: crate::tools::builtin::SharedProcessRegistry =
                 Arc::new(tokio::sync::RwLock::new(Default::default()));
-            let mode = self.config.agent.workspace_mode.as_str();
-            let root = self.config.agent.workspace_root.clone();
             let sandbox_backend = Arc::new(crate::sandbox::SandboxManager::new(
                 self.config.sandbox.to_sandbox_config(),
             ));
 
-            match process_registration_mode(mode) {
+            match tool_plan.process_registration {
                 RuntimeExecRegistrationMode::LocalHost => {
                     crate::tools::builtin::start_reaper(Arc::clone(&process_registry));
                     tools.register_process_tool(process_registry);
                 }
                 RuntimeExecRegistrationMode::Disabled => {
                     tracing::info!(
-                        workspace_mode = mode,
+                        workspace_mode = tool_plan.workspace_mode.as_config_value(),
                         "Background process tool disabled in restricted workspace mode"
                     );
                 }
                 RuntimeExecRegistrationMode::DockerSandbox => {
                     tracing::warn!(
-                        workspace_mode = mode,
+                        workspace_mode = tool_plan.workspace_mode.as_config_value(),
                         "Background process tool is unavailable for Docker sandbox mode"
                     );
                 }
             }
 
-            match mode {
-                "sandboxed" => {
-                    let dir = root.unwrap_or_else(|| {
-                        dirs::home_dir()
-                            .unwrap_or_else(|| std::path::PathBuf::from("."))
-                            .join("Library")
-                            .join("Application Support")
-                            .join("OpenClaw")
-                            .join("agent_workspace")
-                    });
-                    let _ = std::fs::create_dir_all(&dir);
-                    match execute_code_registration_mode(mode, self.config.sandbox.enabled) {
-                        RuntimeExecRegistrationMode::DockerSandbox => {
-                            let backend =
-                                crate::tools::execution_backend::DockerSandboxExecutionBackend::from_sandbox(
-                                    Arc::clone(&sandbox_backend),
-                                    crate::sandbox::SandboxPolicy::WorkspaceWrite,
-                                );
-                            tools.register_execute_code_tool_with_backend(
-                                Some(dir.clone()),
-                                false,
-                                Some(backend),
-                            );
-                        }
-                        RuntimeExecRegistrationMode::Disabled => {
-                            tracing::warn!(
-                                workspace_mode = mode,
-                                sandbox_enabled = self.config.sandbox.enabled,
-                                "execute_code disabled because no isolated execution backend is available"
-                            );
-                        }
-                        RuntimeExecRegistrationMode::LocalHost => {
-                            tools.register_execute_code_tool(Some(dir.clone()), false);
-                        }
-                    }
-                    tools.register_search_files_tool(Some(dir));
+            let workspace_dir = tool_plan
+                .search_files_workspace
+                .as_ref()
+                .and_then(|plan| plan.working_dir.clone().or_else(|| plan.base_dir.clone()));
+            if let Some(plan) = tool_plan.search_files_workspace.as_ref()
+                && let Some(dir) = plan.create_dir.as_ref()
+            {
+                let _ = std::fs::create_dir_all(dir);
+            }
+
+            match tool_plan.execute_code_registration {
+                RuntimeExecRegistrationMode::DockerSandbox => {
+                    let backend =
+                        crate::tools::execution_backend::DockerSandboxExecutionBackend::from_sandbox(
+                            Arc::clone(&sandbox_backend),
+                            crate::sandbox::SandboxPolicy::WorkspaceWrite,
+                        );
+                    tools.register_execute_code_tool_with_backend(
+                        workspace_dir.clone(),
+                        false,
+                        Some(backend),
+                    );
                 }
-                "project" => {
-                    let dir = root.unwrap_or_else(|| {
-                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
-                    });
-                    let _ = std::fs::create_dir_all(&dir);
-                    match execute_code_registration_mode(mode, self.config.sandbox.enabled) {
-                        RuntimeExecRegistrationMode::Disabled => {
-                            tracing::info!(
-                                workspace_mode = mode,
-                                "execute_code disabled in project mode because it has no hard execution isolation there"
-                            );
-                        }
-                        RuntimeExecRegistrationMode::DockerSandbox => {
-                            let backend =
-                                crate::tools::execution_backend::DockerSandboxExecutionBackend::from_sandbox(
-                                    Arc::clone(&sandbox_backend),
-                                    crate::sandbox::SandboxPolicy::WorkspaceWrite,
-                                );
-                            tools.register_execute_code_tool_with_backend(
-                                Some(dir.clone()),
-                                false,
-                                Some(backend),
-                            );
-                        }
-                        RuntimeExecRegistrationMode::LocalHost => {
-                            tools.register_execute_code_tool(Some(dir.clone()), false);
-                        }
-                    }
-                    tools.register_search_files_tool(Some(dir));
+                RuntimeExecRegistrationMode::Disabled => {
+                    tracing::info!(
+                        workspace_mode = tool_plan.workspace_mode.as_config_value(),
+                        sandbox_enabled = self.config.sandbox.enabled,
+                        "execute_code disabled by runtime assembly policy"
+                    );
                 }
-                _ => {
-                    tools.register_execute_code_tool(None, false);
-                    tools.register_search_files_tool(None);
+                RuntimeExecRegistrationMode::LocalHost => {
+                    tools.register_execute_code_tool(workspace_dir.clone(), false);
                 }
             }
+            tools.register_search_files_tool(workspace_dir);
         }
 
         // Register TTS tool (always available — uses OpenAI TTS API)
@@ -1352,33 +1325,15 @@ impl AppBuilder {
                 }
             }
         }
-        let (user_tool_base_dir, user_tool_working_dir) =
-            match self.config.agent.workspace_mode.as_str() {
-                "sandboxed" => {
-                    let dir = self.config.agent.workspace_root.clone().unwrap_or_else(|| {
-                        dirs::home_dir()
-                            .unwrap_or_else(|| std::path::PathBuf::from("."))
-                            .join("Library")
-                            .join("Application Support")
-                            .join("OpenClaw")
-                            .join("agent_workspace")
-                    });
-                    let _ = std::fs::create_dir_all(&dir);
-                    (Some(dir.clone()), Some(dir))
-                }
-                "project" => (
-                    None,
-                    Some(self.config.agent.workspace_root.clone().unwrap_or_else(|| {
-                        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
-                    })),
-                ),
-                _ => (None, None),
-            };
+        let user_tool_workspace = self.tool_runtime_assembly_plan().user_tools_workspace;
+        if let Some(dir) = user_tool_workspace.create_dir.as_ref() {
+            let _ = std::fs::create_dir_all(dir);
+        }
         let user_tool_results = tools
             .auto_discover_user_tools(
                 &user_tools_dir,
-                user_tool_base_dir,
-                user_tool_working_dir,
+                user_tool_workspace.base_dir,
+                user_tool_workspace.working_dir,
                 Some(&self.config.safety),
                 wasm_tool_runtime.clone(),
                 self.secrets_store.clone(),

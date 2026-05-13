@@ -14,7 +14,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get},
 };
+use base64::{Engine as _, engine::general_purpose};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
 use tokio::sync::RwLock;
 
 use crate::wasm::schema::WebhookSecretValidation;
@@ -256,6 +259,112 @@ fn verify_signature(secret: &[u8], payload: &[u8], signature: &str) -> bool {
     let result = mac.finalize();
     let expected = format!("sha256={}", hex::encode(result.into_bytes()));
     expected.as_bytes().ct_eq(signature.as_bytes()).into()
+}
+
+fn verify_base64_signature(secret: &[u8], payload: &[u8], signature: &str) -> bool {
+    use base64::{Engine as _, engine::general_purpose};
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use subtle::ConstantTimeEq;
+
+    type HmacSha256 = Hmac<Sha256>;
+
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC-SHA256 accepts any key length");
+    mac.update(payload);
+    let result = mac.finalize();
+    let expected = general_purpose::STANDARD.encode(result.into_bytes());
+    expected.as_bytes().ct_eq(signature.as_bytes()).into()
+}
+
+fn verify_twitch_eventsub_signature(
+    secret: &[u8],
+    headers: &axum::http::HeaderMap,
+    payload: &[u8],
+    signature: &str,
+) -> bool {
+    let Some(message_id) = headers
+        .get("Twitch-Eventsub-Message-Id")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(timestamp) = headers
+        .get("Twitch-Eventsub-Message-Timestamp")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let mut signed = Vec::with_capacity(message_id.len() + timestamp.len() + payload.len());
+    signed.extend_from_slice(message_id.as_bytes());
+    signed.extend_from_slice(timestamp.as_bytes());
+    signed.extend_from_slice(payload);
+    verify_signature(secret, &signed, signature)
+}
+
+fn verify_twilio_request_signature(
+    auth_token: &[u8],
+    headers: &HeaderMap,
+    full_path: &str,
+    body: &[u8],
+    signature: &str,
+) -> bool {
+    use subtle::ConstantTimeEq;
+
+    let canonical_url = twilio_canonical_url(headers, full_path);
+    let mut signed = canonical_url.into_bytes();
+    for (key, value) in sorted_form_fields(body) {
+        signed.extend_from_slice(key.as_bytes());
+        signed.extend_from_slice(value.as_bytes());
+    }
+
+    let mut mac = Hmac::<Sha1>::new_from_slice(auth_token).expect("HMAC accepts any key length");
+    mac.update(&signed);
+    let expected = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+    expected.as_bytes().ct_eq(signature.as_bytes()).into()
+}
+
+fn twilio_canonical_url(headers: &HeaderMap, full_path: &str) -> String {
+    if let Some(url) = header_value(headers, "x-original-url")
+        .or_else(|| header_value(headers, "x-forwarded-url"))
+        .or_else(|| header_value(headers, "x-thinclaw-public-url"))
+    {
+        return url;
+    }
+
+    let proto = header_value(headers, "x-forwarded-proto").unwrap_or_else(|| "https".to_string());
+    let host = header_value(headers, "x-forwarded-host")
+        .or_else(|| header_value(headers, "host"))
+        .unwrap_or_else(|| "localhost".to_string());
+    format!("{proto}://{host}{full_path}")
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+}
+
+fn sorted_form_fields(body: &[u8]) -> Vec<(String, String)> {
+    let body = String::from_utf8_lossy(body);
+    let mut fields = Vec::new();
+    for part in body.split('&') {
+        if part.is_empty() {
+            continue;
+        }
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        fields.push((decode_form_component(key), decode_form_component(value)));
+    }
+    fields.sort_by(|left, right| left.0.cmp(&right.0));
+    fields
+}
+
+fn decode_form_component(value: &str) -> String {
+    let normalized = value.replace('+', " ");
+    match urlencoding::decode(&normalized) {
+        Ok(decoded) => decoded.into_owned(),
+        Err(_) => normalized,
+    }
 }
 
 fn json_error_response(status: StatusCode, value: serde_json::Value) -> Response {
@@ -515,6 +624,24 @@ async fn webhook_handler(
                 WebhookSecretValidation::HmacSha256Body => {
                     verify_signature(expected.as_bytes(), &body, &provided)
                 }
+                WebhookSecretValidation::HmacSha256Base64Body => {
+                    verify_base64_signature(expected.as_bytes(), &body, &provided)
+                }
+                WebhookSecretValidation::TwitchEventsubHmacSha256 => {
+                    verify_twitch_eventsub_signature(
+                        expected.as_bytes(),
+                        &headers,
+                        &body,
+                        &provided,
+                    )
+                }
+                WebhookSecretValidation::TwilioRequestSignature => verify_twilio_request_signature(
+                    expected.as_bytes(),
+                    &headers,
+                    &full_path,
+                    &body,
+                    &provided,
+                ),
             };
 
             if !valid {
@@ -528,7 +655,12 @@ async fn webhook_handler(
                     serde_json::json!({
                         "error": match auth.secret_validation {
                             WebhookSecretValidation::Equals => "Invalid webhook secret",
-                            WebhookSecretValidation::HmacSha256Body => "Invalid webhook signature",
+                            WebhookSecretValidation::HmacSha256Body
+                            | WebhookSecretValidation::HmacSha256Base64Body
+                            | WebhookSecretValidation::TwitchEventsubHmacSha256
+                            | WebhookSecretValidation::TwilioRequestSignature => {
+                                "Invalid webhook signature"
+                            }
                         }
                     }),
                 );
@@ -921,6 +1053,189 @@ mod tests {
                     .method("POST")
                     .uri("/webhook/whatsapp")
                     .header("X-Hub-Signature-256", "sha256=deadbeef")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_post_base64_hmac_validation() {
+        use base64::{Engine as _, engine::general_purpose};
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("line");
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "line".to_string(),
+            path: "/webhook/line".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: true,
+        }];
+
+        router
+            .register(
+                channel,
+                endpoints,
+                RegisteredWebhookAuth {
+                    secret_header: Some("X-Line-Signature".to_string()),
+                    secret_validation: WebhookSecretValidation::HmacSha256Base64Body,
+                    signature_secret: Some("line-secret".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let app = create_wasm_channel_router(Arc::clone(&router));
+        let body = Bytes::from_static(br#"{"events":[]}"#);
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(b"line-secret").expect("HMAC accepts any key length");
+        mac.update(&body);
+        let signature = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/line")
+                    .header("X-Line-Signature", signature)
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        let invalid = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/line")
+                    .header("X-Line-Signature", "not-valid")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_twitch_eventsub_signature_validation() {
+        let router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("twitch");
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "twitch".to_string(),
+            path: "/webhook/twitch".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: true,
+        }];
+
+        router
+            .register(
+                channel,
+                endpoints,
+                RegisteredWebhookAuth {
+                    secret_header: Some("Twitch-Eventsub-Message-Signature".to_string()),
+                    secret_validation: WebhookSecretValidation::TwitchEventsubHmacSha256,
+                    signature_secret: Some("twitch-secret".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let app = create_wasm_channel_router(Arc::clone(&router));
+        let body = Bytes::from_static(br#"{"challenge":"ok"}"#);
+        let message_id = "msg-1";
+        let timestamp = "2026-05-13T10:00:00Z";
+        let mut signed = Vec::new();
+        signed.extend_from_slice(message_id.as_bytes());
+        signed.extend_from_slice(timestamp.as_bytes());
+        signed.extend_from_slice(&body);
+        let signature = sign_payload(b"twitch-secret", &signed);
+
+        let ok = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/twitch")
+                    .header("Twitch-Eventsub-Message-Id", message_id)
+                    .header("Twitch-Eventsub-Message-Timestamp", timestamp)
+                    .header("Twitch-Eventsub-Message-Signature", signature)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_twilio_request_signature_validation() {
+        use base64::{Engine as _, engine::general_purpose};
+        use hmac::{Hmac, Mac};
+        use sha1::Sha1;
+
+        let router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("twilio_sms");
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "twilio_sms".to_string(),
+            path: "/webhook/twilio_sms".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: true,
+        }];
+
+        router
+            .register(
+                channel,
+                endpoints,
+                RegisteredWebhookAuth {
+                    secret_header: Some("X-Twilio-Signature".to_string()),
+                    secret_validation: WebhookSecretValidation::TwilioRequestSignature,
+                    signature_secret: Some("twilio-token".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let app = create_wasm_channel_router(Arc::clone(&router));
+        let body = Bytes::from_static(b"Body=hello+there&From=%2B15551234567");
+        let mut signed = b"https://agent.example.com/webhook/twilio_sms".to_vec();
+        signed.extend_from_slice(b"Bodyhello there");
+        signed.extend_from_slice(b"From+15551234567");
+        let mut mac =
+            Hmac::<Sha1>::new_from_slice(b"twilio-token").expect("HMAC accepts any key length");
+        mac.update(&signed);
+        let signature = general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+
+        let ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/twilio_sms")
+                    .header("Host", "agent.example.com")
+                    .header("X-Forwarded-Proto", "https")
+                    .header("X-Twilio-Signature", signature)
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        let invalid = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/twilio_sms")
+                    .header("Host", "agent.example.com")
+                    .header("X-Forwarded-Proto", "https")
+                    .header("X-Twilio-Signature", "not-valid")
                     .body(Body::from(body))
                     .unwrap(),
             )

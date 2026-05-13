@@ -6,8 +6,7 @@
 //! Do not commit compiled WASM binaries — they are a supply chain risk.
 //!
 //! ## Default behavior
-//! Builds telegram.wasm from channels-src/telegram and embeds the registry
-//! catalog JSON into the binary via `include_str!`.
+//! Embeds the registry catalog JSON into the binary via `include_str!`.
 //!
 //! ## `bundled-wasm` feature
 //! When compiled with `--features bundled-wasm`, **all** WASM extensions
@@ -36,13 +35,11 @@ fn main() {
     // Build ALL WASM extensions and generate include_bytes! entries.
     if env::var("CARGO_FEATURE_BUNDLED_WASM").is_ok() {
         build_all_wasm_extensions(&root);
-    } else {
-        // Default: only build Telegram channel WASM
-        build_telegram_channel(&root);
     }
 }
 
 /// Build only the Telegram channel WASM (default build behavior).
+#[allow(dead_code)]
 fn build_telegram_channel(root: &Path) {
     let channel_dir = root.join("channels-src/telegram");
     let wasm_out = channel_dir.join("telegram.wasm");

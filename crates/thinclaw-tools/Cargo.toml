@@ -10,46 +10,66 @@ anyhow = "1"
 async-trait = "0.1"
 base64 = "0.22"
 blake3 = "1"
+bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
+chromiumoxide = { version = "0.9.1", optional = true }
 deadpool-postgres = { version = "0.14", optional = true }
+dirs = "6"
+ed25519-dalek = { version = "2", features = ["std"] }
 futures = "0.3"
+flate2 = "1"
 hex = "0.4"
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication"] }
+nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }
 rand = "0.8"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
+rust_decimal_macros = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 sysinfo = "0.38.2"
 thinclaw-llm-core = { version = "0.1.0", path = "../thinclaw-llm-core" }
 thinclaw-config = { version = "0.1.0", path = "../thinclaw-config" }
+thinclaw-media = { version = "0.1.0", path = "../thinclaw-media" }
+thinclaw-llm = { version = "0.1.0", path = "../thinclaw-llm" }
+thinclaw-channels = { version = "0.1.0", path = "../thinclaw-channels", optional = true }
 thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
+thinclaw-safety = { version = "0.1.0", path = "../thinclaw-safety" }
 thinclaw-secrets = { version = "0.1.0", path = "../thinclaw-secrets", default-features = false }
 thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
+thinclaw-workspace = { version = "0.1.0", path = "../thinclaw-workspace" }
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
+tempfile = "3"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"], optional = true }
+toml = "0.8"
 tracing = "0.1"
 unicode-normalization = "0.1"
 url = "2"
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
-wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"] }
-wasmtime-wasi = "36"
-wasmparser = "0.220"
+wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
+wasmtime-wasi = { version = "36", optional = true }
+wasmparser = { version = "0.220", optional = true }
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "4"
+
 [dev-dependencies]
 secrecy = "0.10"
-tempfile = "3"
 
 [features]
 default = []
 postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 libsql = ["dep:libsql"]
+wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmparser"]
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+document-extraction = ["thinclaw-media/document-extraction"]
+browser = ["dep:chromiumoxide"]
+nostr = ["dep:nostr-sdk", "dep:thinclaw-channels", "thinclaw-channels/nostr"]

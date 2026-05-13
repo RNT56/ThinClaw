@@ -80,21 +80,32 @@ pub use channel::{
     Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
     StreamMode,
 };
-pub use discord::DiscordChannel;
+pub use discord::{DiscordChannel, DiscordConfig};
 pub use gmail::GmailChannel;
 pub use health_monitor::{ChannelHealthMonitor, ChannelHealthStatus, HealthMonitorConfig};
 pub use http::HttpChannel;
 #[cfg(target_os = "macos")]
 pub use imessage::{IMessageChannel, IMessageConfig, IMessageDiagnostic};
 pub use manager::{
-    ChannelDescriptor, ChannelManager, IncomingEvent, SlashCommand, legacy_session_key_aliases,
-    mint_session_key, normalize_incoming_event, parse_slash_command,
+    ChannelDescriptor, ChannelManager, IncomingEvent, NativeLifecycleChannelConfig, SlashCommand,
+    legacy_session_key_aliases, mint_session_key, native_lifecycle_channel_descriptors,
+    normalize_incoming_event, parse_slash_command,
 };
 #[cfg(feature = "nostr")]
-pub use nostr::NostrChannel;
+pub use nostr::{NostrChannel, runtime_config_from_resolved, runtime_config_from_resolved_ref};
+#[cfg(feature = "nostr")]
+pub use nostr_runtime::NostrConfig;
 pub use repl::ReplChannel;
 pub use self_message::{SelfMessageConfig, TrustedMetadata};
-pub use signal::SignalChannel;
+pub use signal::{SignalChannel, SignalConfig};
+pub use thinclaw_channels::{
+    ApnsNativeClient, ApnsNativeConfig, BrowserPushNativeClient, BrowserPushNativeConfig,
+    MatrixNativeClient, MatrixNativeConfig, NativeEndpointRegistry, NativeHttpClient,
+    NativeHttpRequest, NativeHttpResponse, NativeLifecycleChannel, NativeLifecycleClient,
+    NativeLifecycleEvent, NativeLifecycleKind, NativeLifecycleWebhookConfig, NativeOutboundMessage,
+    ReqwestNativeHttpClient, VoiceCallNativeClient, VoiceCallNativeConfig,
+    native_lifecycle_webhook_routes,
+};
 pub use tui_channel::TuiChannel;
 pub use web::GatewayChannel;
 pub use webhook_server::{WebhookServer, WebhookServerConfig};

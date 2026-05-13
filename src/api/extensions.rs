@@ -18,52 +18,57 @@ pub async fn list_extensions(ext_mgr: &Arc<ExtensionManager>) -> ApiResult<Vec<E
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let pairing_store = crate::pairing::PairingStore::new();
-    let extensions = installed
-        .into_iter()
-        .map(|ext| {
-            let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
-                Some(if ext.activation_error.is_some() {
-                    "failed".to_string()
-                } else if !ext.authenticated {
-                    "installed".to_string()
-                } else if ext.active && ext.name == "telegram" {
-                    let has_paired = pairing_store
-                        .read_allow_from(&ext.name)
-                        .map(|list| !list.is_empty())
-                        .unwrap_or(false);
-                    if has_paired {
-                        "active".to_string()
-                    } else {
-                        "pairing".to_string()
-                    }
+    let mut extensions = Vec::with_capacity(installed.len());
+    for ext in installed {
+        let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+            Some(if ext.activation_error.is_some() {
+                "failed".to_string()
+            } else if !ext.authenticated {
+                "installed".to_string()
+            } else if ext.active && ext.name == "telegram" {
+                let has_paired = pairing_store
+                    .read_allow_from(&ext.name)
+                    .map(|list| !list.is_empty())
+                    .unwrap_or(false);
+                if has_paired {
+                    "active".to_string()
                 } else {
-                    "configured".to_string()
-                })
+                    "pairing".to_string()
+                }
             } else {
-                None
-            };
-            let reconnect_supported =
-                ext.kind == crate::extensions::ExtensionKind::WasmChannel && ext.name == "telegram";
-            ExtensionInfo {
-                name: ext.name,
-                kind: ext.kind.to_string(),
-                description: ext.description,
-                url: ext.url,
-                authenticated: ext.authenticated,
-                auth_mode: ext.auth_mode,
-                auth_status: ext.auth_status,
-                active: ext.active,
-                tools: ext.tools,
-                needs_setup: ext.needs_setup,
-                shared_auth_provider: ext.shared_auth_provider,
-                missing_scopes: ext.missing_scopes,
-                activation_status,
-                activation_error: ext.activation_error,
-                channel_diagnostics: None,
-                reconnect_supported,
-            }
-        })
-        .collect();
+                "configured".to_string()
+            })
+        } else {
+            None
+        };
+        let reconnect_supported =
+            ext.kind == crate::extensions::ExtensionKind::WasmChannel && ext.name == "telegram";
+        let setup = ext_mgr
+            .integration_setup_status(
+                &ext,
+                crate::extensions::manager::AuthRequestContext::default(),
+            )
+            .await;
+        extensions.push(ExtensionInfo {
+            name: ext.name,
+            kind: ext.kind.to_string(),
+            description: ext.description,
+            url: ext.url,
+            authenticated: ext.authenticated,
+            auth_mode: ext.auth_mode,
+            auth_status: ext.auth_status,
+            active: ext.active,
+            tools: ext.tools,
+            needs_setup: ext.needs_setup,
+            shared_auth_provider: ext.shared_auth_provider,
+            missing_scopes: ext.missing_scopes,
+            activation_status,
+            activation_error: ext.activation_error,
+            channel_diagnostics: None,
+            reconnect_supported,
+            setup,
+        });
+    }
 
     Ok(extensions)
 }

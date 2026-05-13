@@ -5,7 +5,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
@@ -20,6 +22,59 @@ pub enum McpTransport {
     Http,
     /// Stdio transport — spawn a child process and communicate via stdin/stdout.
     Stdio,
+}
+
+#[async_trait]
+pub trait McpConfigProvider: Send + Sync {
+    async fn load_servers(&self) -> Result<McpServersFile, ConfigError>;
+
+    async fn save_servers(&self, _servers: &McpServersFile) -> Result<(), ConfigError> {
+        Err(ConfigError::InvalidConfig {
+            reason: "MCP config provider is read-only".to_string(),
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct McpConfigStore {
+    provider: Arc<dyn McpConfigProvider>,
+}
+
+impl McpConfigStore {
+    pub fn new_provider(provider: Arc<dyn McpConfigProvider>) -> Self {
+        Self { provider }
+    }
+
+    pub async fn load_servers(&self) -> Result<McpServersFile, ConfigError> {
+        self.provider.load_servers().await
+    }
+
+    pub async fn get_server(&self, name: &str) -> Result<Option<McpServerConfig>, ConfigError> {
+        Ok(self.load_servers().await?.get(name).cloned())
+    }
+
+    pub async fn save_servers(&self, servers: &McpServersFile) -> Result<(), ConfigError> {
+        let mut servers = servers.clone();
+        servers.migrate_in_place();
+        self.provider.save_servers(&servers).await
+    }
+
+    pub async fn upsert_server(&self, config: McpServerConfig) -> Result<(), ConfigError> {
+        config.validate()?;
+        let mut servers = self.load_servers().await?;
+        servers.upsert(config);
+        self.save_servers(&servers).await
+    }
+
+    pub async fn remove_server(&self, name: &str) -> Result<(), ConfigError> {
+        let mut servers = self.load_servers().await?;
+        if !servers.remove(name) {
+            return Err(ConfigError::ServerNotFound {
+                name: name.to_string(),
+            });
+        }
+        self.save_servers(&servers).await
+    }
 }
 
 /// Configuration for connecting to a remote MCP server.
@@ -522,6 +577,55 @@ pub async fn load_mcp_servers_from(path: impl AsRef<Path>) -> Result<McpServersF
     Ok(config)
 }
 
+/// Get the default MCP servers configuration path.
+pub fn default_config_path() -> std::path::PathBuf {
+    thinclaw_platform::resolve_data_dir("mcp-servers.json")
+}
+
+/// Load MCP server configurations from the default location.
+pub async fn load_mcp_servers() -> Result<McpServersFile, ConfigError> {
+    load_mcp_servers_from(default_config_path()).await
+}
+
+/// Save MCP server configurations to the default location.
+pub async fn save_mcp_servers(config: &McpServersFile) -> Result<(), ConfigError> {
+    save_mcp_servers_to(config, default_config_path()).await
+}
+
+/// Add a new MCP server configuration in file-backed storage.
+pub async fn add_mcp_server(config: McpServerConfig) -> Result<(), ConfigError> {
+    config.validate()?;
+
+    let mut servers = load_mcp_servers().await?;
+    servers.upsert(config);
+    save_mcp_servers(&servers).await
+}
+
+/// Remove an MCP server by name from file-backed storage.
+pub async fn remove_mcp_server(name: &str) -> Result<(), ConfigError> {
+    let mut servers = load_mcp_servers().await?;
+
+    if !servers.remove(name) {
+        return Err(ConfigError::ServerNotFound {
+            name: name.to_string(),
+        });
+    }
+
+    save_mcp_servers(&servers).await
+}
+
+/// Get a specific MCP server configuration from file-backed storage.
+pub async fn get_mcp_server(name: &str) -> Result<McpServerConfig, ConfigError> {
+    let servers = load_mcp_servers().await?;
+
+    servers
+        .get(name)
+        .cloned()
+        .ok_or_else(|| ConfigError::ServerNotFound {
+            name: name.to_string(),
+        })
+}
+
 /// Save MCP server configurations to a specific path.
 pub async fn save_mcp_servers_to(
     config: &McpServersFile,
@@ -561,6 +665,7 @@ fn is_localhost_url(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_config_path(name: &str) -> std::path::PathBuf {
@@ -724,6 +829,39 @@ mod tests {
 
         let config = load_mcp_servers_from(&path).await.unwrap();
         assert!(config.servers.is_empty());
+    }
+
+    struct MemoryMcpProvider {
+        servers: Mutex<McpServersFile>,
+    }
+
+    #[async_trait]
+    impl McpConfigProvider for MemoryMcpProvider {
+        async fn load_servers(&self) -> Result<McpServersFile, ConfigError> {
+            Ok(self.servers.lock().expect("lock").clone())
+        }
+
+        async fn save_servers(&self, servers: &McpServersFile) -> Result<(), ConfigError> {
+            *self.servers.lock().expect("lock") = servers.clone();
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_config_store_upsert_and_remove_uses_provider() {
+        let provider = Arc::new(MemoryMcpProvider {
+            servers: Mutex::new(McpServersFile::default()),
+        });
+        let store = McpConfigStore::new_provider(provider);
+
+        store
+            .upsert_server(McpServerConfig::new("notion", "https://mcp.notion.com"))
+            .await
+            .expect("upsert");
+        assert!(store.get_server("notion").await.unwrap().is_some());
+
+        store.remove_server("notion").await.expect("remove");
+        assert!(store.get_server("notion").await.unwrap().is_none());
     }
 
     #[test]

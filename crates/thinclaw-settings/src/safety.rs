@@ -42,6 +42,10 @@ pub struct SafetySettings {
     /// Optional absolute path to a first-party external shell scanner binary.
     #[serde(default)]
     pub external_scanner_path: Option<PathBuf>,
+
+    /// Whether external shell scanners must carry verified ThinClaw provenance.
+    #[serde(default)]
+    pub external_scanner_require_verified: bool,
 }
 
 impl Default for SafetySettings {
@@ -53,6 +57,7 @@ impl Default for SafetySettings {
             smart_approval_mode: default_smart_approval_mode(),
             external_scanner_mode: default_external_scanner_mode(),
             external_scanner_path: None,
+            external_scanner_require_verified: false,
         }
     }
 }

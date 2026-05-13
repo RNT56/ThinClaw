@@ -35,7 +35,10 @@ pub(crate) async fn reconcile_nostr_runtime(
     let mut next_runtime = None;
     let mut next_channel = None;
     if let Some(config) = nostr_config {
-        let channel = crate::channels::NostrChannel::new(config).map_err(|err| err.to_string())?;
+        let channel = crate::channels::NostrChannel::new(
+            crate::channels::runtime_config_from_resolved(config),
+        )
+        .map_err(|err| err.to_string())?;
         next_runtime = Some(channel.runtime());
         next_channel = Some(channel);
     }

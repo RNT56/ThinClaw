@@ -4117,6 +4117,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64 0.22.1",
+ "js-sys",
+ "pem",
+ "ring",
+ "serde",
+ "serde_json",
+ "simple_asn1",
+]
+
+[[package]]
 name = "kasuari"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5177,6 +5192,16 @@ name = "peeking_take_while"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099"
+
+[[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
 
 [[package]]
 name = "percent-encoding"
@@ -7012,6 +7037,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
+name = "simple_asn1"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "thiserror 2.0.18",
+ "time",
+]
+
+[[package]]
 name = "siphasher"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7457,7 +7494,6 @@ dependencies = [
  "mime_guess",
  "nostr-sdk",
  "open",
- "pdf-extract",
  "pgvector",
  "postgres-types",
  "pretty_assertions",
@@ -7527,19 +7563,22 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "wasmparser 0.220.1",
  "wasmtime",
  "wasmtime-wasi",
  "windows-service",
  "windows-sys 0.52.0",
  "zbus",
- "zip",
 ]
 
 [[package]]
 name = "thinclaw-agent"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "axum 0.8.9",
+ "blake3",
  "chrono",
  "chrono-tz",
  "cron",
@@ -7554,6 +7593,7 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thinclaw-channels-core",
+ "thinclaw-history",
  "thinclaw-identity",
  "thinclaw-llm",
  "thinclaw-llm-core",
@@ -7563,6 +7603,7 @@ dependencies = [
  "thinclaw-tools-core",
  "thinclaw-types",
  "thinclaw-workspace",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
@@ -7573,6 +7614,7 @@ name = "thinclaw-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "thinclaw-config",
  "thinclaw-platform",
  "tokio",
  "tracing-subscriber",
@@ -7587,16 +7629,21 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
+ "dirs",
  "fs4",
  "futures",
  "hex",
  "hmac 0.12.1",
+ "jsonwebtoken",
+ "lru",
+ "nostr-sdk",
  "rand 0.8.6",
  "regex",
  "reqwest 0.12.28",
  "secrecy",
  "serde",
  "serde_json",
+ "sha1",
  "sha2 0.10.9",
  "subtle",
  "tempfile",
@@ -7606,10 +7653,12 @@ dependencies = [
  "thinclaw-platform",
  "thinclaw-safety",
  "thinclaw-secrets",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+ "tokio-tungstenite 0.26.2",
  "tower 0.5.3",
  "tracing",
  "url",
@@ -7710,6 +7759,7 @@ dependencies = [
  "thinclaw-channels-core",
  "thinclaw-identity",
  "thinclaw-safety",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "tokio",
  "tokio-stream",
@@ -7788,6 +7838,8 @@ dependencies = [
 name = "thinclaw-media"
 version = "0.1.0"
 dependencies = [
+ "pdf-extract",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -7797,6 +7849,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "zip",
 ]
 
 [[package]]
@@ -7887,33 +7940,46 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "blake3",
+ "bytes",
+ "chromiumoxide",
  "chrono",
  "chrono-tz",
  "deadpool-postgres",
+ "dirs",
+ "ed25519-dalek",
+ "flate2",
  "futures",
  "hex",
  "html-to-markdown-rs",
  "libsql",
+ "nostr-sdk",
  "rand 0.8.6",
  "readabilityrs",
  "regex",
  "reqwest 0.12.28",
  "rust_decimal",
+ "rust_decimal_macros",
  "secrecy",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sysinfo",
  "tempfile",
+ "thinclaw-channels",
  "thinclaw-config",
+ "thinclaw-llm",
  "thinclaw-llm-core",
+ "thinclaw-media",
  "thinclaw-platform",
+ "thinclaw-safety",
  "thinclaw-secrets",
  "thinclaw-tools-core",
  "thinclaw-types",
+ "thinclaw-workspace",
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "toml",
  "tracing",
  "unicode-normalization",
  "url",
@@ -7922,6 +7988,7 @@ dependencies = [
  "wasmparser 0.220.1",
  "wasmtime",
  "wasmtime-wasi",
+ "zbus",
 ]
 
 [[package]]

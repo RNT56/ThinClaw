@@ -22,8 +22,8 @@ use thinclaw_types::error::ChannelError;
 const LEGACY_WEB_CHANNEL_ALIAS: &str = "web";
 const GATEWAY_CHANNEL_NAME: &str = "gateway";
 
-/// Descriptor for a native channel surface that the runtime should expose even
-/// when a full transport has not landed yet.
+/// Descriptor for a native channel surface that the runtime can expose in
+/// status/configuration before the concrete transport is registered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelDescriptor {
     pub name: String,
@@ -34,7 +34,7 @@ pub struct ChannelDescriptor {
 }
 
 impl ChannelDescriptor {
-    pub fn native_placeholder(
+    pub fn native_lifecycle(
         name: impl Into<String>,
         enabled: bool,
         available: bool,
@@ -43,12 +43,53 @@ impl ChannelDescriptor {
         let name = name.into();
         Self {
             name: name.clone(),
-            channel_type: "native-placeholder".to_string(),
+            channel_type: "native-lifecycle".to_string(),
             enabled,
             available,
             description: description.into(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeLifecycleChannelConfig {
+    pub matrix_enabled: bool,
+    pub voice_call_enabled: bool,
+    pub voice_call_available: bool,
+    pub apns_enabled: bool,
+    pub browser_push_enabled: bool,
+    pub browser_push_available: bool,
+}
+
+pub fn native_lifecycle_channel_descriptors(
+    config: &NativeLifecycleChannelConfig,
+) -> Vec<ChannelDescriptor> {
+    vec![
+        ChannelDescriptor::native_lifecycle(
+            "matrix",
+            config.matrix_enabled,
+            true,
+            "Matrix rooms and DMs",
+        ),
+        ChannelDescriptor::native_lifecycle(
+            "voice-call",
+            config.voice_call_enabled,
+            config.voice_call_available,
+            "Voice-call lifecycle",
+        ),
+        ChannelDescriptor::native_lifecycle(
+            "apns",
+            config.apns_enabled,
+            true,
+            "APNs device notifications",
+        ),
+        ChannelDescriptor::native_lifecycle(
+            "browser-push",
+            config.browser_push_enabled,
+            config.browser_push_available,
+            "Browser push subscriptions",
+        ),
+    ]
 }
 
 /// Raw platform-neutral event shape used by channel drivers before an event is
@@ -691,7 +732,7 @@ impl ChannelManager {
                 };
             let last_error = match (descriptor.enabled, descriptor.available) {
                 (true, true) => Some(format!(
-                    "{} is configured as a native lifecycle placeholder; transport not implemented yet",
+                    "{} is configured but no native transport instance has been registered",
                     descriptor.description
                 )),
                 (true, false) => Some(format!(
@@ -927,7 +968,7 @@ mod normalization_tests {
     }
 
     #[test]
-    fn native_lifecycle_placeholders_use_shared_ingress_helpers() {
+    fn native_lifecycle_surfaces_use_shared_ingress_helpers() {
         for (platform, chat_type, chat_id) in [
             ("matrix", "room", "!room:example.org"),
             ("voice-call", "call", "call-123"),
@@ -942,7 +983,7 @@ mod normalization_tests {
                 user_id: "user-1".to_string(),
                 user_name: None,
                 text: "/status now".to_string(),
-                metadata: serde_json::json!({"placeholder": true}),
+                metadata: serde_json::json!({"native_lifecycle": true}),
             });
 
             assert_eq!(message.channel, platform);
@@ -959,10 +1000,32 @@ mod normalization_tests {
                     .is_some_and(|aliases| !aliases.is_empty())
             );
             let command = parse_slash_command(&message.content)
-                .expect("placeholder ingress should use shared slash parsing");
+                .expect("native lifecycle ingress should use shared slash parsing");
             assert_eq!(command.command, "status");
             assert_eq!(command.args, "now");
         }
+    }
+
+    #[test]
+    fn native_lifecycle_descriptor_builder_exposes_expected_surfaces() {
+        let descriptors = native_lifecycle_channel_descriptors(&NativeLifecycleChannelConfig {
+            matrix_enabled: true,
+            voice_call_enabled: false,
+            voice_call_available: false,
+            apns_enabled: true,
+            browser_push_enabled: true,
+            browser_push_available: false,
+        });
+
+        let names = descriptors
+            .iter()
+            .map(|descriptor| descriptor.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["matrix", "voice-call", "apns", "browser-push"]);
+        assert!(descriptors[0].enabled);
+        assert!(!descriptors[1].enabled);
+        assert!(!descriptors[1].available);
+        assert!(!descriptors[3].available);
     }
 }
 
@@ -1082,10 +1145,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_entries_include_native_placeholders_without_shadowing_active_channels() {
+    async fn status_entries_include_native_lifecycle_surfaces_without_shadowing_active_channels() {
         let manager = ChannelManager::new();
         manager
-            .add_descriptor(ChannelDescriptor::native_placeholder(
+            .add_descriptor(ChannelDescriptor::native_lifecycle(
                 "matrix",
                 true,
                 true,
@@ -1093,11 +1156,11 @@ mod tests {
             ))
             .await;
         manager
-            .add_descriptor(ChannelDescriptor::native_placeholder(
+            .add_descriptor(ChannelDescriptor::native_lifecycle(
                 "gateway",
                 true,
                 true,
-                "Gateway placeholder should be shadowed",
+                "Gateway lifecycle surface should be shadowed",
             ))
             .await;
         manager
@@ -1111,14 +1174,14 @@ mod tests {
         let matrix = entries
             .iter()
             .find(|entry| entry.name == "matrix")
-            .expect("matrix placeholder should be visible");
-        assert_eq!(matrix.channel_type, "native-placeholder");
+            .expect("matrix lifecycle surface should be visible");
+        assert_eq!(matrix.channel_type, "native-lifecycle");
         assert_eq!(matrix.state, ChannelViewState::Disabled);
         assert!(
             matrix
                 .last_error
                 .as_deref()
-                .is_some_and(|err| err.contains("placeholder"))
+                .is_some_and(|err| err.contains("no native transport instance"))
         );
 
         assert_eq!(

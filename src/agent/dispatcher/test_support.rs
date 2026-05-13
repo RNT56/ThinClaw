@@ -686,6 +686,7 @@ pub(super) async fn make_test_agent_with_channel(
             smart_approval_mode: "off".to_string(),
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
+            external_scanner_require_verified: false,
         })),
         tools,
         workspace: None,
@@ -707,6 +708,7 @@ pub(super) async fn make_test_agent_with_channel(
         model_override: None,
         restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         sandbox_children: None,
+        runtime_ports: None,
     };
 
     let agent = Agent::new(

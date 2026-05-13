@@ -12,6 +12,7 @@ pub struct SafetyConfig {
     pub smart_approval_mode: String,
     pub external_scanner_mode: String,
     pub external_scanner_path: Option<PathBuf>,
+    pub external_scanner_require_verified: bool,
 }
 
 impl Default for SafetyConfig {
@@ -23,6 +24,7 @@ impl Default for SafetyConfig {
             smart_approval_mode: "off".to_string(),
             external_scanner_mode: "fail_open".to_string(),
             external_scanner_path: None,
+            external_scanner_require_verified: false,
         }
     }
 }
@@ -59,6 +61,10 @@ impl SafetyConfig {
             external_scanner_mode: parse_string_env(
                 "SAFETY_EXTERNAL_SCANNER_MODE",
                 settings.safety.external_scanner_mode.clone(),
+            )?,
+            external_scanner_require_verified: parse_bool_env(
+                "SAFETY_EXTERNAL_SCANNER_REQUIRE_VERIFIED",
+                settings.safety.external_scanner_require_verified,
             )?,
             external_scanner_path: if external_scanner_path.trim().is_empty() {
                 None

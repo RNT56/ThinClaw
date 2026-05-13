@@ -147,7 +147,15 @@ pub async fn install_bundled_channel(
     target_dir: &Path,
     force: bool,
 ) -> Result<(), String> {
-    let (wasm_src, caps_src) = locate_channel_artifacts(name)?;
+    let (wasm_src, caps_src) = match locate_channel_artifacts(name) {
+        Ok(paths) => paths,
+        Err(initial_error) => {
+            build_channel_artifact(name).map_err(|build_error| {
+                format!("{initial_error}\nAutomatic build also failed: {build_error}")
+            })?;
+            locate_channel_artifacts(name)?
+        }
+    };
 
     fs::create_dir_all(target_dir)
         .await
@@ -173,6 +181,47 @@ pub async fn install_bundled_channel(
         .map_err(|e| format!("Failed to copy {}: {}", caps_src.display(), e))?;
 
     Ok(())
+}
+
+fn build_channel_artifact(name: &str) -> Result<(), String> {
+    let (_, _) = KNOWN_CHANNELS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .ok_or_else(|| format!("Unknown channel '{}'", name))?;
+
+    let channel_dir = channels_src_dir().join(name);
+    if !channel_dir.join("Cargo.toml").exists() {
+        return Err(format!(
+            "Channel '{}' has no source Cargo.toml at {}",
+            name,
+            channel_dir.display()
+        ));
+    }
+
+    let output = std::process::Command::new("cargo")
+        .args(["component", "build", "--release"])
+        .current_dir(&channel_dir)
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to execute `cargo component build --release` in {}: {error}",
+                channel_dir.display()
+            )
+        })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(format!(
+        "`cargo component build --release` exited with status {} in {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        channel_dir.display(),
+        stdout.trim(),
+        stderr.trim()
+    ))
 }
 
 /// Check which known channels have build artifacts available.

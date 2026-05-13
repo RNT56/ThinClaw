@@ -11,11 +11,14 @@ use async_trait::async_trait;
 use clap::Parser;
 use rust_decimal::Decimal;
 use thinclaw::agent::{Agent, AgentDeps, SessionManager};
-use thinclaw::app::{AppBuilder, AppBuilderFlags};
+use thinclaw::app::{
+    AcpRuntimeConfigInput, AcpRuntimeConfigPlan, AppBuilder, AppBuilderFlags,
+    apply_acp_runtime_config,
+};
 use thinclaw::channels::ChannelManager;
 use thinclaw::channels::acp;
 use thinclaw::channels::web::log_layer::{LogBroadcaster, init_tracing};
-use thinclaw::config::{AgentConfig, Config, LlmBackend, SafetyConfig, SkillsConfig};
+use thinclaw::config::{AgentConfig, Config, SafetyConfig, SkillsConfig};
 use thinclaw::context::{ContextManager, JobContext};
 use thinclaw::error::LlmError;
 use thinclaw::hooks::HookRegistry;
@@ -73,15 +76,13 @@ async fn main() -> anyhow::Result<()> {
     let _log_level_handle = init_tracing(Arc::clone(&log_broadcaster), cli.debug);
 
     let mut config = Config::from_env_with_toml_options(cli.config.as_deref(), !cli.no_db).await?;
-    config.channels.acp_enabled = true;
-    config.agent.main_tool_profile = thinclaw::tools::ToolProfile::Acp;
-    if let Some(workspace) = cli.workspace {
-        config.agent.workspace_mode = "project".to_string();
-        config.agent.workspace_root = Some(workspace);
-    }
-    if let Some(model) = cli.model {
-        apply_model_override(&mut config, model);
-    }
+    apply_acp_runtime_config(
+        &mut config,
+        AcpRuntimeConfigPlan::from_input(AcpRuntimeConfigInput {
+            workspace: cli.workspace,
+            model: cli.model,
+        }),
+    );
 
     let components = AppBuilder::new(
         config.clone(),
@@ -159,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
         model_override: Some(model_override),
         restart_requested: Arc::clone(&restart_requested),
         sandbox_children: None,
+        runtime_ports: None,
     };
 
     let agent = Arc::new(Agent::new(
@@ -214,6 +216,7 @@ async fn run_agent_stdio_smoke() -> anyhow::Result<()> {
             smart_approval_mode: "off".to_string(),
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
+            external_scanner_require_verified: false,
         })),
         tools,
         workspace: None,
@@ -237,6 +240,7 @@ async fn run_agent_stdio_smoke() -> anyhow::Result<()> {
         model_override: None,
         restart_requested: Arc::clone(&restart_requested),
         sandbox_children: None,
+        runtime_ports: None,
     };
 
     let agent = Arc::new(Agent::new(
@@ -431,50 +435,5 @@ impl Tool for SmokeApprovalTool {
 
     fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
         ApprovalRequirement::Always
-    }
-}
-
-fn apply_model_override(config: &mut Config, model: String) {
-    match config.llm.backend {
-        LlmBackend::OpenAi => {
-            if let Some(ref mut provider) = config.llm.openai {
-                provider.model = model;
-            }
-        }
-        LlmBackend::Anthropic => {
-            if let Some(ref mut provider) = config.llm.anthropic {
-                provider.model = model;
-            }
-        }
-        LlmBackend::Ollama => {
-            if let Some(ref mut provider) = config.llm.ollama {
-                provider.model = model;
-            }
-        }
-        LlmBackend::OpenAiCompatible => {
-            if let Some(ref mut provider) = config.llm.openai_compatible {
-                provider.model = model;
-            }
-        }
-        LlmBackend::Tinfoil => {
-            if let Some(ref mut provider) = config.llm.tinfoil {
-                provider.model = model;
-            }
-        }
-        LlmBackend::Gemini => {
-            if let Some(ref mut provider) = config.llm.gemini {
-                provider.model = model;
-            }
-        }
-        LlmBackend::Bedrock => {
-            if let Some(ref mut provider) = config.llm.bedrock {
-                provider.model_id = model;
-            }
-        }
-        LlmBackend::LlamaCpp => {
-            if let Some(ref mut provider) = config.llm.llama_cpp {
-                provider.model = model;
-            }
-        }
     }
 }

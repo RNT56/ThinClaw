@@ -66,6 +66,12 @@ pub enum RegistryCommand {
         /// Extension name (e.g. "slack", "telegram")
         name: String,
     },
+
+    /// Validate registry metadata and capabilities without installing
+    Validate {
+        /// Extension or bundle name (e.g. "slack", "google", "channels/line")
+        name: String,
+    },
 }
 
 /// Run a registry command.
@@ -98,6 +104,7 @@ pub async fn run_registry_command(cmd: RegistryCommand) -> anyhow::Result<()> {
             cmd_install(&catalog, &repo_root, "default", force, build).await
         }
         RegistryCommand::Remove { name } => cmd_remove(&name).await,
+        RegistryCommand::Validate { name } => cmd_validate(&catalog, &repo_root, &name),
     }
 }
 
@@ -443,4 +450,116 @@ async fn cmd_remove(name: &str) -> anyhow::Result<()> {
         "Extension '{}' not found in ~/.thinclaw/channels/ or ~/.thinclaw/tools/.",
         name
     );
+}
+
+fn cmd_validate(
+    catalog: &RegistryCatalog,
+    repo_root: &std::path::Path,
+    name: &str,
+) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
+    let (manifests, bundle) = catalog.resolve(name)?;
+    if manifests.is_empty() {
+        anyhow::bail!("No extensions found for '{}'.", name);
+    }
+
+    branding.print_banner("Registry", Some("Validate extension setup metadata"));
+    if let Some(bundle) = bundle {
+        println!(
+            "{}",
+            branding.key_value("Bundle", format!("{} ({})", bundle.display_name, name))
+        );
+    }
+
+    let mut failures = Vec::new();
+    for manifest in manifests {
+        let label = format!("{} ({})", manifest.name, manifest.kind);
+        let source_dir = repo_root.join(&manifest.source.dir);
+        let caps_path = source_dir.join(&manifest.source.capabilities);
+
+        if !source_dir.exists() {
+            failures.push(format!(
+                "{label}: source dir missing: {}",
+                source_dir.display()
+            ));
+            continue;
+        }
+        if !caps_path.exists() {
+            failures.push(format!(
+                "{label}: capabilities file missing: {}",
+                caps_path.display()
+            ));
+            continue;
+        }
+
+        let raw = std::fs::read_to_string(&caps_path)?;
+        let parse_result = match manifest.kind {
+            ManifestKind::Channel => {
+                match crate::channels::wasm::ChannelCapabilitiesFile::from_json(&raw) {
+                    Ok(caps) => {
+                        if let Some(auth) = &manifest.auth_summary {
+                            let summarized: std::collections::HashSet<&str> =
+                                auth.secrets.iter().map(String::as_str).collect();
+                            for secret in &caps.setup.required_secrets {
+                                if !summarized.contains(secret.name.as_str()) {
+                                    failures.push(format!(
+                                        "{label}: setup secret '{}' is missing from auth_summary",
+                                        secret.name
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(err) => Err(err.to_string()),
+                }
+            }
+            ManifestKind::Tool => match crate::tools::wasm::CapabilitiesFile::from_json(&raw) {
+                Ok(caps) => {
+                    if let (Some(auth), Some(tool_auth)) = (&manifest.auth_summary, caps.auth)
+                        && !auth
+                            .secrets
+                            .iter()
+                            .any(|secret| secret == &tool_auth.secret_name)
+                        && auth.shared_auth.is_none()
+                    {
+                        failures.push(format!(
+                            "{label}: tool auth secret '{}' is missing from auth_summary",
+                            tool_auth.secret_name
+                        ));
+                    }
+                    Ok(())
+                }
+                Err(err) => Err(err.to_string()),
+            },
+        };
+        if let Err(error) = parse_result {
+            failures.push(format!("{label}: capabilities schema invalid: {error}"));
+            continue;
+        }
+
+        if let Some(auth) = &manifest.auth_summary
+            && auth.method.as_deref() != Some("none")
+            && auth.secrets.is_empty()
+            && auth.shared_auth.is_none()
+        {
+            failures.push(format!(
+                "{label}: auth_summary declares auth but no secrets/shared_auth"
+            ));
+        }
+
+        println!("  {}", branding.good(format!("{label}: ok")));
+    }
+
+    if !failures.is_empty() {
+        println!();
+        for failure in &failures {
+            println!("  {}", branding.bad(failure));
+        }
+        anyhow::bail!("{} registry validation issue(s).", failures.len());
+    }
+
+    println!();
+    println!("{}", branding.good("Registry metadata validated."));
+    Ok(())
 }

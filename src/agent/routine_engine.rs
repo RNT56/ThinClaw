@@ -15,6 +15,16 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Timelike, Utc};
 use regex::Regex;
+use thinclaw_agent::routine_engine::{
+    EVENT_CONTENT_PREVIEW_LIMIT, FullJobRuntimeMetadata, active_hour_allows,
+    build_heartbeat_prompt, build_lightweight_routine_prompt, build_routine_event_from_message,
+    build_routine_notification, build_scheduled_routine_triggers,
+    classify_lightweight_routine_response, effective_lightweight_max_tokens, event_run_trigger_key,
+    full_job_metadata, heartbeat_job_metadata, increment_decision_count,
+    lightweight_routine_messages, metadata_contains_subset, routine_cooldown_allows,
+    routine_requests_desktop_capabilities, sanitize_routine_name, scheduled_run_trigger_key,
+    should_refresh_event_cache, summarize_runtime_capabilities, truncate,
+};
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
@@ -22,9 +32,9 @@ use crate::agent::Scheduler;
 use crate::agent::outcomes;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineCatchUpMode, RoutineEvent, RoutineEventDecision,
-    RoutineEventEvaluation, RoutineEventStatus, RoutineRun, RoutineTrigger, RoutineTriggerDecision,
-    RoutineTriggerKind, RoutineTriggerStatus, RunStatus, Trigger, compile_event_trigger_pattern,
-    content_hash, next_fire_for_routine, routine_state_with_runtime_advance,
+    RoutineEventEvaluation, RoutineRun, RoutineTrigger, RoutineTriggerDecision, RoutineTriggerKind,
+    RunStatus, Trigger, compile_event_trigger_pattern, next_fire_for_routine,
+    routine_state_with_runtime_advance,
 };
 use crate::agent::subagent_executor::{SubagentExecutor, SubagentSpawnRequest};
 use crate::agent::{AgentRunArtifact, AgentRunStatus};
@@ -34,7 +44,7 @@ use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
 use crate::db::Database;
 use crate::error::{DatabaseError, RoutineError};
-use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
+use crate::llm::{CompletionRequest, LlmProvider};
 use crate::tools::ToolProfile;
 use crate::tools::execution_backend::routine_engine_runtime_descriptor;
 use crate::workspace::Workspace;
@@ -74,7 +84,6 @@ pub struct RoutineEngine {
 }
 
 const EVENT_QUEUE_BATCH_LIMIT: i64 = 64;
-const EVENT_CONTENT_PREVIEW_LIMIT: usize = 200;
 const TRIGGER_QUEUE_BATCH_LIMIT: i64 = 64;
 
 #[derive(Clone)]
@@ -229,39 +238,70 @@ impl RoutineEngine {
     }
 
     /// Check all due cron/system routines and fire them. Called by the cron ticker.
-    pub async fn check_cron_triggers(&self) {
+    pub async fn check_cron_triggers(&self) -> usize {
         if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager()
             && manager.emergency_stop_active()
         {
             tracing::warn!("Desktop autonomy emergency stop is active; skipping cron routines");
-            return;
+            return 0;
         }
 
         if let Err(error) = self.enqueue_due_cron_triggers().await {
             tracing::error!("Failed to enqueue due cron routines: {}", error);
+            return 0;
         }
 
-        let _ = self.drain_pending_trigger_queue().await;
+        self.drain_pending_trigger_queue().await
+    }
+
+    /// Enqueue a prebuilt trigger and process the durable trigger queue.
+    pub async fn enqueue_trigger_and_drain(
+        &self,
+        trigger: RoutineTrigger,
+    ) -> Result<usize, RoutineError> {
+        self.store
+            .enqueue_routine_trigger(&trigger)
+            .await
+            .map_err(|error| RoutineError::Database {
+                reason: error.to_string(),
+            })?;
+        Ok(self.drain_pending_trigger_queue().await)
+    }
+
+    /// Fire a routine through the same background execution path used by event/cron triggers.
+    pub async fn fire_routine_run_request(
+        &self,
+        routine: Routine,
+        trigger_key: String,
+    ) -> Result<Uuid, RoutineError> {
+        if !routine.enabled {
+            return Err(RoutineError::Disabled {
+                name: routine.name.clone(),
+            });
+        }
+        if !self.check_concurrent(&routine).await {
+            return Err(RoutineError::MaxConcurrent {
+                name: routine.name.clone(),
+            });
+        }
+        self.spawn_fire(routine, "port", None, Some(trigger_key))
+            .await
     }
 
     async fn ensure_event_cache_loaded(&self) {
         let cache_empty = self.event_cache.read().await.is_empty();
-        let ttl_expired = self
-            .event_cache_refreshed_at
-            .read()
-            .await
-            .as_ref()
-            .map(|ts| {
-                Utc::now().signed_duration_since(*ts).num_seconds()
-                    >= self.config.event_cache_ttl_secs as i64
-            })
-            .unwrap_or(true);
-        let version_changed = match self.store.get_routine_event_cache_version().await {
-            Ok(version) => version != *self.event_cache_version.read().await,
-            Err(_) => false,
-        };
+        let last_refreshed_at = *self.event_cache_refreshed_at.read().await;
+        let current_version = *self.event_cache_version.read().await;
+        let observed_version = self.store.get_routine_event_cache_version().await.ok();
 
-        if cache_empty || ttl_expired || version_changed {
+        if should_refresh_event_cache(
+            cache_empty,
+            last_refreshed_at,
+            current_version,
+            observed_version,
+            self.config.event_cache_ttl_secs,
+            Utc::now(),
+        ) {
             self.refresh_event_cache().await;
         }
     }
@@ -274,52 +314,7 @@ impl RoutineEngine {
         &self,
         message: &IncomingMessage,
     ) -> Result<RoutineEvent, RoutineError> {
-        let identity = message.resolved_identity();
-        let event_type = message
-            .metadata
-            .get("event_type")
-            .and_then(|value| value.as_str())
-            .unwrap_or("message")
-            .to_string();
-        let idempotency_key = routine_event_idempotency_key(message, &identity, &event_type);
-        let diagnostics = serde_json::json!({
-            "message_id": message.id.to_string(),
-            "received_at": message.received_at.to_rfc3339(),
-            "content_preview": truncate(&message.content, EVENT_CONTENT_PREVIEW_LIMIT),
-            "thread_id": message.thread_id,
-            "attachment_count": message.attachments.len(),
-            "event_type": event_type,
-            "idempotency_key": idempotency_key,
-        });
-        let event = RoutineEvent {
-            id: Uuid::new_v4(),
-            principal_id: identity.principal_id.clone(),
-            actor_id: identity.actor_id.clone(),
-            channel: message.channel.clone(),
-            event_type,
-            raw_sender_id: identity.raw_sender_id.clone(),
-            conversation_scope_id: identity.conversation_scope_id.to_string(),
-            stable_external_conversation_key: identity.stable_external_conversation_key.clone(),
-            idempotency_key,
-            content: message.content.clone(),
-            content_hash: content_hash(&message.content).to_string(),
-            metadata: if message.metadata.is_null() {
-                serde_json::json!({})
-            } else {
-                message.metadata.clone()
-            },
-            status: RoutineEventStatus::Pending,
-            diagnostics,
-            claimed_by: None,
-            claimed_at: None,
-            lease_expires_at: None,
-            processed_at: None,
-            error_message: None,
-            matched_routines: 0,
-            fired_routines: 0,
-            attempt_count: 0,
-            created_at: Utc::now(),
-        };
+        let event = build_routine_event_from_message(message);
 
         self.store
             .create_routine_event(&event)
@@ -377,45 +372,12 @@ impl RoutineEngine {
         routine: &Routine,
         now: chrono::DateTime<Utc>,
     ) -> Result<(), RoutineError> {
-        let due_plan = due_slots_for_routine(routine, self.user_timezone.as_deref(), now)?;
-        if due_plan.due_times.is_empty() {
-            return Ok(());
-        }
-
-        let trigger_kind = trigger_kind_for_routine(routine);
-        for due_at in due_plan.due_times {
-            let active_key = Some(active_key_for_scheduled_trigger(
-                routine,
-                trigger_kind,
-                due_at,
-            ));
-            let trigger = RoutineTrigger {
-                id: Uuid::new_v4(),
-                routine_id: routine.id,
-                trigger_kind,
-                trigger_label: scheduled_trigger_label(routine),
-                due_at,
-                status: RoutineTriggerStatus::Pending,
-                decision: None,
-                active_key,
-                idempotency_key: scheduled_trigger_idempotency_key(routine, trigger_kind, due_at),
-                claimed_by: None,
-                claimed_at: None,
-                lease_expires_at: None,
-                processed_at: None,
-                error_message: None,
-                diagnostics: serde_json::json!({
-                    "enqueued_at": now.to_rfc3339(),
-                    "catch_up_mode": catch_up_mode_label(routine.policy.catch_up_mode),
-                    "backlog_collapsed": due_plan.backlog_collapsed,
-                    "scheduled_due_at": due_at.to_rfc3339(),
-                    "config_version": routine.config_version,
-                }),
-                coalesced_count: 0,
-                backlog_collapsed: due_plan.backlog_collapsed,
-                routine_config_version: routine.config_version,
-                created_at: now,
-            };
+        for trigger in build_scheduled_routine_triggers(
+            routine,
+            self.user_timezone.as_deref(),
+            now,
+            TRIGGER_QUEUE_BATCH_LIMIT as usize,
+        )? {
             self.store
                 .enqueue_routine_trigger(&trigger)
                 .await
@@ -1215,15 +1177,7 @@ impl RoutineEngine {
     }
 
     fn check_cooldown(&self, routine: &Routine) -> bool {
-        if let Some(last_run) = routine.last_run_at {
-            let elapsed = Utc::now().signed_duration_since(last_run);
-            let cooldown = chrono::Duration::from_std(routine.guardrails.cooldown)
-                .unwrap_or(chrono::Duration::seconds(300));
-            if elapsed < cooldown {
-                return false;
-            }
-        }
-        true
+        routine_cooldown_allows(routine, Utc::now())
     }
 
     async fn check_concurrent(&self, routine: &Routine) -> bool {
@@ -1262,186 +1216,6 @@ struct EventEvaluationPlan {
     should_fire: bool,
     sequence_num: u32,
     trigger_key: Option<String>,
-}
-
-struct DueSlotPlan {
-    due_times: Vec<chrono::DateTime<Utc>>,
-    backlog_collapsed: bool,
-}
-
-fn due_slots_for_routine(
-    routine: &Routine,
-    user_timezone: Option<&str>,
-    now: chrono::DateTime<Utc>,
-) -> Result<DueSlotPlan, RoutineError> {
-    let Some(first_due) = routine.next_fire_at else {
-        return Ok(DueSlotPlan {
-            due_times: Vec::new(),
-            backlog_collapsed: false,
-        });
-    };
-    if first_due > now {
-        return Ok(DueSlotPlan {
-            due_times: Vec::new(),
-            backlog_collapsed: false,
-        });
-    }
-
-    match routine.policy.catch_up_mode {
-        RoutineCatchUpMode::Skip | RoutineCatchUpMode::RunOnceNow => {
-            let backlog_collapsed = next_fire_for_routine(routine, user_timezone, first_due)?
-                .is_some_and(|next| next <= now);
-            Ok(DueSlotPlan {
-                due_times: vec![first_due],
-                backlog_collapsed,
-            })
-        }
-        RoutineCatchUpMode::Replay => {
-            let mut due_times = vec![first_due];
-            let mut cursor = first_due;
-            let mut backlog_collapsed = false;
-
-            while due_times.len() < TRIGGER_QUEUE_BATCH_LIMIT as usize {
-                let Some(next_due) = next_fire_for_routine(routine, user_timezone, cursor)? else {
-                    break;
-                };
-                if next_due > now {
-                    break;
-                }
-                due_times.push(next_due);
-                cursor = next_due;
-            }
-
-            if let Some(next_due) = next_fire_for_routine(routine, user_timezone, cursor)?
-                && next_due <= now
-            {
-                backlog_collapsed = true;
-            }
-
-            Ok(DueSlotPlan {
-                due_times,
-                backlog_collapsed,
-            })
-        }
-    }
-}
-
-fn trigger_kind_for_routine(routine: &Routine) -> RoutineTriggerKind {
-    match routine.trigger {
-        Trigger::SystemEvent { .. } => RoutineTriggerKind::SystemEvent,
-        _ => RoutineTriggerKind::Cron,
-    }
-}
-
-fn active_key_for_scheduled_trigger(
-    routine: &Routine,
-    trigger_kind: RoutineTriggerKind,
-    due_at: chrono::DateTime<Utc>,
-) -> String {
-    match routine.policy.catch_up_mode {
-        RoutineCatchUpMode::Replay => format!(
-            "routine:{}:{}:{}",
-            routine.id,
-            trigger_kind,
-            due_at.timestamp_millis()
-        ),
-        RoutineCatchUpMode::Skip | RoutineCatchUpMode::RunOnceNow => {
-            format!("routine:{}:{}", routine.id, trigger_kind)
-        }
-    }
-}
-
-fn scheduled_trigger_idempotency_key(
-    routine: &Routine,
-    trigger_kind: RoutineTriggerKind,
-    due_at: chrono::DateTime<Utc>,
-) -> String {
-    format!(
-        "routine:{}:{}:{}:v{}",
-        routine.id,
-        trigger_kind,
-        due_at.timestamp_millis(),
-        routine.config_version
-    )
-}
-
-fn scheduled_trigger_label(routine: &Routine) -> Option<String> {
-    match &routine.trigger {
-        Trigger::Cron { schedule } => Some(schedule.clone()),
-        Trigger::SystemEvent { message, .. } => Some(truncate(message, 120)),
-        _ => None,
-    }
-}
-
-fn scheduled_run_trigger_key(trigger: &RoutineTrigger) -> String {
-    format!("scheduled:{}", trigger.idempotency_key)
-}
-
-fn event_run_trigger_key(event: &RoutineEvent) -> String {
-    format!("event:{}", event.idempotency_key)
-}
-
-fn catch_up_mode_label(mode: RoutineCatchUpMode) -> &'static str {
-    match mode {
-        RoutineCatchUpMode::Skip => "skip",
-        RoutineCatchUpMode::RunOnceNow => "run_once_now",
-        RoutineCatchUpMode::Replay => "replay",
-    }
-}
-
-fn metadata_contains_subset(expected: &serde_json::Value, actual: &serde_json::Value) -> bool {
-    match (expected, actual) {
-        (serde_json::Value::Object(expected), serde_json::Value::Object(actual)) => {
-            expected.iter().all(|(key, value)| {
-                actual
-                    .get(key)
-                    .is_some_and(|actual_value| metadata_contains_subset(value, actual_value))
-            })
-        }
-        (serde_json::Value::Array(expected), serde_json::Value::Array(actual)) => {
-            expected.iter().all(|expected_value| {
-                actual
-                    .iter()
-                    .any(|actual_value| metadata_contains_subset(expected_value, actual_value))
-            })
-        }
-        _ => expected == actual,
-    }
-}
-
-fn increment_decision_count(
-    counts: &mut serde_json::Map<String, serde_json::Value>,
-    decision: RoutineEventDecision,
-) {
-    let key = decision.to_string();
-    let next = counts
-        .get(&key)
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0)
-        + 1;
-    counts.insert(key, serde_json::json!(next));
-}
-
-fn routine_event_idempotency_key(
-    message: &IncomingMessage,
-    identity: &crate::identity::ResolvedIdentity,
-    event_type: &str,
-) -> String {
-    let source_id = [
-        "message_id",
-        "external_message_id",
-        "gmail_message_id",
-        "imessage_guid",
-    ]
-    .iter()
-    .find_map(|key| message.metadata.get(key).and_then(|value| value.as_str()))
-    .map(str::to_string)
-    .unwrap_or_else(|| message.id.to_string());
-
-    format!(
-        "event:{}:{}:{}:{}:{}",
-        message.channel, identity.principal_id, identity.actor_id, event_type, source_id
-    )
 }
 
 /// Shared context passed to the execution function.
@@ -1727,7 +1501,9 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             .filter(|_| status == RunStatus::Failed)
             .cloned(),
     )
-    .with_runtime_descriptor(Some(&routine_engine_runtime_descriptor()))
+    .with_runtime_descriptor(Some(&crate::agent::run_artifact::run_runtime_descriptor(
+        &routine_engine_runtime_descriptor(),
+    )))
     .with_metadata(serde_json::json!({
         "event": "routine_run_completed",
         "routine_id": routine.id,
@@ -1775,20 +1551,6 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         run_id: Some(run.id.to_string()),
         result_summary: summary.clone(),
     });
-}
-
-/// Sanitize a routine name for use in workspace paths.
-/// Only keeps alphanumeric, dash, and underscore characters; replaces everything else.
-fn sanitize_routine_name(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
 }
 
 /// Execute a non-heartbeat automation as a subagent.
@@ -1927,59 +1689,28 @@ async fn execute_full_job(
         }
     }
 
-    let mut metadata = serde_json::json!({ "max_iterations": max_iterations });
-    if let Some(obj) = metadata.as_object_mut() {
-        obj.insert(
-            "actor_id".to_string(),
-            serde_json::json!(routine.owner_actor_id()),
-        );
-        obj.insert("conversation_kind".to_string(), serde_json::json!("direct"));
-        if let Some(allowed_tools) = allowed_tools {
-            obj.insert(
-                "allowed_tools".to_string(),
-                serde_json::json!(allowed_tools),
-            );
-        }
-        if let Some(allowed_skills) = allowed_skills {
-            obj.insert(
-                "allowed_skills".to_string(),
-                serde_json::json!(allowed_skills),
-            );
-        }
-        if let Some(tool_profile) = tool_profile {
-            obj.insert(
-                "tool_profile".to_string(),
-                serde_json::json!(tool_profile.as_str()),
-            );
-        }
-        if let Some(manager) = crate::desktop_autonomy::desktop_autonomy_manager() {
-            obj.insert(
-                "desktop_session".to_string(),
-                serde_json::json!(manager.default_session_id()),
-            );
-            obj.insert(
-                "deployment_mode".to_string(),
-                serde_json::json!(manager.config().deployment_mode.as_str()),
-            );
-            obj.insert(
-                "desktop_run_id".to_string(),
-                serde_json::json!(run.id.to_string()),
-            );
-            obj.insert("recovery_count".to_string(), serde_json::json!(0));
-            obj.insert(
-                "last_verified_snapshot".to_string(),
-                serde_json::Value::Null,
-            );
-            obj.insert(
-                "managed_build_id".to_string(),
-                serde_json::json!(manager.current_build_id()),
-            );
-            obj.insert(
-                "autonomy_profile".to_string(),
-                serde_json::json!(manager.config().profile.as_str()),
-            );
-        }
-    }
+    let desktop = crate::desktop_autonomy::desktop_autonomy_manager().map(|manager| {
+        serde_json::json!({
+            "desktop_session": manager.default_session_id(),
+            "deployment_mode": manager.config().deployment_mode.as_str(),
+            "desktop_run_id": run.id.to_string(),
+            "recovery_count": 0,
+            "last_verified_snapshot": serde_json::Value::Null,
+            "managed_build_id": manager.current_build_id(),
+            "autonomy_profile": manager.config().profile.as_str(),
+        })
+    });
+    let metadata = full_job_metadata(
+        routine,
+        run.id,
+        max_iterations,
+        FullJobRuntimeMetadata {
+            allowed_tools: allowed_tools.map(|tools| tools.to_vec()),
+            allowed_skills: allowed_skills.map(|skills| skills.to_vec()),
+            tool_profile,
+            desktop,
+        },
+    );
 
     let job_id = scheduler
         .dispatch_job_for_routine(
@@ -2047,74 +1778,6 @@ async fn execute_full_job(
     Ok((RunStatus::Running, Some(summary), None))
 }
 
-fn routine_requests_desktop_capabilities(allowed_tools: Option<&[String]>) -> bool {
-    const DESKTOP_TOOLS: &[&str] = &[
-        "desktop_apps",
-        "desktop_ui",
-        "desktop_screen",
-        "desktop_calendar_native",
-        "desktop_numbers_native",
-        "desktop_pages_native",
-    ];
-    allowed_tools.is_some_and(|tools| {
-        tools.iter().any(|tool| {
-            DESKTOP_TOOLS
-                .iter()
-                .any(|desktop| desktop == &tool.as_str())
-        })
-    })
-}
-
-fn summarize_runtime_capabilities(
-    tool_profile: ToolProfile,
-    allowed_tools: Option<&[String]>,
-    allowed_skills: Option<&[String]>,
-) -> String {
-    let tool_grants = allowed_tools
-        .map(|items| {
-            if items.is_empty() {
-                "none".to_string()
-            } else {
-                items.join(", ")
-            }
-        })
-        .unwrap_or_else(|| {
-            if matches!(tool_profile, ToolProfile::ExplicitOnly) {
-                "none".to_string()
-            } else {
-                "implicit".to_string()
-            }
-        });
-    let skill_grants = allowed_skills
-        .map(|items| {
-            if items.is_empty() {
-                "none".to_string()
-            } else {
-                items.join(", ")
-            }
-        })
-        .unwrap_or_else(|| "implicit".to_string());
-    format!(
-        "profile `{}` | tool grants: {} | skill grants: {}",
-        tool_profile.as_str(),
-        tool_grants,
-        skill_grants
-    )
-}
-
-/// Default heartbeat prompt body.
-const DEFAULT_HEARTBEAT_PROMPT: &str = "\
-Read the HEARTBEAT.md checklist below and follow it strictly. \
-Do not infer or repeat old tasks from prior chats. Check each item and report findings.\n\
-\n\
-If nothing needs attention, reply EXACTLY with: HEARTBEAT_OK\n\
-\n\
-If something needs attention, provide a short, specific summary of what needs action. \
-Do NOT echo these instructions back — give real findings only. \
-Use `emit_user_message` to deliver your findings to the user.\n\
-\n\
-You may edit HEARTBEAT.md to add, remove, or update checklist items as needed.";
-
 /// Execute a heartbeat routine.
 ///
 /// In `light_context` mode (default), dispatches as a full worker job with
@@ -2142,12 +1805,7 @@ async fn execute_heartbeat(
             ctx.user_timezone.as_deref(),
         );
         let now_hour = crate::timezone::now_in_tz(tz).hour() as u8;
-        let in_window = if s <= e {
-            now_hour >= s && now_hour < e
-        } else {
-            now_hour >= s || now_hour < e
-        };
-        if !in_window {
+        if !active_hour_allows(now_hour, s, e) {
             tracing::debug!(
                 routine = %routine.name,
                 hour = now_hour,
@@ -2212,26 +1870,21 @@ async fn execute_heartbeat(
     };
 
     // 3. Build the full prompt
-    let prompt_body = custom_prompt.unwrap_or(DEFAULT_HEARTBEAT_PROMPT);
-    let logs_note = if daily_context.is_empty() {
-        "\n\nNote: No daily logs exist yet (no conversations recorded). \
-         Any checklist items that reference daily logs are automatically satisfied. \
-         If all items depend on daily logs, reply HEARTBEAT_OK."
-    } else {
-        ""
-    };
     let outcome_summary = match crate::agent::outcomes::heartbeat_review_summary(
         &ctx.store,
         &routine.user_id,
     )
     .await
     {
-        Ok(Some(summary)) => format!("\n\n## {}\n", summary),
-        _ => String::new(),
+        Ok(Some(summary)) => Some(summary),
+        _ => None,
     };
-    let full_prompt = format!(
-        "{}\n\n## HEARTBEAT.md\n\n{}{}{}{}{}",
-        prompt_body, checklist, daily_context, critique_context, outcome_summary, logs_note
+    let full_prompt = build_heartbeat_prompt(
+        custom_prompt,
+        &checklist,
+        &daily_context,
+        &critique_context,
+        outcome_summary.as_deref(),
     );
 
     if !light_context {
@@ -2286,12 +1939,7 @@ async fn execute_heartbeat(
             reason: "scheduler not available".to_string(),
         })?;
 
-    let metadata = serde_json::json!({
-        "max_iterations": max_iterations,
-        "heartbeat": true,
-        "actor_id": routine.owner_actor_id(),
-        "conversation_kind": "direct",
-    });
+    let metadata = heartbeat_job_metadata(routine, max_iterations);
 
     let job_id = scheduler
         .dispatch_job_reserved_for_routine(
@@ -2369,24 +2017,8 @@ async fn execute_lightweight(
         Err(_) => None,
     };
 
-    // Build the prompt
-    let mut full_prompt = String::new();
-    full_prompt.push_str(prompt);
-
-    if !context_parts.is_empty() {
-        full_prompt.push_str("\n\n---\n\n# Context\n\n");
-        full_prompt.push_str(&context_parts.join("\n\n"));
-    }
-
-    if let Some(state) = &state_content {
-        full_prompt.push_str("\n\n---\n\n# Previous State\n\n");
-        full_prompt.push_str(state);
-    }
-
-    full_prompt.push_str(
-        "\n\n---\n\nIf nothing needs attention, reply EXACTLY with: ROUTINE_OK\n\
-         If something needs attention, provide a concise summary.",
-    );
+    let full_prompt =
+        build_lightweight_routine_prompt(prompt, &context_parts, state_content.as_deref());
 
     // Get system prompt
     let system_prompt = match ctx.workspace.system_prompt().await {
@@ -2397,23 +2029,17 @@ async fn execute_lightweight(
         }
     };
 
-    let messages = if system_prompt.is_empty() {
-        vec![ChatMessage::user(&full_prompt)]
-    } else {
-        vec![
-            ChatMessage::system(&system_prompt),
-            ChatMessage::user(&full_prompt),
-        ]
-    };
+    let messages = lightweight_routine_messages(&system_prompt, &full_prompt);
 
     // Determine max_tokens from model metadata with fallback
-    let effective_max_tokens = match ctx.llm.model_metadata().await {
-        Ok(meta) => {
-            let from_api = meta.context_length.map(|ctx| ctx / 2).unwrap_or(max_tokens);
-            from_api.max(max_tokens)
-        }
-        Err(_) => max_tokens,
-    };
+    let effective_max_tokens = effective_lightweight_max_tokens(
+        max_tokens,
+        ctx.llm
+            .model_metadata()
+            .await
+            .ok()
+            .and_then(|meta| meta.context_length),
+    );
 
     let request = CompletionRequest::new(messages)
         .with_max_tokens(effective_max_tokens)
@@ -2427,24 +2053,12 @@ async fn execute_lightweight(
             reason: e.to_string(),
         })?;
 
-    let content = response.content.trim();
-    let tokens_used = Some((response.input_tokens + response.output_tokens) as i32);
-
-    // Empty content guard (same as heartbeat)
-    if content.is_empty() {
-        return if response.finish_reason == FinishReason::Length {
-            Err(RoutineError::TruncatedResponse)
-        } else {
-            Err(RoutineError::EmptyResponse)
-        };
-    }
-
-    // Check for the "nothing to do" sentinel
-    if content == "ROUTINE_OK" || content.contains("ROUTINE_OK") {
-        return Ok((RunStatus::Ok, None, tokens_used));
-    }
-
-    Ok((RunStatus::Attention, Some(content.to_string()), tokens_used))
+    classify_lightweight_routine_response(
+        &response.content,
+        response.finish_reason,
+        response.input_tokens,
+        response.output_tokens,
+    )
 }
 
 /// Send a notification based on the routine's notify config and run status.
@@ -2455,39 +2069,15 @@ async fn send_notification(
     status: RunStatus,
     summary: Option<&str>,
 ) {
-    let should_notify = match status {
-        RunStatus::Ok => notify.on_success,
-        RunStatus::Attention => notify.on_attention,
-        RunStatus::Failed => notify.on_failure,
-        RunStatus::Running => false,
-    };
-
-    if !should_notify {
+    let Some(notification) = build_routine_notification(notify, routine_name, status, summary)
+    else {
         return;
-    }
-
-    let icon = match status {
-        RunStatus::Ok => "✅",
-        RunStatus::Attention => "🔔",
-        RunStatus::Failed => "❌",
-        RunStatus::Running => "⏳",
-    };
-
-    let message = match summary {
-        Some(s) => format!("{} *Routine '{}'*: {}\n\n{}", icon, routine_name, status, s),
-        None => format!("{} *Routine '{}'*: {}", icon, routine_name, status),
     };
 
     let response = OutgoingResponse {
-        content: message,
+        content: notification.content,
         thread_id: None,
-        metadata: serde_json::json!({
-            "source": "routine",
-            "routine_name": routine_name,
-            "status": status.to_string(),
-            "notify_user": notify.user,
-            "notify_channel": notify.channel,
-        }),
+        metadata: notification.metadata,
         attachments: Vec::new(),
     };
 
@@ -2521,15 +2111,6 @@ pub fn spawn_cron_ticker(
     })
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let end = crate::util::floor_char_boundary(s, max);
-        format!("{}...", &s[..end])
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -2540,7 +2121,7 @@ mod tests {
     use tokio::sync::{mpsc, oneshot};
 
     use super::*;
-    use crate::agent::routine::{NotifyConfig, RunStatus};
+    use crate::agent::routine::{NotifyConfig, RoutineEventStatus, RunStatus, content_hash};
     use crate::error::LlmError;
     use crate::llm::{
         CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,

@@ -124,6 +124,25 @@ impl Default for LeaseConfig {
     }
 }
 
+impl LeaseConfig {
+    fn normalized(mut self) -> Self {
+        self.max_concurrent = self.max_concurrent.max(1);
+        self
+    }
+}
+
+/// Process-local health snapshot for the credential lease pool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialPoolHealthSnapshot {
+    pub provider: String,
+    pub entry_count: usize,
+    pub max_concurrency: usize,
+    pub active_lease_count: usize,
+    pub selection_strategy: LeaseSelectionStrategy,
+    pub oauth_sync_enabled: bool,
+    pub last_sync_status: Option<String>,
+}
+
 /// Concrete provider entry participating in failover leasing.
 ///
 /// Multiple entries may point at the same upstream provider family/model but
@@ -162,6 +181,7 @@ fn mix64(mut value: u64) -> u64 {
 
 impl LeaseTracker {
     fn new(provider_count: usize, config: LeaseConfig) -> Self {
+        let config = config.normalized();
         Self {
             active: (0..provider_count)
                 .map(|_| Arc::new(AtomicUsize::new(0)))
@@ -216,7 +236,7 @@ impl LeaseTracker {
     fn try_acquire(&self, provider_idx: usize) -> Option<ProviderLease> {
         loop {
             let current = self.active[provider_idx].load(Ordering::Relaxed);
-            if current >= self.config.max_concurrent.max(1) {
+            if current >= self.config.max_concurrent {
                 return None;
             }
             if self.active[provider_idx]
@@ -400,6 +420,28 @@ impl FailoverProvider {
             leases: LeaseTracker::new(provider_count, lease_config),
             provider_for_task: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Return a process-local snapshot of the credential lease pool.
+    pub fn credential_pool_health_snapshot(
+        &self,
+        oauth_sync_enabled: bool,
+        last_sync_status: Option<String>,
+    ) -> CredentialPoolHealthSnapshot {
+        CredentialPoolHealthSnapshot {
+            provider: self.model_name().to_string(),
+            entry_count: self.providers.len(),
+            max_concurrency: self.leases.config.max_concurrent,
+            active_lease_count: self
+                .leases
+                .active
+                .iter()
+                .map(|count| count.load(Ordering::Relaxed))
+                .sum(),
+            selection_strategy: self.leases.config.selection_strategy,
+            oauth_sync_enabled,
+            last_sync_status,
+        }
     }
 
     /// Nanoseconds elapsed since `self.epoch`.
@@ -865,5 +907,227 @@ impl LlmProvider for FailoverProvider {
         }
 
         self.providers[self.last_used.load(Ordering::Relaxed)].effective_model_name(requested_model)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt;
+    use rust_decimal_macros::dec;
+    use std::sync::atomic::AtomicUsize;
+    use thinclaw_llm_core::provider::{
+        ChatMessage, CompletionRequest, CompletionResponse, FinishReason, StreamChunk,
+        StreamChunkStream, ToolCompletionRequest, ToolCompletionResponse,
+    };
+
+    struct MockProvider {
+        name: &'static str,
+        complete_result: MockCompleteResult,
+        stream_chunks: Vec<StreamChunk>,
+        complete_calls: AtomicUsize,
+    }
+
+    #[derive(Clone)]
+    enum MockCompleteResult {
+        Success,
+        Error,
+    }
+
+    impl MockProvider {
+        fn success(name: &'static str) -> Self {
+            Self {
+                name,
+                complete_result: MockCompleteResult::Success,
+                stream_chunks: Vec::new(),
+                complete_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn error(name: &'static str) -> Self {
+            Self {
+                name,
+                complete_result: MockCompleteResult::Error,
+                stream_chunks: Vec::new(),
+                complete_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn streaming(name: &'static str, chunks: Vec<StreamChunk>) -> Self {
+            Self {
+                name,
+                complete_result: MockCompleteResult::Success,
+                stream_chunks: chunks,
+                complete_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for MockProvider {
+        fn model_name(&self) -> &str {
+            self.name
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (dec!(0), dec!(0))
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            self.complete_calls.fetch_add(1, Ordering::Relaxed);
+            match self.complete_result {
+                MockCompleteResult::Success => Ok(CompletionResponse {
+                    content: "ok".to_string(),
+                    provider_model: Some(self.name.to_string()),
+                    cost_usd: None,
+                    thinking_content: None,
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    finish_reason: FinishReason::Stop,
+                    token_capture: None,
+                }),
+                MockCompleteResult::Error => Err(LlmError::RequestFailed {
+                    provider: self.name.to_string(),
+                    reason: "mock failure".to_string(),
+                }),
+            }
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: self.name.to_string(),
+                reason: "not used".to_string(),
+            })
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<StreamChunkStream, LlmError> {
+            Ok(Box::pin(futures::stream::iter(
+                self.stream_chunks.clone().into_iter().map(Ok),
+            )))
+        }
+
+        fn stream_support(&self) -> StreamSupport {
+            StreamSupport::Native
+        }
+    }
+
+    fn request() -> CompletionRequest {
+        CompletionRequest::new(vec![ChatMessage::user("hello")])
+    }
+
+    fn failover_with_provider(provider: MockProvider, max_concurrent: usize) -> FailoverProvider {
+        FailoverProvider::with_entries(
+            vec![ProviderLeaseEntry::new(Arc::new(provider), "mock:1")],
+            CooldownConfig::default(),
+            LeaseConfig {
+                max_concurrent,
+                selection_strategy: LeaseSelectionStrategy::FillFirst,
+            },
+        )
+        .unwrap()
+    }
+
+    fn done_chunk() -> StreamChunk {
+        StreamChunk::Done {
+            provider_model: Some("mock".to_string()),
+            cost_usd: None,
+            input_tokens: 1,
+            output_tokens: 1,
+            finish_reason: FinishReason::Stop,
+            token_capture: None,
+        }
+    }
+
+    #[test]
+    fn lease_config_zero_is_clamped_to_one_in_process() {
+        let provider = failover_with_provider(MockProvider::success("mock"), 0);
+
+        let snapshot = provider.credential_pool_health_snapshot(false, None);
+
+        assert_eq!(snapshot.max_concurrency, 1);
+    }
+
+    #[test]
+    fn lease_released_after_normal_completion() {
+        let provider = failover_with_provider(MockProvider::success("mock"), 1);
+
+        futures::executor::block_on(provider.complete(request())).unwrap();
+
+        let snapshot = provider.credential_pool_health_snapshot(false, None);
+        assert_eq!(snapshot.active_lease_count, 0);
+    }
+
+    #[test]
+    fn lease_released_after_provider_error() {
+        let provider = failover_with_provider(MockProvider::error("mock"), 1);
+
+        let result = futures::executor::block_on(provider.complete(request()));
+
+        assert!(result.is_err());
+        let snapshot = provider.credential_pool_health_snapshot(false, None);
+        assert_eq!(snapshot.active_lease_count, 0);
+    }
+
+    #[test]
+    fn lease_released_after_stream_exhaustion() {
+        let provider = failover_with_provider(
+            MockProvider::streaming(
+                "mock",
+                vec![StreamChunk::Text("hello".to_string()), done_chunk()],
+            ),
+            1,
+        );
+
+        let mut stream = futures::executor::block_on(provider.complete_stream(request())).unwrap();
+        assert_eq!(
+            provider
+                .credential_pool_health_snapshot(false, None)
+                .active_lease_count,
+            1
+        );
+
+        while futures::executor::block_on(stream.next()).is_some() {}
+
+        let snapshot = provider.credential_pool_health_snapshot(false, None);
+        assert_eq!(snapshot.active_lease_count, 0);
+    }
+
+    #[test]
+    fn lease_released_when_stream_is_dropped() {
+        let provider = failover_with_provider(
+            MockProvider::streaming(
+                "mock",
+                vec![StreamChunk::Text("hello".to_string()), done_chunk()],
+            ),
+            1,
+        );
+
+        let stream = futures::executor::block_on(provider.complete_stream(request())).unwrap();
+        assert_eq!(
+            provider
+                .credential_pool_health_snapshot(true, Some("synced 1 source".to_string()))
+                .active_lease_count,
+            1
+        );
+
+        drop(stream);
+
+        let snapshot =
+            provider.credential_pool_health_snapshot(true, Some("synced 1 source".to_string()));
+        assert_eq!(snapshot.active_lease_count, 0);
+        assert!(snapshot.oauth_sync_enabled);
+        assert_eq!(
+            snapshot.last_sync_status.as_deref(),
+            Some("synced 1 source")
+        );
     }
 }

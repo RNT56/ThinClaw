@@ -631,6 +631,29 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
+          # Publish stable archive aliases used by scripts/thinclaw-installer.sh.
+          # cargo-dist archive names can include version/app metadata; the alias
+          # keeps the user-facing installer URL predictable.
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-musl \
+            x86_64-unknown-linux-musl
+          do
+            src="$(find artifacts -maxdepth 1 -type f -name "*${target}*.tar.gz" ! -name "thinclaw-${target}.tar.gz" | head -1)"
+            if [ -n "$src" ]; then
+              cp "$src" "artifacts/thinclaw-${target}.tar.gz"
+            fi
+          done
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum artifacts/thinclaw-*.tar.gz | awk '{ n=$2; sub(/^artifacts\\//, "", n); print $1 "  " n }' > artifacts/checksums.txt
+          else
+            shasum -a 256 artifacts/thinclaw-*.tar.gz | awk '{ n=$2; sub(/^artifacts\\//, "", n); print $1 "  " n }' > artifacts/checksums.txt
+          fi
+          cp scripts/thinclaw-installer.sh artifacts/thinclaw-installer.sh
+          chmod +x artifacts/thinclaw-installer.sh
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"
@@ -659,6 +682,91 @@ jobs:
           else
             gh release create "$TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" "${artifacts[@]}"
           fi
+
+  build-edge-artifacts:
+    needs:
+      - plan
+      - host
+    if: ${{ always() && needs.host.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: edge-${{ matrix.target }}
+      - name: Build edge binary
+        run: cargo build --release --no-default-features --features edge --bin thinclaw --target ${{ matrix.target }}
+      - name: Package edge artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/edge-artifacts/package
+          cp "target/${{ matrix.target }}/release/thinclaw" target/edge-artifacts/package/thinclaw
+          chmod +x target/edge-artifacts/package/thinclaw
+          archive="thinclaw-edge-${{ matrix.target }}.tar.gz"
+          tar -C target/edge-artifacts/package -czf "target/edge-artifacts/${archive}" thinclaw
+          sha256sum "target/edge-artifacts/${archive}" | awk -v f="$archive" '{print $1 "  " f}' >> target/edge-artifacts/checksums-edge.txt
+          if [[ "${{ matrix.target }}" == *-musl ]]; then
+            if ldd target/edge-artifacts/package/thinclaw >/tmp/thinclaw-edge-ldd.txt 2>&1; then
+              cat /tmp/thinclaw-edge-ldd.txt
+              echo "::error::musl/static-ish artifact appears dynamically linked"
+              exit 1
+            fi
+          fi
+      - name: Upload edge artifact to release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "${{ needs.plan.outputs.tag }}" target/edge-artifacts/thinclaw-edge-${{ matrix.target }}.tar.gz --clobber
+      - name: Upload edge checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-checksum-${{ matrix.target }}
+          path: target/edge-artifacts/checksums-edge.txt
+
+  publish-edge-checksums:
+    needs:
+      - plan
+      - build-edge-artifacts
+    if: ${{ always() && needs.build-edge-artifacts.result == 'success' }}
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download edge checksums
+        uses: actions/download-artifact@v4
+        with:
+          pattern: edge-checksum-*
+          path: target/edge-checksums
+          merge-multiple: true
+      - name: Publish edge checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          sort -k2 target/edge-checksums/checksums-edge.txt > checksums-edge.txt
+          gh release upload "${{ needs.plan.outputs.tag }}" checksums-edge.txt --clobber
 
   # Prepare patched manifest SHA256 checksums as an artifact for follow-up PRs
   # so release jobs don't fail on protected default branches.

@@ -1,9 +1,31 @@
 //! Root-independent tool registry storage and filtering.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use thinclaw_llm_core::ToolDefinition;
+#[cfg(feature = "document-extraction")]
+use crate::builtin::ExtractDocumentTool;
+use crate::builtin::{
+    ADVISOR_TOOL_NAME, AgentManagementPort, AgentThinkTool, AppleMailTool, ApplyPatchTool,
+    CanvasTool, ClarifyTool, ConsultAdvisorTool, CreateAgentTool, DesktopAutonomyPort,
+    DesktopAutonomyTool, DeviceInfoTool, EchoTool, EmitUserMessageTool, ExtensionManagementPort,
+    FileToolHost, GrepTool, HomeAssistantTool, HttpTool, JsonTool, ListAgentsTool, ListDirTool,
+    LlmListModelsTool, LlmSelectTool, MessageAgentTool, MoaTool, ProcessTool, ReadFileTool,
+    RemoveAgentTool, SearchFilesTool, SendMessageFn, SendMessageTool, SharedModelOverride,
+    SharedProcessRegistry, SharedTodoStore, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool,
+    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool,
+    VisionAnalyzeTool, WriteFileTool,
+};
+use crate::execution::LocalExecutionBackend;
+use crate::wasm::SharedCredentialRegistry;
+#[cfg(feature = "wasm-runtime")]
+use crate::wasm::{
+    Capabilities, HostToolInvoker, OAuthRefreshConfig, ResourceLimits, WasmError, WasmStorageError,
+    WasmToolRuntime, WasmToolStore, WasmToolWrapper,
+};
+use thinclaw_llm_core::{LlmProvider, ToolDefinition};
+use thinclaw_secrets::SecretsStore;
 use thinclaw_tools_core::{
     ApprovalRequirement, RateLimiter, Tool, ToolDescriptor, ToolDomain, ToolExecutionLane,
     ToolProfile,
@@ -183,6 +205,344 @@ impl ToolRegistry {
                 builtins.insert(name.clone());
             }
         }
+    }
+
+    /// Register the root-independent default built-ins.
+    ///
+    /// Host-specific tools such as browser backends, app adapters, and
+    /// sandbox/job orchestration are intentionally registered by the root/app
+    /// layer after it has concrete runtime dependencies.
+    pub fn register_core_builtin_tools(
+        &self,
+        credential_registry: Option<Arc<SharedCredentialRegistry>>,
+        secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    ) {
+        self.register_sync(Arc::new(EchoTool));
+        self.register_sync(Arc::new(TimeTool));
+        self.register_sync(Arc::new(JsonTool));
+        self.register_sync(Arc::new(DeviceInfoTool::new()));
+        self.register_sync(Arc::new(CanvasTool));
+        self.register_sync(Arc::new(ClarifyTool));
+        self.register_sync(Arc::new(AgentThinkTool));
+        self.register_sync(Arc::new(EmitUserMessageTool));
+
+        let mut http = HttpTool::new();
+        if let (Some(credential_registry), Some(secrets_store)) =
+            (credential_registry, secrets_store)
+        {
+            http = http.with_credentials(credential_registry, secrets_store);
+        }
+        self.register_sync(Arc::new(http));
+
+        #[cfg(feature = "document-extraction")]
+        self.register_sync(Arc::new(ExtractDocumentTool));
+
+        if let Some(home_assistant) = HomeAssistantTool::from_env() {
+            self.register_sync(Arc::new(home_assistant));
+            tracing::info!("Registered Home Assistant tool (HASS_URL + HASS_TOKEN)");
+        }
+    }
+
+    /// Register filesystem development tools with an optional base directory.
+    pub fn register_filesystem_tools(
+        &self,
+        base_dir: Option<PathBuf>,
+        file_host: Arc<dyn FileToolHost>,
+    ) {
+        if let Some(base_dir) = base_dir {
+            self.register_sync(Arc::new(
+                ReadFileTool::new()
+                    .with_base_dir(base_dir.clone())
+                    .with_host(Arc::clone(&file_host)),
+            ));
+            self.register_sync(Arc::new(
+                WriteFileTool::new()
+                    .with_base_dir(base_dir.clone())
+                    .with_host(Arc::clone(&file_host)),
+            ));
+            self.register_sync(Arc::new(ListDirTool::new().with_base_dir(base_dir.clone())));
+            self.register_sync(Arc::new(
+                ApplyPatchTool::new()
+                    .with_base_dir(base_dir.clone())
+                    .with_host(Arc::clone(&file_host)),
+            ));
+            self.register_sync(Arc::new(GrepTool::new().with_base_dir(base_dir)));
+        } else {
+            self.register_sync(Arc::new(
+                ReadFileTool::new().with_host(Arc::clone(&file_host)),
+            ));
+            self.register_sync(Arc::new(
+                WriteFileTool::new().with_host(Arc::clone(&file_host)),
+            ));
+            self.register_sync(Arc::new(ListDirTool::new()));
+            self.register_sync(Arc::new(ApplyPatchTool::new().with_host(file_host)));
+            self.register_sync(Arc::new(GrepTool::new()));
+        }
+    }
+
+    /// Register extension-management tools from a host-provided lifecycle port.
+    pub fn register_extension_management_tools(&self, port: Arc<dyn ExtensionManagementPort>) {
+        self.register_sync(Arc::new(ToolSearchTool::new(Arc::clone(&port))));
+        self.register_sync(Arc::new(ToolInstallTool::new(Arc::clone(&port))));
+        self.register_sync(Arc::new(ToolAuthTool::new(Arc::clone(&port))));
+        self.register_sync(Arc::new(ToolActivateTool::new(Arc::clone(&port))));
+        self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&port))));
+        self.register_sync(Arc::new(ToolRemoveTool::new(port)));
+    }
+
+    /// Register desktop-autonomy tools from a host-provided desktop port.
+    pub fn register_desktop_autonomy_tools(&self, port: Arc<dyn DesktopAutonomyPort>) {
+        self.register_sync(Arc::new(DesktopAutonomyTool::apps(Arc::clone(&port))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::ui(Arc::clone(&port))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::screen(Arc::clone(&port))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::calendar_native(Arc::clone(
+            &port,
+        ))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::numbers_native(Arc::clone(
+            &port,
+        ))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::pages_native(Arc::clone(
+            &port,
+        ))));
+        self.register_sync(Arc::new(DesktopAutonomyTool::control(port)));
+    }
+
+    /// Register agent-management tools from a host-provided agent registry port.
+    pub fn register_agent_management_tools(&self, port: Arc<dyn AgentManagementPort>) {
+        self.register_sync(Arc::new(CreateAgentTool::new(Arc::clone(&port))));
+        self.register_sync(Arc::new(ListAgentsTool::new(Arc::clone(&port))));
+        self.register_sync(Arc::new(UpdateAgentTool::new(Arc::clone(&port))));
+        self.register_sync(Arc::new(RemoveAgentTool::new(Arc::clone(&port))));
+        self.register_sync(Arc::new(MessageAgentTool::new(port)));
+    }
+
+    /// Register LLM model selection/discovery tools.
+    pub fn register_llm_tools(
+        &self,
+        model_override: SharedModelOverride,
+        primary_llm: Arc<dyn LlmProvider>,
+        cheap_llm: Option<Arc<dyn LlmProvider>>,
+    ) {
+        self.register_sync(Arc::new(LlmSelectTool::new(model_override)));
+        self.register_sync(Arc::new(LlmListModelsTool::new(primary_llm, cheap_llm)));
+    }
+
+    /// Register advisor consultation when the advisor lane is ready.
+    pub fn register_advisor_tool(&self, advisor_ready: bool) {
+        if advisor_ready {
+            self.register_sync(Arc::new(ConsultAdvisorTool));
+        }
+    }
+
+    /// Reconcile advisor tool visibility with current advisor readiness.
+    pub async fn reconcile_advisor_tool_readiness(&self, advisor_ready: bool) {
+        if advisor_ready {
+            self.register_advisor_tool(true);
+        } else {
+            let _ = self.unregister(ADVISOR_TOOL_NAME).await;
+        }
+    }
+
+    /// Register the extracted vision analysis tool.
+    pub fn register_vision_tool(&self, llm: Arc<dyn LlmProvider>) {
+        self.register_sync(Arc::new(VisionAnalyzeTool::new(llm)));
+    }
+
+    /// Register the extracted Mixture-of-Agents tool if the model set is viable.
+    pub fn register_moa_tool(
+        &self,
+        primary: Arc<dyn LlmProvider>,
+        cheap: Option<Arc<dyn LlmProvider>>,
+        reference_models: Vec<String>,
+        aggregator_model: Option<String>,
+        min_successful: usize,
+    ) -> bool {
+        let tool = MoaTool::new(
+            primary,
+            cheap,
+            reference_models,
+            aggregator_model,
+            min_successful,
+        );
+        if !tool.is_viable() {
+            return false;
+        }
+        self.register_sync(Arc::new(tool));
+        true
+    }
+
+    /// Register the extracted cross-platform send-message tool.
+    pub fn register_send_message_tool(&self, send_fn: Option<SendMessageFn>) {
+        let mut tool = SendMessageTool::new();
+        if let Some(send_fn) = send_fn {
+            tool = tool.with_send_fn(send_fn);
+        }
+        self.register_sync(Arc::new(tool));
+    }
+
+    /// Register the extracted background process tool.
+    pub fn register_process_tool(
+        &self,
+        registry: SharedProcessRegistry,
+        backend: Option<Arc<dyn LocalExecutionBackend>>,
+    ) {
+        let mut tool = ProcessTool::new(registry);
+        if let Some(backend) = backend {
+            tool = tool.with_backend(backend);
+        }
+        self.register_sync(Arc::new(tool));
+    }
+
+    /// Register the extracted in-session todo tool.
+    pub fn register_todo_tool(&self, store: SharedTodoStore) {
+        self.register_sync(Arc::new(TodoTool::new(store)));
+    }
+
+    /// Register the extracted TTS tool.
+    pub fn register_tts_tool(
+        &self,
+        secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
+        output_dir: PathBuf,
+    ) {
+        self.register_sync(Arc::new(TtsTool::new(secrets, output_dir)));
+    }
+
+    /// Register the extracted Apple Mail tool.
+    pub fn register_apple_mail_tool(&self, db_path: Option<PathBuf>) -> bool {
+        let tool = if let Some(path) = db_path {
+            AppleMailTool::new(path)
+        } else if let Some(tool) = AppleMailTool::auto_detect() {
+            tool
+        } else {
+            return false;
+        };
+        self.register_sync(Arc::new(tool));
+        true
+    }
+
+    /// Register the extracted filename/path search tool.
+    pub fn register_search_files_tool(&self, base_dir: Option<PathBuf>) {
+        let mut tool = SearchFilesTool::new();
+        if let Some(base_dir) = base_dir {
+            tool = tool.with_base_dir(base_dir);
+        }
+        self.register_sync(Arc::new(tool));
+    }
+
+    /// Register a WASM tool from bytes.
+    ///
+    /// This validates and compiles the component, wraps it as a tool, and
+    /// optionally publishes declared credential mappings for the shared HTTP
+    /// injection registry.
+    #[cfg(feature = "wasm-runtime")]
+    pub async fn register_wasm_tool<I>(
+        &self,
+        reg: WasmToolRegistration<'_, I>,
+        credential_registry: Option<&SharedCredentialRegistry>,
+    ) -> Result<(), WasmError>
+    where
+        I: HostToolInvoker + 'static,
+    {
+        let prepared = reg
+            .runtime
+            .prepare(reg.name, reg.wasm_bytes, reg.limits)
+            .await?;
+
+        let credential_mappings = reg
+            .capabilities
+            .http
+            .as_ref()
+            .map(|http| http.credentials.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        let mut wrapper = WasmToolWrapper::new(Arc::clone(reg.runtime), prepared, reg.capabilities);
+
+        if let Some(description) = reg.description {
+            wrapper = wrapper.with_description(description);
+        }
+        if let Some(schema) = reg.schema {
+            wrapper = wrapper.with_schema(schema);
+        }
+        if let Some(store) = reg.secrets_store {
+            wrapper = wrapper.with_secrets_store(store);
+        }
+        if let Some(oauth) = reg.oauth_refresh {
+            wrapper = wrapper.with_oauth_refresh(oauth);
+        }
+        if let Some(invoker) = reg.tool_invoker {
+            wrapper = wrapper.with_tool_invoker(invoker);
+        }
+
+        self.register(Arc::new(wrapper)).await;
+
+        if let Some(registry) = credential_registry
+            && !credential_mappings.is_empty()
+        {
+            let count = credential_mappings.len();
+            registry.add_mappings(credential_mappings);
+            tracing::debug!(
+                name = reg.name,
+                credential_count = count,
+                "Added credential mappings from WASM tool"
+            );
+        }
+
+        tracing::info!(name = reg.name, "Registered WASM tool");
+        Ok(())
+    }
+
+    /// Register a WASM tool from persisted storage.
+    #[cfg(feature = "wasm-runtime")]
+    pub async fn register_wasm_tool_from_storage<I>(
+        &self,
+        store: &dyn WasmToolStore,
+        runtime: &Arc<WasmToolRuntime>,
+        user_id: &str,
+        name: &str,
+        tool_invoker: Option<Arc<I>>,
+        credential_registry: Option<&SharedCredentialRegistry>,
+    ) -> Result<(), WasmRegistrationError>
+    where
+        I: HostToolInvoker + 'static,
+    {
+        let tool_with_binary = store
+            .get_with_binary(user_id, name)
+            .await
+            .map_err(WasmRegistrationError::Storage)?;
+
+        let capabilities = store
+            .get_capabilities(tool_with_binary.tool.id)
+            .await
+            .map_err(WasmRegistrationError::Storage)?
+            .map(|capabilities| capabilities.to_capabilities())
+            .unwrap_or_default();
+
+        self.register_wasm_tool(
+            WasmToolRegistration {
+                name: &tool_with_binary.tool.name,
+                wasm_bytes: &tool_with_binary.wasm_binary,
+                runtime,
+                capabilities,
+                limits: None,
+                description: Some(&tool_with_binary.tool.description),
+                schema: Some(tool_with_binary.tool.parameters_schema.clone()),
+                secrets_store: None,
+                oauth_refresh: None,
+                tool_invoker,
+            },
+            credential_registry,
+        )
+        .await
+        .map_err(WasmRegistrationError::Wasm)?;
+
+        tracing::info!(
+            name = tool_with_binary.tool.name,
+            user_id = user_id,
+            trust_level = %tool_with_binary.tool.trust_level,
+            "Registered WASM tool from storage"
+        );
+
+        Ok(())
     }
 
     /// Unregister a tool.
@@ -452,7 +812,7 @@ impl std::fmt::Debug for ToolRegistry {
     }
 }
 
-fn deny_reason_for_profile(
+pub fn deny_reason_for_profile(
     descriptor: &ToolDescriptor,
     lane: ToolExecutionLane,
     profile: ToolProfile,
@@ -524,7 +884,7 @@ fn descriptor_allowed_for_acp(descriptor: &ToolDescriptor) -> bool {
         || name.starts_with("skill_")
 }
 
-fn deny_reason_for_lane(
+pub fn deny_reason_for_lane(
     tool: &dyn Tool,
     descriptor: &ToolDescriptor,
     lane: ToolExecutionLane,
@@ -576,4 +936,40 @@ pub fn tool_allowed_for_lane(
     lane: ToolExecutionLane,
 ) -> bool {
     deny_reason_for_lane(tool, descriptor, lane).is_none()
+}
+
+/// Error when registering a WASM tool from storage.
+#[cfg(feature = "wasm-runtime")]
+#[derive(Debug, thiserror::Error)]
+pub enum WasmRegistrationError {
+    #[error("Storage error: {0}")]
+    Storage(#[from] WasmStorageError),
+
+    #[error("WASM error: {0}")]
+    Wasm(#[from] WasmError),
+}
+
+/// Configuration for registering a WASM tool with the extracted registry.
+#[cfg(feature = "wasm-runtime")]
+pub struct WasmToolRegistration<'a, I: HostToolInvoker> {
+    /// Unique name for the tool.
+    pub name: &'a str,
+    /// Raw WASM component bytes.
+    pub wasm_bytes: &'a [u8],
+    /// WASM runtime for compilation and execution.
+    pub runtime: &'a Arc<WasmToolRuntime>,
+    /// Security capabilities to grant the tool.
+    pub capabilities: Capabilities,
+    /// Optional resource limits (uses runtime defaults if omitted).
+    pub limits: Option<ResourceLimits>,
+    /// Optional description override.
+    pub description: Option<&'a str>,
+    /// Optional parameter schema override.
+    pub schema: Option<serde_json::Value>,
+    /// Secrets store for credential injection at request time.
+    pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// OAuth refresh configuration for auto-refreshing expired tokens.
+    pub oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Optional host-mediated bridge for WASM tool_invoke aliases.
+    pub tool_invoker: Option<Arc<I>>,
 }

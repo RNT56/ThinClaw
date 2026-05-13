@@ -1,6 +1,7 @@
 //! Request and response DTOs for the web gateway API.
 
 use serde::{Deserialize, Serialize};
+use thinclaw_types::IntegrationSetupStatus;
 use uuid::Uuid;
 
 pub use crate::api::experiments::{
@@ -365,6 +366,8 @@ pub struct ExtensionInfo {
     /// Whether the UI can request an explicit reconnect for this extension.
     #[serde(default)]
     pub reconnect_supported: bool,
+    /// Normalized setup/auth state used by WebUI, onboarding, CLI, and TUI.
+    pub setup: IntegrationSetupStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -405,6 +408,8 @@ pub struct ExtensionSetupResponse {
     pub instructions: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub setup_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shared_auth_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

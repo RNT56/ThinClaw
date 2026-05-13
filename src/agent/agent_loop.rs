@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::agent::AgentRunDriver;
@@ -23,7 +23,7 @@ use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::subagent_executor::SubagentExecutor;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
-use crate::agent::{Router, Scheduler};
+use crate::agent::{RootAgentRuntimePorts, Router, Scheduler};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
@@ -38,54 +38,15 @@ use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
-/// Collapse a tool output string into a single-line preview for display.
-pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
-    let collapsed: String = output
-        .chars()
-        .take(max_chars + 50)
-        .map(|c| if c == '\n' { ' ' } else { c })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    // char_indices gives us byte offsets at char boundaries, so the slice is always valid UTF-8.
-    if collapsed.chars().count() > max_chars {
-        let byte_offset = collapsed
-            .char_indices()
-            .nth(max_chars)
-            .map(|(i, _)| i)
-            .unwrap_or(collapsed.len());
-        format!("{}...", &collapsed[..byte_offset])
-    } else {
-        collapsed
-    }
-}
-
-fn telegram_startup_thread_id(
-    hook_name: &str,
-    target_channel: &str,
-    bootstrap_pending: bool,
-) -> Option<&'static str> {
-    if target_channel != "telegram" {
-        return None;
-    }
-
-    match hook_name {
-        // During first-run bootstrap we keep the recurring boot hook in the
-        // onboarding thread so General is only created once setup is complete.
-        "boot" if bootstrap_pending => Some("bootstrap"),
-        "boot" => Some("boot"),
-        "bootstrap" => Some("bootstrap"),
-        _ => None,
-    }
-}
-
-#[derive(Debug, Clone)]
-struct GatewayStartupThreadTarget {
-    principal_id: String,
-    actor_id: String,
-    thread_id: Uuid,
-}
+use thinclaw_agent::agent_loop::{
+    HeartbeatRoutineConfig, HeartbeatRoutineSpec, routine_ownership_changed,
+};
+pub(crate) use thinclaw_agent::dispatcher_helpers::truncate_for_preview;
+use thinclaw_agent::startup_hooks::{
+    GatewayStartupThreadTarget, heartbeat_gateway_fallback_identity_from_diagnostics,
+    heartbeat_routine_owner_from_gateway_defaults, telegram_startup_thread_id,
+};
+use thinclaw_agent::turn_cancellation::TurnCancellationRegistry;
 
 /// Core dependencies for the agent.
 ///
@@ -138,6 +99,8 @@ pub struct AgentDeps {
     pub restart_requested: Arc<AtomicBool>,
     /// Tracks interactive sandbox child jobs spawned by a parent agent run.
     pub sandbox_children: Option<Arc<SandboxChildRegistry>>,
+    /// Extracted agent-runtime ports backed by root adapters.
+    pub runtime_ports: Option<Arc<RootAgentRuntimePorts>>,
 }
 
 /// The main agent that coordinates all components.
@@ -165,8 +128,9 @@ pub struct Agent {
     /// Per-thread cancellation signals for active turns. `/interrupt`, ACP
     /// `session/cancel`, and close flows publish here so in-flight provider and
     /// tool awaits can stop promptly instead of waiting for the next loop edge.
-    pub(super) active_turn_cancellations:
-        Arc<Mutex<std::collections::HashMap<Uuid, watch::Sender<bool>>>>,
+    pub(super) active_turn_cancellations: TurnCancellationRegistry,
+    /// Root-backed implementations of extracted agent-runtime ports.
+    pub(super) runtime_ports: Arc<RootAgentRuntimePorts>,
 }
 
 impl Agent {
@@ -220,6 +184,19 @@ impl Agent {
             .unwrap_or_else(|| Arc::new(AgentRouter::new()));
 
         let subagent_executor = deps.subagent_executor.clone();
+        let runtime_ports = deps.runtime_ports.clone().unwrap_or_else(|| {
+            Arc::new(RootAgentRuntimePorts::new(
+                Arc::clone(&channels),
+                Arc::clone(&deps.hooks),
+                Arc::clone(&deps.tools),
+                Arc::clone(&deps.safety),
+                deps.store.clone(),
+                deps.model_override.clone(),
+                deps.skill_registry.clone(),
+                deps.skills_config.clone(),
+                None,
+            ))
+        });
         crate::agent::checkpoint::configure(config.checkpoints_enabled, config.max_checkpoints);
 
         Self {
@@ -237,7 +214,8 @@ impl Agent {
             agent_router,
             subagent_executor,
             latest_token_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            active_turn_cancellations: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            active_turn_cancellations: TurnCancellationRegistry::new(),
+            runtime_ports,
         }
     }
 
@@ -256,6 +234,11 @@ impl Agent {
     /// Get a reference to the multi-agent router.
     pub fn agent_router(&self) -> &Arc<AgentRouter> {
         &self.agent_router
+    }
+
+    /// Get the root-backed extracted runtime ports.
+    pub fn runtime_ports(&self) -> &Arc<RootAgentRuntimePorts> {
+        &self.runtime_ports
     }
 
     // Convenience accessors
@@ -310,53 +293,19 @@ impl Agent {
     }
 
     pub(super) async fn begin_turn_cancellation(&self, thread_id: Uuid) {
-        let (tx, _rx) = watch::channel(false);
-        self.active_turn_cancellations
-            .lock()
-            .await
-            .insert(thread_id, tx);
+        self.active_turn_cancellations.begin(thread_id).await;
     }
 
     pub(super) async fn finish_turn_cancellation(&self, thread_id: Uuid) {
-        self.active_turn_cancellations
-            .lock()
-            .await
-            .remove(&thread_id);
+        self.active_turn_cancellations.finish(thread_id).await;
     }
 
     pub(super) async fn signal_turn_cancellation(&self, thread_id: Uuid) {
-        let tx = self
-            .active_turn_cancellations
-            .lock()
-            .await
-            .get(&thread_id)
-            .cloned();
-        if let Some(tx) = tx {
-            let _ = tx.send(true);
-        }
+        self.active_turn_cancellations.signal(thread_id).await;
     }
 
     pub(super) async fn wait_for_turn_cancellation(&self, thread_id: Uuid) {
-        let maybe_rx = self
-            .active_turn_cancellations
-            .lock()
-            .await
-            .get(&thread_id)
-            .map(|tx| tx.subscribe());
-        let Some(mut rx) = maybe_rx else {
-            futures::future::pending::<()>().await;
-            return;
-        };
-
-        loop {
-            if *rx.borrow() {
-                return;
-            }
-            if rx.changed().await.is_err() {
-                futures::future::pending::<()>().await;
-                return;
-            }
-        }
+        self.active_turn_cancellations.wait(thread_id).await;
     }
 
     pub(super) fn turn_interrupted_error(thread_id: Uuid) -> Error {
@@ -2040,38 +1989,18 @@ async fn upsert_heartbeat_routine(
     user_id: &str,
     actor_id: &str,
 ) -> Result<(), Error> {
-    use crate::agent::routine::{
-        NotifyConfig, Routine, RoutineAction, RoutineGuardrails, Trigger, heartbeat_schedule_hint,
-        next_fire_for_routine,
-    };
-
-    let schedule = heartbeat_schedule_hint(hb_config.interval_secs);
-
-    let action = RoutineAction::Heartbeat {
+    let spec = HeartbeatRoutineSpec::from_config(&HeartbeatRoutineConfig {
+        interval_secs: hb_config.interval_secs,
+        notify_channel: hb_config.notify_channel.clone(),
+        notify_user: hb_config.notify_user.clone(),
         light_context: hb_config.light_context,
-        prompt: hb_config.prompt.clone(),
         include_reasoning: hb_config.include_reasoning,
+        target: hb_config.target.clone(),
         active_start_hour: hb_config.active_start_hour,
         active_end_hour: hb_config.active_end_hour,
-        target: hb_config.target.clone(),
+        prompt: hb_config.prompt.clone(),
         max_iterations: hb_config.max_iterations,
-        interval_secs: Some(hb_config.interval_secs.max(1)),
-    };
-    let notify = NotifyConfig {
-        channel: hb_config.notify_channel.clone(),
-        user: hb_config
-            .notify_user
-            .clone()
-            .unwrap_or_else(|| "default".to_string()),
-        on_attention: true,
-        on_failure: true,
-        on_success: false,
-    };
-    let guardrails = RoutineGuardrails {
-        cooldown: std::time::Duration::from_secs((hb_config.interval_secs / 2).max(1)),
-        max_concurrent: 1,
-        dedup_window: None,
-    };
+    });
 
     let existing = store
         .get_routine_by_name_for_actor(user_id, actor_id, "__heartbeat__")
@@ -2096,35 +2025,12 @@ async fn upsert_heartbeat_routine(
         Ok(None) => match legacy_default.clone() {
             Some(legacy) => legacy,
             None => {
-                let mut routine = Routine {
-                    id: uuid::Uuid::new_v4(),
-                    name: "__heartbeat__".to_string(),
-                    description: "Periodic background awareness check — reads HEARTBEAT.md and acts on checklist items".to_string(),
-                    user_id: user_id.to_string(),
-                    actor_id: actor_id.to_string(),
-                    enabled: true,
-                    trigger: Trigger::Cron {
-                        schedule: schedule.clone(),
-                    },
-                    action,
-                    guardrails,
-                    notify,
-                    policy: Default::default(),
-                    last_run_at: None,
-                    next_fire_at: None,
-                    run_count: 0,
-                    consecutive_failures: 0,
-                    state: serde_json::json!({}),
-                    config_version: 1,
-                    created_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                };
-                routine.next_fire_at = next_fire_for_routine(
-                    &routine,
+                let routine = spec.new_routine(
+                    user_id,
+                    actor_id,
                     hb_config.user_timezone.as_deref(),
                     chrono::Utc::now(),
-                )
-                .unwrap_or(None);
+                );
 
                 store.create_routine(&routine).await.map_err(|e| {
                     Error::Database(crate::error::DatabaseError::Query(e.to_string()))
@@ -2134,7 +2040,7 @@ async fn upsert_heartbeat_routine(
                     id = %routine.id,
                     user_id = %routine.user_id,
                     actor_id = %routine.actor_id,
-                    schedule = %schedule,
+                    schedule = %spec.schedule,
                     next_fire = ?routine.next_fire_at,
                     "Created heartbeat routine"
                 );
@@ -2162,47 +2068,15 @@ async fn upsert_heartbeat_routine(
         );
     }
 
-    let ownership_changed = routine.user_id != user_id || routine.owner_actor_id() != actor_id;
-    let trigger_changed = match &routine.trigger {
-        Trigger::Cron { schedule: s } => *s != schedule,
-        _ => true,
-    };
-    let notify_changed = routine.notify.channel != notify.channel
-        || routine.notify.user != notify.user
-        || routine.notify.on_attention != notify.on_attention
-        || routine.notify.on_failure != notify.on_failure
-        || routine.notify.on_success != notify.on_success;
-    let action_changed = routine.action.type_tag() != action.type_tag()
-        || routine.action.to_config_json() != action.to_config_json();
-    let guardrails_changed = routine.guardrails.cooldown != guardrails.cooldown
-        || routine.guardrails.max_concurrent != guardrails.max_concurrent
-        || routine.guardrails.dedup_window != guardrails.dedup_window;
-    let needs_next_fire = routine.next_fire_at.is_none();
-
-    if ownership_changed
-        || trigger_changed
-        || notify_changed
-        || action_changed
-        || guardrails_changed
-        || !routine.enabled
-        || needs_next_fire
+    if routine_ownership_changed(&routine, user_id, actor_id) || spec.routine_needs_update(&routine)
     {
-        routine.user_id = user_id.to_string();
-        routine.actor_id = actor_id.to_string();
-        routine.trigger = Trigger::Cron {
-            schedule: schedule.clone(),
-        };
-        routine.enabled = true;
-        routine.action = action;
-        routine.notify = notify;
-        routine.guardrails = guardrails;
-        routine.next_fire_at = next_fire_for_routine(
-            &routine,
+        spec.apply_to_routine(
+            &mut routine,
+            user_id,
+            actor_id,
             hb_config.user_timezone.as_deref(),
             chrono::Utc::now(),
-        )
-        .unwrap_or(None);
-        routine.updated_at = chrono::Utc::now();
+        );
         store
             .update_routine(&routine)
             .await
@@ -2211,7 +2085,7 @@ async fn upsert_heartbeat_routine(
             id = %routine.id,
             user_id = %routine.user_id,
             actor_id = %routine.actor_id,
-            schedule = %schedule,
+            schedule = %spec.schedule,
             next_fire = ?routine.next_fire_at,
             "Updated heartbeat routine ownership and configuration"
         );
@@ -2246,57 +2120,12 @@ async fn heartbeat_routine_owner_for_gateway(
     )
 }
 
-fn heartbeat_gateway_fallback_identity_from_diagnostics(
-    diagnostics: Option<&serde_json::Value>,
-    fallback_user_id: &str,
-) -> (String, String) {
-    let principal_id = diagnostics
-        .and_then(|value| value.get("user_id"))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(fallback_user_id)
-        .to_string();
-    let actor_id = diagnostics
-        .and_then(|value| value.get("actor_id"))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(principal_id.as_str())
-        .to_string();
-    (principal_id, actor_id)
-}
-
-fn heartbeat_routine_owner_from_gateway_defaults(
-    fallback_principal_id: &str,
-    fallback_actor_id: &str,
-    inferred_user_id: Option<&str>,
-) -> (String, String) {
-    let user_id = if !fallback_principal_id.trim().is_empty() && fallback_principal_id != "default"
-    {
-        fallback_principal_id.to_string()
-    } else {
-        inferred_user_id
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(fallback_principal_id)
-            .to_string()
-    };
-    let actor_id =
-        if fallback_actor_id.trim().is_empty() || fallback_actor_id == fallback_principal_id {
-            user_id.clone()
-        } else {
-            fallback_actor_id.to_string()
-        };
-    (user_id, actor_id)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
+    use super::truncate_for_preview;
+    use thinclaw_agent::startup_hooks::{
         heartbeat_gateway_fallback_identity_from_diagnostics,
         heartbeat_routine_owner_from_gateway_defaults, telegram_startup_thread_id,
-        truncate_for_preview,
     };
 
     #[test]

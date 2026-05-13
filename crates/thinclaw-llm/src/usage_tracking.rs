@@ -928,7 +928,17 @@ mod tests {
             &self,
             _request: ToolCompletionRequest,
         ) -> Result<ToolCompletionResponse, LlmError> {
-            unimplemented!("usage tracking tests do not exercise tool completions")
+            Ok(ToolCompletionResponse {
+                content: Some(self.content.clone()),
+                provider_model: Some(self.model.clone()),
+                cost_usd: None,
+                tool_calls: Vec::new(),
+                thinking_content: None,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                token_capture: None,
+            })
         }
     }
 

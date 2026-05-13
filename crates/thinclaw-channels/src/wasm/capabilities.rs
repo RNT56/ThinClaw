@@ -176,6 +176,10 @@ impl EndpointPattern {
     }
 
     pub fn host_matches(&self, url_host: &str) -> bool {
+        if self.host == "*" {
+            return true;
+        }
+
         if self.host == url_host {
             return true;
         }

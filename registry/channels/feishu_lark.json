@@ -16,7 +16,7 @@
   "auth_summary": {
     "method": "manual",
     "provider": "Feishu/Lark",
-    "secrets": ["feishu_lark_app_token", "feishu_lark_webhook_secret"],
+    "secrets": ["feishu_lark_app_token", "feishu_lark_verification_token", "feishu_lark_webhook_secret"],
     "shared_auth": null,
     "setup_url": "https://open.feishu.cn/"
   },

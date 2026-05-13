@@ -30,6 +30,14 @@ impl std::fmt::Display for JobMode {
     }
 }
 
+/// A credential grant maps a stored secret to an environment variable exposed
+/// to a sandboxed job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CredentialGrant {
+    pub secret_name: String,
+    pub env_var: String,
+}
+
 fn default_idle_timeout_secs() -> u64 {
     DEFAULT_SANDBOX_IDLE_TIMEOUT_SECS
 }

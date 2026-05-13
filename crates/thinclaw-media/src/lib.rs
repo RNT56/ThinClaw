@@ -1,6 +1,8 @@
 //! Media domain crate.
 
 pub mod cache;
+#[cfg(feature = "document-extraction")]
+pub mod document_extraction;
 pub mod limits;
 pub mod sticker;
 pub mod tts;

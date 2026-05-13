@@ -65,21 +65,26 @@ pub use browser_a11y::AgentBrowserTool;
 pub use camera_capture::CameraCaptureTool;
 pub use canvas::{CanvasAction, CanvasTool, UiComponent};
 pub use clarify::ClarifyTool;
-pub use desktop_autonomy::DesktopAutonomyTool;
+pub use desktop_autonomy::{DesktopAutonomyPort, DesktopAutonomyTool};
 pub use device_info::DeviceInfoTool;
 pub use discord_actions::DiscordActionsTool;
 pub use echo::EchoTool;
 pub use execute_code::ExecuteCodeTool;
 pub use extension_tools::{
-    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
+    ExtensionManagementPort, ToolActivateTool, ToolAuthRequestContext, ToolAuthTool,
+    ToolExtensionKind, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
 };
 pub use external_memory::{
-    ExternalMemoryExportTool, ExternalMemoryOffTool, ExternalMemoryRecallTool,
+    ExternalMemoryExportTool, ExternalMemoryOffTool, ExternalMemoryPort,
+    ExternalMemoryProviderConfig, ExternalMemoryProviderStatus, ExternalMemoryRecallTool,
     ExternalMemorySetupTool, ExternalMemoryStatusTool,
 };
 #[cfg(feature = "document-extraction")]
 pub use extract_document::ExtractDocumentTool;
-pub use file::{ApplyPatchTool, GrepTool, ListDirTool, ReadFileTool, WriteFileTool};
+pub use file::{
+    ApplyPatchTool, FileToolHost, GrepTool, ListDirTool, ReadFileTool, RootFileToolHost,
+    WriteFileTool,
+};
 pub use homeassistant::HomeAssistantTool;
 pub use http::HttpTool;
 pub use job::{
@@ -101,9 +106,11 @@ pub use memory::{
 pub use moa::MoaTool;
 #[cfg(feature = "nostr")]
 pub use nostr_actions::NostrActionsTool;
-pub use process::{ProcessTool, SharedProcessRegistry, start_reaper};
+pub use process::{ProcessTool, RootProcessBackendAdapter, SharedProcessRegistry, start_reaper};
 pub use routine::{
-    RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
+    RootRoutineOutcomeObserver, RootRoutineStorePort, RoutineCreateTool, RoutineDeleteTool,
+    RoutineEngineControlPort, RoutineHistoryTool, RoutineListTool, RoutineOutcomeObserver,
+    RoutineUpdateTool,
 };
 pub use screen_capture::ScreenCaptureTool;
 pub use search_files::SearchFilesTool;

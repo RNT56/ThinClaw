@@ -151,8 +151,9 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"] }
-wasmtime-wasi = "36"  # WASI support for component model
+wasmtime = { version = "36", default-features = false, features = ["component-model", "cranelift", "runtime", "async", "cache", "std", "parallel-compilation"], optional = true }
+wasmtime-wasi = { version = "36", optional = true }  # WASI support for component model
+wasmparser = { version = "0.220", optional = true }  # WASM binary parsing for validation
 
 # Cryptography for secrets management
 aes-gcm = "0.10"
@@ -169,7 +170,7 @@ hex = "0.4"
 rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }
 
 # Docker sandbox
-bollard = "0.18"
+bollard = { version = "0.18", optional = true }
 
 # Archive extraction for WASM extension bundles
 flate2 = "1"
@@ -195,10 +196,6 @@ unicode-width = "0.2.2"
 textwrap = "0.16.2"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 tempfile = "3"
-
-# Document extraction (feature gated)
-pdf-extract = { version = "0.7", optional = true }
-zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 
 # Timezone handling
 chrono-tz = "0.10"
@@ -251,11 +248,16 @@ serde_json = "1"
 # Default: lightweight build — core agent + databases + gateway + HTML/doc tools.
 # Use --features full for everything. See docs/BUILD_PROFILES.md
 default = ["light"]
-# Lightweight build — includes the local gateway; no tunnel, no Docker, no voice,
-# no local browser, no nostr. Saves ~65 MB of binary size vs full.
+# Edge build — small-machine runtime with libSQL only. No Postgres, browser,
+# Docker, Nostr, bundled WASM, document extraction, or WASM runtime.
+edge = ["libsql"]
+# Lightweight build — includes the local gateway, sandbox runtime, and core tools;
+# no tunnel, local browser, voice, or nostr.
 light = [
+    "edge",
     "postgres",
-    "libsql",
+    "docker-sandbox",
+    "wasm-runtime",
     "html-to-markdown",
     "document-extraction",
     "timezones",
@@ -267,9 +269,16 @@ web-gateway = []
 acp = []
 repl = []
 tunnel = []
-docker-sandbox = []
-browser = ["dep:chromiumoxide"]
-nostr = ["dep:nostr-sdk"]
+docker-sandbox = ["dep:bollard"]
+wasm-runtime = [
+    "dep:wasmtime",
+    "dep:wasmtime-wasi",
+    "dep:wasmparser",
+    "thinclaw-channels/wasm-runtime",
+    "thinclaw-tools/wasm-runtime",
+]
+browser = ["dep:chromiumoxide", "thinclaw-tools/browser"]
+nostr = ["thinclaw-channels/nostr", "thinclaw-tools/nostr", "dep:nostr-sdk"]
 # Core scheduling/workspace APIs always use chrono-tz; keep this as a
 # compatibility feature for existing build profiles and docs.
 timezones = []
@@ -310,11 +319,11 @@ libsql = [
 integration = []
 html-to-markdown = ["thinclaw-tools/html-to-markdown"]
 # Document text extraction — PDF (pdf-extract), DOCX/PPTX/XLSX (zip crate)
-document-extraction = ["dep:pdf-extract", "dep:zip"]
+document-extraction = ["thinclaw-media/document-extraction", "thinclaw-tools/document-extraction"]
 # Embed all WASM extensions into the binary for air-gapped / zero-network deployments.
 # Extensions are extracted to ~/.thinclaw/{tools,channels}/ on first install.
 # Increases binary size by ~6-13 MB but requires no network access.
-bundled-wasm = []
+bundled-wasm = ["wasm-runtime"]
 # Voice wake word detection — adds cpal for audio capture.
 # Only enable for headless/remote mode; in desktop mode Scrappy owns the mic.
 voice = ["dep:cpal"]
@@ -366,7 +375,7 @@ ci = "github"
 # The installers to generate for each app
 installers = ["shell", "powershell", "npm", "msi"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
 # Production release artifacts include the full non-desktop/headless runtime
 # used by Pi OS Lite native installs: gateway, channels, tunnels, Docker
 # sandbox/browser fallback, ACP, Nostr, libSQL, and Postgres.
@@ -386,7 +395,9 @@ cache-builds = true
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
 x86_64-unknown-linux-gnu = "ubuntu-22.04"
+x86_64-unknown-linux-musl = "ubuntu-22.04"
 x86_64-pc-windows-msvc = "windows-2022"
 x86_64-apple-darwin = "macos-15-intel"
 aarch64-apple-darwin = "macos-14"

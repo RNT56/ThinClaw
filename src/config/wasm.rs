@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+#[cfg(feature = "wasm-runtime")]
 use std::time::Duration;
 
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
@@ -72,6 +73,7 @@ impl WasmConfig {
     }
 
     /// Convert to WasmRuntimeConfig.
+    #[cfg(feature = "wasm-runtime")]
     pub fn to_runtime_config(&self) -> crate::tools::wasm::WasmRuntimeConfig {
         use crate::tools::wasm::{FuelConfig, ResourceLimits, WasmRuntimeConfig};
 

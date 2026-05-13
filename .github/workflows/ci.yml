@@ -60,6 +60,8 @@ jobs:
         include:
           - name: light (default)
             cargo-args: ""
+          - name: edge
+            cargo-args: "--no-default-features --features edge"
           - name: full
             cargo-args: "--features full"
           - name: all-features
@@ -104,6 +106,26 @@ jobs:
         run: cargo clippy --workspace ${{ matrix.cargo-args }} -- -D warnings
       - name: Compile tests (no run)
         run: cargo test --workspace --no-run ${{ matrix.cargo-args }}
+
+  edge-dependency-guard:
+    name: Edge dependency guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.92.0
+      - name: Verify edge avoids heavy dependency families
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo tree --no-default-features --features edge > cargo-tree-edge.txt
+          if rg -n "wasmtime|wasmtime-wasi|wasmparser|bollard|tokio-postgres|deadpool-postgres|chromiumoxide|nostr-sdk|pdf-extract" cargo-tree-edge.txt; then
+            echo "edge profile pulled in a heavy dependency"
+            exit 1
+          fi
 
   linux-host-smoke:
     name: Linux Host Runtime Smoke

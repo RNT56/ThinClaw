@@ -5,10 +5,10 @@
 //! they depend on concrete sub-agent, model override, history, and context
 //! pressure types.
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use thinclaw_agent::ports::{
-    ModelOverride as PortableModelOverride, PortableSubagentState, ThreadRuntimeSnapshot,
+    ModelOverride as PortableModelOverride, PortableSubagentState, ThreadMessage,
+    ThreadRuntimeSnapshot,
 };
 pub use thinclaw_agent::session::{
     PendingApproval, PendingAuth, PendingAuthMode, Session, Thread, ThreadState, Turn, TurnState,
@@ -164,48 +164,25 @@ impl ThreadRuntimeStateExt for Thread {
         &mut self,
         messages: &[crate::history::ConversationMessage],
     ) {
-        self.turns.clear();
-        self.state = ThreadState::Idle;
-        self.pending_approval = None;
-        self.pending_auth = None;
-
-        let mut iter = messages.iter().peekable();
-        let mut turn_number = 0;
-
-        while let Some(msg) = iter.next() {
-            if msg.role != "user" {
-                if msg.role == "assistant" && message_is_startup_hook(&msg.metadata) {
-                    let mut turn = Turn::new(turn_number, "", true);
-                    turn.complete(&msg.content);
-                    self.turns.push(turn);
-                    turn_number += 1;
-                }
-                continue;
-            }
-
-            let hide_user_input_from_ui = message_hides_user_input_in_main_chat(&msg.metadata);
-            let mut turn = Turn::new(turn_number, &msg.content, hide_user_input_from_ui);
-
-            if let Some(next) = iter.peek()
-                && next.role == "assistant"
-                && let Some(response) = iter.next()
-            {
-                turn.complete(&response.content);
-            }
-
-            if turn.hide_user_input_from_ui && turn.response.is_none() {
-                continue;
-            }
-
-            self.turns.push(turn);
-            turn_number += 1;
-        }
-
-        self.updated_at = Utc::now();
+        let portable = messages
+            .iter()
+            .map(|message| ThreadMessage {
+                id: message.id,
+                conversation_id: Uuid::nil(),
+                role: message.role.clone(),
+                content: message.content.clone(),
+                actor_id: message.actor_id.clone(),
+                actor_display_name: message.actor_display_name.clone(),
+                raw_sender_id: message.raw_sender_id.clone(),
+                metadata: message.metadata.clone(),
+                created_at: message.created_at,
+            })
+            .collect::<Vec<_>>();
+        self.restore_from_thread_messages(&portable);
     }
 }
 
-fn model_override_to_portable(
+pub(crate) fn model_override_to_portable(
     value: crate::tools::builtin::llm_tools::ModelOverride,
 ) -> PortableModelOverride {
     PortableModelOverride {
@@ -214,7 +191,9 @@ fn model_override_to_portable(
     }
 }
 
-fn persisted_subagent_to_portable(value: PersistedSubagentState) -> PortableSubagentState {
+pub(crate) fn persisted_subagent_to_portable(
+    value: PersistedSubagentState,
+) -> PortableSubagentState {
     PortableSubagentState {
         agent_id: value.agent_id,
         name: value.name,
@@ -227,29 +206,36 @@ fn persisted_subagent_to_portable(value: PersistedSubagentState) -> PortableSuba
     }
 }
 
-fn message_hides_user_input_in_main_chat(metadata: &serde_json::Value) -> bool {
-    metadata
-        .get("hide_user_input_from_webui_chat")
-        .and_then(|value| value.as_bool())
-        .or_else(|| {
-            metadata
-                .get("hide_from_webui_chat")
-                .and_then(|value| value.as_bool())
-        })
-        .unwrap_or(false)
-}
-
-fn message_is_startup_hook(metadata: &serde_json::Value) -> bool {
-    metadata
-        .get("synthetic_origin")
-        .and_then(|value| value.as_str())
-        == Some("startup_hook")
+pub(crate) fn thread_runtime_state_from_portable(
+    snapshot: ThreadRuntimeSnapshot,
+    model_override: Option<crate::tools::builtin::llm_tools::ModelOverride>,
+    active_subagents: Vec<PersistedSubagentState>,
+) -> ThreadRuntimeState {
+    ThreadRuntimeState {
+        state: snapshot.state.into(),
+        pending_approval: snapshot.pending_approval.map(Into::into),
+        pending_auth: snapshot.pending_auth.map(Into::into),
+        owner_agent_id: snapshot.owner_agent_id,
+        model_override,
+        auto_approved_tools: snapshot.auto_approved_tools,
+        active_subagents,
+        last_context_pressure: snapshot
+            .last_context_pressure
+            .and_then(|pressure| serde_json::from_value(pressure).ok()),
+        post_compaction_context: snapshot.post_compaction_context,
+        frozen_workspace_prompt: snapshot.frozen_workspace_prompt,
+        frozen_provider_system_prompt: snapshot.frozen_provider_system_prompt,
+        prompt_snapshot_hash: snapshot.prompt_snapshot_hash,
+        ephemeral_overlay_hash: snapshot.ephemeral_overlay_hash,
+        prompt_segment_order: snapshot.prompt_segment_order,
+        provider_context_refs: snapshot.provider_context_refs,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::DateTime;
+    use chrono::{DateTime, Utc};
 
     #[test]
     fn test_restore_from_conversation_messages_preserves_startup_visibility() {

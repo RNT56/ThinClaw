@@ -6,7 +6,7 @@
 #   docker compose pull thinclaw
 #   docker compose up -d
 #
-# Source-build fallback (requires pre-built binary):
+# Source-build fallback for local patches (requires pre-built binary):
 #   cargo build --release --features full --bin thinclaw
 #   cp target/release/thinclaw .
 #   docker compose up -d --build

@@ -16,7 +16,7 @@
   "auth_summary": {
     "method": "manual",
     "provider": "Mattermost",
-    "secrets": ["mattermost_bot_token", "mattermost_webhook_secret"],
+    "secrets": ["mattermost_base_url", "mattermost_bot_token", "mattermost_webhook_secret"],
     "shared_auth": null,
     "setup_url": "https://developers.mattermost.com/integrate/webhooks/"
   },

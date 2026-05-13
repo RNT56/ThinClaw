@@ -218,7 +218,8 @@ expression: settings
     "redact_pii_in_prompts": true,
     "smart_approval_mode": "off",
     "external_scanner_mode": "fail_open",
-    "external_scanner_path": null
+    "external_scanner_path": null,
+    "external_scanner_require_verified": false
   },
   "builder": {
     "enabled": true,

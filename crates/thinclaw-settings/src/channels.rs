@@ -66,20 +66,20 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub signal_group_allow_from: Option<String>,
 
-    // === Native lifecycle placeholders ===
-    /// Whether the Matrix native lifecycle placeholder is configured.
+    // === Native lifecycle surfaces ===
+    /// Whether the Matrix native lifecycle surface is configured.
     #[serde(default)]
     pub matrix_enabled: bool,
 
-    /// Whether the voice-call native lifecycle placeholder is configured.
+    /// Whether the voice-call native lifecycle surface is configured.
     #[serde(default)]
     pub voice_call_enabled: bool,
 
-    /// Whether the APNs native lifecycle placeholder is configured.
+    /// Whether the APNs native lifecycle surface is configured.
     #[serde(default)]
     pub apns_enabled: bool,
 
-    /// Whether the browser-push native lifecycle placeholder is configured.
+    /// Whether the browser-push native lifecycle surface is configured.
     #[serde(default)]
     pub browser_push_enabled: bool,
 

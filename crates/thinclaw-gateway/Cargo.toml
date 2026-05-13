@@ -16,6 +16,7 @@ subtle = "2"
 thinclaw-channels-core = { version = "0.1.0", path = "../thinclaw-channels-core" }
 thinclaw-identity = { version = "0.1.0", path = "../thinclaw-identity" }
 thinclaw-safety = { version = "0.1.0", path = "../thinclaw-safety" }
+thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
 thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 tokio = { version = "1", features = ["sync"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

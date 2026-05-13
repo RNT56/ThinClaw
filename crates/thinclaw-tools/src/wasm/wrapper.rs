@@ -951,6 +951,245 @@ impl std::fmt::Debug for WasmToolWrapper {
     }
 }
 
+#[cfg(test)]
+mod tool_invoke_host_tests {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+    use base64::{Engine as _, engine::general_purpose};
+    use thinclaw_tools_core::Tool;
+    use thinclaw_types::JobContext;
+
+    use super::*;
+    use crate::wasm::capabilities::Capabilities;
+    use crate::wasm::limits::ResourceLimits;
+    use crate::wasm::ports::HostToolInvoker;
+    use crate::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
+
+    struct RecordingInvoker {
+        calls: Mutex<Vec<(String, String, serde_json::Value)>>,
+        response: Mutex<Result<String, String>>,
+    }
+
+    impl Default for RecordingInvoker {
+        fn default() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                response: Mutex::new(Ok("{}".to_string())),
+            }
+        }
+    }
+
+    impl RecordingInvoker {
+        fn success(response: impl Into<String>) -> Self {
+            Self {
+                response: Mutex::new(Ok(response.into())),
+                ..Self::default()
+            }
+        }
+
+        fn failure(message: impl Into<String>) -> Self {
+            Self {
+                response: Mutex::new(Err(message.into())),
+                ..Self::default()
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, String, serde_json::Value)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl HostToolInvoker for RecordingInvoker {
+        async fn invoke_json(
+            &self,
+            job_ctx: &JobContext,
+            tool_name: &str,
+            params_json: &str,
+        ) -> Result<String, String> {
+            self.calls.lock().unwrap().push((
+                job_ctx.user_id.clone(),
+                tool_name.to_string(),
+                serde_json::from_str(params_json).unwrap_or(serde_json::Value::Null),
+            ));
+            self.response.lock().unwrap().clone()
+        }
+    }
+
+    fn store_with_tool_invoke(
+        aliases: HashMap<String, String>,
+        invoker: Option<Arc<dyn HostToolInvoker>>,
+    ) -> StoreData {
+        StoreData::new(
+            1024 * 1024,
+            Capabilities::default().with_tool_invoke(aliases),
+            HashMap::new(),
+            Vec::new(),
+            HashSet::new(),
+            invoker,
+            Arc::new(ExactValueLeakScanner),
+            JobContext {
+                user_id: "wasm-user".to_string(),
+                ..JobContext::default()
+            },
+        )
+    }
+
+    #[test]
+    fn tool_invoke_calls_host_invoker_through_declared_alias_only() {
+        let invoker = Arc::new(RecordingInvoker::success(r#"{"ok":true}"#));
+        let mut store = store_with_tool_invoke(
+            HashMap::from([("echo_alias".to_string(), "echo_tool".to_string())]),
+            Some(invoker.clone()),
+        );
+
+        let output = <StoreData as near::agent::host::Host>::tool_invoke(
+            &mut store,
+            "echo_alias".to_string(),
+            r#"{"message":"hello"}"#.to_string(),
+        )
+        .expect("declared alias should invoke host tool");
+
+        assert_eq!(output, r#"{"ok":true}"#);
+        assert_eq!(
+            invoker.calls(),
+            vec![(
+                "wasm-user".to_string(),
+                "echo_tool".to_string(),
+                serde_json::json!({"message": "hello"})
+            )]
+        );
+    }
+
+    #[test]
+    fn tool_invoke_rejects_undeclared_alias_before_host_invocation() {
+        let invoker = Arc::new(RecordingInvoker::success("{}"));
+        let mut store = store_with_tool_invoke(
+            HashMap::from([("allowed".to_string(), "echo_tool".to_string())]),
+            Some(invoker.clone()),
+        );
+
+        let error = <StoreData as near::agent::host::Host>::tool_invoke(
+            &mut store,
+            "not_declared".to_string(),
+            "{}".to_string(),
+        )
+        .expect_err("undeclared alias should be denied");
+
+        assert!(error.contains("Unknown tool alias"));
+        assert!(invoker.calls().is_empty());
+    }
+
+    #[test]
+    fn tool_invoke_reports_missing_host_bridge_after_capability_check() {
+        let mut store = store_with_tool_invoke(
+            HashMap::from([("echo_alias".to_string(), "echo_tool".to_string())]),
+            None,
+        );
+
+        let error = <StoreData as near::agent::host::Host>::tool_invoke(
+            &mut store,
+            "echo_alias".to_string(),
+            "{}".to_string(),
+        )
+        .expect_err("missing invoker should fail explicitly");
+
+        assert!(error.contains("not configured"));
+    }
+
+    #[test]
+    fn tool_invoke_propagates_policy_or_execution_denials_from_host_bridge() {
+        let invoker = Arc::new(RecordingInvoker::failure("blocked by policy"));
+        let mut store = store_with_tool_invoke(
+            HashMap::from([("echo_alias".to_string(), "echo_tool".to_string())]),
+            Some(invoker),
+        );
+
+        let error = <StoreData as near::agent::host::Host>::tool_invoke(
+            &mut store,
+            "echo_alias".to_string(),
+            "{}".to_string(),
+        )
+        .expect_err("host denial should propagate to guest");
+
+        assert!(error.contains("blocked by policy"));
+    }
+
+    #[test]
+    fn tool_invoke_enforces_per_execution_rate_limit_before_invoking_host() {
+        let invoker = Arc::new(RecordingInvoker::success("{}"));
+        let mut store = store_with_tool_invoke(
+            HashMap::from([("echo_alias".to_string(), "echo_tool".to_string())]),
+            Some(invoker.clone()),
+        );
+
+        for _ in 0..20 {
+            <StoreData as near::agent::host::Host>::tool_invoke(
+                &mut store,
+                "echo_alias".to_string(),
+                "{}".to_string(),
+            )
+            .expect("first twenty invocations should pass");
+        }
+        let error = <StoreData as near::agent::host::Host>::tool_invoke(
+            &mut store,
+            "echo_alias".to_string(),
+            "{}".to_string(),
+        )
+        .expect_err("twenty-first invocation should hit the rate limit");
+
+        assert!(error.contains("Too many tool invocations"));
+        assert_eq!(invoker.calls().len(), 20);
+    }
+
+    #[tokio::test]
+    async fn prebuilt_component_invokes_host_tool_alias_end_to_end() {
+        let encoded = include_str!(
+            "../../../../tests/fixtures/wasm-tool-invoke-smoke/prebuilt/wasm_tool_invoke_smoke.wasm.base64"
+        );
+        let wasm_bytes = general_purpose::STANDARD
+            .decode(encoded.trim())
+            .expect("prebuilt smoke component should decode");
+        let runtime = Arc::new(
+            WasmToolRuntime::new(WasmRuntimeConfig::for_testing()).expect("create runtime"),
+        );
+        let prepared = runtime
+            .prepare(
+                "wasm_tool_invoke_smoke",
+                &wasm_bytes,
+                Some(ResourceLimits::default().with_memory(4 * 1024 * 1024)),
+            )
+            .await
+            .expect("prebuilt smoke component should prepare");
+        let invoker = Arc::new(RecordingInvoker::success(r#"{"ok":true}"#));
+        let wrapper = WasmToolWrapper::new(
+            runtime,
+            prepared,
+            Capabilities::default().with_tool_invoke(HashMap::from([(
+                "echo_alias".to_string(),
+                "echo_tool".to_string(),
+            )])),
+        )
+        .with_tool_invoker(invoker.clone());
+
+        let output = wrapper
+            .execute(serde_json::json!({}), &JobContext::default())
+            .await
+            .expect("prebuilt smoke component should invoke host tool");
+
+        assert_eq!(
+            output.result,
+            serde_json::json!({
+                "invoked": true,
+                "output": { "ok": true }
+            })
+        );
+        assert_eq!(invoker.calls().len(), 1);
+    }
+}
+
 /// Refresh an expired OAuth access token using the stored refresh token.
 ///
 /// Posts to the provider's token endpoint with `grant_type=refresh_token`,

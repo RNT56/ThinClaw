@@ -22,8 +22,27 @@ use thinclaw_llm_core::{ChatMessage, Role, ToolCall};
 use crate::personality::SessionPersonalityOverlay;
 use crate::ports::{
     PortablePendingApproval, PortablePendingAuth, PortablePendingAuthMode, PortableThreadState,
-    ThreadRuntimeSnapshot,
+    ThreadMessage, ThreadRuntimeSnapshot,
 };
+
+pub fn message_hides_user_input_in_main_chat(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("hide_user_input_from_webui_chat")
+        .and_then(|value| value.as_bool())
+        .or_else(|| {
+            metadata
+                .get("hide_from_webui_chat")
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+pub fn message_is_startup_hook(metadata: &serde_json::Value) -> bool {
+    metadata
+        .get("synthetic_origin")
+        .and_then(|value| value.as_str())
+        == Some("startup_hook")
+}
 
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -622,6 +641,51 @@ impl Thread {
 
         self.updated_at = Utc::now();
     }
+
+    /// Restore thread turns from durable conversation rows.
+    ///
+    /// Startup-hook assistant messages are preserved as hidden turns so a
+    /// synthetic startup exchange still appears in the in-memory turn model.
+    pub fn restore_from_thread_messages(&mut self, messages: &[ThreadMessage]) {
+        self.turns.clear();
+        self.state = ThreadState::Idle;
+        self.pending_approval = None;
+        self.pending_auth = None;
+
+        let mut iter = messages.iter().peekable();
+        let mut turn_number = 0;
+
+        while let Some(message) = iter.next() {
+            if message.role != "user" {
+                if message.role == "assistant" && message_is_startup_hook(&message.metadata) {
+                    let mut turn = Turn::new(turn_number, "", true);
+                    turn.complete(&message.content);
+                    self.turns.push(turn);
+                    turn_number += 1;
+                }
+                continue;
+            }
+
+            let hide_user_input_from_ui = message_hides_user_input_in_main_chat(&message.metadata);
+            let mut turn = Turn::new(turn_number, &message.content, hide_user_input_from_ui);
+
+            if let Some(next) = iter.peek()
+                && next.role == "assistant"
+                && let Some(response) = iter.next()
+            {
+                turn.complete(&response.content);
+            }
+
+            if turn.hide_user_input_from_ui && turn.response.is_none() {
+                continue;
+            }
+
+            self.turns.push(turn);
+            turn_number += 1;
+        }
+
+        self.updated_at = Utc::now();
+    }
 }
 
 /// State of a turn.
@@ -744,6 +808,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn metadata_visibility_helpers_read_legacy_and_current_flags() {
+        assert!(message_hides_user_input_in_main_chat(
+            &serde_json::json!({ "hide_user_input_from_webui_chat": true })
+        ));
+        assert!(message_hides_user_input_in_main_chat(
+            &serde_json::json!({ "hide_from_webui_chat": true })
+        ));
+        assert!(!message_hides_user_input_in_main_chat(&serde_json::json!(
+            {}
+        )));
+    }
+
+    #[test]
+    fn metadata_startup_hook_helper_matches_synthetic_origin() {
+        assert!(message_is_startup_hook(
+            &serde_json::json!({ "synthetic_origin": "startup_hook" })
+        ));
+        assert!(!message_is_startup_hook(
+            &serde_json::json!({ "synthetic_origin": "manual" })
+        ));
+    }
+
+    #[test]
     fn test_session_creation() {
         let mut session = Session::new("user-123");
         assert!(session.active_thread.is_none());
@@ -830,6 +917,43 @@ mod tests {
         assert_eq!(thread.turns.len(), 2);
         assert_eq!(thread.turns[1].user_input, "How are you?");
         assert!(thread.turns[1].response.is_none());
+    }
+
+    #[test]
+    fn test_restore_from_thread_messages_preserves_startup_visibility() {
+        let mut thread = Thread::new(Uuid::new_v4());
+        let now = Utc::now();
+        let conversation_id = Uuid::new_v4();
+        let messages = vec![
+            ThreadMessage {
+                id: Uuid::new_v4(),
+                conversation_id,
+                role: "user".to_string(),
+                content: "boot prompt".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({"hide_from_webui_chat": true}),
+                created_at: now,
+            },
+            ThreadMessage {
+                id: Uuid::new_v4(),
+                conversation_id,
+                role: "assistant".to_string(),
+                content: "boot reply".to_string(),
+                actor_id: None,
+                actor_display_name: None,
+                raw_sender_id: None,
+                metadata: serde_json::json!({"synthetic_origin": "startup_hook"}),
+                created_at: now + chrono::TimeDelta::seconds(1),
+            },
+        ];
+
+        thread.restore_from_thread_messages(&messages);
+
+        assert_eq!(thread.turns.len(), 1);
+        assert!(thread.turns[0].hide_user_input_from_ui);
+        assert_eq!(thread.turns[0].response.as_deref(), Some("boot reply"));
     }
 
     #[test]

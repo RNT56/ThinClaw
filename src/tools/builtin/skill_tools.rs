@@ -3,12 +3,11 @@
 //! Five tools for discovering, reading, installing, listing, and removing skills
 //! entirely through conversation, following the extension_tools pattern.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use sha2::{Digest, Sha256};
 use tokio::process::Command;
 
 use crate::context::JobContext;
@@ -16,71 +15,128 @@ use crate::db::Database;
 use crate::settings::{Settings, SkillTapConfig, SkillTapTrustLevel};
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::quarantine::{
-    QuarantineManager, QuarantinedSkill, SecurityFinding, SkillContent, SkillProvenance,
+    FindingSeverity, FindingSummary, QuarantineManager, QuarantinedSkill, SecurityFinding,
+    SkillContent, SkillProvenance, SkillScanFile, SkillScanReport,
 };
 use crate::skills::registry::SkillRegistry;
 use crate::skills::{SharedRemoteSkillHub, SkillSource, SkillTrust};
-use crate::tools::ToolRegistry;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+use thinclaw_tools::builtin::skill as skill_policy;
+use thinclaw_tools::builtin::skill::{
+    SkillPackageFile, collect_skill_package_files, package_file_json, package_hash,
+    package_scan_content,
+};
 
 fn restricted_skill_names(ctx: &JobContext) -> Option<std::collections::HashSet<String>> {
-    ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_skills")
-        .map(|skills| skills.into_iter().collect())
+    skill_policy::restricted_skill_names(&ctx.metadata)
 }
 
 fn ensure_skill_allowed(ctx: &JobContext, skill_name: &str) -> Result<(), ToolError> {
-    if ToolRegistry::skill_name_allowed_by_metadata(&ctx.metadata, skill_name) {
-        Ok(())
-    } else {
-        Err(ToolError::ExecutionFailed(format!(
-            "Skill '{}' is not allowed in this agent context.",
-            skill_name
-        )))
-    }
+    skill_policy::ensure_skill_allowed(&ctx.metadata, skill_name)
 }
 
 fn ensure_skill_admin_available(ctx: &JobContext, tool_name: &str) -> Result<(), ToolError> {
-    if ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_skills").is_some() {
-        Err(ToolError::ExecutionFailed(format!(
-            "Tool '{}' is not available when the current agent is restricted to a specific skill allowlist.",
-            tool_name
-        )))
-    } else {
-        Ok(())
-    }
+    skill_policy::ensure_skill_admin_available(&ctx.metadata, tool_name)
 }
 
 fn summarize_findings(findings: &[SecurityFinding]) -> String {
-    findings
-        .iter()
-        .map(|finding| {
-            format!(
-                "{} ({:?}): {}",
-                finding.kind, finding.severity, finding.excerpt
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
+    skill_policy::skill_findings_summary(findings.iter().map(|finding| {
+        skill_policy::skill_finding_summary(
+            &finding.kind,
+            &format!("{:?}", finding.severity).to_lowercase(),
+            &finding.excerpt,
+        )
+    }))
 }
 
 fn skill_finding_json(findings: &[SecurityFinding]) -> Vec<serde_json::Value> {
     findings
         .iter()
         .map(|finding| {
-            serde_json::json!({
-                "kind": finding.kind,
-                "severity": format!("{:?}", finding.severity).to_lowercase(),
-                "excerpt": finding.excerpt,
-            })
+            let mut value = skill_policy::skill_finding_output(
+                &finding.kind,
+                &format!("{:?}", finding.severity).to_lowercase(),
+                &finding.excerpt,
+            );
+            if let Some(obj) = value.as_object_mut() {
+                if let Some(rule_id) = finding.rule_id.as_ref() {
+                    obj.insert(
+                        "rule_id".to_string(),
+                        serde_json::Value::String(rule_id.clone()),
+                    );
+                }
+                if let Some(file) = finding.file.as_ref() {
+                    obj.insert("file".to_string(), serde_json::Value::String(file.clone()));
+                }
+                if let Some(line) = finding.line {
+                    obj.insert("line".to_string(), serde_json::json!(line));
+                }
+                if let Some(recommendation) = finding.recommendation.as_ref() {
+                    obj.insert(
+                        "recommendation".to_string(),
+                        serde_json::Value::String(recommendation.clone()),
+                    );
+                }
+                if let Some(scanner_version) = finding.scanner_version.as_ref() {
+                    obj.insert(
+                        "scanner_version".to_string(),
+                        serde_json::Value::String(scanner_version.clone()),
+                    );
+                }
+            }
+            value
         })
         .collect()
+}
+
+fn finding_summary_json(summary: &FindingSummary) -> serde_json::Value {
+    serde_json::json!({
+        "total": summary.total,
+        "warnings": summary.warnings,
+        "critical": summary.critical,
+        "categories": summary.categories.clone(),
+    })
+}
+
+fn add_scan_report_fields(output: &mut serde_json::Value, report: &SkillScanReport) {
+    if let Some(obj) = output.as_object_mut() {
+        obj.insert(
+            "scanner_version".to_string(),
+            serde_json::Value::String(report.scanner_version.clone()),
+        );
+        obj.insert(
+            "content_sha256".to_string(),
+            serde_json::Value::String(report.content_sha256.clone()),
+        );
+        obj.insert(
+            "finding_summary".to_string(),
+            finding_summary_json(&report.summary),
+        );
+    }
 }
 
 fn findings_require_approval(
     trust_level: SkillTapTrustLevel,
     findings: &[SecurityFinding],
 ) -> bool {
-    trust_level == SkillTapTrustLevel::Community && !findings.is_empty()
+    let critical = findings
+        .iter()
+        .filter(|finding| finding.severity == FindingSeverity::Critical)
+        .count();
+    let warnings = findings
+        .iter()
+        .filter(|finding| finding.severity == FindingSeverity::Warning)
+        .count();
+    match trust_level {
+        SkillTapTrustLevel::Community => critical > 0 || warnings > 1,
+        SkillTapTrustLevel::Trusted | SkillTapTrustLevel::Builtin => critical > 0,
+    }
+}
+
+fn findings_require_rejection(findings: &[SecurityFinding]) -> bool {
+    findings.iter().any(|finding| {
+        finding.severity == FindingSeverity::Critical && finding.kind == "path_traversal"
+    })
 }
 
 fn source_path_for_skill(skill: &crate::skills::LoadedSkill) -> Option<PathBuf> {
@@ -120,168 +176,56 @@ async fn read_skill_provenance(skill_dir: &Path) -> Result<SkillProvenance, Tool
     serde_json::from_str(&raw).map_err(|err| ToolError::ExecutionFailed(err.to_string()))
 }
 
-fn skill_source_json(source: &SkillSource) -> serde_json::Value {
-    match source {
-        SkillSource::Workspace(path) => serde_json::json!({
-            "kind": "workspace",
-            "path": path.display().to_string(),
-        }),
-        SkillSource::User(path) => serde_json::json!({
-            "kind": "user",
-            "path": path.display().to_string(),
-        }),
-        SkillSource::Bundled(path) => serde_json::json!({
-            "kind": "bundled",
-            "path": path.display().to_string(),
-        }),
-        SkillSource::External(path) => serde_json::json!({
-            "kind": "external",
-            "path": path.display().to_string(),
-        }),
-    }
-}
-
-#[derive(Debug, Clone)]
-struct SkillPackageFile {
-    relative_path: String,
-    source_path: PathBuf,
-    bytes: u64,
-}
-
-fn is_skipped_package_name(name: &str) -> bool {
-    name == ".git"
-        || name == ".DS_Store"
-        || name == ".thinclaw-skill-lock.json"
-        || name == ".cache"
-        || name == "__pycache__"
-        || name == "target"
-        || name == "node_modules"
-        || name == "tmp"
-        || name == "temp"
-        || name.starts_with('.')
-}
-
-fn relative_path_is_safe(path: &Path) -> bool {
-    path.components()
-        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
-}
-
-fn collect_skill_package_files(root: &Path) -> Result<Vec<SkillPackageFile>, ToolError> {
-    fn walk(root: &Path, dir: &Path, files: &mut Vec<SkillPackageFile>) -> Result<(), ToolError> {
-        let entries = std::fs::read_dir(dir).map_err(|err| {
-            ToolError::ExecutionFailed(format!(
-                "Failed to read skill directory '{}': {}",
-                dir.display(),
-                err
-            ))
-        })?;
-
-        for entry in entries {
-            let entry = entry.map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if is_skipped_package_name(&name) {
-                continue;
-            }
-
-            let meta = std::fs::symlink_metadata(&path).map_err(|err| {
-                ToolError::ExecutionFailed(format!("Failed to stat '{}': {}", path.display(), err))
-            })?;
-            if meta.file_type().is_symlink() {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "Refusing to publish symlink '{}'",
-                    path.display()
-                )));
-            }
-            if meta.is_dir() {
-                walk(root, &path, files)?;
-                continue;
-            }
-            if !meta.is_file() {
-                continue;
-            }
-
-            let relative = path.strip_prefix(root).map_err(|err| {
-                ToolError::ExecutionFailed(format!(
-                    "Failed to derive package path for '{}': {}",
-                    path.display(),
-                    err
-                ))
-            })?;
-            if !relative_path_is_safe(relative) {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "Refusing unsafe package path '{}'",
-                    relative.display()
-                )));
-            }
-            files.push(SkillPackageFile {
-                relative_path: relative.to_string_lossy().replace('\\', "/"),
-                source_path: path,
-                bytes: meta.len(),
-            });
-        }
-        Ok(())
-    }
-
-    if !root.join("SKILL.md").is_file() {
-        return Err(ToolError::ExecutionFailed(format!(
-            "Skill directory '{}' is missing SKILL.md",
-            root.display()
-        )));
-    }
-
-    let mut files = Vec::new();
-    walk(root, root, &mut files)?;
-    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    if !files.iter().any(|file| file.relative_path == "SKILL.md") {
-        return Err(ToolError::ExecutionFailed(
-            "Skill package must include SKILL.md".to_string(),
-        ));
-    }
-    Ok(files)
-}
-
-fn package_hash(files: &[SkillPackageFile]) -> Result<String, ToolError> {
-    let mut hasher = Sha256::new();
-    for file in files {
-        hasher.update(file.relative_path.as_bytes());
-        hasher.update(b"\0");
-        let bytes = std::fs::read(&file.source_path).map_err(|err| {
-            ToolError::ExecutionFailed(format!(
-                "Failed to read package file '{}': {}",
-                file.source_path.display(),
-                err
-            ))
-        })?;
-        hasher.update(&bytes);
-        hasher.update(b"\0");
-    }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
-}
-
-fn package_scan_content(files: &[SkillPackageFile]) -> String {
-    let mut out = String::new();
-    for file in files {
-        if let Ok(bytes) = std::fs::read(&file.source_path) {
-            out.push_str("\n--- ");
-            out.push_str(&file.relative_path);
-            out.push_str(" ---\n");
-            out.push_str(&String::from_utf8_lossy(&bytes));
-        }
-    }
-    out
-}
-
-fn package_file_json(files: &[SkillPackageFile]) -> Vec<serde_json::Value> {
+fn package_scan_files(files: &[SkillPackageFile]) -> Vec<SkillScanFile> {
     files
         .iter()
-        .map(|file| {
-            serde_json::json!({
-                "path": file.relative_path,
-                "bytes": file.bytes,
-            })
+        .filter_map(|file| {
+            std::fs::read(&file.source_path)
+                .ok()
+                .map(|bytes| SkillScanFile {
+                    relative_path: file.relative_path.clone(),
+                    content: String::from_utf8_lossy(&bytes).into_owned(),
+                })
         })
         .collect()
+}
+
+fn scan_files_for_source_path(path: &Path) -> Vec<SkillScanFile> {
+    collect_skill_package_files(path)
+        .map(|files| package_scan_files(&files))
+        .unwrap_or_default()
+}
+
+fn scan_report_for_content(
+    quarantine: &QuarantineManager,
+    skill_name: &str,
+    dir: PathBuf,
+    content: SkillContent,
+    package_files: Vec<SkillScanFile>,
+) -> SkillScanReport {
+    quarantine.scan_report(&QuarantinedSkill {
+        skill_name: skill_name.to_string(),
+        dir,
+        content,
+        package_files,
+    })
+}
+
+fn skill_source_json(source: &SkillSource) -> serde_json::Value {
+    match source {
+        SkillSource::Workspace(path) => {
+            skill_policy::skill_source_output("workspace", &path.display().to_string())
+        }
+        SkillSource::User(path) => {
+            skill_policy::skill_source_output("user", &path.display().to_string())
+        }
+        SkillSource::Bundled(path) => {
+            skill_policy::skill_source_output("bundled", &path.display().to_string())
+        }
+        SkillSource::External(path) => {
+            skill_policy::skill_source_output("external", &path.display().to_string())
+        }
+    }
 }
 
 pub async fn inspect_skill_report(
@@ -316,9 +260,7 @@ pub async fn inspect_skill_report(
         if let Some(path) = source_path.as_ref() {
             match collect_skill_package_files(path) {
                 Ok(files) => package_file_json(&files),
-                Err(err) => vec![serde_json::json!({
-                    "error": err.to_string(),
-                })],
+                Err(err) => vec![skill_policy::skill_inventory_error_output(&err.to_string())],
             }
         } else {
             Vec::new()
@@ -327,12 +269,17 @@ pub async fn inspect_skill_report(
         Vec::new()
     };
 
-    let findings = if audit {
+    let scan_report = if audit {
         let scan_root = source_path.clone().unwrap_or_else(|| PathBuf::from("."));
-        quarantine.scan_quarantined(&QuarantinedSkill {
-            skill_name: skill.manifest.name.clone(),
-            dir: scan_root,
-            content: SkillContent {
+        let package_files = source_path
+            .as_ref()
+            .map(|path| scan_files_for_source_path(path))
+            .unwrap_or_default();
+        Some(scan_report_for_content(
+            quarantine,
+            &skill.manifest.name,
+            scan_root,
+            SkillContent {
                 raw_content: skill.prompt_content.clone(),
                 source_kind: "inspect".to_string(),
                 source_adapter: "inspect".to_string(),
@@ -346,97 +293,54 @@ pub async fn inspect_skill_report(
                 commit_sha: None,
                 trust_level: SkillTapTrustLevel::Community,
             },
-        })
+            package_files,
+        ))
     } else {
-        Vec::new()
+        None
     };
 
-    let mut output = serde_json::json!({
-        "name": skill.manifest.name.clone(),
-        "version": skill.manifest.version.clone(),
-        "description": skill.manifest.description.clone(),
-        "activation": skill.manifest.activation.clone(),
-        "metadata": skill.manifest.metadata.clone(),
-        "trust": skill.trust.to_string(),
-        "source_tier": skill.source_tier.to_string(),
-        "source": skill_source_json(&skill.source),
-        "content_hash": skill.content_hash.clone(),
-        "prompt_tokens_approx": (skill.prompt_content.len() as f64 * 0.25) as usize,
-        "provenance_lock": provenance,
-        "finding_count": findings.len(),
-        "findings": skill_finding_json(&findings),
-        "inventory": {
-            "file_count": files.len(),
-            "files": files.clone(),
-        },
-        "files": files,
-    });
-    if include_content {
-        output["content"] = serde_json::Value::String(skill.prompt_content.clone());
+    let findings = scan_report
+        .as_ref()
+        .map(|report| report.findings.as_slice())
+        .unwrap_or(&[]);
+    let mut output = skill_policy::skill_inspect_output(
+        &skill.manifest.name,
+        &skill.manifest.version,
+        &skill.manifest.description,
+        serde_json::to_value(&skill.manifest.activation)
+            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+        serde_json::to_value(&skill.manifest.metadata)
+            .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+        &skill.trust.to_string(),
+        &skill.source_tier.to_string(),
+        skill_source_json(&skill.source),
+        &skill.content_hash,
+        (skill.prompt_content.len() as f64 * 0.25) as usize,
+        provenance,
+        skill_finding_json(&findings),
+        files,
+        include_content.then_some(skill.prompt_content.as_str()),
+    );
+    if let Some(report) = scan_report.as_ref() {
+        add_scan_report_fields(&mut output, report);
     }
     Ok(output)
 }
 
 fn normalize_tap_path(path: &str) -> String {
-    path.trim().trim_matches('/').to_string()
-}
-
-fn normalize_tap_branch(branch: Option<&str>) -> Option<String> {
-    branch
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+    skill_policy::normalize_tap_path(path)
 }
 
 fn validate_github_repo(repo: &str) -> Result<(), ToolError> {
-    let mut parts = repo.split('/');
-    let owner = parts.next().unwrap_or_default();
-    let name = parts.next().unwrap_or_default();
-    if parts.next().is_some()
-        || owner.is_empty()
-        || name.is_empty()
-        || [owner, name].iter().any(|part| {
-            part == &"."
-                || part == &".."
-                || part
-                    .chars()
-                    .any(|ch| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.'))
-        })
-    {
-        return Err(ToolError::InvalidParameters(
-            "repo must be in owner/name form".to_string(),
-        ));
-    }
-    Ok(())
+    skill_policy::validate_github_repo(repo)
 }
 
 fn validate_repo_relative_path(path: &str, field: &str) -> Result<(), ToolError> {
-    if path.is_empty() {
-        return Ok(());
-    }
-    let candidate = Path::new(path);
-    if candidate.is_absolute()
-        || !candidate
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-    {
-        return Err(ToolError::InvalidParameters(format!(
-            "{} must be a relative repository path without traversal",
-            field
-        )));
-    }
-    Ok(())
+    skill_policy::validate_repo_relative_path(path, field)
 }
 
 fn validate_repo_path_component(value: &str, field: &str) -> Result<(), ToolError> {
-    validate_repo_relative_path(value, field)?;
-    if Path::new(value).components().count() != 1 {
-        return Err(ToolError::InvalidParameters(format!(
-            "{} must be a single repository path component",
-            field
-        )));
-    }
-    Ok(())
+    skill_policy::validate_repo_path_component(value, field)
 }
 
 fn parse_tap_trust_level(value: &str) -> Result<SkillTapTrustLevel, ToolError> {
@@ -452,9 +356,14 @@ fn parse_tap_trust_level(value: &str) -> Result<SkillTapTrustLevel, ToolError> {
 }
 
 fn tap_key_matches(tap: &SkillTapConfig, repo: &str, path: &str, branch: Option<&str>) -> bool {
-    tap.repo.eq_ignore_ascii_case(repo)
-        && normalize_tap_path(&tap.path) == normalize_tap_path(path)
-        && tap.branch.as_deref() == branch
+    skill_policy::skill_tap_key_matches(
+        &tap.repo,
+        &tap.path,
+        tap.branch.as_deref(),
+        repo,
+        path,
+        branch,
+    )
 }
 
 async fn load_settings_for_taps(
@@ -526,31 +435,7 @@ impl Tool for SkillInspectTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Name of the loaded skill to inspect."
-                },
-                "include_content": {
-                    "type": "boolean",
-                    "description": "Include full prompt content in the response.",
-                    "default": false
-                },
-                "include_files": {
-                    "type": "boolean",
-                    "description": "Include regular publishable files in the skill directory.",
-                    "default": true
-                },
-                "audit": {
-                    "type": "boolean",
-                    "description": "Run the quarantine scanner over the skill prompt.",
-                    "default": true
-                }
-            },
-            "required": ["name"]
-        })
+        skill_policy::skill_inspect_parameters_schema()
     }
 
     async fn execute(
@@ -559,28 +444,16 @@ impl Tool for SkillInspectTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let name = require_str(&params, "name")?;
-        ensure_skill_allowed(ctx, name)?;
-        let include_content = params
-            .get("include_content")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let include_files = params
-            .get("include_files")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(true);
-        let audit = params
-            .get("audit")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(true);
+        let parsed = skill_policy::parse_skill_inspect_params(&params)?;
+        ensure_skill_allowed(ctx, &parsed.name)?;
 
         let output = inspect_skill_report(
             &self.registry,
             &self.quarantine,
-            name,
-            include_content,
-            include_files,
-            audit,
+            &parsed.name,
+            parsed.include_content,
+            parsed.include_files,
+            parsed.audit,
         )
         .await?;
         Ok(ToolOutput::success(output, start.elapsed()))
@@ -619,16 +492,7 @@ impl Tool for SkillReadTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Name of the skill to read (from skill_list or the Skills section)"
-                }
-            },
-            "required": ["name"]
-        })
+        skill_policy::skill_read_parameters_schema()
     }
 
     async fn execute(
@@ -637,25 +501,25 @@ impl Tool for SkillReadTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let name = require_str(&params, "name")?;
-        ensure_skill_allowed(ctx, name)?;
+        let name = skill_policy::parse_skill_name_param(&params)?;
+        ensure_skill_allowed(ctx, &name)?;
 
         let guard = self.registry.read().await;
         let skill = guard
             .skills()
             .iter()
-            .find(|s| s.manifest.name.eq_ignore_ascii_case(name));
+            .find(|s| s.manifest.name.eq_ignore_ascii_case(&name));
 
         match skill {
             Some(s) => {
-                let output = serde_json::json!({
-                    "name": s.manifest.name,
-                    "version": s.manifest.version,
-                    "description": s.manifest.description,
-                    "trust": s.trust.to_string(),
-                    "source_tier": s.source_tier.to_string(),
-                    "content": s.prompt_content,
-                });
+                let output = skill_policy::skill_read_output(
+                    &s.manifest.name,
+                    &s.manifest.version,
+                    &s.manifest.description,
+                    &s.trust.to_string(),
+                    &s.source_tier.to_string(),
+                    &s.prompt_content,
+                );
                 Ok(ToolOutput::success(output, start.elapsed()))
             }
             None => {
@@ -701,16 +565,7 @@ impl Tool for SkillListTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "verbose": {
-                    "type": "boolean",
-                    "description": "Include extra detail (tags, content_hash, version)",
-                    "default": false
-                }
-            }
-        })
+        skill_policy::skill_list_parameters_schema()
     }
 
     async fn execute(
@@ -719,10 +574,7 @@ impl Tool for SkillListTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let verbose = params
-            .get("verbose")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let parsed = skill_policy::parse_skill_list_params(&params);
         let allowed_skills = restricted_skill_names(ctx);
 
         let guard = self.registry.read().await;
@@ -736,69 +588,58 @@ impl Tool for SkillListTool {
                     .is_none_or(|allowed| allowed.contains(s.manifest.name.as_str()))
             })
             .map(|s| {
-                let mut entry = serde_json::json!({
-                    "name": s.manifest.name,
-                    "description": s.manifest.description,
-                    "trust": s.trust.to_string(),
-                    "source_tier": s.source_tier.to_string(),
-                    "source": format!("{:?}", s.source),
-                    "keywords": s.manifest.activation.keywords,
-                });
+                let mut entry = skill_policy::skill_list_entry(
+                    &s.manifest.name,
+                    &s.manifest.description,
+                    &s.trust.to_string(),
+                    &s.source_tier.to_string(),
+                    &format!("{:?}", s.source),
+                    serde_json::json!(s.manifest.activation.keywords),
+                );
 
-                if verbose && let Some(obj) = entry.as_object_mut() {
-                    obj.insert(
-                        "version".to_string(),
-                        serde_json::Value::String(s.manifest.version.clone()),
-                    );
-                    obj.insert(
-                        "tags".to_string(),
-                        serde_json::json!(s.manifest.activation.tags),
-                    );
-                    obj.insert(
-                        "content_hash".to_string(),
-                        serde_json::Value::String(s.content_hash.clone()),
-                    );
-                    obj.insert(
-                        "max_context_tokens".to_string(),
-                        serde_json::json!(s.manifest.activation.max_context_tokens),
-                    );
+                if parsed.verbose {
+                    let mut provenance = None;
+                    let mut lifecycle_status = None;
+                    let mut outcome_score = None;
+                    let mut reuse_count = None;
+                    let mut activation_reason = None;
                     if let Some(openclaw) = s
                         .manifest
                         .metadata
                         .as_ref()
                         .and_then(|metadata| metadata.openclaw.as_ref())
                     {
-                        obj.insert(
-                            "provenance".to_string(),
-                            serde_json::json!(openclaw.provenance.clone()),
-                        );
-                        obj.insert(
-                            "lifecycle_status".to_string(),
-                            serde_json::json!(openclaw.lifecycle_status.clone()),
-                        );
-                        obj.insert(
-                            "outcome_score".to_string(),
-                            serde_json::json!(openclaw.outcome_score),
-                        );
-                        obj.insert(
-                            "reuse_count".to_string(),
-                            serde_json::json!(openclaw.reuse_count),
-                        );
-                        obj.insert(
-                            "activation_reason".to_string(),
-                            serde_json::json!(openclaw.activation_reason.clone()),
-                        );
+                        provenance = Some(serde_json::json!(openclaw.provenance.clone()));
+                        lifecycle_status =
+                            Some(serde_json::json!(openclaw.lifecycle_status.clone()));
+                        outcome_score = Some(serde_json::json!(openclaw.outcome_score));
+                        reuse_count = Some(serde_json::json!(openclaw.reuse_count));
+                        activation_reason =
+                            Some(serde_json::json!(openclaw.activation_reason.clone()));
                     }
+                    skill_policy::add_skill_list_verbose_fields(
+                        &mut entry,
+                        skill_policy::SkillListVerboseFields {
+                            version: s.manifest.version.clone(),
+                            tags: serde_json::json!(s.manifest.activation.tags),
+                            content_hash: s.content_hash.clone(),
+                            max_context_tokens: serde_json::json!(
+                                s.manifest.activation.max_context_tokens
+                            ),
+                            provenance,
+                            lifecycle_status,
+                            outcome_score,
+                            reuse_count,
+                            activation_reason,
+                        },
+                    );
                 }
 
                 entry
             })
             .collect();
 
-        let output = serde_json::json!({
-            "skills": skills,
-            "count": skills.len(),
-        });
+        let output = skill_policy::skill_list_output(skills);
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
@@ -837,22 +678,7 @@ impl Tool for SkillSearchTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search query (name, keyword, or description fragment)"
-                },
-                "source": {
-                    "type": "string",
-                    "enum": ["all", "clawhub", "github", "well_known"],
-                    "description": "Optional source filter.",
-                    "default": "all"
-                }
-            },
-            "required": ["query"]
-        })
+        skill_policy::skill_search_parameters_schema()
     }
 
     async fn execute(
@@ -862,12 +688,9 @@ impl Tool for SkillSearchTool {
     ) -> Result<ToolOutput, ToolError> {
         ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
-        let query = require_str(&params, "query")?;
-        let source_filter = params
-            .get("source")
-            .and_then(|value| value.as_str())
-            .unwrap_or("all")
-            .to_ascii_lowercase();
+        let parsed = skill_policy::parse_skill_search_params(&params)?;
+        let query = parsed.query.as_str();
+        let source_filter = parsed.source;
 
         // Search the ClawHub catalog (async, best-effort)
         let catalog_outcome = self.catalog.search(query).await;
@@ -903,12 +726,12 @@ impl Tool for SkillSearchTool {
                             .any(|k| k.to_lowercase().contains(&query_lower))
                 })
                 .map(|s| {
-                    serde_json::json!({
-                        "name": s.manifest.name,
-                        "description": s.manifest.description,
-                        "trust": s.trust.to_string(),
-                        "source_tier": s.source_tier.to_string(),
-                    })
+                    skill_policy::skill_search_local_entry(
+                        &s.manifest.name,
+                        &s.manifest.description,
+                        &s.trust.to_string(),
+                        &s.source_tier.to_string(),
+                    )
                 })
                 .collect();
 
@@ -923,17 +746,17 @@ impl Tool for SkillSearchTool {
                     // Match by slug suffix or exact name
                     entry.slug.ends_with(n.as_str()) || entry.name == *n
                 });
-                serde_json::json!({
-                    "slug": entry.slug,
-                    "name": entry.name,
-                    "description": entry.description,
-                    "version": entry.version,
-                    "score": entry.score,
-                    "installed": is_installed,
-                    "stars": entry.stars,
-                    "downloads": entry.downloads,
-                    "owner": entry.owner,
-                })
+                skill_policy::skill_search_catalog_entry(
+                    &entry.slug,
+                    &entry.name,
+                    &entry.description,
+                    &entry.version,
+                    entry.score,
+                    is_installed,
+                    entry.stars,
+                    entry.downloads,
+                    entry.owner.as_deref(),
+                )
             })
             .collect();
 
@@ -942,68 +765,35 @@ impl Tool for SkillSearchTool {
                 .await
                 .into_iter()
                 .map(|entry| {
-                    serde_json::json!({
-                        "slug": entry.slug,
-                        "name": entry.name,
-                        "description": entry.description,
-                        "version": entry.version,
-                        "source": entry.source_adapter,
-                        "source_label": entry.source_label,
-                        "source_ref": entry.source_ref,
-                        "manifest_url": entry.manifest_url,
-                        "manifest_digest": entry.manifest_digest,
-                        "repo": entry.repo,
-                        "path": entry.path,
-                        "branch": entry.branch,
-                        "trust_level": format!("{:?}", entry.trust_level).to_lowercase(),
-                    })
+                    let trust_level = format!("{:?}", entry.trust_level).to_lowercase();
+                    skill_policy::skill_search_remote_entry(
+                        &entry.slug,
+                        &entry.name,
+                        &entry.description,
+                        &entry.version,
+                        &entry.source_adapter,
+                        &entry.source_label,
+                        &entry.source_ref,
+                        entry.manifest_url.as_deref(),
+                        entry.manifest_digest.as_deref(),
+                        entry.repo.as_deref(),
+                        entry.path.as_deref(),
+                        entry.branch.as_deref(),
+                        &trust_level,
+                    )
                 })
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
         };
-        let github_json: Vec<serde_json::Value> = remote_json
-            .iter()
-            .filter(|entry| entry.get("source").and_then(|v| v.as_str()) == Some("github_tap"))
-            .cloned()
-            .collect();
-        let well_known_json: Vec<serde_json::Value> = remote_json
-            .iter()
-            .filter(|entry| entry.get("source").and_then(|v| v.as_str()) == Some("well_known"))
-            .cloned()
-            .collect();
-
-        let mut output = match source_filter.as_str() {
-            "clawhub" => serde_json::json!({
-                "catalog": catalog_json,
-                "catalog_count": catalog_json.len(),
-                "registry_url": self.catalog.registry_url(),
-            }),
-            "github" => serde_json::json!({
-                "github": github_json,
-                "github_count": github_json.len(),
-            }),
-            "well_known" => serde_json::json!({
-                "well_known": well_known_json,
-                "well_known_count": well_known_json.len(),
-            }),
-            _ => serde_json::json!({
-                "catalog": catalog_json,
-                "catalog_count": catalog_json.len(),
-                "remote": remote_json,
-                "remote_count": remote_json.len(),
-                "github": github_json,
-                "github_count": github_json.len(),
-                "well_known": well_known_json,
-                "well_known_count": well_known_json.len(),
-                "installed": local_matches,
-                "installed_count": local_matches.len(),
-                "registry_url": self.catalog.registry_url(),
-            }),
-        };
-        if let Some(err) = catalog_error {
-            output["catalog_error"] = serde_json::Value::String(err);
-        }
+        let output = skill_policy::skill_search_output(
+            source_filter.as_str(),
+            catalog_json,
+            remote_json,
+            local_matches,
+            &self.catalog.registry_url(),
+            catalog_error,
+        );
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
@@ -1024,48 +814,29 @@ impl SkillCheckTool {
         &self,
         params: &serde_json::Value,
     ) -> Result<(String, String, String), ToolError> {
-        let content = params.get("content").and_then(|value| value.as_str());
-        let path = params.get("path").and_then(|value| value.as_str());
-        let url = params.get("url").and_then(|value| value.as_str());
-
-        let provided = [content.is_some(), path.is_some(), url.is_some()]
-            .into_iter()
-            .filter(|present| *present)
-            .count();
-        if provided != 1 {
-            return Err(ToolError::InvalidParameters(
-                "Provide exactly one of content, path, or url".to_string(),
-            ));
-        }
-
-        if let Some(raw) = content {
+        let input = skill_policy::parse_skill_check_input(params)?;
+        if let Some(raw) = input.inline_content() {
             return Ok((
                 raw.to_string(),
-                "content".to_string(),
-                "(inline content)".to_string(),
+                input.source_kind().to_string(),
+                input.source_ref(),
             ));
         }
 
-        if let Some(url) = url {
+        if let skill_policy::SkillCheckInput::Url(url) = &input {
             return Ok((
                 fetch_skill_content(url).await?,
-                "url".to_string(),
-                url.to_string(),
+                input.source_kind().to_string(),
+                input.source_ref(),
             ));
         }
 
-        let path = path.expect("provided count checked path presence");
-        let path_buf = PathBuf::from(path);
-        let skill_path = if path_buf.file_name().and_then(|name| name.to_str()) == Some("SKILL.md")
-        {
-            path_buf.clone()
-        } else {
-            path_buf.join("SKILL.md")
-        };
+        let path = input.source_ref();
+        let skill_path = skill_policy::skill_check_path_for_read(&path);
         let raw = tokio::fs::read_to_string(&skill_path)
             .await
             .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
-        Ok((raw, "path".to_string(), path_buf.display().to_string()))
+        Ok((raw, input.source_kind().to_string(), path))
     }
 }
 
@@ -1080,23 +851,7 @@ impl Tool for SkillCheckTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "Raw SKILL.md content to validate."
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Local SKILL.md file path or skill directory to validate."
-                },
-                "url": {
-                    "type": "string",
-                    "description": "Direct HTTPS URL to a SKILL.md file to fetch and validate."
-                }
-            }
-        })
+        skill_policy::skill_check_parameters_schema()
     }
 
     async fn execute(
@@ -1110,17 +865,37 @@ impl Tool for SkillCheckTool {
         let normalized = crate::skills::normalize_line_endings(&raw_content);
         let normalized_content_hash = crate::skills::registry::compute_hash(&normalized);
         let scan_content = skill_content_for_scan(raw_content, &source_kind, &source_ref);
-        let findings = self.quarantine.scan_quarantined(&QuarantinedSkill {
-            skill_name: "(preflight)".to_string(),
-            dir: self.quarantine.quarantine_dir().to_path_buf(),
-            content: scan_content,
-        });
 
         let source_path = if source_kind == "path" {
             PathBuf::from(&source_ref)
         } else {
             PathBuf::from(".")
         };
+        let package_files = if source_kind == "path" {
+            let package_root =
+                if source_path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+                    source_path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| PathBuf::from("."))
+                } else {
+                    source_path.clone()
+                };
+            collect_skill_package_files(&package_root)
+                .map(|files| package_scan_files(&files))
+                .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?
+        } else {
+            Vec::new()
+        };
+        let scan_report = scan_report_for_content(
+            &self.quarantine,
+            "(preflight)",
+            self.quarantine.quarantine_dir().to_path_buf(),
+            scan_content,
+            package_files,
+        );
+        let findings = scan_report.findings.as_slice();
+
         let validation = if source_kind == "path" {
             crate::skills::registry::SkillRegistry::validate_skill_file(
                 &source_path,
@@ -1137,34 +912,31 @@ impl Tool for SkillCheckTool {
             .await
         };
 
-        let output = match validation {
-            Ok((_name, loaded)) => serde_json::json!({
-                "ok": true,
-                "source_kind": source_kind,
-                "source_ref": source_ref,
-                "name": loaded.manifest.name,
-                "version": loaded.manifest.version,
-                "description": loaded.manifest.description,
-                "activation": loaded.manifest.activation,
-                "trust": loaded.trust.to_string(),
-                "source_tier": loaded.source_tier.to_string(),
-                "prompt_tokens_approx": (loaded.prompt_content.len() as f64 * 0.25) as usize,
-                "declared_max_context_tokens": loaded.manifest.activation.max_context_tokens,
-                "content_hash": loaded.content_hash,
-                "normalized_content_hash": normalized_content_hash,
-                "finding_count": findings.len(),
-                "findings": skill_finding_json(&findings),
-            }),
-            Err(err) => serde_json::json!({
-                "ok": false,
-                "source_kind": source_kind,
-                "source_ref": source_ref,
-                "error": err.to_string(),
-                "normalized_content_hash": normalized_content_hash,
-                "finding_count": findings.len(),
-                "findings": skill_finding_json(&findings),
-            }),
+        let mut output = match validation {
+            Ok((_name, loaded)) => skill_policy::skill_check_success_output(
+                &source_kind,
+                &source_ref,
+                &loaded.manifest.name,
+                &loaded.manifest.version,
+                &loaded.manifest.description,
+                serde_json::json!(loaded.manifest.activation),
+                &loaded.trust.to_string(),
+                &loaded.source_tier.to_string(),
+                (loaded.prompt_content.len() as f64 * 0.25) as usize,
+                loaded.manifest.activation.max_context_tokens,
+                &loaded.content_hash,
+                &normalized_content_hash,
+                skill_finding_json(&findings),
+            ),
+            Err(err) => skill_policy::skill_check_error_output(
+                &source_kind,
+                &source_ref,
+                &err.to_string(),
+                &normalized_content_hash,
+                skill_finding_json(&findings),
+            ),
         };
+        add_scan_report_fields(&mut output, &scan_report);
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
@@ -1269,34 +1041,7 @@ impl Tool for SkillInstallTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Skill name or slug (from search results). Used as the catalog lookup key if neither url nor content is provided."
-                },
-                "url": {
-                    "type": "string",
-                    "description": "Optional: direct URL to a SKILL.md file (skips catalog lookup)"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Optional: raw SKILL.md content to install directly (skips fetch)"
-                },
-                "force": {
-                    "type": "boolean",
-                    "description": "If true, removes the existing skill before installing the new version (update/upgrade)",
-                    "default": false
-                },
-                "approve_risky": {
-                    "type": "boolean",
-                    "description": "Approve installation even when the quarantine scan finds risky patterns in a community skill.",
-                    "default": false
-                }
-            },
-            "required": ["name"]
-        })
+        skill_policy::skill_install_parameters_schema()
     }
 
     async fn execute(
@@ -1306,15 +1051,10 @@ impl Tool for SkillInstallTool {
     ) -> Result<ToolOutput, ToolError> {
         ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
-        let name = require_str(&params, "name")?;
-        let force = params
-            .get("force")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let approve_risky = params
-            .get("approve_risky")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let parsed = skill_policy::parse_skill_install_params(&params)?;
+        let name = parsed.name.as_str();
+        let force = parsed.force;
+        let approve_risky = parsed.approve_risky;
 
         let external_content = self.resolve_external_content(name, &params).await?;
         let content = if let Some(raw) = params.get("content").and_then(|v| v.as_str()) {
@@ -1362,26 +1102,37 @@ impl Tool for SkillInstallTool {
             }
         }
 
-        let (skill_name, loaded_skill, findings) = if let Some(remote) = external_content {
+        let (skill_name, loaded_skill, scan_report) = if let Some(remote) = external_content {
             let quarantined = self
                 .quarantine
                 .quarantine_skill(&skill_name_from_parse, &remote)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-            let findings = self.quarantine.scan_quarantined(&quarantined);
+            let scan_report = self.quarantine.scan_report(&quarantined);
 
-            if findings_require_approval(remote.trust_level, &findings) && !approve_risky {
+            if findings_require_rejection(&scan_report.findings) {
+                self.quarantine.cleanup(&quarantined).await;
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill '{}' was rejected by the quarantine scanner: {}.",
+                    skill_name_from_parse,
+                    summarize_findings(&scan_report.findings)
+                )));
+            }
+
+            if findings_require_approval(remote.trust_level, &scan_report.findings)
+                && !approve_risky
+            {
                 self.quarantine.cleanup(&quarantined).await;
                 return Err(ToolError::ExecutionFailed(format!(
                     "Skill '{}' was quarantined with findings: {}. Re-run with approve_risky=true to install anyway.",
                     skill_name_from_parse,
-                    summarize_findings(&findings)
+                    summarize_findings(&scan_report.findings)
                 )));
             }
 
             let installed_dir = self
                 .quarantine
-                .approve_and_install(&quarantined, &user_dir, &findings)
+                .approve_and_install(&quarantined, &user_dir, &scan_report.findings)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
             self.quarantine.cleanup(&quarantined).await;
@@ -1394,8 +1145,31 @@ impl Tool for SkillInstallTool {
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-            (loaded.0, loaded.1, findings)
+            (loaded.0, loaded.1, scan_report)
         } else {
+            let scan_report = scan_report_for_content(
+                &self.quarantine,
+                &skill_name_from_parse,
+                user_dir.join(&skill_name_from_parse),
+                skill_content_for_scan(content.clone(), "content", "(inline content)"),
+                Vec::new(),
+            );
+            if findings_require_rejection(&scan_report.findings) {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill '{}' was rejected by the quarantine scanner: {}.",
+                    skill_name_from_parse,
+                    summarize_findings(&scan_report.findings)
+                )));
+            }
+            if findings_require_approval(SkillTapTrustLevel::Community, &scan_report.findings)
+                && !approve_risky
+            {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill '{}' has findings: {}. Re-run with approve_risky=true to install anyway.",
+                    skill_name_from_parse,
+                    summarize_findings(&scan_report.findings)
+                )));
+            }
             let loaded = crate::skills::registry::SkillRegistry::prepare_install_to_disk(
                 &user_dir,
                 &skill_name_from_parse,
@@ -1403,7 +1177,7 @@ impl Tool for SkillInstallTool {
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
-            (loaded.0, loaded.1, Vec::new())
+            (loaded.0, loaded.1, scan_report)
         };
 
         // Commit the in-memory addition under a brief write lock.
@@ -1431,21 +1205,13 @@ impl Tool for SkillInstallTool {
             }
         };
 
-        let action = if force { "updated" } else { "installed" };
-        let output = serde_json::json!({
-            "name": installed_name,
-            "status": action,
-            "trust": "installed",
-            "findings": findings.iter().map(|finding| serde_json::json!({
-                "kind": finding.kind,
-                "severity": format!("{:?}", finding.severity).to_lowercase(),
-                "excerpt": finding.excerpt,
-            })).collect::<Vec<_>>(),
-            "message": format!(
-                "Skill '{}' {} successfully. It will activate when matching keywords are detected.",
-                installed_name, action
-            ),
-        });
+        let output = skill_policy::skill_install_output(
+            &installed_name,
+            force,
+            skill_finding_json(&scan_report.findings),
+        );
+        let mut output = output;
+        add_scan_report_fields(&mut output, &scan_report);
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
@@ -1462,79 +1228,7 @@ impl Tool for SkillInstallTool {
 /// - URLs pointing to private, loopback, or link-local IP addresses
 /// - URLs without a host
 pub fn validate_fetch_url(url_str: &str) -> Result<(), ToolError> {
-    let parsed = url::Url::parse(url_str)
-        .map_err(|e| ToolError::ExecutionFailed(format!("Invalid URL '{}': {}", url_str, e)))?;
-
-    // Require HTTPS
-    if parsed.scheme() != "https" {
-        return Err(ToolError::ExecutionFailed(format!(
-            "Only HTTPS URLs are allowed for skill fetching, got scheme '{}'",
-            parsed.scheme()
-        )));
-    }
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| ToolError::ExecutionFailed("URL has no host".to_string()))?;
-
-    // Check if host is an IP address and reject private ranges.
-    // Unwrap IPv4-mapped IPv6 addresses (e.g. ::ffff:192.168.1.1) to catch
-    // SSRF bypasses that encode private IPv4 addresses as IPv6.
-    if let Ok(raw_ip) = host.parse::<std::net::IpAddr>() {
-        let ip = match raw_ip {
-            std::net::IpAddr::V6(v6) => v6
-                .to_ipv4_mapped()
-                .map(std::net::IpAddr::V4)
-                .unwrap_or(std::net::IpAddr::V6(v6)),
-            other => other,
-        };
-        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) || is_link_local_ip(&ip) {
-            return Err(ToolError::ExecutionFailed(format!(
-                "URL points to a private/loopback/link-local address: {}",
-                host
-            )));
-        }
-    }
-
-    // Reject common internal hostnames
-    let host_lower = host.to_lowercase();
-    if host_lower == "localhost"
-        || host_lower == "metadata.google.internal"
-        || host_lower.ends_with(".internal")
-        || host_lower.ends_with(".local")
-    {
-        return Err(ToolError::ExecutionFailed(format!(
-            "URL points to an internal hostname: {}",
-            host
-        )));
-    }
-
-    Ok(())
-}
-
-fn is_private_ip(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16
-            v4.is_private() || v4.is_link_local()
-        }
-        std::net::IpAddr::V6(v6) => {
-            // Unique local (fc00::/7)
-            let segments = v6.segments();
-            (segments[0] & 0xfe00) == 0xfc00
-        }
-    }
-}
-
-fn is_link_local_ip(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => v4.is_link_local(),
-        std::net::IpAddr::V6(v6) => {
-            // fe80::/10
-            let segments = v6.segments();
-            (segments[0] & 0xffc0) == 0xfe80
-        }
-    }
+    skill_policy::validate_fetch_url(url_str)
 }
 
 /// Fetch SKILL.md content from a URL with SSRF protection.
@@ -1621,95 +1315,7 @@ pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
 /// Walks ZIP local file headers looking for an entry named `SKILL.md`.
 /// Supports Store (method 0) and Deflate (method 8) compression.
 fn extract_skill_from_zip(data: &[u8]) -> Result<String, ToolError> {
-    use flate2::read::DeflateDecoder;
-    use std::io::Read;
-
-    // SKILL.md files should never be larger than 1 MB.
-    const MAX_DECOMPRESSED: usize = 1_024 * 1_024;
-
-    let mut offset = 0;
-    while offset + 30 <= data.len() {
-        // Local file header signature = PK\x03\x04
-        if data[offset..offset + 4] != [0x50, 0x4B, 0x03, 0x04] {
-            break;
-        }
-
-        let compression = u16::from_le_bytes([data[offset + 8], data[offset + 9]]);
-        let compressed_size = u32::from_le_bytes([
-            data[offset + 18],
-            data[offset + 19],
-            data[offset + 20],
-            data[offset + 21],
-        ]) as usize;
-        let uncompressed_size = u32::from_le_bytes([
-            data[offset + 22],
-            data[offset + 23],
-            data[offset + 24],
-            data[offset + 25],
-        ]) as usize;
-        let name_len = u16::from_le_bytes([data[offset + 26], data[offset + 27]]) as usize;
-        let extra_len = u16::from_le_bytes([data[offset + 28], data[offset + 29]]) as usize;
-
-        let name_start = offset + 30;
-        let name_end = name_start + name_len;
-        if name_end > data.len() {
-            break;
-        }
-        let file_name = std::str::from_utf8(&data[name_start..name_end]).unwrap_or("");
-
-        let data_start = name_end
-            .checked_add(extra_len)
-            .ok_or_else(|| ToolError::ExecutionFailed("ZIP header offset overflow".to_string()))?;
-        let data_end = data_start
-            .checked_add(compressed_size)
-            .ok_or_else(|| ToolError::ExecutionFailed("ZIP header size overflow".to_string()))?;
-
-        if file_name == "SKILL.md" {
-            if data_end > data.len() {
-                return Err(ToolError::ExecutionFailed(
-                    "ZIP archive truncated".to_string(),
-                ));
-            }
-
-            if uncompressed_size > MAX_DECOMPRESSED {
-                return Err(ToolError::ExecutionFailed(
-                    "ZIP entry too large to decompress safely".to_string(),
-                ));
-            }
-
-            let raw = &data[data_start..data_end];
-            let decompressed = match compression {
-                0 => raw.to_vec(), // Store
-                8 => {
-                    // Deflate -- wrap with a read limit to guard against ZIP bombs
-                    // where the declared size is small but decompressed output is huge.
-                    let mut decoder = DeflateDecoder::new(raw).take(MAX_DECOMPRESSED as u64);
-                    let mut buf = Vec::with_capacity(uncompressed_size.min(MAX_DECOMPRESSED));
-                    decoder.read_to_end(&mut buf).map_err(|e| {
-                        ToolError::ExecutionFailed(format!("Failed to decompress SKILL.md: {}", e))
-                    })?;
-                    buf
-                }
-                other => {
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "Unsupported ZIP compression method: {}",
-                        other
-                    )));
-                }
-            };
-
-            return String::from_utf8(decompressed).map_err(|e| {
-                ToolError::ExecutionFailed(format!("SKILL.md in archive is not valid UTF-8: {}", e))
-            });
-        }
-
-        // Skip to next entry
-        offset = data_end;
-    }
-
-    Err(ToolError::ExecutionFailed(
-        "ZIP archive does not contain SKILL.md".to_string(),
-    ))
+    skill_policy::extract_skill_from_zip(data)
 }
 
 // ── skill_remove ────────────────────────────────────────────────────────
@@ -1742,15 +1348,7 @@ impl Tool for SkillAuditTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Optional single skill name to audit. Omit to audit all loaded skills."
-                }
-            }
-        })
+        skill_policy::skill_audit_parameters_schema()
     }
 
     async fn execute(
@@ -1760,7 +1358,7 @@ impl Tool for SkillAuditTool {
     ) -> Result<ToolOutput, ToolError> {
         ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
-        let target_name = params.get("name").and_then(|value| value.as_str());
+        let target_name = skill_policy::parse_skill_audit_target_name(&params);
         let guard = self.registry.read().await;
 
         let audited = guard
@@ -1772,10 +1370,12 @@ impl Tool for SkillAuditTool {
             .map(|skill| {
                 let source_path =
                     source_path_for_skill(skill).unwrap_or_else(|| PathBuf::from("."));
-                let findings = self.quarantine.scan_quarantined(&QuarantinedSkill {
-                    skill_name: skill.manifest.name.clone(),
-                    dir: source_path.clone(),
-                    content: SkillContent {
+                let package_files = scan_files_for_source_path(&source_path);
+                let scan_report = scan_report_for_content(
+                    &self.quarantine,
+                    &skill.manifest.name,
+                    source_path.clone(),
+                    SkillContent {
                         raw_content: skill.prompt_content.clone(),
                         source_kind: "audit".to_string(),
                         source_adapter: "audit".to_string(),
@@ -1789,20 +1389,18 @@ impl Tool for SkillAuditTool {
                         commit_sha: None,
                         trust_level: SkillTapTrustLevel::Community,
                     },
-                });
+                    package_files,
+                );
 
-                serde_json::json!({
-                    "name": skill.manifest.name,
-                    "trust": skill.trust.to_string(),
-                    "source_tier": skill.source_tier.to_string(),
-                    "source_path": source_path.display().to_string(),
-                    "finding_count": findings.len(),
-                    "findings": findings.iter().map(|finding| serde_json::json!({
-                        "kind": finding.kind,
-                        "severity": format!("{:?}", finding.severity).to_lowercase(),
-                        "excerpt": finding.excerpt,
-                    })).collect::<Vec<_>>(),
-                })
+                let mut entry = skill_policy::skill_audit_entry_output(
+                    &skill.manifest.name,
+                    &skill.trust.to_string(),
+                    &skill.source_tier.to_string(),
+                    &source_path.display().to_string(),
+                    skill_finding_json(&scan_report.findings),
+                );
+                add_scan_report_fields(&mut entry, &scan_report);
+                entry
             })
             .collect::<Vec<_>>();
 
@@ -1812,22 +1410,8 @@ impl Tool for SkillAuditTool {
             ));
         }
 
-        let total_findings = audited
-            .iter()
-            .map(|entry| {
-                entry
-                    .get("finding_count")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0)
-            })
-            .sum::<u64>();
-
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "audited": audited,
-                "audited_count": audited.len(),
-                "total_findings": total_findings,
-            }),
+            skill_policy::skill_audit_output(audited),
             start.elapsed(),
         ))
     }
@@ -1869,21 +1453,7 @@ impl Tool for SkillUpdateTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Skill name to update."
-                },
-                "approve_risky": {
-                    "type": "boolean",
-                    "description": "Approve update even when the quarantine scan reports risky patterns.",
-                    "default": false
-                }
-            },
-            "required": ["name"]
-        })
+        skill_policy::skill_update_parameters_schema()
     }
 
     async fn execute(
@@ -1892,11 +1462,9 @@ impl Tool for SkillUpdateTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         ensure_skill_admin_available(ctx, self.name())?;
-        let name = require_str(&params, "name")?;
-        let approve_risky = params
-            .get("approve_risky")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
+        let parsed = skill_policy::parse_skill_update_params(&params)?;
+        let name = parsed.name.as_str();
+        let approve_risky = parsed.approve_risky;
 
         let (source_path, installed_name) = {
             let guard = self.registry.read().await;
@@ -1923,11 +1491,8 @@ impl Tool for SkillUpdateTool {
             ))
         })?;
 
-        let mut install_params = serde_json::json!({
-            "name": installed_name,
-            "force": true,
-            "approve_risky": approve_risky,
-        });
+        let mut install_params =
+            skill_policy::skill_update_install_params(&installed_name, true, approve_risky);
 
         match provenance.source_adapter.as_str() {
             "clawhub_catalog" => {
@@ -1947,7 +1512,7 @@ impl Tool for SkillUpdateTool {
                             name
                         ))
                     })?;
-                install_params["url"] = serde_json::Value::String(url);
+                skill_policy::add_skill_update_url(&mut install_params, url);
             }
             _ => {
                 if let Some(url) = provenance
@@ -1955,7 +1520,7 @@ impl Tool for SkillUpdateTool {
                     .clone()
                     .or(provenance.manifest_url.clone())
                 {
-                    install_params["url"] = serde_json::Value::String(url);
+                    skill_policy::add_skill_update_url(&mut install_params, url);
                 } else {
                     return Err(ToolError::ExecutionFailed(format!(
                         "Skill '{}' does not have a supported update source",
@@ -2009,6 +1574,8 @@ struct PublishPlan {
     package_hash: String,
     files: Vec<SkillPackageFile>,
     findings: Vec<SecurityFinding>,
+    scan_report: SkillScanReport,
+    target_trust_level: SkillTapTrustLevel,
     trust: String,
     source_tier: String,
     source: serde_json::Value,
@@ -2016,41 +1583,23 @@ struct PublishPlan {
 
 impl PublishPlan {
     fn json(&self, status: &str) -> serde_json::Value {
-        let commit_message = format!("feat(skills): publish {}", self.skill_name);
-        let pr_title = format!("[skills] publish {}", self.skill_name);
-        serde_json::json!({
-            "status": status,
-            "name": self.skill_name,
-            "target_repo": self.target_repo,
-            "tap_path": self.tap_path,
-            "package_path": self.package_path,
-            "branch": self.branch,
-            "base_branch": self.base_branch,
-            "package_hash": self.package_hash,
-            "files": package_file_json(&self.files),
-            "file_count": self.files.len(),
-            "finding_count": self.findings.len(),
-            "findings": skill_finding_json(&self.findings),
-            "trust": self.trust,
-            "source_tier": self.source_tier,
-            "source": self.source,
-            "remote_write_plan": {
-                "repo_url": format!("https://github.com/{}.git", self.target_repo),
-                "base_branch": self.base_branch,
-                "branch": self.branch,
-                "package_path": self.package_path,
-                "commit_message": commit_message,
-                "push": {
-                    "remote": "origin",
-                    "branch": self.branch,
-                },
-                "pull_request": {
-                    "draft": true,
-                    "title": pr_title,
-                    "repo": self.target_repo,
-                },
-            },
-        })
+        let mut output = skill_policy::skill_publish_plan_output(
+            status,
+            &self.skill_name,
+            &self.target_repo,
+            &self.tap_path,
+            &self.package_path,
+            &self.branch,
+            self.base_branch.as_deref(),
+            &self.package_hash,
+            package_file_json(&self.files),
+            skill_finding_json(&self.findings),
+            &self.trust,
+            &self.source_tier,
+            self.source.clone(),
+        );
+        add_scan_report_fields(&mut output, &self.scan_report);
+        output
     }
 }
 
@@ -2118,10 +1667,12 @@ async fn build_publish_plan(
     };
     validate_repo_relative_path(&package_path, "package_path")?;
     let branch = format!("codex/skill-publish/{}-{}", skill.manifest.name, hash8);
-    let findings = quarantine.scan_quarantined(&QuarantinedSkill {
-        skill_name: skill.manifest.name.clone(),
-        dir: source_path,
-        content: SkillContent {
+    let package_files = package_scan_files(&files);
+    let scan_report = scan_report_for_content(
+        quarantine,
+        &skill.manifest.name,
+        source_path,
+        SkillContent {
             raw_content: package_scan_content(&files),
             source_kind: "publish".to_string(),
             source_adapter: "publish".to_string(),
@@ -2135,7 +1686,9 @@ async fn build_publish_plan(
             commit_sha: None,
             trust_level: tap.trust_level,
         },
-    });
+        package_files,
+    );
+    let findings = scan_report.findings.clone();
 
     Ok(PublishPlan {
         skill_name: skill.manifest.name.clone(),
@@ -2147,6 +1700,8 @@ async fn build_publish_plan(
         package_hash: hash,
         files,
         findings,
+        scan_report,
+        target_trust_level: tap.trust_level,
         trust: skill.trust.to_string(),
         source_tier: skill.source_tier.to_string(),
         source: skill_source_json(&skill.source),
@@ -2363,18 +1918,7 @@ impl Tool for SkillPublishTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Loaded skill name to publish."},
-                "target_repo": {"type": "string", "description": "Configured GitHub tap repo in owner/name form."},
-                "dry_run": {"type": "boolean", "default": true},
-                "remote_write": {"type": "boolean", "default": false},
-                "confirm_remote_write": {"type": "boolean", "default": false},
-                "approve_risky": {"type": "boolean", "default": false}
-            },
-            "required": ["name", "target_repo"]
-        })
+        skill_policy::skill_publish_parameters_schema()
     }
 
     async fn execute(
@@ -2384,24 +1928,13 @@ impl Tool for SkillPublishTool {
     ) -> Result<ToolOutput, ToolError> {
         ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
-        let name = require_str(&params, "name")?;
-        let target_repo = require_str(&params, "target_repo")?.trim().to_string();
-        let dry_run = params
-            .get("dry_run")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(true);
-        let remote_write = params
-            .get("remote_write")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let confirm_remote_write = params
-            .get("confirm_remote_write")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
-        let approve_risky = params
-            .get("approve_risky")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
+        let parsed = skill_policy::parse_skill_publish_params(&params)?;
+        let name = parsed.name.as_str();
+        let target_repo = parsed.target_repo;
+        let dry_run = parsed.dry_run;
+        let remote_write = parsed.remote_write;
+        let confirm_remote_write = parsed.confirm_remote_write;
+        let approve_risky = parsed.approve_risky;
 
         let plan = build_publish_plan(
             &self.registry,
@@ -2413,7 +1946,18 @@ impl Tool for SkillPublishTool {
         )
         .await?;
 
-        if !approve_risky && !plan.findings.is_empty() && remote_write {
+        if findings_require_rejection(&plan.findings) && remote_write {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Skill '{}' was rejected by the quarantine scanner: {}.",
+                plan.skill_name,
+                summarize_findings(&plan.findings)
+            )));
+        }
+
+        if !approve_risky
+            && findings_require_approval(plan.target_trust_level, &plan.findings)
+            && remote_write
+        {
             return Err(ToolError::ExecutionFailed(format!(
                 "Skill '{}' has audit findings: {}. Re-run with approve_risky=true to publish anyway.",
                 plan.skill_name,
@@ -2501,12 +2045,8 @@ impl SkillTapRefreshTool {
 }
 
 fn tap_json(tap: &SkillTapConfig) -> serde_json::Value {
-    serde_json::json!({
-        "repo": tap.repo.clone(),
-        "path": tap.path.clone(),
-        "branch": tap.branch.clone(),
-        "trust_level": format!("{:?}", tap.trust_level).to_lowercase(),
-    })
+    let trust_level = format!("{:?}", tap.trust_level).to_lowercase();
+    skill_policy::skill_tap_json(&tap.repo, &tap.path, tap.branch.as_deref(), &trust_level)
 }
 
 fn require_skill_tap_store<'a>(
@@ -2544,12 +2084,7 @@ impl Tool for SkillTapListTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "include_health": {"type": "boolean", "default": false}
-            }
-        })
+        skill_policy::skill_tap_list_parameters_schema()
     }
 
     async fn execute(
@@ -2574,11 +2109,10 @@ impl Tool for SkillTapListTool {
             None
         };
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "taps": settings.skill_taps.iter().map(tap_json).collect::<Vec<_>>(),
-                "count": settings.skill_taps.len(),
-                "hub_enabled": hub_enabled,
-            }),
+            skill_policy::skill_tap_list_output(
+                settings.skill_taps.iter().map(tap_json).collect::<Vec<_>>(),
+                hub_enabled,
+            ),
             start.elapsed(),
         ))
     }
@@ -2599,17 +2133,7 @@ impl Tool for SkillTapAddTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "repo": {"type": "string", "description": "GitHub repo in owner/name form."},
-                "path": {"type": "string", "default": ""},
-                "branch": {"type": ["string", "null"], "default": null},
-                "trust_level": {"type": "string", "enum": ["builtin", "trusted", "community"], "default": "community"},
-                "replace": {"type": "boolean", "default": false}
-            },
-            "required": ["repo"]
-        })
+        skill_policy::skill_tap_add_parameters_schema()
     }
 
     async fn execute(
@@ -2621,26 +2145,12 @@ impl Tool for SkillTapAddTool {
         let start = std::time::Instant::now();
         let store = require_skill_tap_store(&self.store, self.name())?;
         let remote_hub = require_shared_remote_hub(&self.remote_hub, self.name())?;
-        let repo = require_str(&params, "repo")?.trim().to_string();
-        validate_github_repo(&repo)?;
-        let path = normalize_tap_path(
-            params
-                .get("path")
-                .and_then(|value| value.as_str())
-                .unwrap_or(""),
-        );
-        validate_repo_relative_path(&path, "path")?;
-        let branch = normalize_tap_branch(params.get("branch").and_then(|value| value.as_str()));
-        let trust_level = parse_tap_trust_level(
-            params
-                .get("trust_level")
-                .and_then(|value| value.as_str())
-                .unwrap_or("community"),
-        )?;
-        let replace = params
-            .get("replace")
-            .and_then(|value| value.as_bool())
-            .unwrap_or(false);
+        let parsed = skill_policy::parse_skill_tap_add_params(&params)?;
+        let repo = parsed.repo;
+        let path = parsed.path;
+        let branch = parsed.branch;
+        let trust_level = parse_tap_trust_level(&parsed.trust_level)?;
+        let replace = parsed.replace;
         let mut settings = load_settings_for_taps(store, &ctx.user_id).await?;
         let existing_idx = settings
             .skill_taps
@@ -2671,12 +2181,18 @@ impl Tool for SkillTapAddTool {
         persist_skill_taps(store, &ctx.user_id, &settings.skill_taps).await?;
         let refreshed_count =
             refresh_remote_hub_from_settings(store, &ctx.user_id, remote_hub).await?;
+        let replaced = existing_idx.is_some();
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "status": if existing_idx.is_some() { "replaced" } else { "added" },
-                "tap": tap_json(&SkillTapConfig { repo, path, branch, trust_level }),
-                "tap_count": refreshed_count,
-            }),
+            skill_policy::skill_tap_add_output(
+                replaced,
+                tap_json(&SkillTapConfig {
+                    repo,
+                    path,
+                    branch,
+                    trust_level,
+                }),
+                refreshed_count,
+            ),
             start.elapsed(),
         ))
     }
@@ -2697,15 +2213,7 @@ impl Tool for SkillTapRemoveTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "repo": {"type": "string"},
-                "path": {"type": "string", "default": ""},
-                "branch": {"type": ["string", "null"], "default": null}
-            },
-            "required": ["repo"]
-        })
+        skill_policy::skill_tap_remove_parameters_schema()
     }
 
     async fn execute(
@@ -2717,16 +2225,10 @@ impl Tool for SkillTapRemoveTool {
         let start = std::time::Instant::now();
         let store = require_skill_tap_store(&self.store, self.name())?;
         let remote_hub = require_shared_remote_hub(&self.remote_hub, self.name())?;
-        let repo = require_str(&params, "repo")?.trim().to_string();
-        validate_github_repo(&repo)?;
-        let path = normalize_tap_path(
-            params
-                .get("path")
-                .and_then(|value| value.as_str())
-                .unwrap_or(""),
-        );
-        validate_repo_relative_path(&path, "path")?;
-        let branch = normalize_tap_branch(params.get("branch").and_then(|value| value.as_str()));
+        let parsed = skill_policy::parse_skill_tap_remove_params(&params)?;
+        let repo = parsed.repo;
+        let path = parsed.path;
+        let branch = parsed.branch;
         let mut settings = load_settings_for_taps(store, &ctx.user_id).await?;
         let before = settings.skill_taps.len();
         settings
@@ -2742,13 +2244,7 @@ impl Tool for SkillTapRemoveTool {
         let refreshed_count =
             refresh_remote_hub_from_settings(store, &ctx.user_id, remote_hub).await?;
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "status": "removed",
-                "repo": repo,
-                "path": path,
-                "branch": branch,
-                "tap_count": refreshed_count,
-            }),
+            skill_policy::skill_tap_remove_output(&repo, &path, branch.as_deref(), refreshed_count),
             start.elapsed(),
         ))
     }
@@ -2769,13 +2265,7 @@ impl Tool for SkillTapRefreshTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "repo": {"type": ["string", "null"], "default": null},
-                "path": {"type": ["string", "null"], "default": null}
-            }
-        })
+        skill_policy::skill_tap_refresh_parameters_schema()
     }
 
     async fn execute(
@@ -2787,23 +2277,9 @@ impl Tool for SkillTapRefreshTool {
         let start = std::time::Instant::now();
         let store = require_skill_tap_store(&self.store, self.name())?;
         let remote_hub = require_shared_remote_hub(&self.remote_hub, self.name())?;
-        let repo = params
-            .get("repo")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        if let Some(repo) = repo.as_deref() {
-            validate_github_repo(repo)?;
-        }
-        let path = params
-            .get("path")
-            .and_then(|value| value.as_str())
-            .map(normalize_tap_path)
-            .filter(|value| !value.is_empty());
-        if let Some(path) = path.as_deref() {
-            validate_repo_relative_path(path, "path")?;
-        }
+        let parsed = skill_policy::parse_skill_tap_refresh_params(&params)?;
+        let repo = parsed.repo;
+        let path = parsed.path;
 
         if repo.is_some() || path.is_some() {
             let settings = load_settings_for_taps(store, &ctx.user_id).await?;
@@ -2826,16 +2302,14 @@ impl Tool for SkillTapRefreshTool {
         }
 
         let tap_count = refresh_remote_hub_from_settings(store, &ctx.user_id, remote_hub).await?;
+        let hub_enabled = remote_hub.is_enabled().await;
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "status": "refreshed",
-                "tap_count": tap_count,
-                "filter": {
-                    "repo": repo,
-                    "path": path,
-                },
-                "hub_enabled": remote_hub.is_enabled().await,
-            }),
+            skill_policy::skill_tap_refresh_output(
+                tap_count,
+                repo.as_deref(),
+                path.as_deref(),
+                hub_enabled,
+            ),
             start.elapsed(),
         ))
     }
@@ -2866,10 +2340,7 @@ impl Tool for SkillSnapshotTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {}
-        })
+        skill_policy::skill_snapshot_parameters_schema()
     }
 
     async fn execute(
@@ -2881,17 +2352,23 @@ impl Tool for SkillSnapshotTool {
         let start = std::time::Instant::now();
         let guard = self.registry.read().await;
 
-        let snapshot = serde_json::json!({
-            "generated_at": Utc::now().to_rfc3339(),
-            "skills": guard.skills().iter().map(|skill| serde_json::json!({
-                "name": skill.manifest.name,
-                "version": skill.manifest.version,
-                "trust": skill.trust.to_string(),
-                "source_tier": skill.source_tier.to_string(),
-                "content_hash": skill.content_hash,
-                "source_path": source_path_for_skill(skill).map(|path| path.display().to_string()),
-            })).collect::<Vec<_>>(),
-        });
+        let snapshot = skill_policy::skill_snapshot_document(
+            Utc::now().to_rfc3339(),
+            guard
+                .skills()
+                .iter()
+                .map(|skill| {
+                    skill_policy::skill_snapshot_entry(
+                        &skill.manifest.name,
+                        &skill.manifest.version,
+                        &skill.trust.to_string(),
+                        &skill.source_tier.to_string(),
+                        &skill.content_hash,
+                        source_path_for_skill(skill).map(|path| path.display().to_string()),
+                    )
+                })
+                .collect::<Vec<_>>(),
+        );
 
         let snapshot_dir = crate::platform::state_paths().skills_dir.join(".hub");
         tokio::fs::create_dir_all(&snapshot_dir)
@@ -2910,10 +2387,10 @@ impl Tool for SkillSnapshotTool {
         .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
 
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "path": snapshot_path.display().to_string(),
-                "count": guard.count(),
-            }),
+            skill_policy::skill_snapshot_output(
+                &snapshot_path.display().to_string(),
+                guard.count(),
+            ),
             start.elapsed(),
         ))
     }
@@ -2948,21 +2425,7 @@ impl Tool for SkillPromoteTrustTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Skill name to move between trust ceilings."
-                },
-                "target_trust": {
-                    "type": "string",
-                    "enum": ["installed", "trusted"],
-                    "description": "Target trust ceiling."
-                }
-            },
-            "required": ["name", "target_trust"]
-        })
+        skill_policy::skill_trust_promote_parameters_schema()
     }
 
     async fn execute(
@@ -2972,20 +2435,12 @@ impl Tool for SkillPromoteTrustTool {
     ) -> Result<ToolOutput, ToolError> {
         ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
-        let name = require_str(&params, "name")?;
-        let target_trust = match require_str(&params, "target_trust")?
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
+        let parsed = skill_policy::parse_skill_trust_promote_params(&params)?;
+        let name = parsed.name.as_str();
+        let target_trust = match parsed.target_trust.as_str() {
             "installed" => SkillTrust::Installed,
             "trusted" => SkillTrust::Trusted,
-            other => {
-                return Err(ToolError::InvalidParameters(format!(
-                    "Unsupported target_trust '{}'",
-                    other
-                )));
-            }
+            _ => unreachable!("skill policy validates target_trust"),
         };
 
         let mut guard = self.registry.write().await;
@@ -2999,12 +2454,7 @@ impl Tool for SkillPromoteTrustTool {
             .unwrap_or_else(|| "community".to_string());
 
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "name": name,
-                "trust": target_trust.to_string(),
-                "source_tier": source_tier,
-                "status": "updated",
-            }),
+            skill_policy::skill_trust_promote_output(name, &target_trust.to_string(), &source_tier),
             start.elapsed(),
         ))
     }
@@ -3031,16 +2481,7 @@ impl Tool for SkillRemoveTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Name of the skill to remove"
-                }
-            },
-            "required": ["name"]
-        })
+        skill_policy::skill_remove_parameters_schema()
     }
 
     async fn execute(
@@ -3050,7 +2491,8 @@ impl Tool for SkillRemoveTool {
     ) -> Result<ToolOutput, ToolError> {
         ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
-        let name = require_str(&params, "name")?;
+        let name = skill_policy::parse_skill_name_param(&params)?;
+        let name = name.as_str();
 
         // ── TOCTOU fix ─────────────────────────────────────────────────
         // Hold the write lock for the entire validate → delete → commit
@@ -3076,11 +2518,7 @@ impl Tool for SkillRemoveTool {
 
         drop(guard);
 
-        let output = serde_json::json!({
-            "name": name,
-            "status": "removed",
-            "message": format!("Skill '{}' has been removed.", name),
-        });
+        let output = skill_policy::skill_remove_output(name);
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
@@ -3120,22 +2558,7 @@ impl Tool for SkillReloadTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Name of the specific skill to reload from disk. \
-                                   Required unless all=true."
-                },
-                "all": {
-                    "type": "boolean",
-                    "description": "When true, reload ALL skills (full re-discovery). \
-                                   Use after adding new skill files on disk.",
-                    "default": false
-                }
-            }
-        })
+        skill_policy::skill_reload_parameters_schema()
     }
 
     async fn execute(
@@ -3145,35 +2568,25 @@ impl Tool for SkillReloadTool {
     ) -> Result<ToolOutput, ToolError> {
         ensure_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
-        let reload_all = params.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let parsed = skill_policy::parse_skill_reload_params(&params);
+        let reload_all = parsed.all;
 
         if reload_all {
             let mut guard = self.registry.write().await;
             let loaded = guard.reload().await;
-            let output = serde_json::json!({
-                "status": "reloaded_all",
-                "skills": loaded,
-                "count": loaded.len(),
-                "message": format!("Reloaded all skills: {}", loaded.join(", ")),
-            });
+            let output = skill_policy::skill_reload_all_output(loaded);
             return Ok(ToolOutput::success(output, start.elapsed()));
         }
 
         // Single-skill reload
-        let name = require_str(&params, "name")?;
+        let name = parsed.name.as_deref().ok_or_else(|| {
+            ToolError::InvalidParameters("missing required parameter: name".to_string())
+        })?;
         let mut guard = self.registry.write().await;
 
         match guard.reload_skill(name).await {
             Ok(reloaded_name) => {
-                let output = serde_json::json!({
-                    "status": "reloaded",
-                    "name": reloaded_name,
-                    "message": format!(
-                        "Skill '{}' has been reloaded from disk. \
-                         Updated keywords, descriptions, and prompt content are now active.",
-                        reloaded_name
-                    ),
-                });
+                let output = skill_policy::skill_reload_output(&reloaded_name);
                 Ok(ToolOutput::success(output, start.elapsed()))
             }
             Err(e) => Err(ToolError::ExecutionFailed(format!(
@@ -3659,6 +3072,9 @@ mod tests {
                 trust_level: SkillTapTrustLevel::Community,
                 downloaded_at: Utc::now().to_rfc3339(),
                 findings: Vec::new(),
+                scanner_version: Some(crate::skills::quarantine::SKILL_SCANNER_VERSION.to_string()),
+                content_sha256: Some("sha256:test".to_string()),
+                finding_summary: Some(FindingSummary::default()),
             })
             .unwrap(),
         )

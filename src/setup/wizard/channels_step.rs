@@ -738,19 +738,13 @@ impl SetupWizard {
                 "BlueBubbles (iMessage bridge)",
                 self.settings.channels.bluebubbles_enabled,
             ),
+            ("Matrix", self.settings.channels.matrix_enabled),
             (
-                "Matrix (placeholder)",
-                self.settings.channels.matrix_enabled,
-            ),
-            (
-                "Voice-call lifecycle (placeholder)",
+                "Voice-call lifecycle",
                 self.settings.channels.voice_call_enabled,
             ),
-            ("APNs (placeholder)", self.settings.channels.apns_enabled),
-            (
-                "Browser push (placeholder)",
-                self.settings.channels.browser_push_enabled,
-            ),
+            ("APNs", self.settings.channels.apns_enabled),
+            ("Browser push", self.settings.channels.browser_push_enabled),
         ];
         #[allow(unused_mut)]
         let mut native_keys: Vec<&str> = vec![
@@ -945,12 +939,12 @@ impl SetupWizard {
             if enabled {
                 if let Some(feature_hint) = feature_hint {
                     print_info(&format!(
-                        "{} recorded as a native lifecycle placeholder; runtime transport will stay disabled until {} and the driver are available.",
+                        "{} native lifecycle enabled. Runtime registration requires provider credentials and {}.",
                         label, feature_hint
                     ));
                 } else {
                     print_info(&format!(
-                        "{} recorded as a native lifecycle placeholder; runtime transport will stay disabled until the driver is available.",
+                        "{} native lifecycle enabled. Runtime registration requires provider credentials.",
                         label
                     ));
                 }

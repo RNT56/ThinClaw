@@ -1,6 +1,5 @@
 //! Tool registry for managing available tools.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,32 +20,28 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 #[cfg(feature = "browser")]
 use crate::tools::builtin::{AgentBrowserTool, BrowserTool};
 use crate::tools::builtin::{
-    AgentThinkTool, AppleMailTool, ApplyPatchTool, CancelJobTool, CanvasTool, ClarifyTool,
-    CreateAgentTool, CreateJobTool, DesktopAutonomyTool, DeviceInfoTool, EchoTool,
-    EmitUserMessageTool, ExecuteCodeTool, ExternalMemoryExportTool, ExternalMemoryOffTool,
-    ExternalMemoryRecallTool, ExternalMemorySetupTool, ExternalMemoryStatusTool, GrepTool,
-    HomeAssistantTool, HttpTool, JobEventsTool, JobPromptTool, JobStatusTool, JsonTool,
-    LearningFeedbackTool, LearningHistoryTool, LearningOutcomesTool, LearningProposalReviewTool,
-    LearningStatusTool, ListAgentsTool, ListDirTool, ListJobsTool, LlmListModelsTool,
-    LlmSelectTool, MemoryDeleteTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool,
-    MemoryWriteTool, MessageAgentTool, MoaTool, ProcessTool, PromptManageTool, PromptQueue,
-    ReadFileTool, RemoveAgentTool, SearchFilesTool, SendMessageTool, SessionSearchTool,
-    SharedModelOverride, SharedProcessRegistry, SharedTodoStore, ShellTool, SkillAuditTool,
-    SkillCheckTool, SkillInspectTool, SkillInstallTool, SkillListTool, SkillManageTool,
-    SkillPromoteTrustTool, SkillPublishTool, SkillReadTool, SkillReloadTool, SkillRemoveTool,
-    SkillSearchTool, SkillSnapshotTool, SkillTapAddTool, SkillTapListTool, SkillTapRefreshTool,
-    SkillTapRemoveTool, SkillUpdateTool, TimeTool, TodoTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, TtsTool, UpdateAgentTool,
-    VisionAnalyzeTool, WriteFileTool,
+    CancelJobTool, CreateJobTool, DesktopAutonomyPort, ExecuteCodeTool, ExtensionManagementPort,
+    ExternalMemoryExportTool, ExternalMemoryOffTool, ExternalMemoryPort, ExternalMemoryRecallTool,
+    ExternalMemorySetupTool, ExternalMemoryStatusTool, FileToolHost, JobEventsTool, JobPromptTool,
+    JobStatusTool, LearningFeedbackTool, LearningHistoryTool, LearningOutcomesTool,
+    LearningProposalReviewTool, LearningStatusTool, ListJobsTool, MemoryDeleteTool, MemoryReadTool,
+    MemorySearchTool, MemoryTreeTool, MemoryWriteTool, PromptManageTool, PromptQueue,
+    RootFileToolHost, RootProcessBackendAdapter, SessionSearchTool, SharedModelOverride,
+    SharedProcessRegistry, SharedTodoStore, ShellTool, SkillAuditTool, SkillCheckTool,
+    SkillInspectTool, SkillInstallTool, SkillListTool, SkillManageTool, SkillPromoteTrustTool,
+    SkillPublishTool, SkillReadTool, SkillReloadTool, SkillRemoveTool, SkillSearchTool,
+    SkillSnapshotTool, SkillTapAddTool, SkillTapListTool, SkillTapRefreshTool, SkillTapRemoveTool,
+    SkillUpdateTool,
 };
 use crate::tools::execution::HostMediatedToolInvoker;
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDescriptor, ToolDomain, ToolExecutionLane, ToolProfile};
 use crate::tools::user_tool::{UserToolLoadResults, load_user_tools_from_dir};
+#[cfg(feature = "wasm-runtime")]
 use crate::tools::wasm::{
-    Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
-    WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
+    Capabilities, OAuthRefreshConfig, ResourceLimits, WasmError, WasmToolStore,
 };
+use crate::tools::wasm::{SharedCredentialRegistry, WasmToolRuntime};
 use crate::workspace::Workspace;
 
 #[cfg(test)]
@@ -208,27 +203,9 @@ impl ToolRegistry {
         profile: ToolProfile,
         metadata: &serde_json::Value,
     ) -> Vec<ToolDefinition> {
-        let allowed_names: HashSet<String> = self
-            .inner
-            .all()
+        self.inner
+            .filter_tool_definitions_for_execution_profile(defs, lane, profile, metadata)
             .await
-            .into_iter()
-            .filter_map(|tool| {
-                let descriptor = tool.descriptor();
-                (crate::tools::execution::tool_allowed_for_lane(tool.as_ref(), &descriptor, lane)
-                    && crate::tools::execution::descriptor_allowed_for_profile(
-                        &descriptor,
-                        lane,
-                        profile,
-                        metadata,
-                    ))
-                .then_some(descriptor.name)
-            })
-            .collect();
-
-        defs.into_iter()
-            .filter(|def| allowed_names.contains(&def.name))
-            .collect()
     }
 
     #[cfg(test)]
@@ -298,22 +275,17 @@ impl ToolRegistry {
         browser_backend: &str,
         cloud_browser_provider: Option<&str>,
     ) {
-        self.register_sync(Arc::new(EchoTool));
-        self.register_sync(Arc::new(TimeTool));
-        self.register_sync(Arc::new(JsonTool));
-        self.register_sync(Arc::new(DeviceInfoTool::new()));
-        self.register_sync(Arc::new(CanvasTool));
-        self.register_sync(Arc::new(ClarifyTool));
+        self.inner.register_core_builtin_tools(
+            self.credential_registry.clone(),
+            self.secrets_store.clone(),
+        );
 
         // Browser tool with user-local profile dir.
         // Attach Docker Chromium config in auto/always mode so the tool can
         // fall back to a containerised browser when no local browser exists.
         #[cfg(feature = "browser")]
         {
-            let browser_profile = dirs::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("thinclaw")
-                .join("browser-profile");
+            let browser_profile = thinclaw_tools::browser_args::default_browser_profile_dir();
             let browser_tool: Arc<dyn Tool> = if browser_backend
                 .eq_ignore_ascii_case("agent_browser")
                 || browser_backend.eq_ignore_ascii_case("agent-browser")
@@ -347,26 +319,6 @@ impl ToolRegistry {
         {
             let _ = (browser_backend, cloud_browser_provider);
             tracing::debug!("Browser tool not available (build without 'browser' feature)");
-        }
-
-        // Agent control tools (thinking + user messaging)
-        self.register_sync(Arc::new(AgentThinkTool));
-        self.register_sync(Arc::new(EmitUserMessageTool));
-
-        let mut http = HttpTool::new();
-        if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
-            http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
-        }
-        self.register_sync(Arc::new(http));
-
-        // Document extraction tool (when feature is enabled)
-        #[cfg(feature = "document-extraction")]
-        self.register_sync(Arc::new(crate::tools::builtin::ExtractDocumentTool));
-
-        // Home Assistant tool (gated on env vars)
-        if let Some(ha_tool) = HomeAssistantTool::from_env() {
-            self.register_sync(Arc::new(ha_tool));
-            tracing::info!("Registered Home Assistant tool (HASS_URL + HASS_TOKEN)");
         }
 
         tracing::info!("Registered {} built-in tools", self.count());
@@ -454,20 +406,11 @@ impl ToolRegistry {
         }
         self.register_sync(Arc::new(shell));
 
-        // File tools — optionally sandboxed
-        if let Some(ref bd) = base_dir {
-            self.register_sync(Arc::new(ReadFileTool::new().with_base_dir(bd.clone())));
-            self.register_sync(Arc::new(WriteFileTool::new().with_base_dir(bd.clone())));
-            self.register_sync(Arc::new(ListDirTool::new().with_base_dir(bd.clone())));
-            self.register_sync(Arc::new(ApplyPatchTool::new().with_base_dir(bd.clone())));
-            self.register_sync(Arc::new(GrepTool::new().with_base_dir(bd.clone())));
-        } else {
-            self.register_sync(Arc::new(ReadFileTool::new()));
-            self.register_sync(Arc::new(WriteFileTool::new()));
-            self.register_sync(Arc::new(ListDirTool::new()));
-            self.register_sync(Arc::new(ApplyPatchTool::new()));
-            self.register_sync(Arc::new(GrepTool::new()));
-        }
+        // File tools — optionally sandboxed. The root host provides
+        // checkpoint/ACP callbacks; registration is owned by thinclaw-tools.
+        let file_host: Arc<dyn FileToolHost> = Arc::new(RootFileToolHost);
+        self.inner
+            .register_filesystem_tools(base_dir.clone(), file_host);
 
         tracing::info!(
             "Registered 6 development tools (sandbox={}, working_dir={})",
@@ -606,12 +549,8 @@ impl ToolRegistry {
     ///
     /// These allow the LLM to manage MCP servers and WASM tools through conversation.
     pub fn register_extension_tools(&self, manager: Arc<ExtensionManager>) {
-        self.register_sync(Arc::new(ToolSearchTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(ToolInstallTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(ToolAuthTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(ToolActivateTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
-        self.register_sync(Arc::new(ToolRemoveTool::new(manager)));
+        let port: Arc<dyn ExtensionManagementPort> = manager;
+        self.inner.register_extension_management_tools(port);
         tracing::info!("Registered 6 extension management tools");
     }
 
@@ -723,21 +662,22 @@ impl ToolRegistry {
         self.register_sync(Arc::new(LearningFeedbackTool::new(Arc::clone(
             &orchestrator,
         ))));
+        let external_memory_port: Arc<dyn ExternalMemoryPort> = orchestrator.clone();
         self.register_sync(Arc::new(ExternalMemoryRecallTool::new(Arc::clone(
-            &orchestrator,
+            &external_memory_port,
         ))));
         self.register_sync(Arc::new(ExternalMemoryExportTool::new(Arc::clone(
-            &orchestrator,
+            &external_memory_port,
         ))));
         self.register_sync(Arc::new(ExternalMemorySetupTool::new(Arc::clone(
-            &orchestrator,
+            &external_memory_port,
         ))));
         self.register_sync(Arc::new(ExternalMemoryOffTool::new(Arc::clone(
-            &orchestrator,
+            &external_memory_port,
         ))));
-        self.register_sync(Arc::new(ExternalMemoryStatusTool::new(Arc::clone(
-            &orchestrator,
-        ))));
+        self.register_sync(Arc::new(ExternalMemoryStatusTool::new(
+            external_memory_port,
+        )));
         self.register_sync(Arc::new(LearningProposalReviewTool::new(orchestrator)));
         count += 10;
 
@@ -749,19 +689,8 @@ impl ToolRegistry {
         &self,
         manager: Arc<crate::desktop_autonomy::DesktopAutonomyManager>,
     ) {
-        self.register_sync(Arc::new(DesktopAutonomyTool::apps(Arc::clone(&manager))));
-        self.register_sync(Arc::new(DesktopAutonomyTool::ui(Arc::clone(&manager))));
-        self.register_sync(Arc::new(DesktopAutonomyTool::screen(Arc::clone(&manager))));
-        self.register_sync(Arc::new(DesktopAutonomyTool::calendar_native(Arc::clone(
-            &manager,
-        ))));
-        self.register_sync(Arc::new(DesktopAutonomyTool::numbers_native(Arc::clone(
-            &manager,
-        ))));
-        self.register_sync(Arc::new(DesktopAutonomyTool::pages_native(Arc::clone(
-            &manager,
-        ))));
-        self.register_sync(Arc::new(DesktopAutonomyTool::control(manager)));
+        let port: Arc<dyn DesktopAutonomyPort> = manager;
+        self.inner.register_desktop_autonomy_tools(port);
         tracing::info!("Registered 7 reckless desktop autonomy tools");
     }
 
@@ -775,23 +704,28 @@ impl ToolRegistry {
         engine: Arc<crate::agent::routine_engine::RoutineEngine>,
     ) {
         use crate::tools::builtin::{
-            RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool,
+            RootRoutineOutcomeObserver, RootRoutineStorePort, RoutineCreateTool, RoutineDeleteTool,
+            RoutineEngineControlPort, RoutineHistoryTool, RoutineListTool, RoutineOutcomeObserver,
             RoutineUpdateTool,
         };
+        let store_port = RootRoutineStorePort::shared(Arc::clone(&store));
+        let engine_port: Arc<dyn RoutineEngineControlPort> = engine;
+        let outcome_observer: Arc<dyn RoutineOutcomeObserver> =
+            RootRoutineOutcomeObserver::shared(Arc::clone(&store));
         self.register_sync(Arc::new(RoutineCreateTool::new(
-            Arc::clone(&store),
-            Arc::clone(&engine),
+            Arc::clone(&store_port),
+            Arc::clone(&engine_port),
         )));
-        self.register_sync(Arc::new(RoutineListTool::new(Arc::clone(&store))));
-        self.register_sync(Arc::new(RoutineUpdateTool::new(
-            Arc::clone(&store),
-            Arc::clone(&engine),
-        )));
-        self.register_sync(Arc::new(RoutineDeleteTool::new(
-            Arc::clone(&store),
-            Arc::clone(&engine),
-        )));
-        self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
+        self.register_sync(Arc::new(RoutineListTool::new(Arc::clone(&store_port))));
+        self.register_sync(Arc::new(
+            RoutineUpdateTool::new(Arc::clone(&store_port), Arc::clone(&engine_port))
+                .with_outcome_observer(Arc::clone(&outcome_observer)),
+        ));
+        self.register_sync(Arc::new(
+            RoutineDeleteTool::new(Arc::clone(&store_port), Arc::clone(&engine_port))
+                .with_outcome_observer(outcome_observer),
+        ));
+        self.register_sync(Arc::new(RoutineHistoryTool::new(store_port)));
         tracing::info!("Registered 5 routine management tools");
     }
 
@@ -804,7 +738,7 @@ impl ToolRegistry {
         secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
         output_dir: std::path::PathBuf,
     ) {
-        self.register_sync(Arc::new(TtsTool::new(secrets, output_dir)));
+        self.inner.register_tts_tool(secrets, output_dir);
         tracing::info!("Registered TTS tool");
     }
 
@@ -813,15 +747,10 @@ impl ToolRegistry {
     /// Provides search and send capabilities for the local Mail.app.
     /// If `db_path` is None, auto-detects the Envelope Index from ~/Library/Mail/.
     pub fn register_apple_mail_tool(&self, db_path: Option<std::path::PathBuf>) {
-        let tool = if let Some(path) = db_path {
-            AppleMailTool::new(path)
-        } else if let Some(tool) = AppleMailTool::auto_detect() {
-            tool
-        } else {
+        if !self.inner.register_apple_mail_tool(db_path) {
             tracing::warn!("Apple Mail tool: could not auto-detect Envelope Index");
             return;
-        };
-        self.register_sync(Arc::new(tool));
+        }
         tracing::info!("Registered Apple Mail tool (search + send)");
     }
 
@@ -835,8 +764,8 @@ impl ToolRegistry {
         primary_llm: Arc<dyn crate::llm::LlmProvider>,
         cheap_llm: Option<Arc<dyn crate::llm::LlmProvider>>,
     ) {
-        self.register_sync(Arc::new(LlmSelectTool::new(model_override)));
-        self.register_sync(Arc::new(LlmListModelsTool::new(primary_llm, cheap_llm)));
+        self.inner
+            .register_llm_tools(model_override, primary_llm, cheap_llm);
         tracing::info!("Registered 2 LLM management tools (llm_select, llm_list_models)");
     }
 
@@ -846,21 +775,17 @@ impl ToolRegistry {
     /// tool which the executor model can call to get guidance from the advisor.
     /// Otherwise this is a no-op.
     pub fn register_advisor_tool(&self, advisor_ready: bool) {
+        self.inner.register_advisor_tool(advisor_ready);
         if advisor_ready {
-            self.register_sync(Arc::new(crate::tools::builtin::advisor::ConsultAdvisorTool));
             tracing::info!("Registered consult_advisor tool (advisor ready)");
         }
     }
 
     /// Reconcile advisor tool visibility with current advisor readiness.
     pub async fn reconcile_advisor_tool_readiness(&self, advisor_ready: bool) {
-        if advisor_ready {
-            self.register_advisor_tool(true);
-        } else {
-            let _ = self
-                .unregister(crate::tools::builtin::advisor::ADVISOR_TOOL_NAME)
-                .await;
-        }
+        self.inner
+            .reconcile_advisor_tool_readiness(advisor_ready)
+            .await;
     }
 
     /// Register agent management tools (create, list, update, remove, message).
@@ -871,11 +796,8 @@ impl ToolRegistry {
         &self,
         registry: Arc<crate::agent::agent_registry::AgentRegistry>,
     ) {
-        self.register_sync(Arc::new(CreateAgentTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(ListAgentsTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(UpdateAgentTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(RemoveAgentTool::new(Arc::clone(&registry))));
-        self.register_sync(Arc::new(MessageAgentTool::new(registry)));
+        let port: Arc<dyn crate::tools::builtin::agent_management::AgentManagementPort> = registry;
+        self.inner.register_agent_management_tools(port);
         tracing::info!("Registered 5 agent management tools");
     }
 
@@ -894,11 +816,8 @@ impl ToolRegistry {
         registry: SharedProcessRegistry,
         backend: Option<Arc<dyn crate::tools::execution_backend::ExecutionBackend>>,
     ) {
-        let mut tool = ProcessTool::new(registry);
-        if let Some(backend) = backend {
-            tool = tool.with_backend(backend);
-        }
-        self.register_sync(Arc::new(tool));
+        self.inner
+            .register_process_tool(registry, backend.map(RootProcessBackendAdapter::shared));
         tracing::info!("Registered background process tool");
     }
 
@@ -907,7 +826,7 @@ impl ToolRegistry {
     /// The todo store is session-scoped and its active items survive context
     /// compaction by being injected back via the `ContextInjector`.
     pub fn register_todo_tool(&self, store: SharedTodoStore) {
-        self.register_sync(Arc::new(TodoTool::new(store)));
+        self.inner.register_todo_tool(store);
         tracing::info!("Registered todo planner tool");
     }
 
@@ -916,7 +835,7 @@ impl ToolRegistry {
     /// Allows the agent to proactively analyze images by path or URL
     /// using the current multimodal LLM provider.
     pub fn register_vision_tool(&self, llm: Arc<dyn LlmProvider>) {
-        self.register_sync(Arc::new(VisionAnalyzeTool::new(llm)));
+        self.inner.register_vision_tool(llm);
         tracing::info!("Registered vision analysis tool");
     }
 
@@ -932,15 +851,13 @@ impl ToolRegistry {
         aggregator_model: Option<String>,
         min_successful: usize,
     ) {
-        let tool = MoaTool::new(
+        if self.inner.register_moa_tool(
             primary,
             cheap,
             reference_models,
             aggregator_model,
             min_successful,
-        );
-        if tool.is_viable() {
-            self.register_sync(Arc::new(tool));
+        ) {
             tracing::info!("Registered Mixture-of-Agents tool");
         } else {
             tracing::debug!("MoA tool not registered (requires at least 2 providers)");
@@ -956,11 +873,7 @@ impl ToolRegistry {
         &self,
         send_fn: Option<crate::tools::builtin::SendMessageFn>,
     ) {
-        let mut tool = SendMessageTool::new();
-        if let Some(f) = send_fn {
-            tool = tool.with_send_fn(f);
-        }
-        self.register_sync(Arc::new(tool));
+        self.inner.register_send_message_tool(send_fn);
         tracing::info!("Registered unified send_message tool");
     }
 
@@ -1003,11 +916,7 @@ impl ToolRegistry {
     /// Searches directories recursively for files matching a name pattern.
     /// Complements GrepTool (content search) with filename-based discovery.
     pub fn register_search_files_tool(&self, base_dir: Option<std::path::PathBuf>) {
-        let mut tool = SearchFilesTool::new();
-        if let Some(dir) = base_dir {
-            tool = tool.with_base_dir(dir);
-        }
-        self.register_sync(Arc::new(tool));
+        self.inner.register_search_files_tool(base_dir);
         tracing::info!("Registered search_files tool");
     }
 
@@ -1018,7 +927,9 @@ impl ToolRegistry {
         base_dir: Option<PathBuf>,
         working_dir: Option<PathBuf>,
         safety: Option<&SafetyConfig>,
-        wasm_runtime: Option<Arc<WasmToolRuntime>>,
+        #[cfg_attr(not(feature = "wasm-runtime"), allow(unused_variables))] wasm_runtime: Option<
+            Arc<WasmToolRuntime>,
+        >,
         secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
         tool_invoker: Option<Arc<HostMediatedToolInvoker>>,
     ) -> UserToolLoadResults {
@@ -1096,59 +1007,25 @@ impl ToolRegistry {
     ///     ..Default::default()
     /// }).await?;
     /// ```
+    #[cfg(feature = "wasm-runtime")]
     pub async fn register_wasm(&self, reg: WasmToolRegistration<'_>) -> Result<(), WasmError> {
-        // Prepare the module (validates and compiles)
-        let prepared = reg
-            .runtime
-            .prepare(reg.name, reg.wasm_bytes, reg.limits)
-            .await?;
-
-        // Extract credential mappings before capabilities are moved into the wrapper
-        let credential_mappings: Vec<crate::secrets::CredentialMapping> = reg
-            .capabilities
-            .http
-            .as_ref()
-            .map(|http| http.credentials.values().cloned().collect())
-            .unwrap_or_default();
-
-        // Create the wrapper
-        let mut wrapper = WasmToolWrapper::new(Arc::clone(reg.runtime), prepared, reg.capabilities);
-
-        // Apply overrides if provided
-        if let Some(desc) = reg.description {
-            wrapper = wrapper.with_description(desc);
-        }
-        if let Some(s) = reg.schema {
-            wrapper = wrapper.with_schema(s);
-        }
-        if let Some(store) = reg.secrets_store {
-            wrapper = wrapper.with_secrets_store(store);
-        }
-        if let Some(oauth) = reg.oauth_refresh {
-            wrapper = wrapper.with_oauth_refresh(oauth);
-        }
-        if let Some(invoker) = reg.tool_invoker {
-            wrapper = wrapper.with_tool_invoker(invoker);
-        }
-
-        // Register the tool
-        self.register(Arc::new(wrapper)).await;
-
-        // Add credential mappings to the shared registry (for HTTP tool injection)
-        if let Some(cr) = &self.credential_registry
-            && !credential_mappings.is_empty()
-        {
-            let count = credential_mappings.len();
-            cr.add_mappings(credential_mappings);
-            tracing::debug!(
-                name = reg.name,
-                credential_count = count,
-                "Added credential mappings from WASM tool"
-            );
-        }
-
-        tracing::info!(name = reg.name, "Registered WASM tool");
-        Ok(())
+        self.inner
+            .register_wasm_tool(
+                thinclaw_tools::registry::WasmToolRegistration {
+                    name: reg.name,
+                    wasm_bytes: reg.wasm_bytes,
+                    runtime: reg.runtime,
+                    capabilities: reg.capabilities.into(),
+                    limits: reg.limits,
+                    description: reg.description,
+                    schema: reg.schema,
+                    secrets_store: reg.secrets_store,
+                    oauth_refresh: reg.oauth_refresh,
+                    tool_invoker: reg.tool_invoker,
+                },
+                self.credential_registry.as_deref(),
+            )
+            .await
     }
 
     /// Register a WASM tool from database storage.
@@ -1168,6 +1045,7 @@ impl ToolRegistry {
     ///     "my_tool",
     /// ).await?;
     /// ```
+    #[cfg(feature = "wasm-runtime")]
     pub async fn register_wasm_from_storage(
         &self,
         store: &dyn WasmToolStore,
@@ -1176,60 +1054,24 @@ impl ToolRegistry {
         name: &str,
         tool_invoker: Option<Arc<HostMediatedToolInvoker>>,
     ) -> Result<(), WasmRegistrationError> {
-        // Load tool with integrity verification
-        let tool_with_binary = store
-            .get_with_binary(user_id, name)
+        self.inner
+            .register_wasm_tool_from_storage(
+                store,
+                runtime,
+                user_id,
+                name,
+                tool_invoker,
+                self.credential_registry.as_deref(),
+            )
             .await
-            .map_err(WasmRegistrationError::Storage)?;
-
-        // Load capabilities
-        let stored_caps = store
-            .get_capabilities(tool_with_binary.tool.id)
-            .await
-            .map_err(WasmRegistrationError::Storage)?;
-
-        let capabilities = stored_caps
-            .map(|c| c.to_capabilities().into())
-            .unwrap_or_default();
-
-        // Register the tool
-        self.register_wasm(WasmToolRegistration {
-            name: &tool_with_binary.tool.name,
-            wasm_bytes: &tool_with_binary.wasm_binary,
-            runtime,
-            capabilities,
-            limits: None,
-            description: Some(&tool_with_binary.tool.description),
-            schema: Some(tool_with_binary.tool.parameters_schema.clone()),
-            secrets_store: None,
-            oauth_refresh: None,
-            tool_invoker,
-        })
-        .await
-        .map_err(WasmRegistrationError::Wasm)?;
-
-        tracing::info!(
-            name = tool_with_binary.tool.name,
-            user_id = user_id,
-            trust_level = %tool_with_binary.tool.trust_level,
-            "Registered WASM tool from storage"
-        );
-
-        Ok(())
     }
 }
 
-/// Error when registering a WASM tool from storage.
-#[derive(Debug, thiserror::Error)]
-pub enum WasmRegistrationError {
-    #[error("Storage error: {0}")]
-    Storage(#[from] WasmStorageError),
-
-    #[error("WASM error: {0}")]
-    Wasm(#[from] WasmError),
-}
+#[cfg(feature = "wasm-runtime")]
+pub type WasmRegistrationError = thinclaw_tools::registry::WasmRegistrationError;
 
 /// Configuration for registering a WASM tool.
+#[cfg(feature = "wasm-runtime")]
 pub struct WasmToolRegistration<'a> {
     /// Unique name for the tool.
     pub name: &'a str,
@@ -1270,7 +1112,7 @@ impl std::fmt::Debug for ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::registry::EchoTool;
+    use crate::tools::builtin::EchoTool;
 
     #[tokio::test]
     async fn test_register_and_get() {

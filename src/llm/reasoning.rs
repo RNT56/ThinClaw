@@ -18,7 +18,7 @@ use crate::llm::{
     ChatMessage, CompletionRequest, LlmProvider, ProviderTokenCapture, ToolCall,
     ToolCompletionRequest, ToolDefinition,
 };
-use crate::safety::{SafetyLayer, sanitize_context_content};
+use crate::safety::{SafetyLayer, sanitize_prompt_bound_content};
 
 // Response cleaning and tag stripping
 pub use super::reasoning_tags::{
@@ -34,16 +34,15 @@ fn fallback_home_soul_prompt() -> Option<String> {
     if home_soul.trim().is_empty() {
         return None;
     }
-    let (cleaned, warnings) = sanitize_context_content(&home_soul);
-    for warning in warnings {
+    let sanitized = sanitize_prompt_bound_content(&home_soul, None, true);
+    for warning in sanitized.warnings {
         tracing::warn!(
             pattern = %warning.pattern,
-            matched = %warning.matched,
             "Suspicious home SOUL.md content detected during prompt assembly fallback"
         );
     }
     Some(crate::identity::soul::render_canonical_prompt_block(
-        &cleaned,
+        &sanitized.content,
     ))
 }
 
@@ -526,6 +525,18 @@ pub struct Reasoning {
 }
 
 impl Reasoning {
+    fn sanitize_prompt_fragment(&self, label: &str, content: String) -> String {
+        let sanitized = sanitize_prompt_bound_content(&content, self.channel.as_deref(), true);
+        for warning in sanitized.warnings {
+            tracing::warn!(
+                fragment = label,
+                pattern = %warning.pattern,
+                "Suspicious prompt fragment detected during reasoning prompt assembly"
+            );
+        }
+        sanitized.content
+    }
+
     fn system_message(&self, content: impl Into<String>) -> ChatMessage {
         let mut message = ChatMessage::system(content);
         if self.llm.supports_prompt_caching() {
@@ -630,6 +641,7 @@ impl Reasoning {
     /// USER.md, and IDENTITY.md into a unified prompt.
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         if !prompt.is_empty() {
+            let prompt = self.sanitize_prompt_fragment("workspace_system_prompt", prompt);
             self.workspace_system_prompt = Some(prompt);
         }
         self
@@ -641,6 +653,7 @@ impl Reasoning {
     /// wrapped in `<skill>` delimiters with trust metadata.
     pub fn with_skill_context(mut self, context: String) -> Self {
         if !context.is_empty() {
+            let context = self.sanitize_prompt_fragment("skill_context", context);
             self.skill_context = Some(context);
         }
         self
@@ -649,6 +662,7 @@ impl Reasoning {
     /// Set a temporary session personality overlay.
     pub fn with_personality_overlay(mut self, overlay: String) -> Self {
         if !overlay.is_empty() {
+            let overlay = self.sanitize_prompt_fragment("personality_overlay", overlay);
             self.personality_overlay = Some(overlay);
         }
         self
@@ -667,6 +681,7 @@ impl Reasoning {
     pub fn with_channel_formatting_hints(mut self, hints: impl Into<String>) -> Self {
         let hints = hints.into();
         if !hints.is_empty() {
+            let hints = self.sanitize_prompt_fragment("channel_formatting_hints", hints);
             self.channel_formatting_hints = Some(hints);
         }
         self
@@ -2197,6 +2212,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         );
@@ -2230,6 +2246,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         );
@@ -2257,6 +2274,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         );
@@ -2286,6 +2304,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         );
@@ -2313,6 +2332,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         );
@@ -2340,6 +2360,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         )
@@ -2363,6 +2384,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         )
@@ -2386,6 +2408,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         )
@@ -2411,6 +2434,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         );
@@ -2448,6 +2472,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         );
@@ -2479,6 +2504,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         )
@@ -2509,6 +2535,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         );
@@ -2553,6 +2580,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         );
@@ -2591,6 +2619,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         )
@@ -2641,6 +2670,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         );
@@ -2699,6 +2729,7 @@ mod tests {
                     smart_approval_mode: "off".to_string(),
                     external_scanner_mode: "off".to_string(),
                     external_scanner_path: None,
+                    external_scanner_require_verified: false,
                 },
             )),
         );

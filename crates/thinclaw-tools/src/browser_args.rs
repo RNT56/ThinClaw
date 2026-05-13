@@ -4,6 +4,14 @@
 //! for the headless browser tool.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+pub fn default_browser_profile_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("thinclaw")
+        .join("browser-profile")
+}
 
 /// Browser launch configuration with custom arguments.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +150,19 @@ mod tests {
         let config = BrowserArgsConfig::default();
         assert!(config.headless);
         assert_eq!(config.window_size, Some((1920, 1080)));
+    }
+
+    #[test]
+    fn browser_profile_dir_uses_thinclaw_leaf() {
+        let path = default_browser_profile_dir();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("browser-profile")
+        );
+        assert!(
+            path.components()
+                .any(|component| component.as_os_str() == "thinclaw")
+        );
     }
 
     #[test]

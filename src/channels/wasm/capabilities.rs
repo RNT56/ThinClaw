@@ -1,3 +1,5 @@
+//! Compatibility facade for WASM channel capabilities and root tool adapters.
+
 pub use thinclaw_channels::wasm::capabilities::*;
 
 use std::sync::Arc;

@@ -131,6 +131,105 @@ async fn load_channel_setup_status(state: &GatewayState, user_id: &str) -> Chann
     ChannelSetupStatus {
         gmail: build_gmail_setup_status(&settings),
         nostr: build_nostr_setup_status(&settings, nostr_diagnostics.as_ref()),
+        matrix: build_native_lifecycle_setup_status(
+            "MATRIX_ENABLED",
+            settings.channels.matrix_enabled,
+            true,
+            &[
+                ("homeserver", &["MATRIX_HOMESERVER"][..]),
+                ("access_token", &["MATRIX_ACCESS_TOKEN"][..]),
+            ],
+        ),
+        voice_call: build_native_lifecycle_setup_status(
+            "VOICE_CALL_ENABLED",
+            settings.channels.voice_call_enabled,
+            cfg!(feature = "voice"),
+            &[
+                ("response_url", &["VOICE_CALL_RESPONSE_URL"][..]),
+                ("webhook_secret", &["VOICE_CALL_WEBHOOK_SECRET"][..]),
+            ],
+        ),
+        apns: build_native_lifecycle_setup_status(
+            "APNS_ENABLED",
+            settings.channels.apns_enabled,
+            true,
+            &[
+                ("team_id", &["APNS_TEAM_ID"][..]),
+                ("key_id", &["APNS_KEY_ID"][..]),
+                ("bundle_id", &["APNS_BUNDLE_ID"][..]),
+                (
+                    "private_key",
+                    &["APNS_PRIVATE_KEY", "APNS_PRIVATE_KEY_PATH"][..],
+                ),
+                ("registration_secret", &["APNS_REGISTRATION_SECRET"][..]),
+            ],
+        ),
+        browser_push: build_native_lifecycle_setup_status(
+            "BROWSER_PUSH_ENABLED",
+            settings.channels.browser_push_enabled,
+            cfg!(feature = "browser"),
+            &[
+                ("vapid_public_key", &["BROWSER_PUSH_VAPID_PUBLIC_KEY"][..]),
+                (
+                    "vapid_private_key",
+                    &[
+                        "BROWSER_PUSH_VAPID_PRIVATE_KEY",
+                        "BROWSER_PUSH_VAPID_PRIVATE_KEY_PATH",
+                    ][..],
+                ),
+                ("vapid_subject", &["BROWSER_PUSH_VAPID_SUBJECT"][..]),
+                ("webhook_secret", &["BROWSER_PUSH_WEBHOOK_SECRET"][..]),
+            ],
+        ),
+    }
+}
+
+fn build_native_lifecycle_setup_status(
+    enabled_env: &str,
+    enabled_setting: bool,
+    available: bool,
+    required_fields: &[(&str, &[&str])],
+) -> PartialChannelSetupStatus {
+    let enabled = crate::config::helpers::parse_bool_env(enabled_env, enabled_setting)
+        .unwrap_or(enabled_setting);
+    let mut missing_fields = Vec::new();
+    if enabled {
+        if !available {
+            missing_fields.push("build_feature".to_string());
+        }
+        for (field, env_vars) in required_fields {
+            let present = env_vars.iter().any(|env_var| {
+                crate::config::helpers::optional_env(env_var)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|value| !value.trim().is_empty())
+            });
+            if !present {
+                missing_fields.push((*field).to_string());
+            }
+        }
+    }
+
+    PartialChannelSetupStatus {
+        enabled,
+        configured: enabled && available && missing_fields.is_empty(),
+        missing_fields,
+        needs_oauth: false,
+        needs_private_key: required_fields
+            .iter()
+            .any(|(field, _)| field.contains("key")),
+        owner_configured: false,
+        tool_ready: enabled && available,
+        control_ready: enabled && available,
+        social_dm_enabled: false,
+        relay_count: None,
+        connected_relay_count: None,
+        relay_health: None,
+        public_key_hex: None,
+        public_key_npub: None,
+        owner_pubkey_hex: None,
+        owner_pubkey_npub: None,
+        invalid_private_key: false,
     }
 }
 
@@ -399,6 +498,10 @@ pub(crate) struct GatewayStatusResponse {
 struct ChannelSetupStatus {
     gmail: PartialChannelSetupStatus,
     nostr: PartialChannelSetupStatus,
+    matrix: PartialChannelSetupStatus,
+    voice_call: PartialChannelSetupStatus,
+    apns: PartialChannelSetupStatus,
+    browser_push: PartialChannelSetupStatus,
 }
 
 #[derive(serde::Serialize)]
@@ -442,11 +545,11 @@ fn is_false(value: &bool) -> bool {
 }
 
 #[cfg(test)]
-#[cfg(feature = "nostr")]
 mod tests {
-    use super::build_nostr_setup_status;
+    use super::build_native_lifecycle_setup_status;
 
     #[test]
+    #[cfg(feature = "nostr")]
     fn nostr_status_marks_missing_owner_when_secret_exists() {
         let mut settings = crate::settings::Settings::default();
         settings.channels.nostr_enabled = true;
@@ -461,7 +564,7 @@ mod tests {
             std::env::remove_var("NOSTR_SECRET_KEY");
         }
 
-        let status = build_nostr_setup_status(&settings, None);
+        let status = super::build_nostr_setup_status(&settings, None);
         assert!(status.enabled);
         assert!(status.tool_ready);
         assert!(!status.control_ready);
@@ -476,6 +579,85 @@ mod tests {
             std::env::remove_var("NOSTR_ENABLED");
             std::env::remove_var("NOSTR_PRIVATE_KEY");
             std::env::remove_var("NOSTR_SECRET_KEY");
+        }
+    }
+
+    #[test]
+    fn native_lifecycle_status_reports_missing_setup_fields() {
+        unsafe {
+            std::env::set_var("MATRIX_ENABLED", "true");
+            std::env::remove_var("MATRIX_HOMESERVER");
+            std::env::remove_var("MATRIX_ACCESS_TOKEN");
+        }
+
+        let status = build_native_lifecycle_setup_status(
+            "MATRIX_ENABLED",
+            false,
+            true,
+            &[
+                ("homeserver", &["MATRIX_HOMESERVER"][..]),
+                ("access_token", &["MATRIX_ACCESS_TOKEN"][..]),
+            ],
+        );
+
+        assert!(status.enabled);
+        assert!(!status.configured);
+        assert!(
+            status
+                .missing_fields
+                .iter()
+                .any(|field| field == "homeserver")
+        );
+        assert!(
+            status
+                .missing_fields
+                .iter()
+                .any(|field| field == "access_token")
+        );
+
+        unsafe {
+            std::env::remove_var("MATRIX_ENABLED");
+        }
+    }
+
+    #[test]
+    fn native_lifecycle_status_reports_ready_when_required_env_is_present() {
+        unsafe {
+            std::env::set_var("APNS_ENABLED", "true");
+            std::env::set_var("APNS_TEAM_ID", "team");
+            std::env::set_var("APNS_KEY_ID", "key");
+            std::env::set_var("APNS_BUNDLE_ID", "bundle");
+            std::env::set_var("APNS_PRIVATE_KEY", "private");
+            std::env::set_var("APNS_REGISTRATION_SECRET", "registration-secret");
+        }
+
+        let status = build_native_lifecycle_setup_status(
+            "APNS_ENABLED",
+            false,
+            true,
+            &[
+                ("team_id", &["APNS_TEAM_ID"][..]),
+                ("key_id", &["APNS_KEY_ID"][..]),
+                ("bundle_id", &["APNS_BUNDLE_ID"][..]),
+                (
+                    "private_key",
+                    &["APNS_PRIVATE_KEY", "APNS_PRIVATE_KEY_PATH"][..],
+                ),
+                ("registration_secret", &["APNS_REGISTRATION_SECRET"][..]),
+            ],
+        );
+
+        assert!(status.enabled);
+        assert!(status.configured);
+        assert!(status.missing_fields.is_empty());
+
+        unsafe {
+            std::env::remove_var("APNS_ENABLED");
+            std::env::remove_var("APNS_TEAM_ID");
+            std::env::remove_var("APNS_KEY_ID");
+            std::env::remove_var("APNS_BUNDLE_ID");
+            std::env::remove_var("APNS_PRIVATE_KEY");
+            std::env::remove_var("APNS_REGISTRATION_SECRET");
         }
     }
 }

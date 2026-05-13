@@ -43,6 +43,7 @@ pub enum SandboxError {
 
     /// Docker API error.
     #[error("Docker API error: {0}")]
+    #[cfg(feature = "docker-sandbox")]
     Docker(#[from] bollard::errors::Error),
 
     /// I/O error.

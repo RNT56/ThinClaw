@@ -97,6 +97,23 @@ The MCP surface is now split by task instead of a single flat command set:
 
 The WebUI Extensions area also exposes a live MCP browser for server metadata, resources, prompts, OAuth discovery, and pending approval requests such as `sampling/createMessage` and `elicitation/create`.
 
+Extension setup state is normalized through a shared setup/auth descriptor.
+Registry entries, WASM capabilities, WebUI extension cards, CLI validation, and
+onboarding follow-ups all use the same concepts: auth mode, setup state,
+required secrets, validation URL, and allowed actions. The WebUI exposes
+`POST /api/extensions/{name}/validate` for installed extensions; it verifies
+required setup secrets and calls the declared validation endpoint when one is
+available. The CLI exposes the source-side counterpart as
+`thinclaw registry validate <name|bundle>` and the installed-channel check as
+`thinclaw channels validate <name>`.
+
+WASM `tool_invoke` is host-mediated. Guests may invoke only aliases declared in
+their capabilities file; the host resolves the alias, reapplies normal tool
+profile, policy, approval, recursion-depth, timeout, and output-sanitization
+checks, then returns sanitized output to the guest. CI coverage includes both
+direct host-boundary tests and a prebuilt component smoke fixture so this path
+does not depend on `cargo-component` being installed locally.
+
 Roots grants are treated as persisted server policy rather than a one-time startup snapshot. Long-lived MCP clients reload the configured grants when serving `roots/list`, so updated grants are visible to connected servers without requiring a full ThinClaw restart.
 
 ## Recommended Reading Order

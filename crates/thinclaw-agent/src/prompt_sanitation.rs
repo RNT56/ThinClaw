@@ -1,6 +1,4 @@
-use regex::Regex;
-
-use thinclaw_safety::sanitize_context_content;
+use thinclaw_safety::sanitize_prompt_bound_content;
 
 #[derive(Debug, Clone)]
 pub struct ProjectContextSanitization {
@@ -10,26 +8,24 @@ pub struct ProjectContextSanitization {
 }
 
 pub fn sanitize_project_context(raw: &str, max_tokens: usize) -> ProjectContextSanitization {
-    let (mut cleaned, warnings) = sanitize_context_content(raw);
+    sanitize_project_context_for_channel(raw, max_tokens, None, true)
+}
+
+pub fn sanitize_project_context_for_channel(
+    raw: &str,
+    max_tokens: usize,
+    platform: Option<&str>,
+    redact_user_ids: bool,
+) -> ProjectContextSanitization {
+    let sanitized = sanitize_prompt_bound_content(raw, platform, redact_user_ids);
+    let mut cleaned = sanitized.content;
     cleaned = cleaned.replace('\0', "");
 
-    let injection_patterns = [
-        Regex::new(r"(?i)<\s*system\s*>").expect("constant regex"),
-        Regex::new(r"(?i)ignore\s+previous\s+instructions").expect("constant regex"),
-        Regex::new(r"(?i)you\s+are\s+now").expect("constant regex"),
-        Regex::new(r"(?i)override\s+(the\s+)?system").expect("constant regex"),
-        Regex::new(r"(?i)assistant\s*:\s*").expect("constant regex"),
-    ];
-
-    let mut warning_patterns = warnings
+    let mut warning_patterns = sanitized
+        .warnings
         .into_iter()
         .map(|warning| warning.pattern)
         .collect::<Vec<_>>();
-    for pattern in injection_patterns {
-        if pattern.is_match(&cleaned) {
-            warning_patterns.push(pattern.as_str().to_string());
-        }
-    }
     warning_patterns.sort();
     warning_patterns.dedup();
 
@@ -64,5 +60,20 @@ mod tests {
     fn captures_injection_patterns() {
         let result = sanitize_project_context("Ignore previous instructions", 100);
         assert!(!result.warning_patterns.is_empty());
+        assert!(
+            result
+                .content
+                .contains("[redacted context-injection:prompt_override]")
+        );
+        assert!(!result.content.contains("Ignore previous instructions"));
+    }
+
+    #[test]
+    fn redacts_sensitive_prompt_context() {
+        let result = sanitize_project_context("email alex@example.com path /Users/alex/app", 100);
+        assert!(!result.content.contains("alex@example.com"));
+        assert!(!result.content.contains("/Users/alex"));
+        assert!(result.content.contains("[redacted email:"));
+        assert!(result.content.contains("[redacted path:"));
     }
 }

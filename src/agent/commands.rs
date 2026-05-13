@@ -5,12 +5,11 @@
 
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::agent::checkpoint;
-use crate::agent::command_catalog;
+use crate::agent::command_catalog::{self, agent_display_name, rollback_usage};
 use crate::agent::personality::{available_personality_names, preview, resolve_personality};
 use crate::agent::submission::SubmissionResult;
 use crate::agent::{Agent, MessageIntent};
@@ -20,43 +19,6 @@ use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
 use crate::tools::builtin::llm_tools::{ModelOverride, model_override_scope_key_from_metadata};
 use crate::tui::skin::CliSkin;
-
-/// Format a count with a suffix, using K/M abbreviations for large numbers.
-fn format_count(n: u64, suffix: &str) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M {}", n as f64 / 1_000_000.0, suffix)
-    } else if n >= 1_000 {
-        format!("{:.1}K {}", n as f64 / 1_000.0, suffix)
-    } else {
-        format!("{} {}", n, suffix)
-    }
-}
-
-fn format_checkpoint_age(timestamp: DateTime<Utc>) -> String {
-    let age = Utc::now().signed_duration_since(timestamp);
-    if age.num_seconds() < 60 {
-        format!("{}s ago", age.num_seconds().max(0))
-    } else if age.num_minutes() < 60 {
-        format!("{}m ago", age.num_minutes())
-    } else if age.num_hours() < 24 {
-        format!("{}h ago", age.num_hours())
-    } else {
-        format!("{}d ago", age.num_days())
-    }
-}
-
-fn rollback_usage() -> &'static str {
-    "Usage:\n  /rollback list\n  /rollback diff <N>\n  /rollback <N> [file]"
-}
-
-fn agent_display_name(name: &str) -> &str {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        "Assistant"
-    } else {
-        trimmed
-    }
-}
 
 impl Agent {
     /// Handle job-related intents without turn tracking.
@@ -144,10 +106,7 @@ impl Agent {
             tracing::warn!(job_id = %job_id, "Failed to set job category: {}", e);
         }
 
-        Ok(format!(
-            "Created job: {}\nID: {}\n\nThe job has been scheduled and is now running.",
-            title, job_id
-        ))
+        Ok(command_catalog::created_job_text(&title, job_id))
     }
 
     async fn handle_check_status(
@@ -165,27 +124,25 @@ impl Agent {
                     return Err(crate::error::JobError::NotFound { id: uuid }.into());
                 }
 
-                Ok(format!(
-                    "Job: {}\nStatus: {:?}\nCreated: {}\nStarted: {}\nActual cost: {}",
-                    ctx.title,
+                Ok(command_catalog::job_status_text(
+                    &ctx.title,
                     ctx.state,
-                    ctx.created_at.format("%Y-%m-%d %H:%M:%S"),
-                    ctx.started_at
-                        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-                        .unwrap_or_else(|| "Not started".to_string()),
-                    ctx.actual_cost
+                    ctx.created_at,
+                    ctx.started_at,
+                    ctx.actual_cost,
                 ))
             }
             None => {
                 // Show summary of all jobs
                 let summary = self.context_manager.summary_for(user_id).await;
-                Ok(format!(
-                    "Jobs summary:\n  Total: {}\n  In Progress: {}\n  Completed: {}\n  Failed: {}\n  Stuck: {}",
-                    summary.total,
-                    summary.in_progress,
-                    summary.completed,
-                    summary.failed,
-                    summary.stuck
+                Ok(command_catalog::jobs_summary_text(
+                    command_catalog::JobSummaryView {
+                        total: summary.total,
+                        in_progress: summary.in_progress,
+                        completed: summary.completed,
+                        failed: summary.failed,
+                        stuck: summary.stuck,
+                    },
                 ))
             }
         }
@@ -202,7 +159,7 @@ impl Agent {
 
         self.scheduler.stop(uuid).await?;
 
-        Ok(format!("Job {} has been cancelled.", job_id))
+        Ok(command_catalog::cancelled_job_text(job_id))
     }
 
     async fn handle_list_jobs(
@@ -212,20 +169,16 @@ impl Agent {
     ) -> Result<String, Error> {
         let jobs = self.context_manager.all_jobs_for(user_id).await;
 
-        if jobs.is_empty() {
-            return Ok("No jobs found.".to_string());
-        }
-
-        let mut output = String::from("Jobs:\n");
+        let mut visible_jobs = Vec::new();
         for job_id in jobs {
             if let Ok(ctx) = self.context_manager.get_context(job_id).await
                 && ctx.user_id == user_id
             {
-                output.push_str(&format!("  {} - {} ({:?})\n", job_id, ctx.title, ctx.state));
+                visible_jobs.push((job_id, ctx.title, ctx.state));
             }
         }
 
-        Ok(output)
+        Ok(command_catalog::job_list_text(visible_jobs))
     }
 
     async fn handle_help_job(&self, user_id: &str, job_id: &str) -> Result<String, Error> {
@@ -250,16 +203,12 @@ impl Agent {
             // Reschedule
             self.scheduler.schedule(uuid).await?;
 
-            Ok(format!(
-                "Job {} was stuck. Attempting recovery (attempt #{}).",
+            Ok(command_catalog::stuck_job_recovery_text(
                 job_id,
-                ctx.repair_attempts + 1
+                ctx.repair_attempts + 1,
             ))
         } else {
-            Ok(format!(
-                "Job {} is not stuck (current state: {:?}). No help needed.",
-                job_id, ctx.state
-            ))
+            Ok(command_catalog::job_not_stuck_text(job_id, ctx.state))
         }
     }
 
@@ -298,18 +247,17 @@ impl Agent {
 
         match runner.check_heartbeat().await {
             crate::agent::HeartbeatResult::Ok => Ok(SubmissionResult::ok_with_message(
-                "Heartbeat: all clear, nothing needs attention.",
+                command_catalog::heartbeat_clear_text(),
             )),
             crate::agent::HeartbeatResult::NeedsAttention(msg) => Ok(SubmissionResult::response(
-                format!("Heartbeat findings:\n\n{}", msg),
+                command_catalog::heartbeat_findings_text(&msg),
             )),
             crate::agent::HeartbeatResult::Skipped => Ok(SubmissionResult::ok_with_message(
-                "Heartbeat skipped: no HEARTBEAT.md checklist found in workspace.",
+                command_catalog::heartbeat_skipped_text(),
             )),
-            crate::agent::HeartbeatResult::Failed(err) => Ok(SubmissionResult::error(format!(
-                "Heartbeat failed: {}",
-                err
-            ))),
+            crate::agent::HeartbeatResult::Failed(err) => Ok(SubmissionResult::error(
+                command_catalog::heartbeat_failed_text(err),
+            )),
         }
     }
 
@@ -330,7 +278,7 @@ impl Agent {
 
         if messages.is_empty() {
             return Ok(SubmissionResult::ok_with_message(
-                "Nothing to summarize (empty thread).",
+                command_catalog::empty_summary_text(),
             ));
         }
 
@@ -359,11 +307,12 @@ impl Agent {
             reasoning = reasoning.with_cost_tracker(std::sync::Arc::clone(tracker));
         }
         match reasoning.complete(request).await {
-            Ok((text, _usage)) => Ok(SubmissionResult::response(format!(
-                "Thread Summary:\n\n{}",
-                text.trim()
-            ))),
-            Err(e) => Ok(SubmissionResult::error(format!("Summarize failed: {}", e))),
+            Ok((text, _usage)) => Ok(SubmissionResult::response(
+                command_catalog::thread_summary_text(&text),
+            )),
+            Err(e) => Ok(SubmissionResult::error(
+                command_catalog::summarize_failed_text(e),
+            )),
         }
     }
 
@@ -384,7 +333,7 @@ impl Agent {
 
         if messages.is_empty() {
             return Ok(SubmissionResult::ok_with_message(
-                "Nothing to suggest from (empty thread).",
+                command_catalog::empty_suggest_text(),
             ));
         }
 
@@ -410,11 +359,12 @@ impl Agent {
             reasoning = reasoning.with_cost_tracker(std::sync::Arc::clone(tracker));
         }
         match reasoning.complete(request).await {
-            Ok((text, _usage)) => Ok(SubmissionResult::response(format!(
-                "Suggested Next Steps:\n\n{}",
-                text.trim()
-            ))),
-            Err(e) => Ok(SubmissionResult::error(format!("Suggest failed: {}", e))),
+            Ok((text, _usage)) => Ok(SubmissionResult::response(
+                command_catalog::suggested_next_steps_text(&text),
+            )),
+            Err(e) => Ok(SubmissionResult::error(
+                command_catalog::suggest_failed_text(e),
+            )),
         }
     }
 
@@ -545,38 +495,15 @@ impl Agent {
             }
 
             "memory" => Ok(SubmissionResult::response(format!(
-                "Memory & Growth\n\nWorkspace memory: {}\nCore tools: memory_search, memory_read, memory_write, memory_tree, session_search\nLearning tools: learning_status, learning_outcomes, learning_history, learning_feedback, learning_proposal_review, prompt_manage\nShared commands: /compress, /summarize, /skills, /heartbeat\nWebUI surfaces: Memory & Growth, Skills, Learning Ledger\n\nUse /skills to inspect installed skills and the WebUI tabs to browse durable memory and learning history.",
-                if self.workspace().is_some() {
-                    "available"
-                } else {
-                    "unavailable until a workspace/database is attached"
-                }
+                "{}",
+                command_catalog::memory_growth_text(self.workspace().is_some())
             ))),
 
             "skin" => {
-                let available = CliSkin::available_names().join(", ");
-                if args.is_empty() || args[0].eq_ignore_ascii_case("current") {
-                    Ok(SubmissionResult::response(format!(
-                        "Current CLI skin: {}\nAvailable skins: {}\n\nUse /skin <name> in your local CLI client to switch immediately.",
-                        self.config.cli_skin, available
-                    )))
-                } else if args[0].eq_ignore_ascii_case("list") {
-                    Ok(SubmissionResult::response(format!(
-                        "Available skins: {}\n\nUse /skin <name> in your local CLI client to switch immediately.",
-                        available
-                    )))
-                } else if args[0].eq_ignore_ascii_case("reset") {
-                    Ok(SubmissionResult::response(format!(
-                        "Local clients can reset to their configured default skin. This agent is currently configured for '{}'.",
-                        self.config.cli_skin
-                    )))
-                } else {
-                    let requested = args.join(" ");
-                    Ok(SubmissionResult::response(format!(
-                        "Skin '{}' is available as a local client preset. Current configured skin: {}\nAvailable skins: {}",
-                        requested, self.config.cli_skin, available
-                    )))
-                }
+                let available = CliSkin::available_names();
+                Ok(SubmissionResult::response(
+                    command_catalog::skin_command_text(args, &self.config.cli_skin, &available),
+                ))
             }
 
             "tools" => {
@@ -620,30 +547,13 @@ impl Agent {
                 let current = self.llm().active_model_name();
 
                 if args.is_empty() {
-                    // Show current model and list available models
-                    let mut out = format!("Active model: {}\n", current);
-                    match self.llm().list_models().await {
-                        Ok(models) if !models.is_empty() => {
-                            out.push_str("\nAvailable models:\n");
-                            for m in &models {
-                                let marker = if *m == current { " (active)" } else { "" };
-                                out.push_str(&format!("  {}{}\n", m, marker));
-                            }
-                            out.push_str("\nUse /model <name> to switch.");
+                    let models = self.llm().list_models().await;
+                    Ok(SubmissionResult::response(match models {
+                        Ok(models) => command_catalog::active_model_text(&current, Ok(&models)),
+                        Err(error) => {
+                            command_catalog::active_model_text(&current, Err(&error.to_string()))
                         }
-                        Ok(_) => {
-                            out.push_str(
-                                "\nCould not fetch model list. Use /model <name> to switch.",
-                            );
-                        }
-                        Err(e) => {
-                            out.push_str(&format!(
-                                "\nCould not fetch models: {}. Use /model <name> to switch.",
-                                e
-                            ));
-                        }
-                    }
-                    Ok(SubmissionResult::response(out))
+                    }))
                 } else {
                     let requested = &args[0];
                     let identity = message.resolved_identity();
@@ -664,7 +574,7 @@ impl Agent {
                             .await;
                         }
                         return Ok(SubmissionResult::response(
-                            "Switched back to the default routed model.".to_string(),
+                            command_catalog::model_reset_text().to_string(),
                         ));
                     }
 
@@ -672,11 +582,9 @@ impl Agent {
                     match self.llm().list_models().await {
                         Ok(models) if !models.is_empty() => {
                             if !models.iter().any(|m| m == requested) {
-                                return Ok(SubmissionResult::error(format!(
-                                    "Unknown model: {}. Available models:\n  {}",
-                                    requested,
-                                    models.join("\n  ")
-                                )));
+                                return Ok(SubmissionResult::error(
+                                    command_catalog::unknown_model_text(requested, &models),
+                                ));
                             }
                         }
                         Ok(_) => {
@@ -689,8 +597,7 @@ impl Agent {
 
                     if !requested.contains('/') {
                         return Ok(SubmissionResult::error(
-                            "Use /model <provider/model> or /model reset. Example: /model openai/gpt-4o"
-                                .to_string(),
+                            command_catalog::invalid_model_spec_text().to_string(),
                         ));
                     }
 
@@ -706,20 +613,17 @@ impl Agent {
                             })
                             .await;
                         }
-                        Ok(SubmissionResult::response(format!(
-                            "Switched model for this conversation to: {}",
-                            requested
-                        )))
+                        Ok(SubmissionResult::response(
+                            command_catalog::scoped_model_switched_text(requested),
+                        ))
                     } else {
                         match self.llm().set_model(requested) {
-                            Ok(()) => Ok(SubmissionResult::response(format!(
-                                "Switched model to: {}",
-                                requested
-                            ))),
-                            Err(e) => Ok(SubmissionResult::error(format!(
-                                "Failed to switch model: {}",
-                                e
-                            ))),
+                            Ok(()) => Ok(SubmissionResult::response(
+                                command_catalog::global_model_switched_text(requested),
+                            )),
+                            Err(e) => Ok(SubmissionResult::error(
+                                command_catalog::model_switch_failed_text(e),
+                            )),
                         }
                     }
                 }
@@ -728,13 +632,9 @@ impl Agent {
             "status" => {
                 let model = self.llm().active_model_name();
                 let workspace_mode = &self.config.workspace_mode;
-                Ok(SubmissionResult::response(format!(
-                    "Agent status\n\
-                     ──────────────────────\n\
-                     ✅ Reachable\n\
-                     Model:     {model}\n\
-                     Workspace: {workspace_mode}",
-                )))
+                Ok(SubmissionResult::response(
+                    command_catalog::agent_status_text(&model, workspace_mode),
+                ))
             }
 
             "context" => {
@@ -744,11 +644,19 @@ impl Agent {
                 let mut sections = Vec::new();
 
                 // Always-present sections
-                sections.push(("Safety guardrails", true, String::new()));
-                sections.push(("Tool list", true, {
-                    let tools = self.tools().list().await;
-                    format!("{} tools: {}", tools.len(), tools.join(", "))
-                }));
+                sections.push(command_catalog::ContextSourceSection::new(
+                    "Safety guardrails",
+                    true,
+                    String::new(),
+                ));
+                sections.push(command_catalog::ContextSourceSection::new(
+                    "Tool list",
+                    true,
+                    {
+                        let tools = self.tools().list().await;
+                        format!("{} tools: {}", tools.len(), tools.join(", "))
+                    },
+                ));
 
                 // Workspace sections (identity files)
                 if let Some(workspace) = ws {
@@ -772,10 +680,22 @@ impl Agent {
                                         let first_line = content.lines().next().unwrap_or("");
                                         format!("{} ({} chars)", first_line, content.len())
                                     };
-                                    sections.push((label, true, preview));
+                                    sections.push(command_catalog::ContextSourceSection::new(
+                                        label, true, preview,
+                                    ));
                                 }
-                                Ok(_) => sections.push((label, false, "(empty)".to_string())),
-                                Err(_) => sections.push((label, false, "(not found)".to_string())),
+                                Ok(_) => {
+                                    sections.push(command_catalog::ContextSourceSection::new(
+                                        label, false, "(empty)",
+                                    ));
+                                }
+                                Err(_) => {
+                                    sections.push(command_catalog::ContextSourceSection::new(
+                                        label,
+                                        false,
+                                        "(not found)",
+                                    ));
+                                }
                             }
                             continue;
                         }
@@ -787,26 +707,35 @@ impl Agent {
                                     let first_line = doc.content.lines().next().unwrap_or("");
                                     format!("{} ({} chars)", first_line, doc.content.len())
                                 };
-                                sections.push((label, true, preview));
+                                sections.push(command_catalog::ContextSourceSection::new(
+                                    label, true, preview,
+                                ));
                             }
-                            Ok(_) => sections.push((label, false, "(empty)".to_string())),
-                            Err(_) => sections.push((label, false, "(not found)".to_string())),
+                            Ok(_) => {
+                                sections.push(command_catalog::ContextSourceSection::new(
+                                    label, false, "(empty)",
+                                ));
+                            }
+                            Err(_) => {
+                                sections.push(command_catalog::ContextSourceSection::new(
+                                    label,
+                                    false,
+                                    "(not found)",
+                                ));
+                            }
                         }
                     }
                 } else {
-                    sections.push(("Workspace", false, "(no workspace connected)".to_string()));
+                    sections.push(command_catalog::ContextSourceSection::new(
+                        "Workspace",
+                        false,
+                        "(no workspace connected)",
+                    ));
                 }
 
-                let mut out = String::from("Context sources\n──────────────────────\n");
-                for (label, active, preview) in sections {
-                    let icon = if active { "✅" } else { "❌" };
-                    if detail && !preview.is_empty() {
-                        out.push_str(&format!("\n{} {}\n{}\n", icon, label, preview));
-                    } else {
-                        out.push_str(&format!("{} {}  {}\n", icon, label, preview));
-                    }
-                }
-                Ok(SubmissionResult::response(out))
+                Ok(SubmissionResult::response(
+                    command_catalog::context_sources_text(&sections, detail),
+                ))
             }
 
             _ => Ok(SubmissionResult::error(format!(
@@ -825,28 +754,19 @@ impl Agent {
         let guard = registry.read().await;
 
         let skills = guard.skills();
-        if skills.is_empty() {
-            return Ok(SubmissionResult::response(
-                "No skills installed.\n\nUse /skills search <query> to find skills on ClawHub.",
-            ));
-        }
+        let views = skills
+            .iter()
+            .map(|skill| command_catalog::InstalledSkillView {
+                name: skill.manifest.name.clone(),
+                version: skill.manifest.version.clone(),
+                trust: skill.trust.to_string(),
+                description: skill.manifest.description.clone(),
+            })
+            .collect::<Vec<_>>();
 
-        let mut out = String::from("Installed skills:\n\n");
-        for s in skills {
-            let desc = if s.manifest.description.chars().count() > 60 {
-                let truncated: String = s.manifest.description.chars().take(57).collect();
-                format!("{}...", truncated)
-            } else {
-                s.manifest.description.clone()
-            };
-            out.push_str(&format!(
-                "  {:<24} v{:<10} [{}]  {}\n",
-                s.manifest.name, s.manifest.version, s.trust, desc,
-            ));
-        }
-        out.push_str("\nUse /skills search <query> to find more on ClawHub.");
-
-        Ok(SubmissionResult::response(out))
+        Ok(SubmissionResult::response(
+            command_catalog::installed_skills_text(&views),
+        ))
     }
 
     /// Search ClawHub for skills.
@@ -864,70 +784,47 @@ impl Agent {
         let mut entries = outcome.results;
         catalog.enrich_search_results(&mut entries, 5).await;
 
-        let mut out = format!("ClawHub results for \"{}\":\n\n", query);
-
-        if entries.is_empty() {
-            if let Some(ref err) = outcome.error {
-                out.push_str(&format!("  (registry error: {})\n", err));
-            } else {
-                out.push_str("  No results found.\n");
-            }
-        } else {
-            for entry in &entries {
-                let owner_str = entry
-                    .owner
-                    .as_deref()
-                    .map(|o| format!("  by {}", o))
-                    .unwrap_or_default();
-
-                let stats_parts: Vec<String> = [
-                    entry.stars.map(|s| format!("{} stars", s)),
-                    entry.downloads.map(|d| format_count(d, "downloads")),
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
-                let stats_str = if stats_parts.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {}", stats_parts.join("  "))
-                };
-
-                out.push_str(&format!(
-                    "  {:<24} v{:<10}{}{}\n",
-                    entry.name, entry.version, owner_str, stats_str,
-                ));
-                if !entry.description.is_empty() {
-                    out.push_str(&format!("    {}\n\n", entry.description));
-                }
-            }
-        }
+        let entry_views = entries
+            .iter()
+            .map(|entry| command_catalog::SkillSearchResultView {
+                name: entry.name.clone(),
+                version: entry.version.clone(),
+                owner: entry.owner.clone(),
+                stars: entry.stars,
+                downloads: entry.downloads,
+                description: entry.description.clone(),
+            })
+            .collect::<Vec<_>>();
 
         // Show matching installed skills
+        let mut installed_matches = Vec::new();
         if let Some(registry) = self.skill_registry() {
             let guard = registry.read().await;
             let query_lower = query.to_lowercase();
-            let matches: Vec<_> = guard
+            installed_matches = guard
                 .skills()
                 .iter()
                 .filter(|s| {
                     s.manifest.name.to_lowercase().contains(&query_lower)
                         || s.manifest.description.to_lowercase().contains(&query_lower)
                 })
+                .map(|skill| command_catalog::InstalledSkillView {
+                    name: skill.manifest.name.clone(),
+                    version: skill.manifest.version.clone(),
+                    trust: skill.trust.to_string(),
+                    description: skill.manifest.description.clone(),
+                })
                 .collect();
-
-            if !matches.is_empty() {
-                out.push_str(&format!("Installed skills matching \"{}\":\n", query));
-                for s in &matches {
-                    out.push_str(&format!(
-                        "  {:<24} v{:<10} [{}]\n",
-                        s.manifest.name, s.manifest.version, s.trust,
-                    ));
-                }
-            }
         }
 
-        Ok(SubmissionResult::response(out))
+        Ok(SubmissionResult::response(
+            command_catalog::skill_search_text(
+                query,
+                &entry_views,
+                outcome.error.as_deref(),
+                &installed_matches,
+            ),
+        ))
     }
 
     async fn handle_rollback_command(&self, thread_id: Uuid, args: &[String]) -> String {
@@ -949,11 +846,7 @@ impl Agent {
         let thread_scope = thread_id.to_string();
 
         if args.is_empty() || args[0].eq_ignore_ascii_case("help") {
-            return format!(
-                "{}\n\nActive project: {}",
-                rollback_usage(),
-                project_root.display()
-            );
+            return command_catalog::rollback_active_project_text(&project_root);
         }
 
         match args[0].as_str() {
@@ -963,38 +856,30 @@ impl Agent {
                     Err(e) => return format!("Error listing checkpoints: {}", e),
                 };
                 if entries.is_empty() {
-                    return format!(
-                        "No filesystem checkpoints found for {}.",
-                        project_root.display()
-                    );
+                    return command_catalog::rollback_no_checkpoints_text(&project_root);
                 }
 
-                let mut out = format!("Filesystem checkpoints for {}:\n", project_root.display());
-                for (idx, entry) in entries.iter().enumerate() {
-                    out.push_str(&format!(
-                        "  {}. {}  {}  {}\n",
-                        idx + 1,
-                        &entry.commit_hash[..entry.commit_hash.len().min(12)],
-                        format_checkpoint_age(entry.timestamp),
-                        entry.summary
-                    ));
-                }
-                out
+                let views = entries
+                    .into_iter()
+                    .map(|entry| command_catalog::RollbackCheckpointView {
+                        commit_hash: entry.commit_hash,
+                        timestamp: entry.timestamp,
+                        summary: entry.summary,
+                    })
+                    .collect::<Vec<_>>();
+                command_catalog::rollback_checkpoint_list_text(&project_root, &views)
             }
             "diff" => {
                 let Some(raw_index) = args.get(1) else {
                     return rollback_usage().to_string();
                 };
                 if args.len() != 2 {
-                    return format!(
-                        "{}\n\n`/rollback diff <N>` does not take a file path.",
-                        rollback_usage()
-                    );
+                    return command_catalog::rollback_diff_usage_error_text();
                 }
                 let index = match raw_index.parse::<usize>().ok().filter(|n| *n > 0) {
                     Some(index) => index,
                     None => {
-                        return "Rollback index must be a positive integer.".to_string();
+                        return command_catalog::rollback_positive_index_error_text().to_string();
                     }
                 };
                 let entries = match checkpoint::list_checkpoints(&project_root).await {
@@ -1002,33 +887,24 @@ impl Agent {
                     Err(e) => return format!("Error listing checkpoints: {}", e),
                 };
                 let Some(entry) = entries.get(index - 1) else {
-                    return format!(
-                        "Checkpoint {} not found. Run `/rollback list` to inspect available checkpoints.",
-                        index
-                    );
+                    return command_catalog::rollback_checkpoint_not_found_text(index);
                 };
                 let diff = match checkpoint::diff(&project_root, &entry.commit_hash).await {
                     Ok(diff) => diff,
                     Err(e) => return format!("Error computing diff: {}", e),
                 };
                 if diff.trim().is_empty() {
-                    format!(
-                        "No differences between checkpoint {} and the current project state.",
-                        index
-                    )
+                    command_catalog::rollback_empty_diff_text(index)
                 } else {
-                    format!(
-                        "Diff for checkpoint {} ({})\n\n{}",
-                        index,
-                        &entry.commit_hash[..entry.commit_hash.len().min(12)],
-                        diff.trim_end()
-                    )
+                    command_catalog::rollback_diff_text(index, &entry.commit_hash, &diff)
                 }
             }
             _ => {
                 let index = match args[0].parse::<usize>().ok().filter(|n| *n > 0) {
                     Some(index) => index,
-                    None => return "Rollback index must be a positive integer.".to_string(),
+                    None => {
+                        return command_catalog::rollback_positive_index_error_text().to_string();
+                    }
                 };
 
                 let file = if args.len() > 1 {
@@ -1042,10 +918,7 @@ impl Agent {
                     Err(e) => return format!("Error listing checkpoints: {}", e),
                 };
                 let Some(entry) = entries.get(index - 1) else {
-                    return format!(
-                        "Checkpoint {} not found. Run `/rollback list` to inspect available checkpoints.",
-                        index
-                    );
+                    return command_catalog::rollback_checkpoint_not_found_text(index);
                 };
 
                 if let Err(e) = checkpoint::restore_with_scope(
@@ -1059,19 +932,7 @@ impl Agent {
                     return format!("Error restoring checkpoint: {}", e);
                 }
 
-                match file {
-                    Some(file) => format!(
-                        "Restored {} from checkpoint {} ({})",
-                        file,
-                        index,
-                        &entry.commit_hash[..entry.commit_hash.len().min(12)]
-                    ),
-                    None => format!(
-                        "Restored project state from checkpoint {} ({})",
-                        index,
-                        &entry.commit_hash[..entry.commit_hash.len().min(12)]
-                    ),
-                }
+                command_catalog::rollback_restored_text(index, &entry.commit_hash, file.as_deref())
             }
         }
     }

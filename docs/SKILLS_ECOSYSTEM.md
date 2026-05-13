@@ -68,6 +68,12 @@ Externally sourced installs pass through the quarantine manager before landing i
 - `skill_audit` re-runs the content scanner without removing or mutating the skill
 - `skill_snapshot` writes a point-in-time JSON manifest to `~/.thinclaw/skills/.hub/`
 
+The quarantine scanner is versioned as `skill_quarantine_v2`. It scans `SKILL.md` plus package support files and reports rule IDs, file paths, line numbers, severity, recommendations, scanner version, content hash, and finding summaries. Current rule groups cover network fetches, pipe-to-shell patterns, command/code execution, secret/environment reads, destructive filesystem operations, traversal attempts, encoded payloads, persistence hooks, dependency install scripts, and prompt-override attempts.
+
+Package layout validation also blocks absolute paths, path traversal, hidden/VCS/cache paths, symlinks, and provenance-lock spoofing inside incoming skill packages. Community-trust installs with high-risk findings still require explicit approval before files are written.
+
+This is a concrete install-time scanner, not a complete formal audit system. It is intentionally smaller than a full marketplace-scale ruleset and should continue to grow as new skill abuse patterns are identified.
+
 ## Inspect, Taps, And Publishing
 
 `skill_inspect` returns a loaded skill report with metadata, source/trust fields, provenance lock details, publishable file inventory, and optional quarantine findings. It is read-only and honors restricted agent `allowed_skills` contexts.

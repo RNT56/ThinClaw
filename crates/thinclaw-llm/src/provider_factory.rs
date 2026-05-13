@@ -22,6 +22,7 @@ use thinclaw_config::{LlmBackend, LlmConfig};
 use thinclaw_llm_core::{LlmProvider, StreamSupport, TokenCaptureSupport};
 use thinclaw_settings::{
     CredentialSelectionStrategy, ProviderCredentialMode, ProvidersSettings, RoutingMode,
+    normalize_credential_max_concurrent,
 };
 use thinclaw_types::error::LlmError;
 
@@ -1393,7 +1394,7 @@ fn wrap_failover(
         };
         let lease = providers_settings
             .map(|ps| LeaseConfig {
-                max_concurrent: ps.credential_max_concurrent.max(1),
+                max_concurrent: normalize_credential_max_concurrent(ps.credential_max_concurrent),
                 selection_strategy: match ps.credential_selection_strategy {
                     CredentialSelectionStrategy::FillFirst => LeaseSelectionStrategy::FillFirst,
                     CredentialSelectionStrategy::RoundRobin => LeaseSelectionStrategy::RoundRobin,
@@ -1417,5 +1418,60 @@ fn wrap_failover(
         )?))
     } else {
         Ok(primary)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_does_not_prefer_external_oauth_sync_by_default() {
+        let settings = ProvidersSettings::default();
+
+        assert!(!provider_prefers_external_oauth_sync(
+            Some(&settings),
+            "openai"
+        ));
+    }
+
+    #[test]
+    fn provider_prefers_external_oauth_sync_only_when_configured_for_slug() {
+        let mut settings = ProvidersSettings::default();
+        settings.provider_credential_modes.insert(
+            "anthropic".to_string(),
+            ProviderCredentialMode::ExternalOAuthSync,
+        );
+
+        assert!(provider_prefers_external_oauth_sync(
+            Some(&settings),
+            "anthropic"
+        ));
+        assert!(!provider_prefers_external_oauth_sync(
+            Some(&settings),
+            "openai"
+        ));
+    }
+
+    #[test]
+    fn configured_credential_list_takes_precedence_over_primary_key() {
+        let primary = Some(SecretString::from("primary"));
+        let keys = vec![SecretString::from("first"), SecretString::from("second")];
+
+        let resolved = resolved_secret_credentials(&keys, &primary);
+
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].expose_secret(), "first");
+        assert_eq!(resolved[1].expose_secret(), "second");
+    }
+
+    #[test]
+    fn primary_key_is_used_when_credential_list_is_empty() {
+        let primary = Some(SecretString::from("primary"));
+
+        let resolved = resolved_secret_credentials(&[], &primary);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].expose_secret(), "primary");
     }
 }

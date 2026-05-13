@@ -9,7 +9,8 @@ and development boxes. For Raspberry Pi OS Lite, use
 | Goal | Recommended Path |
 |---|---|
 | Fast local install | Release installer, then `thinclaw onboard` |
-| Generic always-on server | Release binary, `thinclaw onboard --profile remote`, then service install |
+| Generic always-on server | Release installer, `thinclaw onboard --profile remote`, then service install |
+| Small VPS / SD-card host | Release installer with `--profile edge` |
 | Container deployment | [docker.md](docker.md) |
 | Raspberry Pi OS Lite 64-bit | [raspberry-pi-os-lite.md](raspberry-pi-os-lite.md) |
 | Remote Scrappy access | [remote-access.md](remote-access.md) |
@@ -78,6 +79,13 @@ thinclaw onboard
 thinclaw
 ```
 
+Small-machine install:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh -s -- --profile edge
+```
+
 Open the local gateway:
 
 ```text
@@ -107,7 +115,7 @@ thinclaw --debug run --no-onboard
 
 ## Build From Source
 
-Debian or Ubuntu:
+Build from source only when you need local code changes. Debian or Ubuntu:
 
 ```bash
 sudo apt-get update

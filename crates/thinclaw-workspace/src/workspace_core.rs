@@ -19,7 +19,7 @@ use crate::repository::Repository;
 use crate::search::{SearchConfig, SearchResult};
 use crate::{WorkspaceBackend, WorkspaceStore};
 use thinclaw_identity::{ConversationKind, LinkedConversationRecall, ResolvedIdentity};
-use thinclaw_safety::{pii_redactor, sanitize_context_content};
+use thinclaw_safety::{pii_redactor, sanitize_prompt_bound_content};
 use thinclaw_types::error::WorkspaceError;
 
 /// Maximum characters per workspace file injected into the system prompt.
@@ -309,17 +309,20 @@ fn profile_to_user_md(profile: &serde_json::Value) -> String {
     sections.join("\n")
 }
 
-fn sanitize_prompt_context(file_name: &str, content: &str) -> String {
-    let (cleaned, warnings) = sanitize_context_content(content);
-    for warning in warnings {
+fn sanitize_prompt_context(
+    file_name: &str,
+    content: &str,
+    redaction: PromptRedaction<'_>,
+) -> String {
+    let sanitized = sanitize_prompt_bound_content(content, redaction.channel, redaction.enabled);
+    for warning in sanitized.warnings {
         tracing::warn!(
             file = file_name,
             pattern = %warning.pattern,
-            matched = %warning.matched,
             "Suspicious context content detected during prompt assembly"
         );
     }
-    cleaned
+    sanitized.content
 }
 
 #[allow(dead_code)] // Retained for shared/global memory summarisation
@@ -1089,12 +1092,13 @@ impl Workspace {
             && let Ok(doc) = self.read(paths::BOOTSTRAP).await
             && !is_effectively_empty(&doc.content)
         {
-            let mut bootstrap_prompt = doc.content;
+            let mut bootstrap_prompt =
+                sanitize_prompt_context(paths::BOOTSTRAP, &doc.content, redaction);
 
             if let Ok(home_soul) = read_home_soul()
                 && !home_soul.trim().is_empty()
             {
-                let soul_content = sanitize_prompt_context(paths::SOUL, &home_soul);
+                let soul_content = sanitize_prompt_context(paths::SOUL, &home_soul, redaction);
                 bootstrap_prompt.push_str("\n\n---\n\n");
                 bootstrap_prompt.push_str("## Your Canonical Soul\n\n");
                 bootstrap_prompt.push_str(&cap_chars(&soul_content, FILE_MAX_CHARS));
@@ -1106,7 +1110,8 @@ impl Workspace {
             if let Ok(local_soul) = self.read(paths::SOUL_LOCAL).await
                 && !local_soul.content.is_empty()
             {
-                let local_content = sanitize_prompt_context(paths::SOUL_LOCAL, &local_soul.content);
+                let local_content =
+                    sanitize_prompt_context(paths::SOUL_LOCAL, &local_soul.content, redaction);
                 bootstrap_prompt.push_str("\n\n---\n\n");
                 bootstrap_prompt.push_str("## This Workspace's Local Soul Overlay\n\n");
                 bootstrap_prompt.push_str(&cap_chars(&local_content, FILE_MAX_CHARS));
@@ -1116,14 +1121,17 @@ impl Workspace {
             if let Ok(agents) = self.read(paths::AGENTS).await
                 && !agents.content.is_empty()
             {
-                let agents_content = sanitize_prompt_context(paths::AGENTS, &agents.content);
+                let agents_content =
+                    sanitize_prompt_context(paths::AGENTS, &agents.content, redaction);
                 bootstrap_prompt.push_str("\n\n---\n\n");
                 bootstrap_prompt.push_str("## Your Workspace Guide (operational reference)\n\n");
                 bootstrap_prompt.push_str(&agents_content);
             }
 
             if let Some(actor_id) = actor_id
-                && let Some(actor_overlay) = self.actor_overlay_section(actor_id).await?
+                && let Some(actor_overlay) = self
+                    .actor_overlay_section_for_prompt(actor_id, redaction)
+                    .await?
             {
                 bootstrap_prompt.push_str("\n\n---\n\n");
                 bootstrap_prompt.push_str(&actor_overlay);
@@ -1133,7 +1141,12 @@ impl Workspace {
                 && !linked_recall_is_empty(recall)
             {
                 bootstrap_prompt.push_str("\n\n---\n\n");
-                bootstrap_prompt.push_str(&format_linked_recall(recall, redaction));
+                let linked = format_linked_recall(recall, redaction);
+                bootstrap_prompt.push_str(&sanitize_prompt_context(
+                    "linked recall",
+                    &linked,
+                    redaction,
+                ));
             }
 
             return Ok(bootstrap_prompt);
@@ -1145,7 +1158,7 @@ impl Workspace {
         if let Ok(home_soul) = read_home_soul()
             && !home_soul.trim().is_empty()
         {
-            let soul_content = sanitize_prompt_context(paths::SOUL, &home_soul);
+            let soul_content = sanitize_prompt_context(paths::SOUL, &home_soul, redaction);
             let soul_block = thinclaw_soul::render_canonical_prompt_block(&soul_content);
             parts.push(cap_chars(&soul_block, FILE_MAX_CHARS));
         }
@@ -1153,21 +1166,24 @@ impl Workspace {
         if let Ok(local_soul) = self.read(paths::SOUL_LOCAL).await
             && !local_soul.content.is_empty()
         {
-            let local_content = sanitize_prompt_context(paths::SOUL_LOCAL, &local_soul.content);
+            let local_content =
+                sanitize_prompt_context(paths::SOUL_LOCAL, &local_soul.content, redaction);
             if let Ok(local_block) = thinclaw_soul::render_local_prompt_block(&local_content) {
                 parts.push(cap_chars(&local_block, FILE_MAX_CHARS / 2));
             }
         }
 
         // 1. Compact identity (name, nature, presentation, user info)
-        let identity = self.compact_identity().await?;
+        let identity = self.compact_identity_for_prompt(redaction).await?;
         if !identity.is_empty() {
             parts.push(format!("## Identity\n\n{}", identity));
         }
 
         if !is_group_chat
             && let Some(actor_id) = actor_id
-            && let Some(actor_overlay) = self.actor_overlay_section(actor_id).await?
+            && let Some(actor_overlay) = self
+                .actor_overlay_section_for_prompt(actor_id, redaction)
+                .await?
         {
             parts.push(actor_overlay);
         }
@@ -1176,7 +1192,7 @@ impl Workspace {
         if let Ok(doc) = self.read(paths::AGENTS).await
             && !doc.content.is_empty()
         {
-            let sanitized_agents = sanitize_prompt_context(paths::AGENTS, &doc.content);
+            let sanitized_agents = sanitize_prompt_context(paths::AGENTS, &doc.content, redaction);
             let essential = extract_essential_instructions(&sanitized_agents);
             if !essential.is_empty() {
                 parts.push(format!(
@@ -1197,6 +1213,7 @@ impl Workspace {
             && !doc.content.is_empty()
             && let Some(summary) = summarize_profile_json(&doc.content)
         {
+            let summary = sanitize_prompt_context(paths::PROFILE, &summary, redaction);
             parts.push(format!("## User Profile\n\n{}", summary));
         }
 
@@ -1204,7 +1221,8 @@ impl Workspace {
             && let Some(recall) = linked_recall
             && !linked_recall_is_empty(recall)
         {
-            parts.push(format_linked_recall(recall, redaction));
+            let linked = format_linked_recall(recall, redaction);
+            parts.push(sanitize_prompt_context("linked recall", &linked, redaction));
         }
 
         // 3. Context manifest (what's available, not the content itself)
@@ -1226,11 +1244,20 @@ impl Workspace {
     /// SOUL.md is injected separately as a dedicated prompt block.
     /// Full files remain accessible via `memory_read`.
     pub async fn compact_identity(&self) -> Result<String, WorkspaceError> {
+        self.compact_identity_for_prompt(PromptRedaction::new(None, false))
+            .await
+    }
+
+    async fn compact_identity_for_prompt(
+        &self,
+        redaction: PromptRedaction<'_>,
+    ) -> Result<String, WorkspaceError> {
         let mut lines = Vec::new();
 
         // IDENTITY.md → extract filled key-value pairs
         if let Ok(doc) = self.read(paths::IDENTITY).await {
-            let identity_content = sanitize_prompt_context(paths::IDENTITY, &doc.content);
+            let identity_content =
+                sanitize_prompt_context(paths::IDENTITY, &doc.content, redaction);
             for line in identity_content.lines() {
                 let t = line.trim();
                 if t.starts_with("- **") && t.contains(":**") {
@@ -1248,7 +1275,7 @@ impl Workspace {
 
         // USER.md → extract filled fields compactly
         if let Ok(doc) = self.read(paths::USER).await {
-            let user_content = sanitize_prompt_context(paths::USER, &doc.content);
+            let user_content = sanitize_prompt_context(paths::USER, &doc.content, redaction);
             let mut user_fields = Vec::new();
             for line in user_content.lines() {
                 let t = line.trim();
@@ -1439,12 +1466,22 @@ impl Workspace {
         &self,
         actor_id: &str,
     ) -> Result<Option<String>, WorkspaceError> {
+        self.actor_overlay_section_for_prompt(actor_id, PromptRedaction::new(None, false))
+            .await
+    }
+
+    async fn actor_overlay_section_for_prompt(
+        &self,
+        actor_id: &str,
+        redaction: PromptRedaction<'_>,
+    ) -> Result<Option<String>, WorkspaceError> {
         let mut sections = Vec::new();
 
         if let Ok(doc) = self.read(&paths::actor_user(actor_id)).await
             && !doc.content.is_empty()
         {
-            let actor_user_content = sanitize_prompt_context("actor USER.md", &doc.content);
+            let actor_user_content =
+                sanitize_prompt_context("actor USER.md", &doc.content, redaction);
             let fields = extract_markdown_fields(&actor_user_content);
             if !fields.is_empty() {
                 sections.push(format!("## Actor USER.md\n\n{}", fields.join("\n")));
@@ -1454,11 +1491,13 @@ impl Workspace {
         if let Ok(doc) = self.read(&paths::actor_memory(actor_id)).await
             && !doc.content.is_empty()
         {
-            let summary = summarize_actor_memory_content(&doc.content);
+            let actor_memory_content =
+                sanitize_prompt_context("actor MEMORY.md", &doc.content, redaction);
+            let summary = summarize_actor_memory_content(&actor_memory_content);
             if !summary.is_empty() {
                 sections.push(format!("## Actor MEMORY.md\n\n{}", summary));
             }
-            let capped = cap_chars(&doc.content, FILE_MAX_CHARS);
+            let capped = cap_chars(&actor_memory_content, FILE_MAX_CHARS);
             sections.push(format!("## Actor MEMORY.md (recent context)\n\n{}", capped));
         }
 
@@ -1466,6 +1505,7 @@ impl Workspace {
             && !doc.content.is_empty()
             && let Some(summary) = summarize_profile_json(&doc.content)
         {
+            let summary = sanitize_prompt_context("actor profile.json", &summary, redaction);
             sections.push(format!("## Actor Profile\n\n{}", summary));
         }
 

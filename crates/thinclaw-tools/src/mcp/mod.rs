@@ -1,6 +1,7 @@
 //! Root-independent Model Context Protocol helpers.
 
 pub mod auth;
+pub mod client;
 pub mod config;
 pub mod protocol;
 pub mod session;
@@ -16,9 +17,11 @@ pub use auth::{
     find_available_port, get_access_token, is_authenticated, refresh_access_token, register_client,
     store_client_id, store_tokens,
 };
+pub use client::{McpClient, McpInteractionKind, McpPendingInteraction};
 pub use config::{
-    ConfigError, McpCapabilityPolicy, McpLoggingLevel, McpRuntimeHealth, McpServerConfig,
-    McpServersFile, McpTransport, OAuthConfig, load_mcp_servers_from, save_mcp_servers_to,
+    ConfigError, McpCapabilityPolicy, McpConfigProvider, McpConfigStore, McpLoggingLevel,
+    McpRuntimeHealth, McpServerConfig, McpServersFile, McpTransport, OAuthConfig,
+    load_mcp_servers_from, save_mcp_servers_to,
 };
 pub use protocol::{
     CallToolResult, CancelledNotification, ClientCapabilities, ClientElicitationCapability,

@@ -85,6 +85,9 @@ pub(crate) async fn extensions_list_handler(
         };
         let reconnect_supported =
             ext.kind == crate::extensions::ExtensionKind::WasmChannel && ext.name == "telegram";
+        let setup = ext_mgr
+            .integration_setup_status(&ext, AuthRequestContext::default())
+            .await;
         extensions.push(ExtensionInfo {
             name: ext.name,
             kind: ext.kind.to_string(),
@@ -102,6 +105,7 @@ pub(crate) async fn extensions_list_handler(
             activation_error: ext.activation_error,
             channel_diagnostics,
             reconnect_supported,
+            setup,
         });
     }
 
@@ -278,6 +282,32 @@ pub(crate) async fn extensions_reconnect_handler(
     }
 }
 
+pub(crate) async fn extensions_validate_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    match ext_mgr
+        .validate_setup(
+            &name,
+            AuthRequestContext {
+                callback_base_url: request_origin(&headers),
+                callback_type: Some("web".to_string()),
+                thread_id: None,
+            },
+        )
+        .await
+    {
+        Ok(message) => Ok(Json(ActionResponse::ok(message))),
+        Err(error) => Ok(Json(ActionResponse::fail(error.to_string()))),
+    }
+}
+
 pub(crate) async fn extensions_remove_handler(
     State(state): State<Arc<GatewayState>>,
     Path(name): Path<String>,
@@ -391,6 +421,7 @@ pub(crate) async fn extensions_setup_handler(
         auth_url: setup.auth_url,
         instructions: setup.instructions,
         setup_url: setup.setup_url,
+        validation_url: setup.validation_url,
         shared_auth_provider: setup.shared_auth_provider,
         missing_scopes: setup.missing_scopes,
     }))

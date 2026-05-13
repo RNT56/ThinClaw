@@ -42,55 +42,17 @@ use termimad::MadSkin;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::agent::truncate_for_preview;
 use crate::channels::{
     Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, StreamMode,
 };
 use crate::error::ChannelError;
 use crate::terminal_branding::{TerminalBranding, resolve_cli_skin_name};
 use crate::tui::skin::CliSkin;
-
-/// Max characters for tool result previews in the terminal.
-const CLI_TOOL_RESULT_MAX: usize = 200;
-
-/// Max characters for thinking/status messages in the terminal.
-const CLI_STATUS_MAX: usize = 200;
-
-/// Slash commands available in the REPL.
-const SLASH_COMMANDS: &[&str] = &[
-    "/help",
-    "/quit",
-    "/exit",
-    "/debug",
-    "/model",
-    "/undo",
-    "/redo",
-    "/clear",
-    "/compress",
-    "/compact",
-    "/new",
-    "/interrupt",
-    "/version",
-    "/tools",
-    "/ping",
-    "/context",
-    "/job",
-    "/status",
-    "/cancel",
-    "/list",
-    "/identity",
-    "/memory",
-    "/skills",
-    "/heartbeat",
-    "/summarize",
-    "/suggest",
-    "/thread",
-    "/resume",
-    "/rollback",
-    "/personality",
-    "/vibe",
-    "/skin",
-];
+use thinclaw_channels::repl::{
+    CLI_STATUS_MAX, CLI_TOOL_RESULT_MAX, ReplInputAction, classify_repl_line,
+    repl_input_is_incomplete, slash_command_hint, slash_command_matches,
+    truncate_for_terminal_preview,
+};
 
 /// Rustyline helper for slash-command tab completion.
 struct ReplHelper;
@@ -109,13 +71,7 @@ impl Completer for ReplHelper {
         }
 
         let prefix = &line[..pos];
-        let matches: Vec<String> = SLASH_COMMANDS
-            .iter()
-            .filter(|cmd| cmd.starts_with(prefix))
-            .map(|cmd| cmd.to_string())
-            .collect();
-
-        Ok((0, matches))
+        Ok((0, slash_command_matches(prefix)))
     }
 }
 
@@ -127,10 +83,7 @@ impl Hinter for ReplHelper {
             return None;
         }
 
-        SLASH_COMMANDS
-            .iter()
-            .find(|cmd| cmd.starts_with(line) && **cmd != line)
-            .map(|cmd| cmd[line.len()..].to_string())
+        slash_command_hint(line, pos)
     }
 }
 
@@ -146,12 +99,7 @@ impl Validator for ReplHelper {
         ctx: &mut rustyline::validate::ValidationContext,
     ) -> rustyline::Result<rustyline::validate::ValidationResult> {
         let input = ctx.input();
-        // Backslash continuation: if the line ends with '\', request more input.
-        if input.ends_with('\\') {
-            return Ok(rustyline::validate::ValidationResult::Incomplete);
-        }
-        // Triple-backtick fencing: if odd number of ```, request more input.
-        if !input.matches("```").count().is_multiple_of(2) {
+        if repl_input_is_incomplete(input) {
             return Ok(rustyline::validate::ValidationResult::Incomplete);
         }
         Ok(rustyline::validate::ValidationResult::Valid(None))
@@ -545,26 +493,22 @@ impl Channel for ReplChannel {
 
                 match rl.readline(&prompt) {
                     Ok(line) => {
-                        let line = line.trim();
-                        if line.is_empty() {
-                            continue;
-                        }
-
                         // Handle local REPL commands (only commands that need
                         // immediate local handling stay here)
-                        match line.to_lowercase().as_str() {
-                            "/quit" | "/exit" => {
+                        match classify_repl_line(&line) {
+                            ReplInputAction::Ignore => continue,
+                            ReplInputAction::Quit => {
                                 // Forward shutdown command so the agent loop exits even
                                 // when other channels (e.g. web gateway) are still active.
                                 let msg = IncomingMessage::new("repl", "default", "/quit");
                                 let _ = tx.blocking_send(msg);
                                 break;
                             }
-                            "/help" => {
+                            ReplInputAction::Help => {
                                 print_help(&current_skin);
                                 continue;
                             }
-                            "/debug" => {
+                            ReplInputAction::ToggleDebug => {
                                 let current = debug_mode.load(Ordering::Relaxed);
                                 debug_mode.store(!current, Ordering::Relaxed);
                                 let branding = TerminalBranding::from_skin(current_skin.clone());
@@ -575,8 +519,7 @@ impl Channel for ReplChannel {
                                 }
                                 continue;
                             }
-                            _ if line.starts_with("/skin") => {
-                                let arg = line.strip_prefix("/skin").map(str::trim).unwrap_or("");
+                            ReplInputAction::Skin(arg) => {
                                 let mut guard = match skin.write() {
                                     Ok(guard) => guard,
                                     Err(poisoned) => poisoned.into_inner(),
@@ -606,7 +549,7 @@ impl Channel for ReplChannel {
                                     let requested = if arg.eq_ignore_ascii_case("reset") {
                                         default_skin_name.as_str()
                                     } else {
-                                        arg
+                                        &arg
                                     };
                                     *guard = CliSkin::load(requested);
                                     let branding = TerminalBranding::from_skin(guard.clone());
@@ -621,12 +564,12 @@ impl Channel for ReplChannel {
                                 }
                                 continue;
                             }
-                            _ => {}
-                        }
-
-                        let msg = IncomingMessage::new("repl", "default", line);
-                        if tx.blocking_send(msg).is_err() {
-                            break;
+                            ReplInputAction::Submit(message) => {
+                                let msg = IncomingMessage::new("repl", "default", &message);
+                                if tx.blocking_send(msg).is_err() {
+                                    break;
+                                }
+                            }
                         }
                     }
                     Err(ReadlineError::Interrupted) => {
@@ -711,7 +654,7 @@ impl Channel for ReplChannel {
 
         match status {
             StatusUpdate::Thinking(msg) => {
-                let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
+                let display = truncate_for_terminal_preview(&msg, CLI_STATUS_MAX);
                 let spinner_frame = skin.resolved_spinner_frames();
                 let frame_char = spinner_frame.first().copied().unwrap_or("⠋");
                 eprintln!("  {accent}{frame_char}{reset} {muted}{display}{reset}");
@@ -727,7 +670,7 @@ impl Channel for ReplChannel {
                 }
             }
             StatusUpdate::ToolResult { name: _, preview } => {
-                let display = truncate_for_preview(&preview, CLI_TOOL_RESULT_MAX);
+                let display = truncate_for_terminal_preview(&preview, CLI_TOOL_RESULT_MAX);
                 eprintln!("    {muted}{display}{reset}");
             }
             StatusUpdate::StreamChunk(chunk) => {
@@ -753,7 +696,7 @@ impl Channel for ReplChannel {
             }
             StatusUpdate::Status(msg) => {
                 if debug || msg.contains("approval") || msg.contains("Approval") {
-                    let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
+                    let display = truncate_for_terminal_preview(&msg, CLI_STATUS_MAX);
                     eprintln!("  {muted}{display}{reset}");
                 }
             }
@@ -936,7 +879,7 @@ impl Channel for ReplChannel {
                 eprintln!("  {}", branding.muted("└────────────────────────────────"));
             }
             StatusUpdate::SubagentProgress { message, .. } => {
-                let display = truncate_for_preview(&message, CLI_STATUS_MAX);
+                let display = truncate_for_terminal_preview(&message, CLI_STATUS_MAX);
                 eprintln!("  {}", branding.muted(format!("│ progress: {display}")));
             }
             StatusUpdate::SubagentCompleted {

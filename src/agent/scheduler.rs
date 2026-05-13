@@ -4,8 +4,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use thinclaw_agent::scheduler::WorkerMessage;
+use thinclaw_agent::scheduler::{
+    SUBTASK_CLEANUP_DELAYS_MS, SUBTASK_CLEANUP_TIMEOUT_SECS, ScheduledJob, ScheduledSubtask,
+    SchedulerCapacity, reserved_job_limit, routine_job_metadata,
+};
 use tokio::sync::{RwLock, mpsc, oneshot};
-use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::task::{Task, TaskContext, TaskOutput};
@@ -19,32 +23,6 @@ use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
 use crate::tools::{ToolExecutionLane, ToolProfile, ToolRegistry, execution};
-
-/// Message to send to a worker.
-#[derive(Debug)]
-pub enum WorkerMessage {
-    /// Start working on the job.
-    Start,
-    /// Stop the job.
-    Stop,
-    /// Check health.
-    Ping,
-}
-
-/// Status of a scheduled job.
-#[derive(Debug)]
-pub struct ScheduledJob {
-    pub handle: JoinHandle<()>,
-    pub tx: mpsc::Sender<WorkerMessage>,
-}
-
-/// Status of a scheduled sub-task.
-/// Stores only the raw `JoinHandle` needed for `is_finished()` polling during
-/// subtask cleanup. The actual result is delivered via a `oneshot` channel
-/// returned from `spawn_subtask()`.
-struct ScheduledSubtask {
-    handle: JoinHandle<()>,
-}
 
 /// Schedules and manages parallel job execution.
 pub struct Scheduler {
@@ -203,27 +181,12 @@ impl Scheduler {
             .create_job_for_identity(principal_id, actor_id, title, description)
             .await?;
 
-        if let Some(meta) = metadata {
-            self.context_manager
-                .update_context(job_id, |ctx| {
-                    // Merge routine_dispatched flag into metadata
-                    let mut merged = meta;
-                    if let Some(obj) = merged.as_object_mut() {
-                        obj.insert(
-                            "routine_dispatched".to_string(),
-                            serde_json::Value::Bool(true),
-                        );
-                    }
-                    ctx.metadata = merged;
-                })
-                .await?;
-        } else {
-            self.context_manager
-                .update_context(job_id, |ctx| {
-                    ctx.metadata = serde_json::json!({ "routine_dispatched": true });
-                })
-                .await?;
-        }
+        let metadata = routine_job_metadata(metadata, false);
+        self.context_manager
+            .update_context(job_id, |ctx| {
+                ctx.metadata = metadata;
+            })
+            .await?;
 
         if let Some(ref store) = self.store {
             let ctx = self.context_manager.get_context(job_id).await?;
@@ -260,30 +223,12 @@ impl Scheduler {
             .create_job_reserved_for_identity(principal_id, actor_id, title, description)
             .await?;
 
-        if let Some(meta) = metadata {
-            self.context_manager
-                .update_context(job_id, |ctx| {
-                    let mut merged = meta;
-                    if let Some(obj) = merged.as_object_mut() {
-                        obj.insert(
-                            "routine_dispatched".to_string(),
-                            serde_json::Value::Bool(true),
-                        );
-                        obj.insert("system_reserved".to_string(), serde_json::Value::Bool(true));
-                    }
-                    ctx.metadata = merged;
-                })
-                .await?;
-        } else {
-            self.context_manager
-                .update_context(job_id, |ctx| {
-                    ctx.metadata = serde_json::json!({
-                        "routine_dispatched": true,
-                        "system_reserved": true,
-                    });
-                })
-                .await?;
-        }
+        let metadata = routine_job_metadata(metadata, true);
+        self.context_manager
+            .update_context(job_id, |ctx| {
+                ctx.metadata = metadata;
+            })
+            .await?;
 
         if let Some(ref store) = self.store {
             let ctx = self.context_manager.get_context(job_id).await?;
@@ -314,11 +259,12 @@ impl Scheduler {
                 return Ok(());
             }
 
-            // Allow max_parallel_jobs + 1 for reserved system tasks
-            let reserved_limit = self.config.max_parallel_jobs + 1;
-            if jobs.len() >= reserved_limit {
+            // Allow one overflow slot for reserved system tasks.
+            let reserved_limit = reserved_job_limit(self.config.max_parallel_jobs);
+            let capacity = SchedulerCapacity::new(jobs.len(), reserved_limit);
+            if !capacity.allows_schedule() {
                 return Err(JobError::MaxJobsExceeded {
-                    max: reserved_limit,
+                    max: capacity.limit,
                 });
             }
 
@@ -407,9 +353,10 @@ impl Scheduler {
                 return Ok(());
             }
 
-            if jobs.len() >= self.config.max_parallel_jobs {
+            let capacity = SchedulerCapacity::new(jobs.len(), self.config.max_parallel_jobs);
+            if !capacity.allows_schedule() {
                 return Err(JobError::MaxJobsExceeded {
-                    max: self.config.max_parallel_jobs,
+                    max: capacity.limit,
                 });
             }
 
@@ -494,9 +441,10 @@ impl Scheduler {
                 return Ok(());
             }
 
-            if jobs.len() >= self.config.max_parallel_jobs {
+            let capacity = SchedulerCapacity::new(jobs.len(), self.config.max_parallel_jobs);
+            if !capacity.allows_schedule() {
                 return Err(JobError::MaxJobsExceeded {
-                    max: self.config.max_parallel_jobs,
+                    max: capacity.limit,
                 });
             }
 
@@ -633,7 +581,7 @@ impl Scheduler {
                 let ctx = TaskContext::new(task_id).with_parent(parent_id);
 
                 tokio::spawn(async move {
-                    let result = handler.run(ctx).await;
+                    let result = handler.run(ctx).await.map_err(Error::from);
                     let _ = result_tx.send(result);
                 })
             }
@@ -647,7 +595,7 @@ impl Scheduler {
         self.subtasks
             .write()
             .await
-            .insert(task_id, ScheduledSubtask { handle });
+            .insert(task_id, ScheduledSubtask::new(handle));
 
         // Cleanup waiter — progressive polling with a hard timeout (Bug 35 fix).
         // We cannot use a oneshot here because the result is delivered via
@@ -656,8 +604,9 @@ impl Scheduler {
         // infinite loops on stuck tasks.
         let subtasks_cleanup = Arc::clone(&self.subtasks);
         tokio::spawn(async move {
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
-            for delay_ms in [100u64, 500, 1000, 2000, 5000, 10_000, 10_000, 10_000] {
+            let deadline =
+                tokio::time::Instant::now() + Duration::from_secs(SUBTASK_CLEANUP_TIMEOUT_SECS);
+            for delay_ms in SUBTASK_CLEANUP_DELAYS_MS {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 if tokio::time::Instant::now() >= deadline {
                     tracing::warn!("Subtask {} cleanup timed out, force-removing", task_id);
@@ -666,10 +615,9 @@ impl Scheduler {
                 }
                 let finished = {
                     let subtasks_read = subtasks_cleanup.read().await;
-                    match subtasks_read.get(&task_id) {
-                        Some(s) => s.handle.is_finished(),
-                        None => break,
-                    }
+                    subtasks_read
+                        .get(&task_id)
+                        .is_some_and(ScheduledSubtask::is_finished)
                 };
                 if finished {
                     subtasks_cleanup.write().await.remove(&task_id);
@@ -870,7 +818,7 @@ impl Scheduler {
         // Abort all subtasks
         let mut subtasks = self.subtasks.write().await;
         for (_, scheduled) in subtasks.drain() {
-            scheduled.handle.abort();
+            scheduled.abort();
         }
     }
 

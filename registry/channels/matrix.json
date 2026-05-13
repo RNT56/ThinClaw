@@ -16,7 +16,7 @@
   "auth_summary": {
     "method": "manual",
     "provider": "Matrix",
-    "secrets": ["matrix_access_token", "matrix_webhook_secret"],
+    "secrets": ["matrix_homeserver", "matrix_access_token", "matrix_webhook_secret"],
     "shared_auth": null,
     "setup_url": "https://matrix.org/docs"
   },

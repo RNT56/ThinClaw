@@ -4,8 +4,9 @@
 # ============================================================================
 #
 # Deploys ThinClaw as a standalone headless agent on a fresh macOS machine.
-# Installs all prerequisites, builds the binary, runs the onboarding wizard,
-# and optionally installs as a persistent launchd service.
+# Downloads and verifies the release binary by default, runs the onboarding
+# wizard, and optionally installs as a persistent launchd service. Source builds
+# are available with --from-source for local patches.
 #
 # Usage:
 #   # From a fresh machine (no repo needed):
@@ -18,9 +19,13 @@
 #   ./scripts/mac-deploy.sh
 #
 # Options:
-#   --bundled        Build with all WASM extensions embedded (air-gapped mode)
-#   --skip-build     Skip compilation (use existing binary or download release)
-#   --install-only   Install prerequisites only, don't build or run
+#   --profile        Release profile to install: full or edge (default: full)
+#   --version        Release tag to install (default: latest)
+#   --system         Install to /usr/local/bin instead of ~/.local/bin
+#   --from-source    Clone/build from source instead of installing release
+#   --bundled        Source build with all WASM extensions embedded
+#   --skip-build     Source mode: skip compilation and use existing binary
+#   --install-only   Source mode: install prerequisites only, don't build or run
 #   --no-launch      Don't prompt to launch after build
 #   --help           Show this help
 #
@@ -82,13 +87,21 @@ BUNDLED=false
 SKIP_BUILD=false
 INSTALL_ONLY=false
 NO_LAUNCH=false
+FROM_SOURCE=false
+INSTALL_PROFILE="${THINCLAW_INSTALL_PROFILE:-full}"
+THINCLAW_VERSION="${THINCLAW_VERSION:-latest}"
+SYSTEM_INSTALL=false
 FEATURES="libsql"
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        --bundled)      BUNDLED=true ;;
-        --skip-build)   SKIP_BUILD=true ;;
-        --install-only) INSTALL_ONLY=true ;;
+        --profile)      INSTALL_PROFILE="$2"; shift ;;
+        --version)      THINCLAW_VERSION="$2"; shift ;;
+        --system)       SYSTEM_INSTALL=true ;;
+        --from-source)  FROM_SOURCE=true ;;
+        --bundled)      BUNDLED=true; FROM_SOURCE=true ;;
+        --skip-build)   SKIP_BUILD=true; FROM_SOURCE=true ;;
+        --install-only) INSTALL_ONLY=true; FROM_SOURCE=true ;;
         --no-launch)    NO_LAUNCH=true ;;
         --help|-h)
             # Print the header comment block as help text (works in pipe mode too)
@@ -100,21 +113,24 @@ Usage:
   ./scripts/mac-deploy.sh              # from a local checkout
 
 Options:
-  --bundled        Build with all WASM extensions embedded (air-gapped mode)
-  --skip-build     Skip compilation (use existing binary)
-  --install-only   Install prerequisites only, don't build or run
+  --profile full|edge
+                  Release profile to install (default: full)
+  --version <tag> Release tag to install (default: latest)
+  --system        Install to /usr/local/bin instead of ~/.local/bin
+  --from-source   Clone/build from source instead of installing release
+  --bundled       Source mode: build with all WASM extensions embedded
+  --skip-build    Source mode: skip compilation and use existing binary
+  --install-only  Source mode: install prerequisites only, don't build or run
   --no-launch      Don't prompt to launch after build
   --help           Show this help
 
 Steps:
   1. Checks macOS version compatibility
-  2. Installs Xcode CLI tools (if missing)
-  3. Installs Rust 1.92+ toolchain via rustup (if missing)
-  4. Adds wasm32-wasip2 target
-  5. Installs wasm-tools and cargo-component
-  6. Clones ThinClaw repository (or uses existing checkout)
-  7. Builds the release binary
-  8. Offers to launch onboarding wizard + install as launchd service
+  2. Downloads release installer
+  3. Verifies checksum and installs thinclaw
+  4. Offers to launch onboarding wizard
+
+Source mode adds Rust/Xcode/WASM toolchain setup and a local cargo build.
 HELP
             exit 0
             ;;
@@ -122,6 +138,11 @@ HELP
     esac
     shift
 done
+
+if [[ "$INSTALL_PROFILE" != "full" && "$INSTALL_PROFILE" != "edge" ]]; then
+    error "--profile must be one of: full, edge"
+    exit 1
+fi
 
 if [ "$BUNDLED" = true ]; then
     FEATURES="libsql,bundled-wasm"
@@ -133,8 +154,11 @@ echo -e "${BOLD}╭────────────────────�
 echo -e "${BOLD}│         🦀 ThinClaw — Mac Deployment Setup          │${NC}"
 echo -e "${BOLD}╰──────────────────────────────────────────────────────╯${NC}"
 echo ""
-echo "  Mode: $([ "$BUNDLED" = true ] && echo 'Air-gapped (all WASM embedded)' || echo 'Standard (extensions downloaded on demand)')"
-echo "  Features: $FEATURES"
+echo "  Mode: $([ "$FROM_SOURCE" = true ] && echo "Source build" || echo "Release install")"
+echo "  Profile: $INSTALL_PROFILE"
+if [ "$FROM_SOURCE" = true ]; then
+    echo "  Features: $FEATURES"
+fi
 echo ""
 
 # ── Check this is macOS ─────────────────────────────────────────────────────
@@ -162,6 +186,64 @@ elif [[ "$ARCH" == "x86_64" ]]; then
 else
     error "Unsupported architecture: $ARCH"
     exit 1
+fi
+
+if [ "$FROM_SOURCE" != true ]; then
+    info "[1/1] Installing ThinClaw release binary..."
+    INSTALLER_ARGS=(--profile "$INSTALL_PROFILE" --version "$THINCLAW_VERSION")
+    if [ "$SYSTEM_INSTALL" = true ]; then
+        INSTALLER_ARGS+=(--system)
+    fi
+
+    if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "bash" ]]; then
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
+    else
+        SCRIPT_DIR=""
+    fi
+
+    if [[ -n "$SCRIPT_DIR" && -x "$SCRIPT_DIR/thinclaw-installer.sh" ]]; then
+        "$SCRIPT_DIR/thinclaw-installer.sh" "${INSTALLER_ARGS[@]}"
+    else
+        curl --proto '=https' --tlsv1.2 -LsSf \
+          https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh \
+          | sh -s -- "${INSTALLER_ARGS[@]}"
+    fi
+
+    BINARY="$(command -v thinclaw || true)"
+    if [[ -z "$BINARY" && -x "$HOME/.local/bin/thinclaw" ]]; then
+        BINARY="$HOME/.local/bin/thinclaw"
+    fi
+    if [[ -z "$BINARY" ]]; then
+        error "ThinClaw installed, but the binary was not found on PATH."
+        echo "    Add ~/.local/bin to PATH or rerun with --system."
+        exit 1
+    fi
+
+    echo ""
+    echo -e "${BOLD}╭──────────────────────────────────────────────────────╮${NC}"
+    echo -e "${BOLD}│         ThinClaw Deployment Ready                    │${NC}"
+    echo -e "${BOLD}╰──────────────────────────────────────────────────────╯${NC}"
+    echo ""
+    echo "  Binary:  $BINARY"
+    echo "  Config:  ~/.thinclaw/.env"
+    echo "  Data:    ~/.thinclaw/"
+    echo ""
+    echo -e "${BOLD}  Next steps:${NC}"
+    echo "  1. Run the onboarding wizard: $BINARY"
+    echo "  2. Optional service install:  $BINARY service install && $BINARY service start"
+    echo ""
+
+    if [[ "$NO_LAUNCH" != true ]] && [[ "$IS_INTERACTIVE" == true ]]; then
+        echo -e "  ${BOLD}Launch ThinClaw now? [Y/n]${NC}"
+        safe_read -r -n 1 LAUNCH
+        echo ""
+        if [[ ! "${LAUNCH:-Y}" =~ ^[Nn]$ ]]; then
+            echo ""
+            info "Launching ThinClaw (first run starts the onboarding wizard)..."
+            exec "$BINARY"
+        fi
+    fi
+    exit 0
 fi
 
 # ============================================================================

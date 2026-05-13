@@ -1,10 +1,8 @@
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use serde_json::json;
 use uuid::Uuid;
 
 use crate::agent::Scheduler;
@@ -14,130 +12,25 @@ use crate::context::ContextManager;
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
-use crate::sandbox_jobs::{SandboxChildRegistry, SandboxJobController, SandboxJobSpec};
-use crate::sandbox_types::{
-    ContainerJobManager, ContainerState, CredentialGrant, JobMode, PromptQueue,
-};
+use crate::sandbox_jobs::{SandboxChildRegistry, SandboxJobController};
+use crate::sandbox_types::{ContainerJobManager, ContainerState, JobMode, PromptQueue};
 use crate::tools::tool::ToolError;
 
 pub use thinclaw_tools::execution::{
-    CommandExecutionRequest, ExecutionBackendKind, ExecutionResult, MAX_CAPTURED_OUTPUT_SIZE,
+    CommandExecutionRequest, ExecutionBackend, ExecutionBackendKind, ExecutionResult,
+    JobExecutionOrchestrator, JobExecutionRequest, JobExecutionResult, MAX_CAPTURED_OUTPUT_SIZE,
     NetworkIsolationKind, ProcessStartRequest, RuntimeDescriptor, ScriptExecutionRequest,
-    StartedProcess, experiment_runner_runtime_descriptor, host_local_network_deny_support,
-    host_local_network_isolation, interactive_chat_runtime_descriptor,
-    local_job_runtime_descriptor, routine_engine_runtime_descriptor,
-    subagent_executor_runtime_descriptor, truncate_output,
+    StartedProcess, build_local_job_metadata, build_sandbox_job_spec,
+    credential_grants_restart_json, experiment_runner_runtime_descriptor,
+    host_local_network_deny_support, host_local_network_isolation,
+    interactive_chat_runtime_descriptor, local_job_runtime_descriptor,
+    render_container_script_command, resolve_project_dir, routine_engine_runtime_descriptor,
+    sandbox_job_runtime_descriptor, subagent_executor_runtime_descriptor, truncate_output,
 };
 use thinclaw_tools::execution::{
-    LocalExecutionBackend as RootIndependentLocalExecutionBackend,
-    LocalHostExecutionBackend as RootIndependentLocalHostExecutionBackend,
+    LocalHostExecutionBackendWithJobs as RootIndependentLocalHostExecutionBackendWithJobs,
+    SandboxJobExecutionBackend as RootIndependentSandboxJobExecutionBackend,
 };
-
-#[derive(Debug, Clone)]
-pub struct JobExecutionRequest {
-    pub title: String,
-    pub description: String,
-    pub principal_id: String,
-    pub actor_id: String,
-    pub parent_job_id: Option<Uuid>,
-    pub wait: bool,
-    pub explicit_project_dir: Option<PathBuf>,
-    pub mode: Option<JobMode>,
-    pub metadata: serde_json::Value,
-    pub allowed_tools: Option<Vec<String>>,
-    pub allowed_skills: Option<Vec<String>>,
-    pub tool_profile: Option<String>,
-    pub credential_grants: Vec<CredentialGrant>,
-    pub job_events_available: bool,
-    pub job_prompt_available: bool,
-    pub job_status_available: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct JobExecutionResult {
-    pub job_id: Uuid,
-    pub status: String,
-    pub runtime: RuntimeDescriptor,
-    pub message: Option<String>,
-    pub output: Option<String>,
-    pub project_dir: Option<String>,
-    pub browse_url: Option<String>,
-}
-
-pub fn sandbox_job_runtime_descriptor(mode: JobMode) -> RuntimeDescriptor {
-    let mut runtime_capabilities = vec![
-        "file_browse".to_string(),
-        "follow_up_prompts".to_string(),
-        "job_orchestration".to_string(),
-        "persistent_workspace".to_string(),
-        "streamed_events".to_string(),
-    ];
-    match mode {
-        JobMode::Worker => {
-            runtime_capabilities.push("agent_loop".to_string());
-            runtime_capabilities.push("llm_proxy".to_string());
-        }
-        JobMode::ClaudeCode => {
-            runtime_capabilities.push("agent_loop".to_string());
-            runtime_capabilities.push("claude_cli".to_string());
-        }
-        JobMode::CodexCode => {
-            runtime_capabilities.push("agent_loop".to_string());
-            runtime_capabilities.push("codex_cli".to_string());
-        }
-    }
-    RuntimeDescriptor::execution_surface(
-        ExecutionBackendKind::DockerSandbox,
-        mode.as_str(),
-        runtime_capabilities,
-        NetworkIsolationKind::Hard,
-    )
-}
-
-#[async_trait]
-pub trait ExecutionBackend: Send + Sync {
-    fn kind(&self) -> ExecutionBackendKind;
-
-    async fn run_shell(
-        &self,
-        _request: CommandExecutionRequest,
-    ) -> Result<ExecutionResult, ToolError> {
-        Err(ToolError::ExecutionFailed(format!(
-            "{} does not support shell execution",
-            self.kind().as_str()
-        )))
-    }
-
-    async fn start_process(
-        &self,
-        _request: ProcessStartRequest,
-    ) -> Result<StartedProcess, ToolError> {
-        Err(ToolError::ExecutionFailed(format!(
-            "{} does not support background process execution",
-            self.kind().as_str()
-        )))
-    }
-
-    async fn run_script(
-        &self,
-        _request: ScriptExecutionRequest,
-    ) -> Result<ExecutionResult, ToolError> {
-        Err(ToolError::ExecutionFailed(format!(
-            "{} does not support script execution",
-            self.kind().as_str()
-        )))
-    }
-
-    async fn run_job(
-        &self,
-        _request: JobExecutionRequest,
-    ) -> Result<JobExecutionResult, ToolError> {
-        Err(ToolError::ExecutionFailed(format!(
-            "{} does not support job execution",
-            self.kind().as_str()
-        )))
-    }
-}
 
 #[derive(Clone)]
 pub struct JobOrchestrationContext {
@@ -207,46 +100,6 @@ impl JobOrchestrationContext {
         )
     }
 
-    fn build_local_job_metadata(&self, request: &JobExecutionRequest) -> serde_json::Value {
-        let runtime = local_job_runtime_descriptor();
-        let mut metadata = match request.metadata.as_object() {
-            Some(obj) => obj.clone(),
-            None => serde_json::Map::new(),
-        };
-
-        if !request.metadata.is_null() && !request.metadata.is_object() {
-            metadata.insert("request_metadata".to_string(), request.metadata.clone());
-        }
-        if let Some(parent_job_id) = request.parent_job_id {
-            metadata.insert("parent_job_id".to_string(), json!(parent_job_id));
-        }
-        if let Some(allowed_tools) = request.allowed_tools.as_ref() {
-            metadata.insert("allowed_tools".to_string(), json!(allowed_tools));
-        }
-        if let Some(allowed_skills) = request.allowed_skills.as_ref() {
-            metadata.insert("allowed_skills".to_string(), json!(allowed_skills));
-        }
-        if let Some(tool_profile) = request.tool_profile.as_ref() {
-            metadata.insert("tool_profile".to_string(), json!(tool_profile));
-        }
-        metadata.insert(
-            "execution_backend".to_string(),
-            json!(runtime.execution_backend),
-        );
-        metadata.insert("runtime_family".to_string(), json!(runtime.runtime_family));
-        metadata.insert("runtime_mode".to_string(), json!(runtime.runtime_mode));
-        metadata.insert(
-            "runtime_capabilities".to_string(),
-            json!(runtime.runtime_capabilities),
-        );
-        metadata.insert(
-            "network_isolation".to_string(),
-            json!(runtime.network_isolation),
-        );
-
-        serde_json::Value::Object(metadata)
-    }
-
     fn update_status(
         &self,
         job_id: Uuid,
@@ -280,8 +133,7 @@ impl JobOrchestrationContext {
         &self,
         request: JobExecutionRequest,
     ) -> Result<JobExecutionResult, ToolError> {
-        let runtime = local_job_runtime_descriptor();
-        let metadata = self.build_local_job_metadata(&request);
+        let metadata = build_local_job_metadata(&request);
 
         if let Some(scheduler) = self.scheduler.as_ref() {
             let job_id = scheduler
@@ -294,15 +146,7 @@ impl JobOrchestrationContext {
                 )
                 .await
                 .map_err(|error| ToolError::ExecutionFailed(error.to_string()))?;
-            return Ok(JobExecutionResult {
-                job_id,
-                status: "started".to_string(),
-                runtime,
-                message: Some(format!("Scheduled job '{}'", request.title)),
-                output: None,
-                project_dir: None,
-                browse_url: None,
-            });
+            return Ok(JobExecutionResult::local_started(job_id, &request.title));
         }
 
         let job_id = self
@@ -328,15 +172,7 @@ impl JobOrchestrationContext {
                 error
             );
         }
-        Ok(JobExecutionResult {
-            job_id,
-            status: "pending".to_string(),
-            runtime,
-            message: Some(format!("Created job '{}'", request.title)),
-            output: None,
-            project_dir: None,
-            browse_url: None,
-        })
+        Ok(JobExecutionResult::local_pending(job_id, &request.title))
     }
 
     async fn run_sandbox_job(
@@ -349,25 +185,19 @@ impl JobOrchestrationContext {
         let mode = request.mode.unwrap_or(JobMode::Worker);
 
         let job_id = Uuid::new_v4();
-        let (project_dir, browse_id) = resolve_project_dir(request.explicit_project_dir, job_id)?;
+        let explicit_project_dir = request.explicit_project_dir.clone();
+        let (project_dir, browse_id) = resolve_project_dir(explicit_project_dir, job_id)?;
         let project_dir_str = project_dir.display().to_string();
-        let spec = SandboxJobSpec {
-            title: request.title.clone(),
-            description: request.description.clone(),
-            principal_id: request.principal_id.clone(),
-            actor_id: request.actor_id.clone(),
-            project_dir: Some(project_dir_str.clone()),
+        let spec = build_sandbox_job_spec(
+            &request,
             mode,
-            interactive: !request.wait,
-            idle_timeout_secs: job_manager.interactive_idle_timeout_secs(),
-            parent_job_id: request.parent_job_id,
-            metadata: request.metadata.clone(),
-            allowed_tools: request.allowed_tools.clone(),
-            allowed_skills: request.allowed_skills.clone(),
-            tool_profile: request.tool_profile.clone(),
-        };
+            project_dir_str.clone(),
+            job_manager.interactive_idle_timeout_secs(),
+        );
 
-        let credential_grants_json = match serde_json::to_string(&request.credential_grants) {
+        let credential_grants_json = match credential_grants_restart_json(
+            &request.credential_grants,
+        ) {
             Ok(json) => json,
             Err(error) => {
                 tracing::warn!(
@@ -392,7 +222,7 @@ impl JobOrchestrationContext {
         });
 
         job_manager
-            .create_job(job_id, spec.clone(), request.credential_grants)
+            .create_job(job_id, spec.clone(), request.credential_grants.clone())
             .await
             .map_err(|error| {
                 self.update_status(
@@ -424,30 +254,13 @@ impl JobOrchestrationContext {
                     inject_tx.clone(),
                 );
             }
-            let mut hints = Vec::new();
-            if request.job_events_available {
-                hints.push("Use job_events to inspect streamed activity.".to_string());
-            } else if request.job_status_available {
-                hints.push("Use job_status to inspect progress.".to_string());
-            }
-            if request.job_prompt_available {
-                hints.push(
-                    "Use job_prompt to send follow-up instructions or done=true when wrapping up."
-                        .to_string(),
-                );
-            }
-            if hints.is_empty() {
-                hints.push("Use the Jobs UI to inspect progress.".to_string());
-            }
-            return Ok(JobExecutionResult {
+            return Ok(JobExecutionResult::sandbox_started(
                 job_id,
-                status: "started".to_string(),
-                runtime: sandbox_job_runtime_descriptor(mode),
-                message: Some(format!("Container started. {}", hints.join(" "))),
-                output: None,
-                project_dir: Some(project_dir_str),
-                browse_url: Some(format!("/projects/{}", browse_id)),
-            });
+                mode,
+                &request,
+                project_dir_str,
+                &browse_id,
+            ));
         }
 
         let timeout = Duration::from_secs(600);
@@ -492,15 +305,13 @@ impl JobOrchestrationContext {
                         job_manager.cleanup_job(job_id).await;
 
                         if success {
-                            return Ok(JobExecutionResult {
+                            return Ok(JobExecutionResult::sandbox_completed(
                                 job_id,
-                                status: "completed".to_string(),
-                                runtime: sandbox_job_runtime_descriptor(mode),
-                                message: None,
-                                output: Some(message),
-                                project_dir: Some(project_dir_str),
-                                browse_url: Some(format!("/projects/{}", browse_id)),
-                            });
+                                mode,
+                                message,
+                                project_dir_str,
+                                &browse_id,
+                            ));
                         }
 
                         return Err(ToolError::ExecutionFailed(format!(
@@ -530,31 +341,44 @@ impl JobOrchestrationContext {
                         None,
                         Some(Utc::now()),
                     );
-                    return Ok(JobExecutionResult {
+                    return Ok(JobExecutionResult::sandbox_completed(
                         job_id,
-                        status: "completed".to_string(),
-                        runtime: sandbox_job_runtime_descriptor(mode),
-                        message: None,
-                        output: Some("Container job completed".to_string()),
-                        project_dir: Some(project_dir_str),
-                        browse_url: Some(format!("/projects/{}", browse_id)),
-                    });
+                        mode,
+                        "Container job completed".to_string(),
+                        project_dir_str,
+                        &browse_id,
+                    ));
                 }
             }
         }
     }
 }
 
+#[async_trait]
+impl JobExecutionOrchestrator for JobOrchestrationContext {
+    async fn run_local_job(
+        &self,
+        request: JobExecutionRequest,
+    ) -> Result<JobExecutionResult, ToolError> {
+        JobOrchestrationContext::run_local_job(self, request).await
+    }
+
+    async fn run_sandbox_job(
+        &self,
+        request: JobExecutionRequest,
+    ) -> Result<JobExecutionResult, ToolError> {
+        JobOrchestrationContext::run_sandbox_job(self, request).await
+    }
+}
+
 pub struct LocalHostExecutionBackend {
-    inner: Arc<dyn RootIndependentLocalExecutionBackend>,
-    job_orchestration: Option<Arc<JobOrchestrationContext>>,
+    inner: Arc<dyn ExecutionBackend>,
 }
 
 impl LocalHostExecutionBackend {
     pub fn shared() -> Arc<dyn ExecutionBackend> {
         Arc::new(Self {
-            inner: RootIndependentLocalHostExecutionBackend::shared(),
-            job_orchestration: None,
+            inner: RootIndependentLocalHostExecutionBackendWithJobs::shared(),
         })
     }
 
@@ -562,8 +386,9 @@ impl LocalHostExecutionBackend {
         job_orchestration: Arc<JobOrchestrationContext>,
     ) -> Arc<dyn ExecutionBackend> {
         Arc::new(Self {
-            inner: RootIndependentLocalHostExecutionBackend::shared(),
-            job_orchestration: Some(job_orchestration),
+            inner: RootIndependentLocalHostExecutionBackendWithJobs::with_job_orchestration(
+                job_orchestration,
+            ),
         })
     }
 }
@@ -596,19 +421,14 @@ impl ExecutionBackend for LocalHostExecutionBackend {
     }
 
     async fn run_job(&self, request: JobExecutionRequest) -> Result<JobExecutionResult, ToolError> {
-        let job_orchestration = self.job_orchestration.as_ref().ok_or_else(|| {
-            ToolError::ExecutionFailed(
-                "local host backend is not configured for job execution".to_string(),
-            )
-        })?;
-        job_orchestration.run_local_job(request).await
+        self.inner.run_job(request).await
     }
 }
 
 pub struct DockerSandboxExecutionBackend {
     sandbox: Option<Arc<SandboxManager>>,
     policy: Option<SandboxPolicy>,
-    job_orchestration: Option<Arc<JobOrchestrationContext>>,
+    job_backend: Option<Arc<dyn ExecutionBackend>>,
 }
 
 impl DockerSandboxExecutionBackend {
@@ -619,7 +439,7 @@ impl DockerSandboxExecutionBackend {
         Arc::new(Self {
             sandbox: Some(sandbox),
             policy: Some(policy),
-            job_orchestration: None,
+            job_backend: None,
         })
     }
 
@@ -629,7 +449,11 @@ impl DockerSandboxExecutionBackend {
         Arc::new(Self {
             sandbox: None,
             policy: None,
-            job_orchestration: Some(job_orchestration),
+            job_backend: Some(
+                RootIndependentSandboxJobExecutionBackend::with_job_orchestration(
+                    job_orchestration,
+                ),
+            ),
         })
     }
 }
@@ -712,12 +536,12 @@ impl ExecutionBackend for DockerSandboxExecutionBackend {
     }
 
     async fn run_job(&self, request: JobExecutionRequest) -> Result<JobExecutionResult, ToolError> {
-        let job_orchestration = self.job_orchestration.as_ref().ok_or_else(|| {
+        let job_backend = self.job_backend.as_ref().ok_or_else(|| {
             ToolError::ExecutionFailed(
                 "docker sandbox backend is not configured for job execution".to_string(),
             )
         })?;
-        job_orchestration.run_sandbox_job(request).await
+        job_backend.run_job(request).await
     }
 }
 
@@ -734,100 +558,5 @@ impl RemoteRunnerAdapterExecutionBackend {
 impl ExecutionBackend for RemoteRunnerAdapterExecutionBackend {
     fn kind(&self) -> ExecutionBackendKind {
         ExecutionBackendKind::RemoteRunnerAdapter
-    }
-}
-
-fn render_container_script_command(program: &str, args: &[String], workdir: &Path) -> String {
-    std::iter::once(program.to_string())
-        .chain(args.iter().cloned())
-        .map(|value| map_host_path_to_container(&value, workdir))
-        .map(|value| shell_quote(&value))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn projects_base() -> PathBuf {
-    crate::platform::resolve_data_dir("projects")
-}
-
-pub fn resolve_project_dir(
-    explicit: Option<PathBuf>,
-    project_id: Uuid,
-) -> Result<(PathBuf, String), ToolError> {
-    let base = projects_base();
-    std::fs::create_dir_all(&base).map_err(|error| {
-        ToolError::ExecutionFailed(format!(
-            "failed to create projects base {}: {}",
-            base.display(),
-            error
-        ))
-    })?;
-    let canonical_base = base.canonicalize().map_err(|error| {
-        ToolError::ExecutionFailed(format!("failed to canonicalize projects base: {}", error))
-    })?;
-
-    let canonical_dir = match explicit {
-        Some(dir) => {
-            let canonical = dir.canonicalize().map_err(|error| {
-                ToolError::InvalidParameters(format!(
-                    "explicit project dir {} does not exist or is inaccessible: {}",
-                    dir.display(),
-                    error
-                ))
-            })?;
-            if !canonical.starts_with(&canonical_base) {
-                return Err(ToolError::InvalidParameters(format!(
-                    "project directory must be under {}",
-                    canonical_base.display()
-                )));
-            }
-            canonical
-        }
-        None => {
-            let dir = canonical_base.join(project_id.to_string());
-            std::fs::create_dir_all(&dir).map_err(|error| {
-                ToolError::ExecutionFailed(format!(
-                    "failed to create project dir {}: {}",
-                    dir.display(),
-                    error
-                ))
-            })?;
-            dir.canonicalize().map_err(|error| {
-                ToolError::ExecutionFailed(format!(
-                    "failed to canonicalize project dir {}: {}",
-                    dir.display(),
-                    error
-                ))
-            })?
-        }
-    };
-
-    let browse_id = canonical_dir
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| project_id.to_string());
-    Ok((canonical_dir, browse_id))
-}
-
-fn map_host_path_to_container(value: &str, workdir: &Path) -> String {
-    let path = Path::new(value);
-    if path.is_absolute()
-        && let Ok(relative) = path.strip_prefix(workdir)
-    {
-        let mapped = if relative.as_os_str().is_empty() {
-            PathBuf::from("/workspace")
-        } else {
-            PathBuf::from("/workspace").join(relative)
-        };
-        return mapped.to_string_lossy().to_string();
-    }
-    value.to_string()
-}
-
-fn shell_quote(value: &str) -> String {
-    if value.is_empty() {
-        "''".to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
 }

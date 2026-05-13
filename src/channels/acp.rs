@@ -5,18 +5,18 @@
 //! the normal agent core remains the source of truth for prompts, tools,
 //! approvals, learning, and artifacts.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::path::Path;
-use std::sync::{
-    Arc, LazyLock,
-    atomic::{AtomicU64, Ordering},
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use thinclaw_channels::acp::wire::{JsonRpcError, JsonRpcErrorValue, JsonRpcMessage};
+use thinclaw_channels::acp::{
+    ACP_TERMINAL_OUTPUT_LIMIT, AcpConnectionCore, AcpSessionState, AcpTerminalExecution,
+    PendingPermission, PromptCompletion, acp_cwd_from_metadata, acp_session_id, prompt_to_text,
+    session_config_options, tool_kind,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{RwLock, mpsc, oneshot};
 use uuid::Uuid;
@@ -24,7 +24,6 @@ use uuid::Uuid;
 use crate::agent::{Agent, Submission};
 use crate::channels::{
     Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate, StreamMode,
-    mint_session_key,
 };
 use crate::error::ChannelError;
 use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
@@ -40,8 +39,6 @@ pub type AcpSharedState = Arc<AcpConnectionState>;
 
 const ACP_CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const ACP_PROMPT_APPROVAL_TIMEOUT: Duration = Duration::from_secs(60 * 30);
-const ACP_TERMINAL_OUTPUT_LIMIT: u64 = 64 * 1024;
-
 static ACP_CLIENT_BRIDGES: LazyLock<RwLock<HashMap<String, AcpClientBridge>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -53,314 +50,7 @@ fn prompt_approval_timeout() -> Duration {
         .unwrap_or(ACP_PROMPT_APPROVAL_TIMEOUT)
 }
 
-/// Public ACP v1 wire structs used by the stdio adapter and conformance tests.
-///
-/// The adapter still accepts raw `serde_json::Value` at the JSON-RPC boundary so
-/// editor quirks can be handled in one place, but all emitted public shapes
-/// should round-trip through these types before they are considered supported.
-pub mod wire {
-    use std::collections::BTreeMap;
-
-    use serde::{Deserialize, Serialize};
-    use serde_json::Value;
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    pub enum StopReason {
-        EndTurn,
-        MaxTokens,
-        MaxTurnRequests,
-        Refusal,
-        Cancelled,
-    }
-
-    impl StopReason {
-        pub fn as_str(self) -> &'static str {
-            match self {
-                Self::EndTurn => "end_turn",
-                Self::MaxTokens => "max_tokens",
-                Self::MaxTurnRequests => "max_turn_requests",
-                Self::Refusal => "refusal",
-                Self::Cancelled => "cancelled",
-            }
-        }
-
-        pub fn from_error_text(text: &str) -> Option<Self> {
-            let text = text.to_ascii_lowercase();
-            if text.contains("cancelled") || text.contains("canceled") {
-                Some(Self::Cancelled)
-            } else if text.contains("content_filter")
-                || text.contains("content filter")
-                || text.contains("refusal")
-                || text.contains("refused")
-            {
-                Some(Self::Refusal)
-            } else if text.contains("max_tokens")
-                || text.contains("max token")
-                || text.contains("finish_reason: length")
-                || text.contains("truncated")
-            {
-                Some(Self::MaxTokens)
-            } else if text.contains("max_turn_requests") || text.contains("max turn requests") {
-                Some(Self::MaxTurnRequests)
-            } else {
-                None
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct PromptResponse {
-        pub stop_reason: StopReason,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct EmbeddedResource {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub uri: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub text: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub mime_type: Option<String>,
-        #[serde(flatten)]
-        pub extra: BTreeMap<String, Value>,
-    }
-
-    impl EmbeddedResource {
-        pub fn text(uri: impl Into<String>, text: impl Into<String>) -> Self {
-            Self {
-                uri: Some(uri.into()),
-                text: Some(text.into()),
-                mime_type: Some("text/plain".to_string()),
-                extra: BTreeMap::new(),
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(
-        tag = "type",
-        rename_all = "snake_case",
-        rename_all_fields = "camelCase"
-    )]
-    pub enum ContentBlock {
-        Text {
-            text: String,
-        },
-        Resource {
-            resource: EmbeddedResource,
-        },
-        #[serde(rename = "resource_link", alias = "resourceLink")]
-        ResourceLink {
-            uri: String,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            name: Option<String>,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            title: Option<String>,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            mime_type: Option<String>,
-            #[serde(flatten)]
-            extra: BTreeMap<String, Value>,
-        },
-    }
-
-    impl ContentBlock {
-        pub fn text(text: impl Into<String>) -> Self {
-            Self::Text { text: text.into() }
-        }
-
-        pub fn embedded_text_resource(uri: impl Into<String>, text: impl Into<String>) -> Self {
-            Self::Resource {
-                resource: EmbeddedResource::text(uri, text),
-            }
-        }
-
-        pub fn resource_link(uri: impl Into<String>) -> Self {
-            Self::ResourceLink {
-                uri: uri.into(),
-                name: None,
-                title: None,
-                mime_type: None,
-                extra: BTreeMap::new(),
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(tag = "type", rename_all = "snake_case")]
-    pub enum ToolContentBlock {
-        Content { content: ContentBlock },
-    }
-
-    impl ToolContentBlock {
-        pub fn text(text: impl Into<String>) -> Self {
-            Self::Content {
-                content: ContentBlock::text(text),
-            }
-        }
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(
-        tag = "sessionUpdate",
-        rename_all = "snake_case",
-        rename_all_fields = "camelCase"
-    )]
-    pub enum SessionUpdate {
-        UserMessageChunk {
-            content: ContentBlock,
-        },
-        AgentMessageChunk {
-            content: ContentBlock,
-        },
-        AgentThoughtChunk {
-            content: ContentBlock,
-        },
-        ToolCall {
-            tool_call_id: String,
-            title: String,
-            kind: String,
-            status: String,
-            raw_input: Value,
-            #[serde(default, skip_serializing_if = "Option::is_none", rename = "_meta")]
-            meta: Option<Value>,
-        },
-        ToolCallUpdate {
-            tool_call_id: String,
-            status: String,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            content: Option<Vec<ToolContentBlock>>,
-            #[serde(default, skip_serializing_if = "Option::is_none", rename = "_meta")]
-            meta: Option<Value>,
-        },
-        CurrentModeUpdate {
-            current_mode_id: String,
-        },
-        ConfigOptionUpdate {
-            config_options: Value,
-        },
-        SessionInfoUpdate {
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            title: Option<String>,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            updated_at: Option<String>,
-            #[serde(default, skip_serializing_if = "Option::is_none", rename = "_meta")]
-            meta: Option<Value>,
-        },
-        Plan {
-            entries: Vec<Value>,
-        },
-        UsageUpdate {
-            usage: Value,
-        },
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct SessionUpdateParams {
-        pub session_id: String,
-        pub update: SessionUpdate,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct JsonRpcNotification<T> {
-        pub jsonrpc: &'static str,
-        pub method: &'static str,
-        pub params: T,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct JsonRpcRequest<T> {
-        pub jsonrpc: &'static str,
-        pub id: Value,
-        pub method: &'static str,
-        pub params: T,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct PermissionOption {
-        pub option_id: String,
-        pub name: String,
-        pub kind: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct RequestPermissionParams {
-        pub session_id: String,
-        pub tool_call: Value,
-        pub options: Vec<PermissionOption>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct PermissionOutcome {
-        pub outcome: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub option_id: Option<String>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct ReadTextFileRequest {
-        pub session_id: String,
-        pub path: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub line: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub limit: Option<u64>,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct WriteTextFileRequest {
-        pub session_id: String,
-        pub path: String,
-        pub content: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct TerminalEnvVar {
-        pub name: String,
-        pub value: String,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct TerminalCreateRequest {
-        pub session_id: String,
-        pub command: String,
-        pub args: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub cwd: Option<String>,
-        pub env: Vec<TerminalEnvVar>,
-        pub output_byte_limit: u64,
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    pub struct TerminalIdRequest {
-        pub session_id: String,
-        pub terminal_id: String,
-    }
-
-    pub fn to_value<T: Serialize>(value: T) -> Value {
-        serde_json::to_value(value).unwrap_or(Value::Null)
-    }
-}
-
-/// Golden transcript fragments for editor compatibility and stdout tests.
-pub mod compat {
-    pub const INITIALIZE_REQUEST: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true},"terminal":true},"clientInfo":{"name":"compat-client","version":"1.0.0"}}}"#;
-    pub const SESSION_NEW_REQUEST: &str = r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#;
-    pub const TEXT_PROMPT_REQUEST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"session/prompt","params":{"sessionId":"00000000-0000-0000-0000-000000000000","prompt":[{"type":"text","text":"hello"}]}}"#;
-    pub const EMBEDDED_RESOURCE_PROMPT_REQUEST: &str = r#"{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"00000000-0000-0000-0000-000000000000","prompt":[{"type":"resource","resource":{"uri":"file:///tmp/main.rs","text":"fn main() {}","mimeType":"text/plain"}}]}}"#;
-    pub const RESOURCE_LINK_PROMPT_REQUEST: &str = r#"{"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"00000000-0000-0000-0000-000000000000","prompt":[{"type":"resource_link","uri":"file:///tmp/lib.rs","mimeType":"text/x-rust"}]}}"#;
-}
+pub use thinclaw_channels::acp::{compat, wire};
 
 #[derive(Clone)]
 struct AcpClientBridge {
@@ -374,11 +64,6 @@ enum AcpClientResponse {
     Error(JsonRpcErrorValue),
 }
 
-#[derive(Debug)]
-struct PromptCompletion {
-    stop_reason: wire::StopReason,
-}
-
 #[derive(Debug, Clone)]
 struct ActivePromptTask {
     abort_handle: tokio::task::AbortHandle,
@@ -386,210 +71,96 @@ struct ActivePromptTask {
     writer_tx: OutboundTx,
 }
 
-#[derive(Debug, Clone)]
-pub struct AcpTerminalExecution {
-    pub terminal_id: String,
-    pub output: String,
-    pub exit_code: Option<i64>,
-    pub signal: Option<String>,
-    pub truncated: bool,
-}
-
 #[derive(Debug)]
 pub struct AcpConnectionState {
-    inner: RwLock<AcpRuntimeState>,
-    request_counter: AtomicU64,
+    core: AcpConnectionCore,
+    io: RwLock<AcpRuntimeIoState>,
 }
 
 impl Default for AcpConnectionState {
     fn default() -> Self {
         Self {
-            inner: RwLock::new(AcpRuntimeState::default()),
-            request_counter: AtomicU64::new(1),
+            core: AcpConnectionCore::default(),
+            io: RwLock::new(AcpRuntimeIoState::default()),
         }
     }
 }
 
 impl AcpConnectionState {
     fn next_counter(&self) -> u64 {
-        self.request_counter.fetch_add(1, Ordering::Relaxed)
+        self.core.next_counter()
     }
 
-    async fn initialize(&self, request: InitializeRequest) -> InitializeResponse {
-        let protocol_version = if request.protocol_version == ACP_PROTOCOL_VERSION {
-            request.protocol_version
-        } else {
-            ACP_PROTOCOL_VERSION
-        };
-
-        let mut inner = self.inner.write().await;
-        inner.initialized = true;
-        inner.protocol_version = protocol_version;
-        inner.client_capabilities = request.client_capabilities;
-        inner.client_info = request.client_info;
-        initialize_response(protocol_version)
+    async fn initialize(&self, request: wire::InitializeRequest) -> wire::InitializeResponse {
+        self.core
+            .initialize(request, ACP_PROTOCOL_VERSION, env!("CARGO_PKG_VERSION"))
+            .await
     }
 
     async fn ensure_initialized(&self) -> Result<(), JsonRpcError> {
-        if self.inner.read().await.initialized {
-            Ok(())
-        } else {
-            Err(json_rpc_error(
-                -32002,
-                "ACP connection must be initialized before session methods",
-                None,
-            ))
-        }
+        self.core.ensure_initialized().await
     }
 
     async fn upsert_session(&self, session: AcpSessionState) {
-        let mut inner = self.inner.write().await;
-        if !inner.sessions.contains_key(&session.session_id) {
-            inner.session_order.push(session.session_id.clone());
-        }
-        inner.sessions.insert(session.session_id.clone(), session);
+        self.core.upsert_session(session).await;
     }
 
     async fn get_session(&self, session_id: &str) -> Option<AcpSessionState> {
-        self.inner.read().await.sessions.get(session_id).cloned()
+        self.core.get_session(session_id).await
     }
 
     async fn mark_session_touched(&self, session_id: &str) {
-        if let Some(session) = self.inner.write().await.sessions.get_mut(session_id) {
-            session.updated_at = Utc::now();
-        }
+        self.core.mark_session_touched(session_id).await;
     }
 
     async fn mark_session_closed(&self, session_id: &str) {
-        if let Some(session) = self.inner.write().await.sessions.get_mut(session_id) {
-            session.closed = true;
-            session.updated_at = Utc::now();
-        }
+        self.core.mark_session_closed(session_id).await;
     }
 
     async fn mark_cancelled(&self, session_id: &str) {
-        if let Some(session) = self.inner.write().await.sessions.get_mut(session_id) {
-            session.cancelled_turn = true;
-            session.updated_at = Utc::now();
-        }
+        self.core.mark_cancelled(session_id).await;
     }
 
     async fn clear_cancelled(&self, session_id: &str) {
-        if let Some(session) = self.inner.write().await.sessions.get_mut(session_id) {
-            session.cancelled_turn = false;
-        }
+        self.core.clear_cancelled(session_id).await;
     }
 
     async fn was_cancelled(&self, session_id: &str) -> bool {
-        self.inner
-            .read()
-            .await
-            .sessions
-            .get(session_id)
-            .map(|session| session.cancelled_turn)
-            .unwrap_or(false)
+        self.core.was_cancelled(session_id).await
     }
 
     async fn append_transcript(&self, session_id: &str, role: &str, content: impl Into<String>) {
-        let content = content.into();
-        if content.trim().is_empty() {
-            return;
-        }
-        if let Some(session) = self.inner.write().await.sessions.get_mut(session_id) {
-            if role == "user" && session.title.is_none() {
-                session.title = Some(title_from_prompt(&content));
-            }
-            session.transcript.push(AcpTranscriptEntry {
-                role: role.to_string(),
-                content,
-                created_at: Utc::now(),
-            });
-            session.updated_at = Utc::now();
-        }
+        self.core.append_transcript(session_id, role, content).await;
     }
 
     async fn set_mode(&self, session_id: &str, mode_id: &str) -> Result<(), JsonRpcError> {
-        if !matches!(mode_id, "ask" | "code") {
-            return Err(json_rpc_error(
-                -32602,
-                format!("Unsupported ACP session mode: {mode_id}"),
-                None,
-            ));
-        }
-        let mut inner = self.inner.write().await;
-        let session = inner.sessions.get_mut(session_id).ok_or_else(|| {
-            json_rpc_error(-32004, format!("Unknown ACP session: {session_id}"), None)
-        })?;
-        session.mode_id = mode_id.to_string();
-        session.updated_at = Utc::now();
-        Ok(())
+        self.core.set_mode(session_id, mode_id).await
     }
 
     async fn sessions_for_list(&self, cwd: Option<&str>) -> Vec<AcpSessionState> {
-        let inner = self.inner.read().await;
-        inner
-            .session_order
-            .iter()
-            .filter_map(|id| inner.sessions.get(id))
-            .filter(|session| !session.closed)
-            .filter(|session| cwd.is_none_or(|cwd| session.cwd == cwd))
-            .cloned()
-            .collect()
+        self.core.sessions_for_list(cwd).await
     }
 
     async fn tool_call_started(&self, session_id: &str, name: &str) -> String {
-        let id = format!("call_{}", self.next_counter());
-        let mut inner = self.inner.write().await;
-        if let Some(session) = inner.sessions.get_mut(session_id) {
-            session
-                .tool_call_ids
-                .entry(name.to_string())
-                .or_default()
-                .push_back(id.clone());
-            session.updated_at = Utc::now();
-        }
-        id
+        self.core.tool_call_started(session_id, name).await
     }
 
     async fn tool_call_update_id(&self, session_id: &str, name: &str, complete: bool) -> String {
-        let mut inner = self.inner.write().await;
-        if let Some(session) = inner.sessions.get_mut(session_id)
-            && let Some(queue) = session.tool_call_ids.get_mut(name)
-        {
-            if complete {
-                if let Some(id) = queue.pop_front() {
-                    return id;
-                }
-            } else if let Some(id) = queue.front() {
-                return id.clone();
-            }
-        }
-        format!("call_{}", self.next_counter())
+        self.core
+            .tool_call_update_id(session_id, name, complete)
+            .await
     }
 
     async fn insert_pending_permission(&self, pending: PendingPermission) {
-        self.inner
-            .write()
-            .await
-            .pending_permissions
-            .insert(pending.client_request_id.clone(), pending);
+        self.core.insert_pending_permission(pending).await;
     }
 
     async fn take_pending_permission(&self, client_request_id: &str) -> Option<PendingPermission> {
-        self.inner
-            .write()
-            .await
-            .pending_permissions
-            .remove(client_request_id)
+        self.core.take_pending_permission(client_request_id).await
     }
 
     async fn has_pending_permission(&self, session_id: &str) -> bool {
-        self.inner
-            .read()
-            .await
-            .pending_permissions
-            .values()
-            .any(|pending| pending.session_id == session_id)
+        self.core.has_pending_permission(session_id).await
     }
 
     async fn insert_pending_client_request(
@@ -597,7 +168,7 @@ impl AcpConnectionState {
         request_id: String,
         tx: oneshot::Sender<AcpClientResponse>,
     ) {
-        self.inner
+        self.io
             .write()
             .await
             .pending_client_requests
@@ -608,7 +179,7 @@ impl AcpConnectionState {
         &self,
         request_id: &str,
     ) -> Option<oneshot::Sender<AcpClientResponse>> {
-        self.inner
+        self.io
             .write()
             .await
             .pending_client_requests
@@ -662,7 +233,7 @@ impl AcpConnectionState {
         session_id: &str,
     ) -> Result<oneshot::Receiver<PromptCompletion>, JsonRpcError> {
         let (tx, rx) = oneshot::channel();
-        let mut inner = self.inner.write().await;
+        let mut inner = self.io.write().await;
         if inner.prompt_waiters.contains_key(session_id) {
             return Err(json_rpc_error(
                 -32000,
@@ -678,7 +249,7 @@ impl AcpConnectionState {
         &self,
         session_id: &str,
     ) -> Option<oneshot::Sender<PromptCompletion>> {
-        self.inner.write().await.prompt_waiters.remove(session_id)
+        self.io.write().await.prompt_waiters.remove(session_id)
     }
 
     async fn complete_prompt(&self, session_id: &str, stop_reason: wire::StopReason) {
@@ -688,7 +259,7 @@ impl AcpConnectionState {
     }
 
     async fn register_prompt_task(&self, session_id: &str, task: ActivePromptTask) {
-        self.inner
+        self.io
             .write()
             .await
             .active_prompt_tasks
@@ -696,11 +267,7 @@ impl AcpConnectionState {
     }
 
     async fn take_prompt_task(&self, session_id: &str) -> Option<ActivePromptTask> {
-        self.inner
-            .write()
-            .await
-            .active_prompt_tasks
-            .remove(session_id)
+        self.io.write().await.active_prompt_tasks.remove(session_id)
     }
 
     async fn cancel_prompt_task(&self, session_id: &str) -> bool {
@@ -720,20 +287,13 @@ impl AcpConnectionState {
     }
 
     #[cfg(test)]
-    async fn client_capabilities(&self) -> AcpClientCapabilities {
-        self.inner.read().await.client_capabilities.clone()
+    async fn client_capabilities(&self) -> wire::AcpClientCapabilities {
+        self.core.client_capabilities().await
     }
 }
 
 #[derive(Debug, Default)]
-struct AcpRuntimeState {
-    initialized: bool,
-    protocol_version: u64,
-    client_capabilities: AcpClientCapabilities,
-    client_info: Option<AcpImplementation>,
-    sessions: HashMap<String, AcpSessionState>,
-    session_order: Vec<String>,
-    pending_permissions: HashMap<String, PendingPermission>,
+struct AcpRuntimeIoState {
     pending_client_requests: HashMap<String, oneshot::Sender<AcpClientResponse>>,
     prompt_waiters: HashMap<String, oneshot::Sender<PromptCompletion>>,
     active_prompt_tasks: HashMap<String, ActivePromptTask>,
@@ -766,15 +326,7 @@ pub async fn client_read_text_file(
     let Some(bridge) = client_bridge(session_id).await else {
         return Ok(None);
     };
-    if !bridge
-        .state
-        .inner
-        .read()
-        .await
-        .client_capabilities
-        .fs
-        .read_text_file
-    {
+    if !bridge.state.core.client_can_read_text_file().await {
         return Ok(None);
     }
 
@@ -811,15 +363,7 @@ pub async fn client_write_text_file(
     let Some(bridge) = client_bridge(session_id).await else {
         return Ok(None);
     };
-    if !bridge
-        .state
-        .inner
-        .read()
-        .await
-        .client_capabilities
-        .fs
-        .write_text_file
-    {
+    if !bridge.state.core.client_can_write_text_file().await {
         return Ok(None);
     }
 
@@ -850,7 +394,7 @@ pub async fn client_execute_terminal(
     let Some(bridge) = client_bridge(session_id).await else {
         return Ok(None);
     };
-    if !bridge.state.inner.read().await.client_capabilities.terminal {
+    if !bridge.state.core.client_can_execute_terminal().await {
         return Ok(None);
     }
 
@@ -983,63 +527,11 @@ pub async fn client_execute_terminal(
 }
 
 fn is_client_request_timeout(error: &JsonRpcError) -> bool {
-    error.code == -32000 && error.message.contains("timed out")
+    thinclaw_channels::acp::is_client_request_timeout(error)
 }
 
 fn format_json_rpc_error(error: JsonRpcError) -> String {
-    match error.data {
-        Some(data) => format!("{} ({})", error.message, data),
-        None => error.message,
-    }
-}
-
-#[derive(Debug, Clone)]
-struct AcpSessionState {
-    session_id: String,
-    cwd: String,
-    mcp_servers: Vec<Value>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    title: Option<String>,
-    mode_id: String,
-    transcript: Vec<AcpTranscriptEntry>,
-    tool_call_ids: HashMap<String, VecDeque<String>>,
-    cancelled_turn: bool,
-    closed: bool,
-}
-
-impl AcpSessionState {
-    fn new(session_id: String, cwd: String, mcp_servers: Vec<Value>) -> Self {
-        let now = Utc::now();
-        Self {
-            session_id,
-            cwd,
-            mcp_servers,
-            created_at: now,
-            updated_at: now,
-            title: None,
-            mode_id: "ask".to_string(),
-            transcript: Vec::new(),
-            tool_call_ids: HashMap::new(),
-            cancelled_turn: false,
-            closed: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct AcpTranscriptEntry {
-    role: String,
-    content: String,
-    created_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone)]
-struct PendingPermission {
-    client_request_id: String,
-    session_id: String,
-    approval_request_id: String,
-    tool_call_id: String,
+    thinclaw_channels::acp::format_json_rpc_error(error)
 }
 
 #[derive(Debug, Clone)]
@@ -1136,9 +628,8 @@ async fn run_stdio_inner(
     let writer = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         while let Some(message) = writer_rx.recv().await {
-            match serde_json::to_vec(&message) {
-                Ok(mut bytes) => {
-                    bytes.push(b'\n');
+            match thinclaw_channels::acp::serialize_json_rpc_line(&message) {
+                Ok(bytes) => {
                     if stdout.write_all(&bytes).await.is_err() {
                         break;
                     }
@@ -1169,15 +660,10 @@ async fn run_stdio_inner(
             continue;
         }
 
-        let request = match serde_json::from_str::<JsonRpcMessage>(&line) {
+        let request = match thinclaw_channels::acp::parse_json_rpc_line(&line) {
             Ok(request) => request,
-            Err(error) => {
-                let _ = writer_tx.send(error_response(
-                    None,
-                    -32700,
-                    format!("Parse error: {error}"),
-                    None,
-                ));
+            Err(response) => {
+                let _ = writer_tx.send(response);
                 continue;
             }
         };
@@ -1211,201 +697,6 @@ async fn run_stdio_inner(
     }
     let _ = writer.await;
     Ok(())
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct JsonRpcMessage {
-    jsonrpc: Option<String>,
-    id: Option<Value>,
-    method: Option<String>,
-    #[serde(default)]
-    params: Value,
-    #[serde(default)]
-    result: Option<Value>,
-    #[serde(default)]
-    error: Option<JsonRpcErrorValue>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct JsonRpcErrorValue {
-    code: i64,
-    message: String,
-    #[serde(default)]
-    data: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct JsonRpcResponse {
-    jsonrpc: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<JsonRpcError>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct JsonRpcRequest {
-    jsonrpc: &'static str,
-    id: Value,
-    method: &'static str,
-    params: Value,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct JsonRpcError {
-    code: i64,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct AcpClientCapabilities {
-    #[serde(default)]
-    fs: AcpFsCapabilities,
-    #[serde(default)]
-    terminal: bool,
-    #[serde(default, rename = "_meta", skip_serializing_if = "Option::is_none")]
-    _meta: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct AcpFsCapabilities {
-    #[serde(default)]
-    read_text_file: bool,
-    #[serde(default)]
-    write_text_file: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct AcpImplementation {
-    name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    title: Option<String>,
-    version: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct InitializeRequest {
-    protocol_version: u64,
-    #[serde(default)]
-    client_capabilities: AcpClientCapabilities,
-    #[serde(default)]
-    client_info: Option<AcpImplementation>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct InitializeResponse {
-    protocol_version: u64,
-    agent_capabilities: AgentCapabilities,
-    agent_info: AcpImplementation,
-    auth_methods: Vec<Value>,
-    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
-    _meta: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentCapabilities {
-    load_session: bool,
-    prompt_capabilities: PromptCapabilities,
-    mcp_capabilities: McpCapabilities,
-    session_capabilities: SessionCapabilities,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PromptCapabilities {
-    image: bool,
-    audio: bool,
-    embedded_context: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct McpCapabilities {
-    http: bool,
-    sse: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SessionCapabilities {
-    close: Value,
-    list: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    resume: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionNewRequest {
-    cwd: String,
-    #[serde(default)]
-    mcp_servers: Vec<Value>,
-    #[serde(default, rename = "_meta")]
-    _meta: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionLoadRequest {
-    session_id: String,
-    cwd: String,
-    #[serde(default)]
-    mcp_servers: Vec<Value>,
-    #[serde(default, rename = "_meta")]
-    _meta: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionIdRequest {
-    session_id: String,
-    #[serde(default, rename = "_meta")]
-    _meta: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct SessionListRequest {
-    #[serde(default)]
-    cursor: Option<String>,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default, rename = "_meta")]
-    _meta: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionPromptRequest {
-    session_id: String,
-    prompt: Value,
-    #[serde(default, rename = "_meta")]
-    _meta: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionSetModeRequest {
-    session_id: String,
-    mode_id: String,
-    #[serde(default, rename = "_meta")]
-    _meta: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionSetConfigOptionRequest {
-    session_id: String,
-    config_id: String,
-    value: Value,
-    #[serde(default, rename = "_meta")]
-    _meta: Option<Value>,
 }
 
 async fn handle_json_rpc(
@@ -1662,44 +953,19 @@ async fn approve_pending_tool(
 }
 
 fn permission_outcome_from_result(result: &Value) -> wire::PermissionOutcome {
-    if let Ok(outcome) = serde_json::from_value::<wire::PermissionOutcome>(result.clone()) {
-        return outcome;
-    }
-    if let Some(nested) = result.get("outcome") {
-        if let Ok(outcome) = serde_json::from_value::<wire::PermissionOutcome>(nested.clone()) {
-            return outcome;
-        }
-        if let Some(outcome) = nested.as_str() {
-            return wire::PermissionOutcome {
-                outcome: outcome.to_string(),
-                option_id: result
-                    .get("optionId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            };
-        }
-    }
+    let outcome = thinclaw_channels::acp::permission_outcome_from_result(result);
     wire::PermissionOutcome {
-        outcome: "cancelled".to_string(),
-        option_id: None,
+        outcome: outcome.outcome,
+        option_id: outcome.option_id,
     }
 }
 
 fn permission_decision_from_outcome(outcome: &wire::PermissionOutcome) -> (bool, bool, bool) {
-    if outcome.outcome == "cancelled" {
-        return (false, false, true);
-    }
-    match outcome.option_id.as_deref().unwrap_or_default() {
-        "allow-once" => (true, false, false),
-        "allow-always" => (true, true, false),
-        "reject-once" | "reject" => (false, false, false),
-        _ => (false, false, false),
-    }
+    thinclaw_channels::acp::permission_decision(&outcome.outcome, outcome.option_id.as_deref())
 }
 
 async fn handle_initialize(state: &AcpSharedState, params: &Value) -> Result<Value, JsonRpcError> {
-    let request: InitializeRequest = serde_json::from_value(params.clone())
-        .map_err(|err| json_rpc_error(-32602, format!("Invalid initialize params: {err}"), None))?;
+    let request = thinclaw_channels::acp::parse_initialize_params(params)?;
     serde_json::to_value(state.initialize(request).await)
         .map_err(|err| json_rpc_error(-32603, err.to_string(), None))
 }
@@ -1711,11 +977,7 @@ async fn handle_new_session(
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
     state.ensure_initialized().await?;
-    let request: SessionNewRequest = serde_json::from_value(params.clone()).map_err(|err| {
-        json_rpc_error(-32602, format!("Invalid session/new params: {err}"), None)
-    })?;
-    validate_cwd(&request.cwd)?;
-    validate_mcp_servers(&request.mcp_servers)?;
+    let request = thinclaw_channels::acp::parse_session_new_params(params)?;
 
     let session_id = Uuid::new_v4().to_string();
     let accepted_mcp_servers = if let Some(agent) = agent.as_deref() {
@@ -1724,12 +986,7 @@ async fn handle_new_session(
         request.mcp_servers.len()
     };
     let session = AcpSessionState::new(session_id.clone(), request.cwd, request.mcp_servers);
-    let modes = session_modes(&session.mode_id);
-    let meta = json!({
-        "toolProfile": "acp",
-        "mcpServersAccepted": accepted_mcp_servers,
-        "loadSessionScope": "active_process"
-    });
+    let mode_id = session.mode_id.clone();
     if let Some(agent) = agent.as_deref() {
         persist_session_metadata(agent, &session).await?;
     }
@@ -1738,12 +995,11 @@ async fn handle_new_session(
         register_client_bridge(&session_id, writer_tx, state).await;
     }
 
-    Ok(json!({
-        "sessionId": session_id,
-        "modes": modes,
-        "configOptions": session_config_options(),
-        "_meta": meta
-    }))
+    Ok(thinclaw_channels::acp::session_new_output(
+        &session_id,
+        &mode_id,
+        accepted_mcp_servers,
+    ))
 }
 
 async fn handle_list_sessions(
@@ -1752,19 +1008,8 @@ async fn handle_list_sessions(
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
     state.ensure_initialized().await?;
-    let request: SessionListRequest = serde_json::from_value(params.clone()).map_err(|err| {
-        json_rpc_error(-32602, format!("Invalid session/list params: {err}"), None)
-    })?;
-    if let Some(cwd) = request.cwd.as_deref() {
-        validate_cwd(cwd)?;
-    }
+    let request = thinclaw_channels::acp::parse_session_list_params(params)?;
 
-    let page_size = 50usize;
-    let start = request
-        .cursor
-        .as_deref()
-        .and_then(|cursor| cursor.parse::<usize>().ok())
-        .unwrap_or(0);
     let mut page_source = state
         .sessions_for_list(request.cwd.as_deref())
         .await
@@ -1784,22 +1029,11 @@ async fn handle_list_sessions(
         );
     }
 
-    let next_start = start.saturating_add(page_size);
-    let next_cursor = if next_start < page_source.len() {
-        Some(next_start.to_string())
-    } else {
-        None
-    };
-    let page = page_source
-        .into_iter()
-        .skip(start)
-        .take(page_size)
-        .collect::<Vec<_>>();
-
-    Ok(json!({
-        "sessions": page,
-        "nextCursor": next_cursor
-    }))
+    Ok(thinclaw_channels::acp::session_list_output(
+        page_source,
+        request.cursor.as_deref(),
+        50,
+    ))
 }
 
 async fn handle_load_session(
@@ -1809,11 +1043,7 @@ async fn handle_load_session(
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
     state.ensure_initialized().await?;
-    let request: SessionLoadRequest = serde_json::from_value(params.clone()).map_err(|err| {
-        json_rpc_error(-32602, format!("Invalid session/load params: {err}"), None)
-    })?;
-    validate_cwd(&request.cwd)?;
-    validate_mcp_servers(&request.mcp_servers)?;
+    let request = thinclaw_channels::acp::parse_session_load_params(params)?;
 
     let mut session = match state.get_session(&request.session_id).await {
         Some(session) => session,
@@ -1846,22 +1076,16 @@ async fn handle_load_session(
     } else {
         request.mcp_servers.len()
     };
-    session.mcp_servers = request.mcp_servers;
-    session.closed = false;
-    session.updated_at = Utc::now();
+    session.reopen_with_mcp_servers(request.mcp_servers);
     state.upsert_session(session.clone()).await;
     register_client_bridge(&session.session_id, writer_tx, state).await;
 
     replay_session_transcript(writer_tx, &session)?;
-    Ok(json!({
-        "modes": session_modes(&session.mode_id),
-        "configOptions": session_config_options(),
-        "_meta": {
-            "replayedMessages": session.transcript.len(),
-            "mcpServersAccepted": accepted_mcp_servers,
-            "loadSessionScope": "active_process"
-        }
-    }))
+    Ok(thinclaw_channels::acp::session_load_output(
+        &session.mode_id,
+        session.transcript.len(),
+        accepted_mcp_servers,
+    ))
 }
 
 async fn handle_resume_session(
@@ -1871,15 +1095,7 @@ async fn handle_resume_session(
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
     state.ensure_initialized().await?;
-    let request: SessionLoadRequest = serde_json::from_value(params.clone()).map_err(|err| {
-        json_rpc_error(
-            -32602,
-            format!("Invalid session/resume params: {err}"),
-            None,
-        )
-    })?;
-    validate_cwd(&request.cwd)?;
-    validate_mcp_servers(&request.mcp_servers)?;
+    let request = thinclaw_channels::acp::parse_session_resume_params(params)?;
 
     let mut session = match state.get_session(&request.session_id).await {
         Some(session) => session,
@@ -1912,21 +1128,15 @@ async fn handle_resume_session(
     } else {
         request.mcp_servers.len()
     };
-    session.mcp_servers = request.mcp_servers;
-    session.closed = false;
-    session.updated_at = Utc::now();
+    session.reopen_with_mcp_servers(request.mcp_servers);
     state.upsert_session(session.clone()).await;
     if let Some(writer_tx) = writer_tx {
         register_client_bridge(&session.session_id, writer_tx, state).await;
     }
-    Ok(json!({
-        "modes": session_modes(&session.mode_id),
-        "configOptions": session_config_options(),
-        "_meta": {
-            "mcpServersAccepted": accepted_mcp_servers,
-            "loadSessionScope": "active_process"
-        }
-    }))
+    Ok(thinclaw_channels::acp::session_resume_output(
+        &session.mode_id,
+        accepted_mcp_servers,
+    ))
 }
 
 async fn handle_close_session(
@@ -1935,9 +1145,7 @@ async fn handle_close_session(
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
     state.ensure_initialized().await?;
-    let request: SessionIdRequest = serde_json::from_value(params.clone()).map_err(|err| {
-        json_rpc_error(-32602, format!("Invalid session/close params: {err}"), None)
-    })?;
+    let request = thinclaw_channels::acp::parse_session_id_params("session/close", params)?;
     state.mark_cancelled(&request.session_id).await;
     state.cancel_prompt_task(&request.session_id).await;
     state
@@ -1958,13 +1166,7 @@ async fn handle_cancel_session(
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
     state.ensure_initialized().await?;
-    let request: SessionIdRequest = serde_json::from_value(params.clone()).map_err(|err| {
-        json_rpc_error(
-            -32602,
-            format!("Invalid session/cancel params: {err}"),
-            None,
-        )
-    })?;
+    let request = thinclaw_channels::acp::parse_session_id_params("session/cancel", params)?;
     state.mark_cancelled(&request.session_id).await;
     state.cancel_prompt_task(&request.session_id).await;
     state
@@ -1980,13 +1182,7 @@ async fn handle_set_mode(
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
     state.ensure_initialized().await?;
-    let request: SessionSetModeRequest = serde_json::from_value(params.clone()).map_err(|err| {
-        json_rpc_error(
-            -32602,
-            format!("Invalid session/set_mode params: {err}"),
-            None,
-        )
-    })?;
+    let request = thinclaw_channels::acp::parse_session_set_mode_params(params)?;
     state
         .set_mode(&request.session_id, &request.mode_id)
         .await?;
@@ -1994,14 +1190,11 @@ async fn handle_set_mode(
         writer_tx,
         session_update(
             &request.session_id,
-            json!({
-                "sessionUpdate": "current_mode_update",
-                "currentModeId": request.mode_id
-            }),
+            thinclaw_channels::acp::current_mode_update(&request.mode_id),
         ),
     )
     .map_err(|error| json_rpc_error(-32000, error.to_string(), None))?;
-    Ok(json!({ "modes": session_modes(&request.mode_id) }))
+    Ok(thinclaw_channels::acp::set_mode_output(&request.mode_id))
 }
 
 async fn handle_set_config_option(
@@ -2009,14 +1202,7 @@ async fn handle_set_config_option(
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
     state.ensure_initialized().await?;
-    let request: SessionSetConfigOptionRequest =
-        serde_json::from_value(params.clone()).map_err(|err| {
-            json_rpc_error(
-                -32602,
-                format!("Invalid session/set_config_option params: {err}"),
-                None,
-            )
-        })?;
+    let request = thinclaw_channels::acp::parse_session_set_config_option_params(params)?;
     let Some(session) = state.get_session(&request.session_id).await else {
         return Err(json_rpc_error(
             -32004,
@@ -2049,13 +1235,7 @@ async fn handle_prompt(
     params: &Value,
 ) -> Result<Value, JsonRpcError> {
     state.ensure_initialized().await?;
-    let request: SessionPromptRequest = serde_json::from_value(params.clone()).map_err(|err| {
-        json_rpc_error(
-            -32602,
-            format!("Invalid session/prompt params: {err}"),
-            None,
-        )
-    })?;
+    let request = thinclaw_channels::acp::parse_session_prompt_params(params)?;
     let session = state
         .get_session(&request.session_id)
         .await
@@ -2066,7 +1246,12 @@ async fn handle_prompt(
                 None,
             )
         })?;
+    let was_cancelled_before_start = state.was_cancelled(&request.session_id).await;
     if session.closed {
+        if was_cancelled_before_start {
+            state.clear_cancelled(&request.session_id).await;
+            return Ok(prompt_response(wire::StopReason::Cancelled));
+        }
         return Err(json_rpc_error(
             -32004,
             format!("ACP session is closed: {}", request.session_id),
@@ -2080,6 +1265,11 @@ async fn handle_prompt(
     }
     let was_untitled = session.title.is_none();
     let prompt_rx = state.start_prompt_waiter(&request.session_id).await?;
+    if was_cancelled_before_start {
+        let _ = state.take_prompt_waiter(&request.session_id).await;
+        state.clear_cancelled(&request.session_id).await;
+        return Ok(prompt_response(wire::StopReason::Cancelled));
+    }
     state.clear_cancelled(&request.session_id).await;
     state.mark_session_touched(&request.session_id).await;
     state
@@ -2135,6 +1325,7 @@ async fn handle_prompt(
 
     if state.was_cancelled(&request.session_id).await {
         let _ = state.take_prompt_waiter(&request.session_id).await;
+        state.clear_cancelled(&request.session_id).await;
         return Ok(prompt_response(wire::StopReason::Cancelled));
     }
 
@@ -2154,10 +1345,14 @@ async fn handle_prompt(
     if state.has_pending_permission(&request.session_id).await {
         match tokio::time::timeout(prompt_approval_timeout(), prompt_rx).await {
             Ok(Ok(completion)) => {
+                if completion.stop_reason == wire::StopReason::Cancelled {
+                    state.clear_cancelled(&request.session_id).await;
+                }
                 return Ok(prompt_response(completion.stop_reason));
             }
             Ok(Err(_)) => {
                 if state.was_cancelled(&request.session_id).await {
+                    state.clear_cancelled(&request.session_id).await;
                     return Ok(prompt_response(wire::StopReason::Cancelled));
                 }
                 return Ok(prompt_response(wire::StopReason::EndTurn));
@@ -2165,6 +1360,7 @@ async fn handle_prompt(
             Err(_) => {
                 state.mark_cancelled(&request.session_id).await;
                 interrupt_acp_session(agent, state, &request.session_id).await;
+                state.clear_cancelled(&request.session_id).await;
                 return Ok(prompt_response(wire::StopReason::Cancelled));
             }
         }
@@ -2172,6 +1368,7 @@ async fn handle_prompt(
 
     if state.was_cancelled(&request.session_id).await {
         let _ = state.take_prompt_waiter(&request.session_id).await;
+        state.clear_cancelled(&request.session_id).await;
         return Ok(prompt_response(wire::StopReason::Cancelled));
     }
 
@@ -2200,74 +1397,9 @@ async fn interrupt_acp_session(agent: Arc<Agent>, state: &AcpSharedState, sessio
     }
 }
 
-fn initialize_response(protocol_version: u64) -> InitializeResponse {
-    InitializeResponse {
-        protocol_version,
-        agent_capabilities: AgentCapabilities {
-            load_session: true,
-            prompt_capabilities: PromptCapabilities {
-                image: false,
-                audio: false,
-                embedded_context: true,
-            },
-            mcp_capabilities: McpCapabilities {
-                http: false,
-                sse: false,
-            },
-            session_capabilities: SessionCapabilities {
-                close: json!({}),
-                list: json!({}),
-                resume: None,
-            },
-        },
-        agent_info: AcpImplementation {
-            name: "thinclaw".to_string(),
-            title: Some("ThinClaw".to_string()),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        },
-        auth_methods: Vec::new(),
-        _meta: Some(json!({
-            "toolProfile": "acp",
-            "loadSessionScope": "active_process"
-        })),
-    }
-}
-
-fn validate_cwd(cwd: &str) -> Result<(), JsonRpcError> {
-    if cwd.trim().is_empty() {
-        return Err(json_rpc_error(-32602, "cwd is required", None));
-    }
-    if !Path::new(cwd).is_absolute() {
-        return Err(json_rpc_error(-32602, "cwd must be an absolute path", None));
-    }
-    Ok(())
-}
-
-fn validate_mcp_servers(servers: &[Value]) -> Result<(), JsonRpcError> {
-    for server in servers {
-        let server_type = server
-            .get("type")
-            .or_else(|| server.get("transport"))
-            .and_then(Value::as_str)
-            .unwrap_or("stdio");
-        if matches!(server_type, "http" | "sse") {
-            return Err(json_rpc_error(
-                -32602,
-                format!(
-                    "ACP MCP server transport '{server_type}' is not advertised by this ThinClaw build"
-                ),
-                None,
-            ));
-        }
-        if server_type != "stdio" {
-            return Err(json_rpc_error(
-                -32602,
-                format!("Unsupported ACP MCP server transport: {server_type}"),
-                None,
-            ));
-        }
-    }
-    Ok(())
+#[cfg(test)]
+fn initialize_response(protocol_version: u64) -> wire::InitializeResponse {
+    thinclaw_channels::acp::initialize_response(protocol_version, env!("CARGO_PKG_VERSION"))
 }
 
 async fn configure_acp_mcp_servers(
@@ -2329,124 +1461,27 @@ fn acp_mcp_server_config(
     index: usize,
     server: &Value,
 ) -> Result<McpServerConfig, JsonRpcError> {
-    let server_type = server
-        .get("type")
-        .or_else(|| server.get("transport"))
-        .and_then(Value::as_str)
-        .unwrap_or("stdio");
-    if server_type != "stdio" {
-        return Err(json_rpc_error(
-            -32602,
-            format!("Unsupported ACP MCP server transport: {server_type}"),
-            None,
-        ));
-    }
-
-    let command = server
-        .get("command")
-        .and_then(Value::as_str)
-        .filter(|command| !command.trim().is_empty())
-        .ok_or_else(|| json_rpc_error(-32602, "stdio MCP server command is required", None))?;
-    let args = server
-        .get("args")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .map(|value| {
-                    value.as_str().map(str::to_string).ok_or_else(|| {
-                        json_rpc_error(-32602, "stdio MCP server args must be strings", None)
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let env = server
-        .get("env")
-        .and_then(Value::as_object)
-        .map(|object| {
-            object
-                .iter()
-                .map(|(key, value)| {
-                    value
-                        .as_str()
-                        .map(|value| (key.clone(), value.to_string()))
-                        .ok_or_else(|| {
-                            json_rpc_error(
-                                -32602,
-                                "stdio MCP server env values must be strings",
-                                None,
-                            )
-                        })
-                })
-                .collect::<Result<BTreeMap<_, _>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    let label = server
-        .get("name")
-        .or_else(|| server.get("id"))
-        .and_then(Value::as_str)
-        .unwrap_or(command);
-    let session_prefix = session_id.chars().take(8).collect::<String>();
-    let name = format!(
-        "acp-{}-{}-{}",
-        session_prefix,
-        index + 1,
-        sanitize_mcp_name(label)
-    );
-    let mut config = McpServerConfig::new_stdio(name, command, args).with_env(env);
-    config.display_name = server
-        .get("displayName")
-        .or_else(|| server.get("name"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    config.description = server
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let descriptor = thinclaw_channels::acp::acp_mcp_server_descriptor(session_id, index, server)
+        .map_err(|error| json_rpc_error(-32602, error, None))?;
+    let mut config =
+        McpServerConfig::new_stdio(descriptor.name, descriptor.command, descriptor.args)
+            .with_env(descriptor.env);
+    config.display_name = descriptor.display_name;
+    config.description = descriptor.description;
     config.metadata = Some(json!({
         "source": "acp",
         "acpSessionId": session_id,
-        "descriptor": server
+        "descriptor": descriptor.raw_descriptor
     }));
     Ok(config)
-}
-
-fn sanitize_mcp_name(value: &str) -> String {
-    let sanitized = value
-        .chars()
-        .filter_map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-                Some(ch.to_ascii_lowercase())
-            } else if ch.is_ascii_whitespace() || matches!(ch, '/' | ':' | '.') {
-                Some('-')
-            } else {
-                None
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string();
-    if sanitized.is_empty() {
-        "server".to_string()
-    } else {
-        sanitized
-    }
 }
 
 fn replay_session_transcript(
     writer_tx: &OutboundTx,
     session: &AcpSessionState,
 ) -> Result<(), JsonRpcError> {
-    for entry in &session.transcript {
-        let update = match entry.role.as_str() {
-            "user" => user_message_chunk(&entry.content),
-            "assistant" => agent_message_chunk(&entry.content),
-            _ => continue,
-        };
-        send_outbound(writer_tx, session_update(&session.session_id, update))
+    for message in thinclaw_channels::acp::transcript_replay_updates(session) {
+        send_outbound(writer_tx, message)
             .map_err(|error| json_rpc_error(-32000, error.to_string(), None))?;
     }
     Ok(())
@@ -2612,14 +1647,7 @@ async fn durable_session_state(
         if message.role != "user" && message.role != "assistant" {
             continue;
         }
-        if message.role == "user" && session.title.is_none() {
-            session.title = Some(title_from_prompt(&message.content));
-        }
-        session.transcript.push(AcpTranscriptEntry {
-            role: message.role,
-            content: message.content,
-            created_at: message.created_at,
-        });
+        session.append_transcript_at(&message.role, message.content, message.created_at);
     }
     if let Some(first) = session.transcript.first() {
         session.created_at = first.created_at;
@@ -2630,101 +1658,8 @@ async fn durable_session_state(
     Ok(session)
 }
 
-fn acp_cwd_from_metadata(metadata: &Value) -> Option<&str> {
-    metadata
-        .get("acp")
-        .and_then(|value| value.get("cwd"))
-        .and_then(Value::as_str)
-        .or_else(|| metadata.get("acp_cwd").and_then(Value::as_str))
-        .filter(|cwd| Path::new(cwd).is_absolute())
-}
-
 fn prompt_to_text_result(prompt: &Value) -> Result<String, JsonRpcError> {
-    match prompt {
-        Value::String(text) => Ok(text.clone()),
-        Value::Array(blocks) => Ok(blocks
-            .iter()
-            .map(content_block_to_text_result)
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join("\n\n")),
-        other => Ok(content_block_to_text_result(other)?.unwrap_or_default()),
-    }
-}
-
-fn content_block_to_text_result(block: &Value) -> Result<Option<String>, JsonRpcError> {
-    let kind = block
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if kind == "image" || kind == "audio" {
-        return Err(json_rpc_error(
-            -32602,
-            format!("ACP prompt content type '{kind}' is not advertised by this ThinClaw build"),
-            None,
-        ));
-    }
-    if kind.is_empty() {
-        return Ok(None);
-    }
-
-    let content: wire::ContentBlock =
-        serde_json::from_value(block.clone()).map_err(|error| match kind {
-            "resource" => json_rpc_error(
-                -32602,
-                format!("Invalid ACP resource content block: {error}"),
-                None,
-            ),
-            "resource_link" | "resourceLink" => json_rpc_error(
-                -32602,
-                format!("Invalid ACP resource_link content block: {error}"),
-                None,
-            ),
-            "text" => json_rpc_error(
-                -32602,
-                format!("Invalid ACP text content block: {error}"),
-                None,
-            ),
-            other => json_rpc_error(
-                -32602,
-                format!("Unsupported ACP prompt content type: {other}"),
-                None,
-            ),
-        })?;
-
-    match content {
-        wire::ContentBlock::Text { text } => Ok(Some(text)),
-        wire::ContentBlock::Resource { resource } => Ok(resource
-            .text
-            .as_deref()
-            .map(|text| format_resource_text(&resource, text))
-            .or_else(|| {
-                resource
-                    .uri
-                    .as_deref()
-                    .map(|uri| format!("Context resource: {uri}"))
-            })),
-        wire::ContentBlock::ResourceLink { uri, .. } => {
-            Ok(Some(format!("Context resource: {uri}")))
-        }
-    }
-}
-
-fn format_resource_text(resource: &wire::EmbeddedResource, text: &str) -> String {
-    if let Some(uri) = resource.uri.as_deref() {
-        format!("Context resource: {uri}\n\n{text}")
-    } else {
-        text.to_string()
-    }
-}
-
-fn acp_session_id(metadata: &Value) -> Option<&str> {
-    metadata
-        .get("acp_session_id")
-        .and_then(Value::as_str)
-        .or_else(|| metadata.get("sessionId").and_then(Value::as_str))
+    prompt_to_text(prompt).map_err(|error| json_rpc_error(-32602, error.to_string(), None))
 }
 
 async fn status_to_acp_messages(
@@ -2735,23 +1670,19 @@ async fn status_to_acp_messages(
     match status {
         StatusUpdate::Thinking(content) => vec![session_update(
             session_id,
-            json!({
-                "sessionUpdate": "agent_thought_chunk",
-                "content": text_content(content)
-            }),
+            thinclaw_channels::acp::agent_thought_chunk(content),
         )],
         StatusUpdate::Status(content) => vec![session_update(
             session_id,
-            json!({
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": format!("status_{}", state.next_counter()),
-                "status": "in_progress",
-                "content": [tool_content_text(content)]
-            }),
+            thinclaw_channels::acp::tool_call_update(
+                &format!("status_{}", state.next_counter()),
+                "in_progress",
+                Some(&content),
+            ),
         )],
         StatusUpdate::Plan { entries } => vec![session_update(
             session_id,
-            wire::to_value(wire::SessionUpdate::Plan { entries }),
+            thinclaw_channels::acp::plan_update(entries),
         )],
         StatusUpdate::Usage {
             input_tokens,
@@ -2760,15 +1691,12 @@ async fn status_to_acp_messages(
             model,
         } => vec![session_update(
             session_id,
-            wire::to_value(wire::SessionUpdate::UsageUpdate {
-                usage: json!({
-                    "inputTokens": input_tokens,
-                    "outputTokens": output_tokens,
-                    "totalTokens": input_tokens as u64 + output_tokens as u64,
-                    "costUsd": cost_usd,
-                    "model": model
-                }),
-            }),
+            thinclaw_channels::acp::usage_update(
+                input_tokens as u64,
+                output_tokens as u64,
+                cost_usd,
+                model,
+            ),
         )],
         StatusUpdate::StreamChunk(content) => {
             vec![session_update(session_id, agent_message_chunk(&content))]
@@ -2777,15 +1705,14 @@ async fn status_to_acp_messages(
             let tool_call_id = state.tool_call_started(session_id, &name).await;
             vec![session_update(
                 session_id,
-                json!({
-                    "sessionUpdate": "tool_call",
-                    "toolCallId": tool_call_id,
-                    "title": name,
-                    "kind": tool_kind(&name),
-                    "status": "pending",
-                    "rawInput": parameters.clone().unwrap_or(Value::Null),
-                    "_meta": { "parameters": parameters }
-                }),
+                thinclaw_channels::acp::tool_call(
+                    &tool_call_id,
+                    name.clone(),
+                    tool_kind(&name),
+                    "pending",
+                    parameters.clone().unwrap_or(Value::Null),
+                    Some(json!({ "parameters": parameters })),
+                ),
             )]
         }
         StatusUpdate::ToolCompleted {
@@ -2796,24 +1723,22 @@ async fn status_to_acp_messages(
             let tool_call_id = state.tool_call_update_id(session_id, &name, true).await;
             vec![session_update(
                 session_id,
-                json!({
-                    "sessionUpdate": "tool_call_update",
-                    "toolCallId": tool_call_id,
-                    "status": if success { "completed" } else { "failed" },
-                    "content": result_preview.map(|preview| vec![tool_content_text(preview)]),
-                }),
+                thinclaw_channels::acp::tool_call_update(
+                    &tool_call_id,
+                    if success { "completed" } else { "failed" },
+                    result_preview.as_deref(),
+                ),
             )]
         }
         StatusUpdate::ToolResult { name, preview } => {
             let tool_call_id = state.tool_call_update_id(session_id, &name, false).await;
             vec![session_update(
                 session_id,
-                json!({
-                    "sessionUpdate": "tool_call_update",
-                    "toolCallId": tool_call_id,
-                    "status": "in_progress",
-                    "content": [tool_content_text(preview)]
-                }),
+                thinclaw_channels::acp::tool_call_update(
+                    &tool_call_id,
+                    "in_progress",
+                    Some(&preview),
+                ),
             )]
         }
         StatusUpdate::ApprovalNeeded {
@@ -2836,36 +1761,32 @@ async fn status_to_acp_messages(
             vec![
                 session_update(
                     session_id,
-                    json!({
-                        "sessionUpdate": "tool_call",
-                        "toolCallId": tool_call_id,
-                        "title": format!("Approval needed: {tool_name}"),
-                        "kind": tool_kind(&tool_name),
-                        "status": "pending",
-                        "rawInput": parameters.clone(),
-                        "_meta": {
+                    thinclaw_channels::acp::tool_call(
+                        &tool_call_id,
+                        format!("Approval needed: {tool_name}"),
+                        tool_kind(&tool_name),
+                        "pending",
+                        parameters.clone(),
+                        Some(json!({
                             "approvalNeeded": true,
                             "description": description,
                             "parameters": parameters
-                        }
-                    }),
+                        })),
+                    ),
                 ),
                 client_request(
                     Value::Number(client_request_id.parse::<u64>().unwrap_or_default().into()),
                     "session/request_permission",
-                    json!({
-                        "sessionId": session_id,
-                        "toolCall": {
-                            "sessionUpdate": "tool_call_update",
-                            "toolCallId": tool_call_id,
-                            "title": format!("Approval needed: {tool_name}"),
-                            "kind": tool_kind(&tool_name),
-                            "status": "pending",
-                            "rawInput": parameters,
-                            "_meta": { "description": description }
-                        },
-                        "options": permission_options()
-                    }),
+                    thinclaw_channels::acp::request_permission_params(
+                        session_id,
+                        thinclaw_channels::acp::permission_tool_call_update(
+                            &tool_call_id,
+                            format!("Approval needed: {tool_name}"),
+                            tool_kind(&tool_name),
+                            parameters,
+                            description,
+                        ),
+                    ),
                 ),
             ]
         }
@@ -2877,11 +1798,7 @@ async fn status_to_acp_messages(
         }
         StatusUpdate::Error { message, code } => vec![session_update(
             session_id,
-            json!({
-                "sessionUpdate": "agent_message_chunk",
-                "content": text_content(format!("Error: {message}")),
-                "_meta": { "code": code }
-            }),
+            thinclaw_channels::acp::agent_error_message_chunk(&message, code),
         )],
         StatusUpdate::SubagentSpawned {
             agent_id,
@@ -2890,15 +1807,7 @@ async fn status_to_acp_messages(
             ..
         } => vec![session_update(
             session_id,
-            json!({
-                "sessionUpdate": "tool_call",
-                "toolCallId": format!("subagent_{agent_id}"),
-                "title": format!("Sub-agent: {name}"),
-                "kind": "think",
-                "status": "pending",
-                "rawInput": { "task": task },
-                "_meta": { "subagentId": agent_id }
-            }),
+            thinclaw_channels::acp::subagent_tool_call(agent_id, &name, &task),
         )],
         StatusUpdate::SubagentProgress {
             agent_id,
@@ -2906,13 +1815,7 @@ async fn status_to_acp_messages(
             category,
         } => vec![session_update(
             session_id,
-            json!({
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": format!("subagent_{agent_id}"),
-                "status": "in_progress",
-                "content": [tool_content_text(message)],
-                "_meta": { "category": category }
-            }),
+            thinclaw_channels::acp::subagent_progress_update(agent_id, &message, json!(category)),
         )],
         StatusUpdate::SubagentCompleted {
             agent_id,
@@ -2923,16 +1826,13 @@ async fn status_to_acp_messages(
             ..
         } => vec![session_update(
             session_id,
-            json!({
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": format!("subagent_{agent_id}"),
-                "status": if success { "completed" } else { "failed" },
-                "content": [tool_content_text(response)],
-                "_meta": {
-                    "durationMs": duration_ms,
-                    "iterations": iterations
-                }
-            }),
+            thinclaw_channels::acp::subagent_completed_update(
+                agent_id,
+                success,
+                &response,
+                duration_ms,
+                iterations as u64,
+            ),
         )],
         StatusUpdate::LifecycleStart { .. }
         | StatusUpdate::LifecycleEnd { .. }
@@ -2943,106 +1843,45 @@ async fn status_to_acp_messages(
     }
 }
 
-fn tool_kind(name: &str) -> &'static str {
-    match name {
-        "read_file" | "memory_read" | "skill_read" | "session_search" => "read",
-        "write_file" | "apply_patch" | "memory_write" | "skill_manage" => "edit",
-        "memory_delete" | "skill_remove" => "delete",
-        "grep" | "search_files" | "memory_search" | "skill_search" => "search",
-        "shell" | "process" | "execute_code" => "execute",
-        "agent_think" => "think",
-        "http" | "browser" => "fetch",
-        _ => "other",
-    }
-}
-
 fn agent_message_chunk(content: &str) -> Value {
-    wire::to_value(wire::SessionUpdate::AgentMessageChunk {
-        content: wire::ContentBlock::text(content),
-    })
-}
-
-fn user_message_chunk(content: &str) -> Value {
-    wire::to_value(wire::SessionUpdate::UserMessageChunk {
-        content: wire::ContentBlock::text(content),
-    })
+    thinclaw_channels::acp::agent_message_chunk(content)
 }
 
 fn tool_call_update(tool_call_id: &str, status: &str, content: Option<&str>) -> Value {
-    json!({
-        "sessionUpdate": "tool_call_update",
-        "toolCallId": tool_call_id,
-        "status": status,
-        "content": content.map(|content| vec![tool_content_text(content)])
-    })
+    thinclaw_channels::acp::tool_call_update(tool_call_id, status, content)
 }
 
 fn text_content(content: impl Into<String>) -> Value {
-    wire::to_value(wire::ContentBlock::text(content))
+    thinclaw_channels::acp::text_content(content)
 }
 
-fn tool_content_text(content: impl Into<String>) -> Value {
-    wire::to_value(wire::ToolContentBlock::text(content))
-}
-
+#[cfg(test)]
 fn permission_options() -> Vec<Value> {
-    vec![
-        json!({
-            "optionId": "allow-once",
-            "name": "Allow once",
-            "kind": "allow_once"
-        }),
-        json!({
-            "optionId": "allow-always",
-            "name": "Always allow this tool in this session",
-            "kind": "allow_always"
-        }),
-        json!({
-            "optionId": "reject-once",
-            "name": "Reject",
-            "kind": "reject_once"
-        }),
-    ]
+    thinclaw_channels::acp::permission_options()
 }
 
 fn prompt_response(stop_reason: wire::StopReason) -> Value {
-    wire::to_value(wire::PromptResponse { stop_reason })
+    thinclaw_channels::acp::prompt_response(stop_reason.as_str())
 }
 
 fn session_update(session_id: &str, update: Value) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "method": "session/update",
-        "params": {
-            "sessionId": session_id,
-            "update": update
-        }
-    })
+    thinclaw_channels::acp::session_update(session_id, update)
 }
 
 fn client_request(id: Value, method: &'static str, params: Value) -> Value {
-    serde_json::to_value(JsonRpcRequest {
-        jsonrpc: "2.0",
-        id,
-        method,
-        params,
-    })
-    .unwrap_or_else(|_| json!({"jsonrpc": "2.0", "id": null, "method": method, "params": {}}))
+    thinclaw_channels::acp::client_request(id, method, params)
 }
 
 fn session_info(session: &AcpSessionState) -> Value {
-    json!({
-        "sessionId": session.session_id,
-        "cwd": session.cwd,
-        "title": session.title.as_deref(),
-        "createdAt": session.created_at.to_rfc3339(),
-        "updatedAt": session.updated_at.to_rfc3339(),
-        "_meta": {
-            "modeId": session.mode_id,
-            "messageCount": session.transcript.len(),
-            "loadSessionScope": "active_process"
-        }
-    })
+    thinclaw_channels::acp::session_info(
+        &session.session_id,
+        &session.cwd,
+        session.title.as_deref(),
+        &session.created_at.to_rfc3339(),
+        &session.updated_at.to_rfc3339(),
+        &session.mode_id,
+        session.transcript.len(),
+    )
 }
 
 fn session_info_update(
@@ -3050,67 +1889,19 @@ fn session_info_update(
     updated_at: Option<String>,
     meta: Option<Value>,
 ) -> Value {
-    wire::to_value(wire::SessionUpdate::SessionInfoUpdate {
-        title,
-        updated_at,
-        meta,
-    })
-}
-
-fn session_modes(current_mode_id: &str) -> Value {
-    json!({
-        "currentModeId": current_mode_id,
-        "availableModes": [
-            {
-                "id": "ask",
-                "name": "Ask",
-                "description": "Request permission before file or command changes."
-            },
-            {
-                "id": "code",
-                "name": "Code",
-                "description": "Use ThinClaw's ACP editor tool profile for code-editing tasks."
-            }
-        ]
-    })
-}
-
-fn session_config_options() -> Value {
-    json!([])
+    thinclaw_channels::acp::session_info_update(title, updated_at, meta)
 }
 
 fn success_response(id: Option<Value>, result: Value) -> Value {
-    serde_json::to_value(JsonRpcResponse {
-        jsonrpc: "2.0",
-        id,
-        result: Some(result),
-        error: None,
-    })
-    .unwrap_or_else(|_| json!({"jsonrpc": "2.0", "result": null}))
+    thinclaw_channels::acp::success_response(id, result)
 }
 
 fn error_response(id: Option<Value>, code: i64, message: String, data: Option<Value>) -> Value {
-    serde_json::to_value(JsonRpcResponse {
-        jsonrpc: "2.0",
-        id,
-        result: None,
-        error: Some(JsonRpcError {
-            code,
-            message,
-            data,
-        }),
-    })
-    .unwrap_or_else(
-        |_| json!({"jsonrpc": "2.0", "error": {"code": -32603, "message": "Internal error"}}),
-    )
+    thinclaw_channels::acp::error_response(id, code, message, data)
 }
 
 fn json_rpc_error(code: i64, message: impl Into<String>, data: Option<Value>) -> JsonRpcError {
-    JsonRpcError {
-        code,
-        message: message.into(),
-        data,
-    }
+    thinclaw_channels::acp::json_rpc_error(code, message, data)
 }
 
 fn send_outbound(tx: &OutboundTx, value: Value) -> Result<(), ChannelError> {
@@ -3121,32 +1912,15 @@ fn send_outbound(tx: &OutboundTx, value: Value) -> Result<(), ChannelError> {
 }
 
 fn json_rpc_id_key(id: &Value) -> String {
-    match id {
-        Value::String(value) => value.clone(),
-        Value::Number(value) => value.to_string(),
-        other => other.to_string(),
-    }
+    thinclaw_channels::acp::json_rpc_id_key(id)
 }
 
 fn acp_metadata(session_id: &str) -> Value {
-    json!({
-        "acp": true,
-        "acp_session_id": session_id,
-        "thread_id": session_id,
-        "tool_profile": "acp",
-        "principal_id": ACP_USER_ID,
-        "session_key": mint_session_key("acp", "session", session_id),
-    })
+    thinclaw_channels::acp::acp_metadata(session_id, ACP_USER_ID)
 }
 
 fn acp_metadata_with_cwd(session_id: &str, cwd: &str) -> Value {
-    let mut metadata = acp_metadata(session_id);
-    if let Some(object) = metadata.as_object_mut() {
-        object.insert("acp_cwd".to_string(), json!(cwd));
-        object.insert("tool_base_dir".to_string(), json!(cwd));
-        object.insert("tool_working_dir".to_string(), json!(cwd));
-    }
-    metadata
+    thinclaw_channels::acp::acp_metadata_with_cwd(session_id, ACP_USER_ID, cwd)
 }
 
 async fn acp_metadata_for_session(state: &AcpSharedState, session_id: &str) -> Value {
@@ -3168,19 +1942,10 @@ fn acp_identity(session_id: &str) -> ResolvedIdentity {
     }
 }
 
-fn title_from_prompt(prompt: &str) -> String {
-    let collapsed = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    let title = collapsed.chars().take(80).collect::<String>();
-    if title.is_empty() {
-        "ACP session".to_string()
-    } else {
-        title
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use thinclaw_channels::acp::session_modes;
 
     fn assert_json_schema_valid(schema: &Value, instance: &Value) {
         let compiled = jsonschema::JSONSchema::compile(schema).expect("schema fixture compiles");
@@ -3384,16 +2149,8 @@ mod tests {
         let session_id = Uuid::new_v4().to_string();
         let mut session =
             AcpSessionState::new(session_id.clone(), "/tmp/project".to_string(), Vec::new());
-        session.transcript.push(AcpTranscriptEntry {
-            role: "user".to_string(),
-            content: "first prompt".to_string(),
-            created_at: Utc::now(),
-        });
-        session.transcript.push(AcpTranscriptEntry {
-            role: "assistant".to_string(),
-            content: "first answer".to_string(),
-            created_at: Utc::now(),
-        });
+        session.append_transcript("user", "first prompt");
+        session.append_transcript("assistant", "first answer");
         state.upsert_session(session).await;
 
         let (writer_tx, mut writer_rx) = mpsc::unbounded_channel();

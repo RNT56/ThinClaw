@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -123,6 +125,11 @@ const ZERO_WIDTH_CHARS: &[char] = &['\u{200b}', '\u{200c}', '\u{200d}', '\u{2060
 
 const EXTERNAL_SCANNER_TIMEOUT: Duration = Duration::from_secs(2);
 const EXTERNAL_SCANNER_INSTALL_FAILURE_TTL: Duration = Duration::from_secs(60 * 60 * 24);
+const SCANNER_MANIFEST_EXTENSION: &str = "manifest.json";
+const TRUSTED_SCANNER_KEYS: &[(&str, &str)] = &[(
+    "thinclaw-shell-scanner-release-v1",
+    "Uifx7MAec5x/6by//vk4hW0AY13EDHNqhLpJO/9SrKU=",
+)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -166,6 +173,17 @@ pub enum ExternalScanVerdict {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalScannerProvenanceStatus {
+    Verified,
+    ConfiguredUnverified,
+    PathUnverified,
+    MissingManifest,
+    InvalidSignature,
+    Off,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalScanReport {
     pub verdict: ExternalScanVerdict,
@@ -205,6 +223,7 @@ impl ExternalScanReport {
 pub struct ExternalScannerHealth {
     pub mode: ExternalScannerMode,
     pub available: bool,
+    pub provenance_status: ExternalScannerProvenanceStatus,
     pub source: Option<String>,
     pub path: Option<PathBuf>,
     pub cooldown_until: Option<SystemTime>,
@@ -215,6 +234,7 @@ pub struct ExternalScannerHealth {
 pub struct ExternalCommandScanner {
     mode: ExternalScannerMode,
     configured_path: Option<PathBuf>,
+    require_verified: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +243,32 @@ enum ScannerPathSource {
     Path,
     Bundled,
     Cached,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedExternalScanner {
+    source: ScannerPathSource,
+    path: PathBuf,
+    provenance_status: ExternalScannerProvenanceStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScannerProvenanceManifest {
+    pub binary_name: String,
+    pub version: String,
+    pub target_triple: String,
+    pub sha256: String,
+    pub signature: String,
+    pub key_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ScannerProvenancePayload<'a> {
+    binary_name: &'a str,
+    version: &'a str,
+    target_triple: &'a str,
+    sha256: &'a str,
+    key_id: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -453,6 +499,19 @@ impl ExternalCommandScanner {
         Self {
             mode,
             configured_path,
+            require_verified: false,
+        }
+    }
+
+    pub fn new_with_provenance_requirement(
+        mode: ExternalScannerMode,
+        configured_path: Option<PathBuf>,
+        require_verified: bool,
+    ) -> Self {
+        Self {
+            mode,
+            configured_path,
+            require_verified,
         }
     }
 
@@ -460,11 +519,16 @@ impl ExternalCommandScanner {
         self.mode
     }
 
+    pub fn configured_path(&self) -> Option<&PathBuf> {
+        self.configured_path.as_ref()
+    }
+
     pub fn health(&self) -> ExternalScannerHealth {
         if self.mode == ExternalScannerMode::Off {
             return ExternalScannerHealth {
                 mode: self.mode,
                 available: false,
+                provenance_status: ExternalScannerProvenanceStatus::Off,
                 source: None,
                 path: None,
                 cooldown_until: None,
@@ -473,11 +537,12 @@ impl ExternalCommandScanner {
         }
 
         match self.resolve_binary_path() {
-            Ok((source, path)) => ExternalScannerHealth {
+            Ok(resolved) => ExternalScannerHealth {
                 mode: self.mode,
                 available: true,
-                source: Some(scanner_source_name(source).to_string()),
-                path: Some(path),
+                provenance_status: resolved.provenance_status,
+                source: Some(scanner_source_name(resolved.source).to_string()),
+                path: Some(resolved.path),
                 cooldown_until: install_failure_marker()
                     .and_then(|marker| install_failure_cooldown_until(&marker)),
                 last_error: None,
@@ -485,11 +550,12 @@ impl ExternalCommandScanner {
             Err(error) => ExternalScannerHealth {
                 mode: self.mode,
                 available: false,
+                provenance_status: error.provenance_status,
                 source: None,
                 path: None,
                 cooldown_until: install_failure_marker()
                     .and_then(|marker| install_failure_cooldown_until(&marker)),
-                last_error: Some(error),
+                last_error: Some(error.message),
             },
         }
     }
@@ -499,12 +565,32 @@ impl ExternalCommandScanner {
             return ExternalScanReport::safe();
         }
 
-        let (source, binary_path) = match self.resolve_binary_path() {
+        let resolved = match self.resolve_binary_path() {
             Ok(resolved) => resolved,
-            Err(error) => return ExternalScanReport::unknown(error),
+            Err(error) => return ExternalScanReport::unknown(error.message),
         };
 
-        let mut child = match Command::new(&binary_path)
+        if self.require_verified
+            && resolved.provenance_status != ExternalScannerProvenanceStatus::Verified
+        {
+            return ExternalScanReport::unknown(format!(
+                "external scanner provenance is {:?}; verified provenance is required",
+                resolved.provenance_status
+            ));
+        }
+        if matches!(
+            resolved.source,
+            ScannerPathSource::Bundled | ScannerPathSource::Cached
+        ) && resolved.provenance_status != ExternalScannerProvenanceStatus::Verified
+        {
+            return ExternalScanReport::unknown(format!(
+                "external scanner {} provenance is {:?}; bundled and cached scanners require a verified manifest",
+                scanner_source_name(resolved.source),
+                resolved.provenance_status
+            ));
+        }
+
+        let mut child = match Command::new(&resolved.path)
             .arg("--json")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -515,7 +601,7 @@ impl ExternalCommandScanner {
             Err(error) => {
                 return ExternalScanReport::unknown(format!(
                     "failed to spawn external scanner ({}): {}",
-                    scanner_source_name(source),
+                    scanner_source_name(resolved.source),
                     error
                 ));
             }
@@ -534,7 +620,7 @@ impl ExternalCommandScanner {
                 Ok(Err(error)) => {
                     return ExternalScanReport::unknown(format!(
                         "external scanner execution failed ({}): {}",
-                        scanner_source_name(source),
+                        scanner_source_name(resolved.source),
                         error
                     ));
                 }
@@ -568,48 +654,95 @@ impl ExternalCommandScanner {
         }
     }
 
-    fn resolve_binary_path(&self) -> Result<(ScannerPathSource, PathBuf), String> {
+    fn resolve_binary_path(&self) -> Result<ResolvedExternalScanner, ScannerResolveError> {
         if let Some(path) = self.configured_path.as_ref() {
             if path.is_file() {
-                return Ok((ScannerPathSource::Configured, path.clone()));
+                return Ok(ResolvedExternalScanner {
+                    source: ScannerPathSource::Configured,
+                    path: path.clone(),
+                    provenance_status: ExternalScannerProvenanceStatus::ConfiguredUnverified,
+                });
             }
-            return Err(format!(
-                "configured external scanner path does not exist: {}",
-                path.display()
+            return Err(ScannerResolveError::new(
+                ExternalScannerProvenanceStatus::ConfiguredUnverified,
+                format!(
+                    "configured external scanner path does not exist: {}",
+                    path.display()
+                ),
             ));
         }
 
         if let Some(path) = find_scanner_on_path() {
-            return Ok((ScannerPathSource::Path, path));
+            return Ok(ResolvedExternalScanner {
+                source: ScannerPathSource::Path,
+                path,
+                provenance_status: ExternalScannerProvenanceStatus::PathUnverified,
+            });
         }
 
         if let Some(path) = bundled_scanner_path() {
-            if let Err(error) = ensure_cached_scanner_install(&path) {
+            let provenance_status = match verify_scanner_binary(&path) {
+                Ok(()) => ExternalScannerProvenanceStatus::Verified,
+                Err(error) => error.provenance_status,
+            };
+            if provenance_status == ExternalScannerProvenanceStatus::Verified
+                && let Err(error) = ensure_cached_scanner_install(&path)
+            {
                 tracing::warn!(error = %error, "Failed to refresh cached external scanner install");
             }
-            return Ok((ScannerPathSource::Bundled, path));
+            return Ok(ResolvedExternalScanner {
+                source: ScannerPathSource::Bundled,
+                path,
+                provenance_status,
+            });
         }
 
         if let Some(path) = cached_scanner_path()
             && path.is_file()
         {
-            return Ok((ScannerPathSource::Cached, path));
+            let provenance_status = match verify_scanner_binary(&path) {
+                Ok(()) => ExternalScannerProvenanceStatus::Verified,
+                Err(error) => error.provenance_status,
+            };
+            return Ok(ResolvedExternalScanner {
+                source: ScannerPathSource::Cached,
+                path,
+                provenance_status,
+            });
         }
 
         if let Some(marker) = install_failure_marker()
             && let Some(until) = install_failure_cooldown_until(&marker)
             && until > SystemTime::now()
         {
-            return Err(format!(
-                "external scanner auto-install cooldown active until {:?}: {}",
-                until, marker.reason
+            return Err(ScannerResolveError::new(
+                ExternalScannerProvenanceStatus::MissingManifest,
+                format!(
+                    "external scanner auto-install cooldown active until {:?}: {}",
+                    until, marker.reason
+                ),
             ));
         }
 
-        Err(
-            "no external scanner binary found in configured path, PATH, bundled assets, or cache"
-                .to_string(),
-        )
+        Err(ScannerResolveError::new(
+            ExternalScannerProvenanceStatus::MissingManifest,
+            "no external scanner binary found in configured path, PATH, bundled assets, or cache",
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ScannerResolveError {
+    provenance_status: ExternalScannerProvenanceStatus,
+    message: String,
+}
+
+impl ScannerResolveError {
+    fn new(provenance_status: ExternalScannerProvenanceStatus, message: impl Into<String>) -> Self {
+        Self {
+            provenance_status,
+            message: message.into(),
+        }
     }
 }
 
@@ -650,6 +783,172 @@ fn bundled_scanner_path() -> Option<PathBuf> {
     let current_exe = std::env::current_exe().ok()?;
     let sibling = current_exe.parent()?.join(scanner_binary_name());
     sibling.is_file().then_some(sibling)
+}
+
+fn scanner_manifest_path(binary_path: &Path) -> PathBuf {
+    let file_name = binary_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_else(|| scanner_binary_name());
+    binary_path.with_file_name(format!("{file_name}.{SCANNER_MANIFEST_EXTENSION}"))
+}
+
+fn scanner_provenance_payload(
+    manifest: &ScannerProvenanceManifest,
+) -> Result<Vec<u8>, ScannerResolveError> {
+    let payload = ScannerProvenancePayload {
+        binary_name: &manifest.binary_name,
+        version: &manifest.version,
+        target_triple: &manifest.target_triple,
+        sha256: &manifest.sha256,
+        key_id: &manifest.key_id,
+    };
+    serde_json::to_vec(&payload).map_err(|error| {
+        ScannerResolveError::new(
+            ExternalScannerProvenanceStatus::InvalidSignature,
+            format!("failed to build scanner provenance payload: {error}"),
+        )
+    })
+}
+
+fn trusted_scanner_key(key_id: &str) -> Option<&'static str> {
+    TRUSTED_SCANNER_KEYS
+        .iter()
+        .find_map(|(candidate, key)| (*candidate == key_id).then_some(*key))
+}
+
+fn read_scanner_manifest(
+    binary_path: &Path,
+) -> Result<ScannerProvenanceManifest, ScannerResolveError> {
+    let manifest_path = scanner_manifest_path(binary_path);
+    let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
+        ScannerResolveError::new(
+            ExternalScannerProvenanceStatus::MissingManifest,
+            format!(
+                "external scanner provenance manifest missing or unreadable '{}': {}",
+                manifest_path.display(),
+                error
+            ),
+        )
+    })?;
+    serde_json::from_str(&raw).map_err(|error| {
+        ScannerResolveError::new(
+            ExternalScannerProvenanceStatus::InvalidSignature,
+            format!(
+                "external scanner provenance manifest is invalid JSON '{}': {}",
+                manifest_path.display(),
+                error
+            ),
+        )
+    })
+}
+
+fn verify_scanner_binary(binary_path: &Path) -> Result<(), ScannerResolveError> {
+    let manifest = read_scanner_manifest(binary_path)?;
+    verify_scanner_manifest_inner(binary_path, &manifest)
+}
+
+pub fn verify_scanner_manifest(
+    binary_path: &Path,
+    manifest: &ScannerProvenanceManifest,
+) -> Result<(), String> {
+    verify_scanner_manifest_inner(binary_path, manifest).map_err(|error| error.message)
+}
+
+fn verify_scanner_manifest_inner(
+    binary_path: &Path,
+    manifest: &ScannerProvenanceManifest,
+) -> Result<(), ScannerResolveError> {
+    verify_scanner_manifest_with_keys(binary_path, manifest, TRUSTED_SCANNER_KEYS)
+}
+
+fn verify_scanner_manifest_with_keys(
+    binary_path: &Path,
+    manifest: &ScannerProvenanceManifest,
+    trusted_keys: &[(&str, &str)],
+) -> Result<(), ScannerResolveError> {
+    let binary_name = binary_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if manifest.binary_name != binary_name {
+        return Err(ScannerResolveError::new(
+            ExternalScannerProvenanceStatus::InvalidSignature,
+            format!(
+                "external scanner manifest binary_name mismatch (expected {}, got {})",
+                binary_name, manifest.binary_name
+            ),
+        ));
+    }
+
+    let actual_sha = file_sha256(binary_path).map_err(|error| {
+        ScannerResolveError::new(ExternalScannerProvenanceStatus::InvalidSignature, error)
+    })?;
+    if !actual_sha.eq_ignore_ascii_case(&manifest.sha256) {
+        return Err(ScannerResolveError::new(
+            ExternalScannerProvenanceStatus::InvalidSignature,
+            format!(
+                "external scanner SHA-256 mismatch (expected {}, got {})",
+                manifest.sha256, actual_sha
+            ),
+        ));
+    }
+
+    let public_key_b64 = trusted_keys
+        .iter()
+        .find_map(|(candidate, key)| (*candidate == manifest.key_id).then_some(*key))
+        .or_else(|| trusted_scanner_key(&manifest.key_id))
+        .ok_or_else(|| {
+            ScannerResolveError::new(
+                ExternalScannerProvenanceStatus::InvalidSignature,
+                format!(
+                    "external scanner manifest key_id '{}' is not trusted",
+                    manifest.key_id
+                ),
+            )
+        })?;
+    let public_key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(public_key_b64)
+        .map_err(|error| {
+            ScannerResolveError::new(
+                ExternalScannerProvenanceStatus::InvalidSignature,
+                format!("external scanner public key is not valid base64: {error}"),
+            )
+        })?;
+    let public_key_array: [u8; 32] = public_key_bytes.as_slice().try_into().map_err(|_| {
+        ScannerResolveError::new(
+            ExternalScannerProvenanceStatus::InvalidSignature,
+            "external scanner public key must be 32 bytes",
+        )
+    })?;
+    let verifying_key = VerifyingKey::from_bytes(&public_key_array).map_err(|error| {
+        ScannerResolveError::new(
+            ExternalScannerProvenanceStatus::InvalidSignature,
+            format!("external scanner public key is invalid: {error}"),
+        )
+    })?;
+
+    let signature_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&manifest.signature)
+        .map_err(|error| {
+            ScannerResolveError::new(
+                ExternalScannerProvenanceStatus::InvalidSignature,
+                format!("external scanner signature is not valid base64: {error}"),
+            )
+        })?;
+    let signature = Signature::try_from(signature_bytes.as_slice()).map_err(|_| {
+        ScannerResolveError::new(
+            ExternalScannerProvenanceStatus::InvalidSignature,
+            "external scanner signature must be 64 bytes",
+        )
+    })?;
+    let payload = scanner_provenance_payload(manifest)?;
+    verifying_key.verify(&payload, &signature).map_err(|error| {
+        ScannerResolveError::new(
+            ExternalScannerProvenanceStatus::InvalidSignature,
+            format!("external scanner manifest signature verification failed: {error}"),
+        )
+    })
 }
 
 fn find_scanner_on_path() -> Option<PathBuf> {
@@ -696,6 +995,12 @@ fn write_install_failure_marker(reason: impl Into<String>) {
 }
 
 fn ensure_cached_scanner_install(source_path: &Path) -> Result<(), String> {
+    verify_scanner_binary(source_path).map_err(|error| {
+        let message = error.message;
+        write_install_failure_marker(message.clone());
+        message
+    })?;
+
     let Some(cached_path) = cached_scanner_path() else {
         return Ok(());
     };
@@ -714,6 +1019,15 @@ fn ensure_cached_scanner_install(source_path: &Path) -> Result<(), String> {
 
     let source_sha = file_sha256(source_path)?;
     if cached_path.is_file() && file_sha256(&cached_path)? == source_sha {
+        let _ = std::fs::copy(
+            scanner_manifest_path(source_path),
+            scanner_manifest_path(&cached_path),
+        );
+        verify_scanner_binary(&cached_path).map_err(|error| {
+            let message = error.message;
+            write_install_failure_marker(message.clone());
+            message
+        })?;
         clear_install_failure_marker();
         return Ok(());
     }
@@ -753,6 +1067,24 @@ fn ensure_cached_scanner_install(source_path: &Path) -> Result<(), String> {
             cached_path.display(),
             error
         );
+        write_install_failure_marker(message.clone());
+        message
+    })?;
+
+    let source_manifest_path = scanner_manifest_path(source_path);
+    let cached_manifest_path = scanner_manifest_path(&cached_path);
+    std::fs::copy(&source_manifest_path, &cached_manifest_path).map_err(|error| {
+        let message = format!(
+            "failed to copy external scanner provenance manifest from '{}' to '{}': {}",
+            source_manifest_path.display(),
+            cached_manifest_path.display(),
+            error
+        );
+        write_install_failure_marker(message.clone());
+        message
+    })?;
+    verify_scanner_binary(&cached_path).map_err(|error| {
+        let message = error.message;
         write_install_failure_marker(message.clone());
         message
     })?;
@@ -1181,6 +1513,119 @@ pub fn has_command_token(lower: &str, token: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn signed_test_manifest(
+        binary_path: &Path,
+        signing_key: &SigningKey,
+        key_id: &str,
+    ) -> ScannerProvenanceManifest {
+        let verifying_key = signing_key.verifying_key();
+        let mut manifest = ScannerProvenanceManifest {
+            binary_name: binary_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap()
+                .to_string(),
+            version: "1.2.3".to_string(),
+            target_triple: "test-target".to_string(),
+            sha256: file_sha256(binary_path).unwrap(),
+            signature: String::new(),
+            key_id: key_id.to_string(),
+        };
+        let payload = scanner_provenance_payload(&manifest).unwrap();
+        manifest.signature =
+            base64::engine::general_purpose::STANDARD.encode(signing_key.sign(&payload).to_bytes());
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes()),
+            test_public_key_b64(signing_key)
+        );
+        manifest
+    }
+
+    fn test_public_key_b64(signing_key: &SigningKey) -> String {
+        base64::engine::general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes())
+    }
+
+    #[test]
+    fn verifies_valid_scanner_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary_path = dir.path().join(scanner_binary_name());
+        std::fs::write(&binary_path, b"scanner-bytes").unwrap();
+        let signing_key = SigningKey::from_bytes(&[7; 32]);
+        let key_id = "test-key";
+        let manifest = signed_test_manifest(&binary_path, &signing_key, key_id);
+        let public_key = test_public_key_b64(&signing_key);
+
+        assert!(
+            verify_scanner_manifest_with_keys(
+                &binary_path,
+                &manifest,
+                &[(key_id, public_key.as_str())]
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_scanner_manifest_with_invalid_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary_path = dir.path().join(scanner_binary_name());
+        std::fs::write(&binary_path, b"scanner-bytes").unwrap();
+        let signing_key = SigningKey::from_bytes(&[8; 32]);
+        let key_id = "test-key";
+        let manifest = signed_test_manifest(&binary_path, &signing_key, key_id);
+        let public_key = test_public_key_b64(&signing_key);
+        std::fs::write(&binary_path, b"tampered-scanner-bytes").unwrap();
+
+        let error = verify_scanner_manifest_with_keys(
+            &binary_path,
+            &manifest,
+            &[(key_id, public_key.as_str())],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.provenance_status,
+            ExternalScannerProvenanceStatus::InvalidSignature
+        );
+        assert!(error.message.contains("SHA-256 mismatch"));
+    }
+
+    #[test]
+    fn rejects_scanner_manifest_with_invalid_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary_path = dir.path().join(scanner_binary_name());
+        std::fs::write(&binary_path, b"scanner-bytes").unwrap();
+        let signing_key = SigningKey::from_bytes(&[9; 32]);
+        let key_id = "test-key";
+        let mut manifest = signed_test_manifest(&binary_path, &signing_key, key_id);
+        let public_key = test_public_key_b64(&signing_key);
+        manifest.signature = base64::engine::general_purpose::STANDARD.encode([0; 64]);
+
+        let error = verify_scanner_manifest_with_keys(
+            &binary_path,
+            &manifest,
+            &[(key_id, public_key.as_str())],
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.provenance_status,
+            ExternalScannerProvenanceStatus::InvalidSignature
+        );
+    }
+
+    #[test]
+    fn reports_missing_scanner_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary_path = dir.path().join(scanner_binary_name());
+        std::fs::write(&binary_path, b"scanner-bytes").unwrap();
+
+        let error = verify_scanner_binary(&binary_path).unwrap_err();
+        assert_eq!(
+            error.provenance_status,
+            ExternalScannerProvenanceStatus::MissingManifest
+        );
+    }
 
     #[test]
     fn normalize_command_strips_ansi_escape_sequences() {

@@ -33,6 +33,7 @@ impl SmartApprover {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn from_test_response(response: impl Into<String>) -> Self {
         Self::new(Arc::new(TestResponseProvider {
             response: response.into(),
@@ -63,6 +64,7 @@ fn map_llm_error(err: LlmError) -> String {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 struct TestResponseProvider {
     response: String,
 }

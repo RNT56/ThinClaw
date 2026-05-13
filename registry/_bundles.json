@@ -22,6 +22,7 @@
         "channels/feishu_lark",
         "channels/google_chat",
         "channels/line",
+        "channels/matrix",
         "channels/mattermost",
         "channels/ms_teams",
         "channels/qq",

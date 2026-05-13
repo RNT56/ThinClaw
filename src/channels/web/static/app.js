@@ -4444,6 +4444,34 @@ function createReconfigureButton(extName) {
   return btn;
 }
 
+function renderSetupStatusLine(setup) {
+  if (!setup || !setup.state) return null;
+  const line = document.createElement('div');
+  line.className = 'ext-setup-status ui-resource-note';
+  const state = String(setup.state || '').replace(/_/g, ' ');
+  const auth = String(setup.auth_mode || 'none').replace(/_/g, ' ');
+  const actions = Array.isArray(setup.actions) ? setup.actions.map(function(action) {
+    return String(action).replace(/_/g, ' ');
+  }).join(', ') : '';
+  const required = Array.isArray(setup.required_secrets) ? setup.required_secrets : [];
+  const requiredCount = required.filter(function(secret) { return !secret.optional; }).length;
+  const detail = [];
+  if (setup.message) detail.push(setup.message);
+  if (required.length) {
+    detail.push('Secrets: ' + required.map(function(secret) {
+      return secret.name + (secret.optional ? ' (optional)' : '');
+    }).join(', '));
+  }
+  if (setup.validation_url) detail.push('Validation: ' + setup.validation_url);
+  line.textContent = 'Setup: ' + state + ' · auth: ' + auth
+    + (required.length ? ' · secrets: ' + requiredCount + '/' + required.length + ' required' : '')
+    + (actions ? ' · next: ' + actions : '');
+  if (detail.length) {
+    line.title = detail.join('\n');
+  }
+  return line;
+}
+
 function renderExtensionCard(ext) {
   const card = document.createElement('div');
   card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card';
@@ -4474,6 +4502,11 @@ function renderExtensionCard(ext) {
   // WASM channels get a progress stepper
   if (ext.kind === 'wasm_channel') {
     card.appendChild(renderWasmChannelStepper(ext));
+  }
+
+  const setupLine = renderSetupStatusLine(ext.setup);
+  if (setupLine) {
+    card.appendChild(setupLine);
   }
 
   if (ext.description) {
@@ -4605,6 +4638,14 @@ function renderExtensionCard(ext) {
     }
   }
 
+  if (ext.installed !== false && ext.setup && Array.isArray(ext.setup.actions) && ext.setup.actions.includes('validate')) {
+    const validateBtn = document.createElement('button');
+    validateBtn.className = 'btn-ext configure';
+    validateBtn.textContent = 'Validate';
+    validateBtn.addEventListener('click', () => validateExtensionSetup(ext.name));
+    actions.appendChild(validateBtn);
+  }
+
   const removeBtn = document.createElement('button');
   removeBtn.className = 'btn-ext remove';
   removeBtn.textContent = 'Remove';
@@ -4659,6 +4700,19 @@ function reconnectExtension(name) {
       loadExtensions();
     })
     .catch((err) => showToast('Reconnect failed: ' + err.message, 'error'));
+}
+
+function validateExtensionSetup(name) {
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/validate', { method: 'POST' })
+    .then((res) => {
+      if (!res.success) {
+        showToast('Validation failed: ' + (res.message || 'setup is incomplete'), 'error');
+      } else {
+        showToast(res.message || ('Validated ' + name), 'success');
+      }
+      loadExtensions();
+    })
+    .catch((err) => showToast('Validation failed: ' + err.message, 'error'));
 }
 
 function renderChannelDiagnostics(ext) {
@@ -4747,12 +4801,13 @@ function showConfigureModal(name) {
         showToast(setup.instructions || ('No configuration needed for ' + name), 'info');
         return;
       }
-      renderConfigureModal(name, setup.fields);
+      renderConfigureModal(name, setup);
     })
     .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
 }
 
-function renderConfigureModal(name, secrets) {
+function renderConfigureModal(name, setup) {
+  const secrets = setup.fields || [];
   closeConfigureModal();
   configureModalFocusReturn = document.activeElement;
   const dialog = document.createElement('dialog');
@@ -4776,6 +4831,16 @@ function renderConfigureModal(name, secrets) {
   header.textContent = 'Configure ' + name;
   modal.appendChild(header);
   dialog.setAttribute('aria-labelledby', header.id);
+
+  if (setup.instructions || setup.setup_url || setup.validation_url) {
+    const intro = document.createElement('div');
+    intro.className = 'ui-resource-note';
+    intro.textContent = setup.instructions || setup.setup_url || setup.validation_url || '';
+    if (setup.setup_url || setup.validation_url) {
+      intro.title = [setup.setup_url, setup.validation_url].filter(Boolean).join('\n');
+    }
+    modal.appendChild(intro);
+  }
 
   const form = document.createElement('div');
   form.className = 'configure-form';

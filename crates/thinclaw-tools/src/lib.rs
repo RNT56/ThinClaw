@@ -11,7 +11,11 @@ pub mod intent_display;
 pub mod mcp;
 pub mod registry;
 pub mod smart_approve;
+pub mod user_tool;
 pub mod wasm;
 
-pub use registry::{ToolRegistry, descriptor_allowed_for_profile, tool_allowed_for_lane};
+pub use registry::{
+    ToolRegistry, deny_reason_for_lane, deny_reason_for_profile, descriptor_allowed_for_profile,
+    tool_allowed_for_lane,
+};
 pub use thinclaw_tools_core::*;

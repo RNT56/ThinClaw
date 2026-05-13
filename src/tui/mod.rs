@@ -27,11 +27,11 @@ use ratatui::prelude::*;
 use ratatui_textarea::{Input, Key, TextArea};
 use tokio::sync::mpsc;
 
-use crate::channels::StatusUpdate;
 use crate::platform::shell_launcher;
 use crate::settings::Settings;
 use crate::tui::skin::CliSkin;
 use crate::tui::spinner::KawaiiSpinner;
+pub use thinclaw_channels::tui::{TuiEvent, TuiUpdate};
 
 static RUNTIME_GATEWAY_URL_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
 
@@ -173,79 +173,6 @@ pub struct TuiApp {
     animation_tick: u64,
     /// Timestamp of last meaningful activity (for idle display).
     last_activity: Instant,
-}
-
-/// Events the TUI sends to the agent controller.
-#[derive(Debug)]
-pub enum TuiEvent {
-    /// User submitted a message.
-    UserMessage(String),
-    /// User requested abort.
-    Abort,
-    /// User exited the TUI.
-    Exit,
-}
-
-/// Updates sent to the TUI from the agent/channel manager.
-#[derive(Debug, Clone)]
-pub enum TuiUpdate {
-    /// Agent is thinking/processing.
-    Thinking(String),
-    /// Streaming text chunk.
-    StreamChunk(String),
-    /// Tool started.
-    ToolStarted { name: String },
-    /// Tool completed with result.
-    ToolResult {
-        name: String,
-        result: String,
-        is_error: bool,
-    },
-    /// Final response from the agent.
-    Response(String),
-    /// Status message.
-    Status(String),
-    /// Model changed.
-    ModelChanged(String),
-    /// Approval needed.
-    ApprovalNeeded {
-        tool_name: String,
-        description: String,
-    },
-    /// Error.
-    Error(String),
-    /// Structured message from the agent (question, warning, interim result).
-    AgentMessage {
-        content: String,
-        message_type: String,
-    },
-    /// Sub-agent spawned.
-    SubagentSpawned { name: String, task: String },
-    /// Sub-agent progress.
-    SubagentProgress { name: String, message: String },
-    /// Sub-agent completed.
-    SubagentCompleted {
-        name: String,
-        success: bool,
-        duration_ms: u64,
-    },
-    /// Background job started.
-    JobStarted {
-        title: String,
-        job_id: String,
-        browse_url: String,
-    },
-    /// Extension auth required.
-    AuthRequired {
-        extension_name: String,
-        instructions: Option<String>,
-    },
-    /// Extension auth completed.
-    AuthCompleted {
-        extension_name: String,
-        success: bool,
-        message: String,
-    },
 }
 
 impl TuiApp {
@@ -1064,129 +991,11 @@ fn gateway_enabled_from_env() -> bool {
     }
 }
 
-/// Convert a StatusUpdate to a TuiUpdate.
-impl From<StatusUpdate> for TuiUpdate {
-    fn from(status: StatusUpdate) -> Self {
-        match status {
-            StatusUpdate::StreamChunk(chunk) => TuiUpdate::StreamChunk(chunk),
-            StatusUpdate::Thinking(text) => TuiUpdate::Thinking(text),
-            StatusUpdate::ToolStarted { name, .. } => TuiUpdate::ToolStarted { name },
-            StatusUpdate::ToolResult { name, preview } => TuiUpdate::ToolResult {
-                name,
-                result: preview,
-                is_error: false,
-            },
-            StatusUpdate::ToolCompleted {
-                name,
-                success: false,
-                ..
-            } => TuiUpdate::ToolResult {
-                name,
-                result: "Failed".to_string(),
-                is_error: true,
-            },
-            StatusUpdate::ToolCompleted { .. } => TuiUpdate::Status("Ready".to_string()),
-            StatusUpdate::Status(text) => TuiUpdate::Status(text),
-            StatusUpdate::Plan { entries } => TuiUpdate::Status(
-                serde_json::to_string(&entries).unwrap_or_else(|_| "Plan updated".to_string()),
-            ),
-            StatusUpdate::Usage {
-                input_tokens,
-                output_tokens,
-                ..
-            } => TuiUpdate::Status(format!(
-                "Usage: {input_tokens} input / {output_tokens} output tokens"
-            )),
-            StatusUpdate::Error { message, .. } => TuiUpdate::Error(message),
-            StatusUpdate::ApprovalNeeded {
-                tool_name,
-                description,
-                ..
-            } => TuiUpdate::ApprovalNeeded {
-                tool_name,
-                description,
-            },
-            StatusUpdate::AgentMessage {
-                content,
-                message_type,
-            } => TuiUpdate::AgentMessage {
-                content,
-                message_type,
-            },
-            StatusUpdate::SubagentSpawned { name, task, .. } => {
-                TuiUpdate::SubagentSpawned { name, task }
-            }
-            StatusUpdate::SubagentProgress { message, .. } => TuiUpdate::SubagentProgress {
-                name: String::new(),
-                message,
-            },
-            StatusUpdate::SubagentCompleted {
-                name,
-                success,
-                duration_ms,
-                ..
-            } => TuiUpdate::SubagentCompleted {
-                name,
-                success,
-                duration_ms,
-            },
-            StatusUpdate::JobStarted {
-                job_id,
-                title,
-                browse_url,
-            } => TuiUpdate::JobStarted {
-                title,
-                job_id,
-                browse_url,
-            },
-            StatusUpdate::AuthRequired {
-                extension_name,
-                instructions,
-                ..
-            } => TuiUpdate::AuthRequired {
-                extension_name,
-                instructions,
-            },
-            StatusUpdate::AuthCompleted {
-                extension_name,
-                success,
-                message,
-                ..
-            } => TuiUpdate::AuthCompleted {
-                extension_name,
-                success,
-                message,
-            },
-            StatusUpdate::CanvasAction(ref action) => {
-                let summary = match action {
-                    crate::tools::builtin::CanvasAction::Show {
-                        panel_id, title, ..
-                    } => format!("Canvas: show \"{}\" ({})", title, panel_id),
-                    crate::tools::builtin::CanvasAction::Update { panel_id, .. } => {
-                        format!("Canvas: update ({})", panel_id)
-                    }
-                    crate::tools::builtin::CanvasAction::Dismiss { panel_id } => {
-                        format!("Canvas: dismiss ({})", panel_id)
-                    }
-                    crate::tools::builtin::CanvasAction::Notify { message, .. } => {
-                        format!("Canvas: {}", message)
-                    }
-                };
-                TuiUpdate::Status(summary)
-            }
-            // Lifecycle events are informational; the TUI already shows
-            // streaming indicators via active_stream.
-            StatusUpdate::LifecycleStart { .. } | StatusUpdate::LifecycleEnd { .. } => {
-                TuiUpdate::Status(String::new())
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::helpers::lock_env;
+    use thinclaw_channels::StatusUpdate;
 
     #[test]
     fn test_stream_state_display() {

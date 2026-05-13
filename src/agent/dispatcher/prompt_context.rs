@@ -117,8 +117,12 @@ impl Agent {
         }
         let workspace_prompt = workspace_prompt
             .map(|prompt| {
-                let sanitized =
-                    sanitize_project_context(&prompt, prompt_settings.project_context_max_tokens);
+                let sanitized = sanitize_project_context_for_channel(
+                    &prompt,
+                    prompt_settings.project_context_max_tokens,
+                    Some(&message.channel),
+                    self.deps.safety.redact_pii_in_prompts(),
+                );
                 if sanitized.was_truncated {
                     tracing::info!(
                         thread = %thread_id,
@@ -285,6 +289,60 @@ impl Agent {
         } else {
             None
         };
+        let sanitize_prompt_segment = |segment: &str, content: String| {
+            let sanitized = sanitize_project_context_for_channel(
+                &content,
+                prompt_settings.project_context_max_tokens,
+                Some(&message.channel),
+                self.deps.safety.redact_pii_in_prompts(),
+            );
+            if sanitized.was_truncated {
+                tracing::info!(
+                    thread = %thread_id,
+                    segment,
+                    "Prompt context segment was truncated to fit prompt.project_context_max_tokens"
+                );
+            }
+            for pattern in &sanitized.warning_patterns {
+                tracing::warn!(
+                    thread = %thread_id,
+                    segment,
+                    pattern = %pattern,
+                    "Suspicious prompt context content detected during prompt assembly"
+                );
+            }
+            sanitized.content
+        };
+        let provider_system_prompt = provider_system_prompt
+            .map(|prompt| sanitize_prompt_segment("provider_system_prompt", prompt));
+        let skill_index_context = skill_index_context
+            .map(|ctx| sanitize_prompt_segment("skills_index", format!("## Skills\n{ctx}")));
+        let active_skill_context = active_skill_context.map(|ctx| {
+            sanitize_prompt_segment("active_skills", format!("## Skill Expansion\n{ctx}"))
+        });
+        let provider_recall_context = provider_context.as_ref().map(|ctx| {
+            sanitize_prompt_segment(
+                "provider_recall",
+                format!("## External Memory Recall\n{}", ctx.rendered_context),
+            )
+        });
+        let linked_recall_context = linked_recall_block.as_ref().map(|block| {
+            sanitize_prompt_segment("linked_recall", format!("## Linked Recall\n{block}"))
+        });
+        let channel_formatting_context = active_channel_hint.as_ref().map(|hints| {
+            sanitize_prompt_segment(
+                "channel_formatting_hints",
+                format!("## Platform Formatting ({})\n{}", message.channel, hints),
+            )
+        });
+        let personality_overlay_context = active_personality_overlay.as_ref().map(|overlay| {
+            sanitize_prompt_segment(
+                "personality_overlay",
+                format!("## Temporary Personality\n\n{overlay}"),
+            )
+        });
+        let post_compaction_fragment = post_compaction_fragment
+            .map(|fragment| sanitize_prompt_segment("post_compaction_fragment", fragment));
         let runtime_capability_hint = {
             let has_execute_code = self.tools().has("execute_code").await;
             let has_shell = self.tools().has("shell").await;
@@ -329,44 +387,24 @@ impl Agent {
             )
             .push_stable(
                 "skills_index",
-                skill_index_context
-                    .map(|ctx| format!("## Skills\n{ctx}"))
-                    .unwrap_or_default(),
+                skill_index_context.unwrap_or_default(),
             )
             .push_ephemeral("transcript_guidance", "Channel transcript guidance: when the user asks about prior Telegram, WebUI, or other channel conversations, use session_search to inspect transcript history. Do not use communication/action tools like telegram_actions to read transcript history or infer account login state; those tools perform live platform actions only.")
             .push_ephemeral(
                 "provider_recall",
-                provider_context
-                    .as_ref()
-                    .map(|ctx| format!("## External Memory Recall\n{}", ctx.rendered_context))
-                    .unwrap_or_default(),
+                provider_recall_context.unwrap_or_default(),
             )
             .push_ephemeral(
                 "linked_recall",
-                linked_recall_block
-                    .as_ref()
-                    .map(|block| format!("## Linked Recall\n{block}"))
-                    .unwrap_or_default(),
+                linked_recall_context.unwrap_or_default(),
             )
             .push_ephemeral(
                 "channel_formatting_hints",
-                active_channel_hint
-                    .as_ref()
-                    .map(|hints| {
-                        format!(
-                            "## Platform Formatting ({})\n{}",
-                            message.channel,
-                            hints
-                        )
-                    })
-                    .unwrap_or_default(),
+                channel_formatting_context.unwrap_or_default(),
             )
             .push_ephemeral(
                 "personality_overlay",
-                active_personality_overlay
-                    .as_ref()
-                    .map(|overlay| format!("## Temporary Personality\n\n{overlay}"))
-                    .unwrap_or_default(),
+                personality_overlay_context.unwrap_or_default(),
             )
             .push_ephemeral(
                 "runtime_capabilities",
@@ -374,9 +412,7 @@ impl Agent {
             )
             .push_ephemeral(
                 "active_skills",
-                active_skill_context
-                    .map(|ctx| format!("## Skill Expansion\n{ctx}"))
-                    .unwrap_or_default(),
+                active_skill_context.unwrap_or_default(),
             )
             .push_ephemeral(
                 "post_compaction_fragment",

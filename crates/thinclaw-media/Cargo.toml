@@ -7,6 +7,8 @@ publish = false
 
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+pdf-extract = { version = "0.7", optional = true }
+regex = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -15,3 +17,8 @@ thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "process", "rt", "macros"] }
 tracing = "0.1"
+zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
+
+[features]
+default = []
+document-extraction = ["dep:pdf-extract", "dep:regex", "dep:zip"]

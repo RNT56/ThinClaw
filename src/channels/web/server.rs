@@ -345,6 +345,10 @@ pub async fn start_server(
             post(extensions_reconnect_handler),
         )
         .route(
+            "/api/extensions/{name}/validate",
+            post(extensions_validate_handler),
+        )
+        .route(
             "/api/extensions/{name}/remove",
             post(extensions_remove_handler),
         )

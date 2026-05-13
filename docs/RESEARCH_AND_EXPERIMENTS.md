@@ -46,6 +46,7 @@ The `src/agent/env/` framework packages ThinClaw's normal multi-turn agent loop 
 - `EnvRunner::serve_openai_compatible` exposes `/v1/chat/completions` for external eval harnesses
 - `TerminalBenchEnv` and `SkillBenchEnv` can now run through Research campaigns by creating an `agent_env` runner with `backend_config.benchmark` set to `terminal_bench` or `skill_bench`
 - trajectory steps carry token/logprob capture metadata when a provider can supply exact token IDs and logprobs; unsupported providers mark the capability flags false rather than pretending synthetic data is exact
+- `thinclaw trajectory export` now produces validated `sft` and `dpo` datasets with optional manifests covering record counts, skipped-record reasons, score thresholds, max-record limits, and output hashes
 
 Example `backend_config` for a terminal benchmark runner:
 
@@ -117,5 +118,7 @@ The research stack now uses the shared execution/runtime hardening path more con
 - Use [AGENT_ENV.md](AGENT_ENV.md) for the eval/SFT environment API
 - Use [SURFACES_AND_COMMANDS.md](SURFACES_AND_COMMANDS.md) for shared cross-surface command vocabulary
 - Use [DEPLOYMENT.md](DEPLOYMENT.md) for service mode, remote execution, and operator setup details
+
+Training export is available today as a local data-preparation step. Automated RL training orchestration and remote fine-tuning job management are still external to ThinClaw's shipped research controller.
 
 Research is complementary to day-to-day chat. The chat surface handles the current conversation; the research surface handles structured, benchmarked, and repeatable improvement work.

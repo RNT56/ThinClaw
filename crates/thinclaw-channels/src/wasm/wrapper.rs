@@ -269,20 +269,6 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .scan_http_request(&url, &raw_header_vec, body.as_deref())
             .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
-        // Check if HTTP is allowed before credential injection.
-        self.host_state
-            .check_http_allowed(&url, &method)
-            .map_err(|e| {
-                tracing::error!(error = %e, "HTTP not allowed");
-                format!("HTTP not allowed: {}", e)
-            })?;
-
-        // Record the request for rate limiting
-        self.host_state.record_http_request().map_err(|e| {
-            tracing::error!(error = %e, "Rate limit exceeded");
-            format!("Rate limit exceeded: {}", e)
-        })?;
-
         // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN} with actual token)
         let injected_url = self.inject_credentials(&url, "url");
 
@@ -312,6 +298,24 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         );
 
         let url = injected_url;
+        let body = body.map(|body_bytes| {
+            std::str::from_utf8(&body_bytes)
+                .map(|text| self.inject_credentials(text, "body").into_bytes())
+                .unwrap_or(body_bytes)
+        });
+
+        self.host_state
+            .check_http_allowed(&url, &method)
+            .map_err(|e| {
+                tracing::error!(error = %e, "HTTP not allowed");
+                format!("HTTP not allowed: {}", e)
+            })?;
+
+        // Record the request for rate limiting
+        self.host_state.record_http_request().map_err(|e| {
+            tracing::error!(error = %e, "Rate limit exceeded");
+            format!("Rate limit exceeded: {}", e)
+        })?;
         // Get the max response size from capabilities (default 10MB).
         let max_response_bytes = self
             .host_state

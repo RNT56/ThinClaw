@@ -145,15 +145,71 @@ New native messaging channels should convert platform payloads into `IncomingEve
 
 This is the foundation for Mattermost, Matrix, SMS/Twilio, browser-push, DingTalk, Feishu/Lark, WeCom, Weixin, QQ, LINE, Google Chat, Microsoft Teams, and Twitch drivers. Platform drivers should own authentication and transport details; the manager owns canonical session identity and command parsing.
 
-Matrix, voice-call, APNs, and browser-push currently exist as native lifecycle
-placeholders. They are config-gated descriptors that appear in channel status
-without starting a transport. This keeps setup/status continuity visible while
-the real drivers are still absent:
+Matrix, voice-call, APNs, and browser-push are native lifecycle surfaces. They
+are config-gated descriptors that appear in channel status until a concrete
+transport instance registers with the manager:
 
 - `MATRIX_ENABLED`
 - `VOICE_CALL_ENABLED` (`--features voice` required before a real transport can run)
 - `APNS_ENABLED`
 - `BROWSER_PUSH_ENABLED` (`--features browser` required before a real transport can run)
+
+Gateway status and the WebUI setup surfaces expose actionable setup readiness
+for these native surfaces. Missing fields are reported using the provider
+environment variable names:
+
+- Matrix: `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN`
+- Voice-call: `VOICE_CALL_RESPONSE_URL`, `VOICE_CALL_WEBHOOK_SECRET`
+- APNs: `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_BUNDLE_ID`, `APNS_PRIVATE_KEY` or `APNS_PRIVATE_KEY_PATH`, `APNS_REGISTRATION_SECRET`
+- Browser push: `BROWSER_PUSH_VAPID_PUBLIC_KEY`, `BROWSER_PUSH_VAPID_PRIVATE_KEY` or `BROWSER_PUSH_VAPID_PRIVATE_KEY_PATH`, `BROWSER_PUSH_VAPID_SUBJECT`, `BROWSER_PUSH_WEBHOOK_SECRET`
+
+APNs and browser-push endpoint registrations are persisted under
+`$THINCLAW_HOME/native-endpoints/apns.json` and
+`$THINCLAW_HOME/native-endpoints/browser-push.json` by default. Operators can
+override those paths with `APNS_ENDPOINT_REGISTRY_PATH` and
+`BROWSER_PUSH_ENDPOINT_REGISTRY_PATH`.
+
+Use `thinclaw channels validate <name>` for a local CLI readiness check.
+
+The crate-owned native driver boundary lives in `thinclaw-channels` as
+`NativeLifecycleChannel`, `NativeLifecycleClient`, `NativeLifecycleEvent`, and
+`NativeOutboundMessage`. Provider-specific clients plug into that boundary:
+
+- ingress clients convert platform callbacks/sync records into `NativeLifecycleEvent`
+- `NativeLifecycleChannel` normalizes those events through `IncomingEvent`
+- outbound replies route through `NativeLifecycleClient::send`
+- health and diagnostics route through `NativeLifecycleClient::validate` and `diagnostics`
+
+The crate also includes provider-specific native HTTP clients for Matrix,
+voice-call response webhooks, APNs, and browser-push wake delivery. The runtime
+registers these clients when the corresponding channel is enabled and required
+credentials are present. CI coverage uses injectable mock HTTP transports to
+validate provider-native URLs, headers, JWT provider-token signing for
+APNs/VAPID, and request payloads.
+
+Enabled native lifecycle channels also mount local webhook ingress routes on the
+shared webhook server:
+
+- `POST /webhook/native/matrix`: accepts a Matrix room event, an `events` array,
+  or a `/sync`-style joined-room timeline response and emits Matrix messages
+  through the shared `IncomingEvent` path.
+- `POST /webhook/native/voice-call`: accepts call transcript payloads and
+  requires `X-ThinClaw-Voice-Secret` when `VOICE_CALL_WEBHOOK_SECRET` is set.
+- `POST /webhook/native/browser-push`: accepts notification action/wake payloads
+  and requires `X-ThinClaw-Browser-Push-Secret` when
+  `BROWSER_PUSH_WEBHOOK_SECRET` is set.
+- `POST /webhook/native/apns/register` and
+  `DELETE /webhook/native/apns/register`: register or remove APNs device tokens
+  for a ThinClaw user. These always require
+  `X-ThinClaw-Apns-Registration-Secret`.
+- `POST /webhook/native/browser-push/register` and
+  `DELETE /webhook/native/browser-push/register`: register or remove browser
+  push subscription endpoints for a ThinClaw user. These always require
+  `X-ThinClaw-Browser-Push-Secret`.
+
+Remaining live-release checks are a real Matrix sync/appservice round trip, real
+APNs delivery, real Web Push service delivery, and a real voice
+media/transcription webhook round trip.
 
 ## Operator Docs
 

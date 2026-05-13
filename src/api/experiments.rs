@@ -4003,8 +4003,8 @@ fn trial_runner_run_artifact(
         AgentRunStatus::Failed => completion.summary.clone(),
         _ => None,
     })
-    .with_runtime_descriptor(Some(&experiment_runner_runtime_descriptor(
-        trial.runner_backend.slug(),
+    .with_runtime_descriptor(Some(&crate::agent::run_artifact::run_runtime_descriptor(
+        &experiment_runner_runtime_descriptor(trial.runner_backend.slug()),
     )))
     .with_prompt_hashes(None, digest_json(&completion.artifact_manifest_json))
     .with_provider_context_refs(provider_context_refs)
@@ -4104,7 +4104,9 @@ fn research_subagent_run_artifact(
         Some(Utc::now()),
     )
     .with_failure_reason(failure_reason.map(str::to_string))
-    .with_runtime_descriptor(Some(&subagent_executor_runtime_descriptor()))
+    .with_runtime_descriptor(Some(&crate::agent::run_artifact::run_runtime_descriptor(
+        &subagent_executor_runtime_descriptor(),
+    )))
     .with_prompt_hashes(
         digest_text(system_prompt),
         digest_json(&serde_json::json!({
@@ -6460,6 +6462,7 @@ mod tests {
                 smart_approval_mode: "off".to_string(),
                 external_scanner_mode: "off".to_string(),
                 external_scanner_path: None,
+                external_scanner_require_verified: false,
             },
         ));
         let tools = Arc::new(ToolRegistry::new());

@@ -4,6 +4,14 @@ fn default_true() -> bool {
     true
 }
 
+fn deserialize_credential_max_concurrent<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    Ok(normalize_credential_max_concurrent(value))
+}
+
 /// Multi-provider cloud intelligence configuration.
 ///
 /// Enables ThinClaw to manage multiple LLM providers with failover,
@@ -197,7 +205,10 @@ pub struct ProvidersSettings {
 
     /// Maximum number of concurrent requests leased to a single routed
     /// provider/credential before failover prefers another available option.
-    #[serde(default = "default_provider_credential_max_concurrent")]
+    #[serde(
+        default = "default_provider_credential_max_concurrent",
+        deserialize_with = "deserialize_credential_max_concurrent"
+    )]
     pub credential_max_concurrent: usize,
 
     /// How the runtime should pick among available provider credentials when
@@ -208,7 +219,7 @@ pub struct ProvidersSettings {
     /// Whether ThinClaw should watch external OAuth credential sources (for
     /// example Claude Code or Codex auth files) and hot-reload the live
     /// provider chain when those tokens change.
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub oauth_sync_enabled: bool,
 
     /// Poll interval in seconds for watched external OAuth credential sources.
@@ -348,6 +359,29 @@ fn default_provider_credential_max_concurrent() -> usize {
     3
 }
 
+pub fn normalize_credential_max_concurrent(value: usize) -> usize {
+    value.max(1)
+}
+
 fn default_oauth_sync_poll_interval_secs() -> u64 {
     30
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializing_missing_oauth_sync_defaults_disabled() {
+        let providers: ProvidersSettings = toml::from_str("").unwrap();
+
+        assert!(!providers.oauth_sync_enabled);
+    }
+
+    #[test]
+    fn deserializing_zero_credential_max_concurrent_clamps_to_one() {
+        let providers: ProvidersSettings = toml::from_str("credential_max_concurrent = 0").unwrap();
+
+        assert_eq!(providers.credential_max_concurrent, 1);
+    }
 }

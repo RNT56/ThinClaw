@@ -42,9 +42,13 @@ pub mod turn_analysis;
 pub mod usage_tracking;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
-pub use credential_sync::{OAuthCredentialSyncHandle, prime_runtime_oauth_credentials};
+pub use credential_sync::{
+    OAuthCredentialSyncHandle, OAuthCredentialSyncStatus, oauth_credential_sync_status,
+    prime_runtime_oauth_credentials,
+};
 pub use failover::{
-    CooldownConfig, FailoverProvider, LeaseConfig, LeaseSelectionStrategy, ProviderLeaseEntry,
+    CooldownConfig, CredentialPoolHealthSnapshot, FailoverProvider, LeaseConfig,
+    LeaseSelectionStrategy, ProviderLeaseEntry,
 };
 pub use prompt_stack::{PromptLayer, PromptStack};
 pub use provider::{

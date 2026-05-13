@@ -520,8 +520,14 @@ pub enum WebhookSecretValidation {
     /// Compare the provided secret directly with the configured secret value.
     #[default]
     Equals,
-    /// Validate the request body using the header value as an HMAC-SHA256 signature.
+    /// Validate the request body using a `sha256=<hex>` HMAC-SHA256 signature.
     HmacSha256Body,
+    /// Validate the request body using a base64 HMAC-SHA256 signature.
+    HmacSha256Base64Body,
+    /// Validate Twitch EventSub signatures over id + timestamp + body.
+    TwitchEventsubHmacSha256,
+    /// Validate Twilio signatures over callback URL plus sorted form fields.
+    TwilioRequestSignature,
 }
 
 /// Setup configuration schema.

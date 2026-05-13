@@ -139,6 +139,58 @@ impl RuntimeEntrypointPlan {
     }
 }
 
+/// Root-independent inputs for deciding which native channels should be
+/// registered by a concrete runtime adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NativeChannelActivationInput {
+    pub cli_only: bool,
+    pub signal_configured: bool,
+    pub nostr_configured: bool,
+    pub discord_configured: bool,
+    pub imessage_configured: bool,
+    pub apple_mail_configured: bool,
+    pub bluebubbles_configured: bool,
+    pub gmail_configured: bool,
+    pub http_configured: bool,
+    pub gateway_configured: bool,
+    pub wasm_channels_enabled: bool,
+    pub wasm_channels_dir_exists: bool,
+}
+
+/// Native channel registration decisions that do not depend on root channel
+/// implementation types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeChannelActivationPlan {
+    pub signal: bool,
+    pub nostr: bool,
+    pub discord: bool,
+    pub imessage: bool,
+    pub apple_mail: bool,
+    pub bluebubbles: bool,
+    pub gmail: bool,
+    pub http: bool,
+    pub gateway: bool,
+    pub wasm_channels: bool,
+}
+
+impl NativeChannelActivationPlan {
+    pub const fn from_input(input: NativeChannelActivationInput) -> Self {
+        let native_enabled = !input.cli_only;
+        Self {
+            signal: native_enabled && input.signal_configured,
+            nostr: native_enabled && input.nostr_configured,
+            discord: native_enabled && input.discord_configured,
+            imessage: native_enabled && input.imessage_configured,
+            apple_mail: native_enabled && input.apple_mail_configured,
+            bluebubbles: native_enabled && input.bluebubbles_configured,
+            gmail: native_enabled && input.gmail_configured,
+            http: native_enabled && input.http_configured,
+            gateway: input.gateway_configured,
+            wasm_channels: input.wasm_channels_enabled && input.wasm_channels_dir_exists,
+        }
+    }
+}
+
 /// Root-independent workspace mode names understood by the app runtime.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum RuntimeWorkspaceMode {
@@ -224,6 +276,29 @@ impl WorkspaceDirectoryPlan {
             },
         }
     }
+
+    /// Computes the user-tool execution directories for a workspace mode.
+    ///
+    /// User tools use the same base/working directory semantics as runtime
+    /// workspace-aware tools, but preserve the historical behavior of only
+    /// creating the sandbox workspace directory eagerly.
+    pub fn for_user_tools(
+        mode: &RuntimeWorkspaceMode,
+        workspace_root: Option<PathBuf>,
+        default_sandbox_workspace: PathBuf,
+        default_project_workspace: PathBuf,
+    ) -> Self {
+        let mut plan = Self::for_mode(
+            mode,
+            workspace_root,
+            default_sandbox_workspace,
+            default_project_workspace,
+        );
+        if !matches!(mode, RuntimeWorkspaceMode::Sandboxed) {
+            plan.create_dir = None;
+        }
+        plan
+    }
 }
 
 /// Inputs needed to compute tool registration plans without root config types.
@@ -249,6 +324,7 @@ pub struct ToolRuntimeAssemblyPlan {
     pub dev_tools_workspace: Option<WorkspaceDirectoryPlan>,
     pub builder_workspace: Option<WorkspaceDirectoryPlan>,
     pub search_files_workspace: Option<WorkspaceDirectoryPlan>,
+    pub user_tools_workspace: WorkspaceDirectoryPlan,
 }
 
 impl ToolRuntimeAssemblyPlan {
@@ -282,6 +358,12 @@ impl ToolRuntimeAssemblyPlan {
         let dev_tools_workspace =
             (input.allow_local_tools && builder_workspace.is_none()).then(directory_plan);
         let search_files_workspace = input.allow_local_tools.then(directory_plan);
+        let user_tools_workspace = WorkspaceDirectoryPlan::for_user_tools(
+            &input.workspace_mode,
+            input.workspace_root.clone(),
+            input.default_sandbox_workspace.clone(),
+            input.default_project_workspace.clone(),
+        );
 
         Self {
             workspace_mode: input.workspace_mode,
@@ -291,6 +373,7 @@ impl ToolRuntimeAssemblyPlan {
             dev_tools_workspace,
             builder_workspace,
             search_files_workspace,
+            user_tools_workspace,
         }
     }
 }
@@ -454,6 +537,12 @@ mod tests {
             dev_workspace.working_dir,
             Some(PathBuf::from("/workspace/project"))
         );
+        assert_eq!(plan.user_tools_workspace.base_dir, None);
+        assert_eq!(
+            plan.user_tools_workspace.working_dir,
+            Some(PathBuf::from("/workspace/project"))
+        );
+        assert_eq!(plan.user_tools_workspace.create_dir, None);
     }
 
     #[test]
@@ -472,6 +561,26 @@ mod tests {
         assert_eq!(
             plan.search_files_workspace.expect("search workspace").scope,
             WorkspaceFilesystemScope::FullFilesystem
+        );
+        assert_eq!(plan.user_tools_workspace.base_dir, None);
+        assert_eq!(plan.user_tools_workspace.working_dir, None);
+    }
+
+    #[test]
+    fn user_tool_workspace_preserves_sandbox_creation_policy() {
+        let plan = ToolRuntimeAssemblyPlan::from_input(tool_input(RuntimeWorkspaceMode::Sandboxed));
+
+        assert_eq!(
+            plan.user_tools_workspace.base_dir,
+            Some(PathBuf::from("/tmp/thinclaw-sandbox"))
+        );
+        assert_eq!(
+            plan.user_tools_workspace.working_dir,
+            Some(PathBuf::from("/tmp/thinclaw-sandbox"))
+        );
+        assert_eq!(
+            plan.user_tools_workspace.create_dir,
+            Some(PathBuf::from("/tmp/thinclaw-sandbox"))
         );
     }
 
@@ -509,5 +618,21 @@ mod tests {
             plan.dependencies.log_broadcaster,
             RuntimeAssemblyRequirement::External
         );
+    }
+
+    #[test]
+    fn native_channel_plan_disables_external_channels_for_cli_only() {
+        let plan = NativeChannelActivationPlan::from_input(NativeChannelActivationInput {
+            cli_only: true,
+            signal_configured: true,
+            gateway_configured: true,
+            wasm_channels_enabled: true,
+            wasm_channels_dir_exists: true,
+            ..NativeChannelActivationInput::default()
+        });
+
+        assert!(!plan.signal);
+        assert!(plan.gateway);
+        assert!(plan.wasm_channels);
     }
 }

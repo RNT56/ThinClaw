@@ -40,6 +40,14 @@ pub struct OAuthCredentialSyncHandle {
     join_handle: JoinHandle<()>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthCredentialSyncStatus {
+    pub enabled: bool,
+    pub source_count: usize,
+    pub synced_env_count: usize,
+    pub last_sync_status: Option<String>,
+}
+
 impl Drop for OAuthCredentialSyncHandle {
     fn drop(&mut self) {
         self.join_handle.abort();
@@ -96,6 +104,30 @@ pub fn prime_runtime_oauth_credentials(providers: &ProvidersSettings) -> usize {
 
     let (snapshot, _) = snapshot_source_state(&sources);
     replace_synced_oauth_vars(snapshot)
+}
+
+pub fn oauth_credential_sync_status(providers: &ProvidersSettings) -> OAuthCredentialSyncStatus {
+    let sources = resolved_sources(providers);
+    if sources.is_empty() {
+        return OAuthCredentialSyncStatus {
+            enabled: false,
+            source_count: 0,
+            synced_env_count: 0,
+            last_sync_status: None,
+        };
+    }
+
+    let (snapshot, _) = snapshot_source_state(&sources);
+    let synced_env_count = snapshot.len();
+    OAuthCredentialSyncStatus {
+        enabled: true,
+        source_count: sources.len(),
+        synced_env_count,
+        last_sync_status: Some(format!(
+            "synced {synced_env_count}/{} OAuth credential source(s)",
+            sources.len()
+        )),
+    }
 }
 
 pub fn provider_oauth_source_kind(slug: &str) -> Option<OAuthCredentialSourceKind> {
@@ -412,6 +444,48 @@ mod tests {
 
         let sources = resolved_sources(&providers);
         assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn oauth_status_reports_disabled_when_no_sources_are_configured() {
+        let status = oauth_credential_sync_status(&ProvidersSettings::default());
+
+        assert!(!status.enabled);
+        assert_eq!(status.source_count, 0);
+        assert_eq!(status.synced_env_count, 0);
+        assert_eq!(status.last_sync_status, None);
+    }
+
+    #[test]
+    fn oauth_status_includes_last_sync_status_when_sources_are_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth_path = dir.path().join("custom-auth.json");
+        std::fs::write(&auth_path, r#"{"token":"custom-token"}"#).unwrap();
+
+        let providers = ProvidersSettings {
+            oauth_sync_enabled: true,
+            oauth_sync_sources: vec![OAuthCredentialSourceConfig {
+                kind: OAuthCredentialSourceKind::JsonFile,
+                path: Some(auth_path),
+                env_key: Some("THINCLAW_TEST_OAUTH_STATUS".to_string()),
+                json_pointer: Some("/token".to_string()),
+            }],
+            provider_credential_modes: HashMap::from([(
+                "openai".to_string(),
+                ProviderCredentialMode::ApiKey,
+            )]),
+            ..ProvidersSettings::default()
+        };
+
+        let status = oauth_credential_sync_status(&providers);
+
+        assert!(status.enabled);
+        assert_eq!(status.source_count, 1);
+        assert_eq!(status.synced_env_count, 1);
+        assert_eq!(
+            status.last_sync_status.as_deref(),
+            Some("synced 1/1 OAuth credential source(s)")
+        );
     }
 
     #[test]

@@ -6,77 +6,60 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 pub use thinclaw_tools::mcp::config::*;
-
-/// Get the default MCP servers configuration path.
-pub fn default_config_path() -> std::path::PathBuf {
-    crate::platform::resolve_data_dir("mcp-servers.json")
-}
-
-/// Load MCP server configurations from the default location.
-pub async fn load_mcp_servers() -> Result<McpServersFile, ConfigError> {
-    load_mcp_servers_from(default_config_path()).await
-}
-
-/// Save MCP server configurations to the default location.
-pub async fn save_mcp_servers(config: &McpServersFile) -> Result<(), ConfigError> {
-    save_mcp_servers_to(config, default_config_path()).await
-}
-
-/// Add a new MCP server configuration.
-pub async fn add_mcp_server(config: McpServerConfig) -> Result<(), ConfigError> {
-    config.validate()?;
-
-    let mut servers = load_mcp_servers().await?;
-    servers.upsert(config);
-    save_mcp_servers(&servers).await?;
-
-    Ok(())
-}
-
-/// Remove an MCP server by name.
-pub async fn remove_mcp_server(name: &str) -> Result<(), ConfigError> {
-    let mut servers = load_mcp_servers().await?;
-
-    if !servers.remove(name) {
-        return Err(ConfigError::ServerNotFound {
-            name: name.to_string(),
-        });
-    }
-
-    save_mcp_servers(&servers).await?;
-
-    Ok(())
-}
-
-/// Get a specific MCP server configuration.
-pub async fn get_mcp_server(name: &str) -> Result<McpServerConfig, ConfigError> {
-    let servers = load_mcp_servers().await?;
-
-    servers
-        .get(name)
-        .cloned()
-        .ok_or_else(|| ConfigError::ServerNotFound {
-            name: name.to_string(),
-        })
-}
 
 /// Shared loader for reading persisted MCP server configuration.
 #[derive(Clone)]
 pub struct McpConfigStore {
+    inner: thinclaw_tools::mcp::config::McpConfigStore,
+}
+
+#[derive(Clone)]
+struct RootMcpConfigProvider {
     store: Option<Arc<dyn crate::db::Database>>,
     user_id: String,
 }
 
 impl McpConfigStore {
     pub fn new(store: Option<Arc<dyn crate::db::Database>>, user_id: impl Into<String>) -> Self {
-        Self {
+        let provider = RootMcpConfigProvider {
             store,
             user_id: user_id.into(),
+        };
+        Self {
+            inner: thinclaw_tools::mcp::config::McpConfigStore::new_provider(Arc::new(provider)),
         }
     }
 
+    pub fn into_inner(self) -> thinclaw_tools::mcp::config::McpConfigStore {
+        self.inner
+    }
+
     pub async fn load_servers(&self) -> Result<McpServersFile, ConfigError> {
+        self.inner.load_servers().await
+    }
+
+    pub async fn get_server(&self, name: &str) -> Result<Option<McpServerConfig>, ConfigError> {
+        self.inner.get_server(name).await
+    }
+
+    pub async fn save_servers(&self, config: &McpServersFile) -> Result<(), ConfigError> {
+        self.inner.save_servers(config).await
+    }
+
+    pub async fn upsert_server(&self, config: McpServerConfig) -> Result<(), ConfigError> {
+        self.inner.upsert_server(config).await
+    }
+
+    pub async fn remove_server(&self, name: &str) -> Result<(), ConfigError> {
+        self.inner.remove_server(name).await
+    }
+}
+
+#[async_trait]
+impl thinclaw_tools::mcp::config::McpConfigProvider for RootMcpConfigProvider {
+    async fn load_servers(&self) -> Result<McpServersFile, ConfigError> {
         if let Some(ref store) = self.store {
             load_mcp_servers_from_db(store.as_ref(), &self.user_id).await
         } else {
@@ -84,8 +67,12 @@ impl McpConfigStore {
         }
     }
 
-    pub async fn get_server(&self, name: &str) -> Result<Option<McpServerConfig>, ConfigError> {
-        Ok(self.load_servers().await?.get(name).cloned())
+    async fn save_servers(&self, config: &McpServersFile) -> Result<(), ConfigError> {
+        if let Some(ref store) = self.store {
+            save_mcp_servers_to_db(store.as_ref(), &self.user_id, config).await
+        } else {
+            save_mcp_servers(config).await
+        }
     }
 }
 

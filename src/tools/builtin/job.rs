@@ -32,49 +32,8 @@ use crate::tools::execution_backend::{
 };
 #[cfg(test)]
 use crate::tools::execution_backend::{resolve_project_dir, sandbox_job_runtime_descriptor};
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
-
-/// Resolve a job ID from a full UUID or a short prefix (like git short SHAs).
-///
-/// Tries full UUID parse first. If that fails, treats the input as a hex prefix
-/// and searches the context manager for a unique match.
-#[cfg(test)]
-async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result<Uuid, ToolError> {
-    // Fast path: full UUID
-    if let Ok(id) = Uuid::parse_str(input) {
-        return Ok(id);
-    }
-
-    // Require a minimum prefix length to limit brute-force enumeration.
-    if input.len() < 4 {
-        return Err(ToolError::InvalidParameters(
-            "job ID prefix must be at least 4 hex characters".to_string(),
-        ));
-    }
-
-    // Prefix match against known jobs
-    let input_lower = input.to_lowercase();
-    let all_ids = context_manager.all_jobs().await;
-    let matches: Vec<Uuid> = all_ids
-        .into_iter()
-        .filter(|id| {
-            let hex = id.to_string().replace('-', "");
-            hex.starts_with(&input_lower)
-        })
-        .collect();
-
-    match matches.len() {
-        1 => Ok(matches[0]),
-        0 => Err(ToolError::InvalidParameters(format!(
-            "no job found matching prefix '{}'",
-            input
-        ))),
-        n => Err(ToolError::InvalidParameters(format!(
-            "ambiguous prefix '{}' matches {} jobs, provide more characters",
-            input, n
-        ))),
-    }
-}
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
+use thinclaw_tools::builtin::job::{self as job_policy, JobReferenceKind};
 
 #[derive(Clone, Default)]
 struct SandboxJobLookup {
@@ -245,62 +204,39 @@ async fn resolve_owned_job_ref(
         load_owned_direct_jobs(context_manager, store, principal_id, actor_id).await?;
     let sandbox_jobs = load_owned_sandbox_jobs(job_manager, store, principal_id, actor_id).await?;
 
-    let mut matches = Vec::<ResolvedOwnedJob>::new();
+    let resolved = job_policy::resolve_job_reference(
+        input,
+        direct_jobs.keys().copied(),
+        sandbox_jobs.keys().copied(),
+    )
+    .map_err(|error| match error {
+        ToolError::InvalidParameters(message) if message == "no job found" => {
+            ToolError::InvalidParameters("job not found".to_string())
+        }
+        other => other,
+    })?;
 
-    if let Ok(id) = Uuid::parse_str(input) {
-        if let Some(job_ctx) = direct_jobs.get(&id).cloned() {
-            matches.push(ResolvedOwnedJob::Local {
-                job_id: id,
+    match resolved.kind {
+        JobReferenceKind::Direct => {
+            let job_ctx = direct_jobs
+                .get(&resolved.job_id)
+                .cloned()
+                .ok_or_else(|| ToolError::InvalidParameters("job not found".to_string()))?;
+            Ok(ResolvedOwnedJob::Local {
+                job_id: resolved.job_id,
                 ctx: Box::new(job_ctx),
-            });
+            })
         }
-        if let Some(lookup) = sandbox_jobs.get(&id).cloned() {
-            matches.push(ResolvedOwnedJob::Sandbox {
-                job_id: id,
+        JobReferenceKind::Sandbox => {
+            let lookup = sandbox_jobs
+                .get(&resolved.job_id)
+                .cloned()
+                .ok_or_else(|| ToolError::InvalidParameters("job not found".to_string()))?;
+            Ok(ResolvedOwnedJob::Sandbox {
+                job_id: resolved.job_id,
                 lookup: Box::new(lookup),
-            });
+            })
         }
-    } else {
-        if input.len() < 4 {
-            return Err(ToolError::InvalidParameters(
-                "job ID prefix must be at least 4 hex characters".to_string(),
-            ));
-        }
-
-        let input_lower = input.to_lowercase();
-        for (job_id, job_ctx) in direct_jobs {
-            if job_id
-                .to_string()
-                .replace('-', "")
-                .starts_with(&input_lower)
-            {
-                matches.push(ResolvedOwnedJob::Local {
-                    job_id,
-                    ctx: Box::new(job_ctx),
-                });
-            }
-        }
-        for (job_id, lookup) in sandbox_jobs {
-            if job_id
-                .to_string()
-                .replace('-', "")
-                .starts_with(&input_lower)
-            {
-                matches.push(ResolvedOwnedJob::Sandbox {
-                    job_id,
-                    lookup: Box::new(lookup),
-                });
-            }
-        }
-    }
-
-    match matches.len() {
-        1 => Ok(matches.remove(0)),
-        0 => Err(ToolError::InvalidParameters("job not found".to_string())),
-        n => Err(ToolError::InvalidParameters(format!(
-            "ambiguous prefix '{}' matches {} jobs, provide more characters",
-            input, n
-        ))),
     }
 }
 
@@ -419,49 +355,14 @@ impl CreateJobTool {
     }
 
     fn available_sandbox_modes(&self) -> Vec<&'static str> {
-        let mut modes = vec!["worker"];
-        if self.claude_code_enabled() {
-            modes.push("claude_code");
-        }
-        if self.codex_code_enabled() {
-            modes.push("codex_code");
-        }
-        modes
+        job_policy::available_sandbox_modes(self.claude_code_enabled(), self.codex_code_enabled())
     }
 
     fn sandbox_mode_schema_description(&self) -> String {
-        let mut descriptions = vec!["'worker' (default) uses the ThinClaw sub-agent.".to_string()];
-        if self.claude_code_enabled() {
-            descriptions.push(
-                "'claude_code' uses Claude Code CLI for full agentic software engineering."
-                    .to_string(),
-            );
-        }
-        if self.codex_code_enabled() {
-            descriptions.push(
-                "'codex_code' uses Codex CLI for full agentic software engineering.".to_string(),
-            );
-        }
-        format!("Execution mode. {}", descriptions.join(" "))
-    }
-
-    fn resolve_sandbox_mode(&self, requested_mode: Option<&str>) -> Result<JobMode, ToolError> {
-        match requested_mode {
-            None | Some("worker") => Ok(JobMode::Worker),
-            Some("claude_code") if self.claude_code_enabled() => Ok(JobMode::ClaudeCode),
-            Some("codex_code") if self.codex_code_enabled() => Ok(JobMode::CodexCode),
-            Some("claude_code") => Err(ToolError::InvalidParameters(
-                "mode 'claude_code' is not enabled in the current sandbox configuration"
-                    .to_string(),
-            )),
-            Some("codex_code") => Err(ToolError::InvalidParameters(
-                "mode 'codex_code' is not enabled in the current sandbox configuration".to_string(),
-            )),
-            Some(other) => Err(ToolError::InvalidParameters(format!(
-                "unsupported sandbox mode '{}'",
-                other
-            ))),
-        }
+        job_policy::sandbox_mode_schema_description(
+            self.claude_code_enabled(),
+            self.codex_code_enabled(),
+        )
     }
 
     /// Parse and validate the `credentials` parameter.
@@ -474,18 +375,9 @@ impl CreateJobTool {
         params: &serde_json::Value,
         user_id: &str,
     ) -> Result<Vec<CredentialGrant>, ToolError> {
-        let creds_obj = match params.get("credentials").and_then(|v| v.as_object()) {
-            Some(obj) if !obj.is_empty() => obj,
-            _ => return Ok(vec![]),
-        };
-
-        const MAX_CREDENTIAL_GRANTS: usize = 20;
-        if creds_obj.len() > MAX_CREDENTIAL_GRANTS {
-            return Err(ToolError::InvalidParameters(format!(
-                "too many credential grants ({}, max {})",
-                creds_obj.len(),
-                MAX_CREDENTIAL_GRANTS
-            )));
+        let requests = job_policy::parse_credential_requests(params)?;
+        if requests.is_empty() {
+            return Ok(vec![]);
         }
 
         let secrets = match &self.secrets_store {
@@ -499,35 +391,29 @@ impl CreateJobTool {
             }
         };
 
-        let mut grants = Vec::with_capacity(creds_obj.len());
-        for (secret_name, env_var_value) in creds_obj {
-            let env_var = env_var_value.as_str().ok_or_else(|| {
-                ToolError::InvalidParameters(format!(
-                    "credential env var for '{}' must be a string",
-                    secret_name
-                ))
-            })?;
-
-            validate_env_var_name(env_var)?;
-
+        let mut grants = Vec::with_capacity(requests.len());
+        for request in requests {
             // Validate the secret actually exists
-            let exists = secrets.exists(user_id, secret_name).await.map_err(|e| {
-                ToolError::ExecutionFailed(format!(
-                    "failed to check secret '{}': {}",
-                    secret_name, e
-                ))
-            })?;
+            let exists = secrets
+                .exists(user_id, &request.secret_name)
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!(
+                        "failed to check secret '{}': {}",
+                        request.secret_name, e
+                    ))
+                })?;
 
             if !exists {
                 return Err(ToolError::ExecutionFailed(format!(
                     "secret '{}' not found. Store it first via 'thinclaw tool auth' or the web UI.",
-                    secret_name
+                    request.secret_name
                 )));
             }
 
             grants.push(CredentialGrant {
-                secret_name: secret_name.clone(),
-                env_var: env_var.to_string(),
+                secret_name: request.secret_name,
+                env_var: request.env_var,
             });
         }
 
@@ -574,17 +460,7 @@ impl CreateJobTool {
             })
             .await?;
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "job_id": result.job_id.to_string(),
-                "title": title,
-                "status": result.status,
-                "execution_backend": result.runtime.execution_backend,
-                "runtime_family": result.runtime.runtime_family,
-                "runtime_mode": result.runtime.runtime_mode,
-                "runtime_capabilities": result.runtime.runtime_capabilities,
-                "network_isolation": result.runtime.network_isolation,
-                "message": result.message,
-            }),
+            job_policy::local_job_output(&result, title),
             start.elapsed(),
         ))
     }
@@ -636,83 +512,10 @@ impl CreateJobTool {
             })
             .await?;
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "job_id": result.job_id.to_string(),
-                "status": result.status,
-                "execution_backend": result.runtime.execution_backend,
-                "runtime_family": result.runtime.runtime_family,
-                "runtime_mode": result.runtime.runtime_mode,
-                "runtime_capabilities": result.runtime.runtime_capabilities,
-                "network_isolation": result.runtime.network_isolation,
-                "message": result.message,
-                "output": result.output,
-                "project_dir": result.project_dir,
-                "browse_url": result.browse_url,
-            }),
+            job_policy::sandbox_job_output(&result),
             start.elapsed(),
         ))
     }
-}
-
-/// The base directory where all project directories must live.
-/// Env var names that could be abused to hijack process behavior.
-const DANGEROUS_ENV_VARS: &[&str] = &[
-    // Dynamic linker hijacking
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "LD_AUDIT",
-    "DYLD_INSERT_LIBRARIES",
-    "DYLD_LIBRARY_PATH",
-    // Shell behavior
-    "BASH_ENV",
-    "ENV",
-    "CDPATH",
-    "IFS",
-    "PATH",
-    "HOME",
-    // Language runtime library path hijacking
-    "PYTHONPATH",
-    "NODE_PATH",
-    "PERL5LIB",
-    "RUBYLIB",
-    "CLASSPATH",
-    // JVM injection
-    "JAVA_TOOL_OPTIONS",
-    "MAVEN_OPTS",
-    "USER",
-    "SHELL",
-    "RUST_LOG",
-];
-
-/// Validate that an env var name is safe for container injection.
-fn validate_env_var_name(name: &str) -> Result<(), ToolError> {
-    if name.is_empty() {
-        return Err(ToolError::InvalidParameters(
-            "env var name cannot be empty".into(),
-        ));
-    }
-
-    // Must match ^[A-Z_][A-Z0-9_]*$
-    let valid = name
-        .bytes()
-        .enumerate()
-        .all(|(i, b)| matches!(b, b'A'..=b'Z' | b'_') || (i > 0 && b.is_ascii_digit()));
-
-    if !valid {
-        return Err(ToolError::InvalidParameters(format!(
-            "env var '{}' must match [A-Z_][A-Z0-9_]* (uppercase, underscores, digits)",
-            name
-        )));
-    }
-
-    if DANGEROUS_ENV_VARS.contains(&name) {
-        return Err(ToolError::InvalidParameters(format!(
-            "env var '{}' is on the denylist (could hijack process behavior)",
-            name
-        )));
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -727,75 +530,15 @@ impl Tool for CreateJobTool {
     }
 
     fn description(&self) -> &str {
-        if self.sandbox_enabled() {
-            "Create and execute a job. The job runs in a sandboxed Docker container with its own \
-             sub-agent that has shell, file read/write, list_dir, and apply_patch tools. Use this \
-             whenever the user asks you to build, create, or work on something. The task \
-             description should be detailed enough for the sub-agent to work independently. \
-             Set wait=false to start immediately while continuing the conversation. Set mode \
-             to 'claude_code' or 'codex_code' only when that container coding agent is enabled."
-        } else {
-            "Create a new job or task for the agent to work on. Use this when the user wants \
-             you to do something substantial that should be tracked as a separate job."
-        }
+        job_policy::create_job_description(self.sandbox_enabled())
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        if self.sandbox_enabled() {
-            let available_modes = self.available_sandbox_modes();
-            let mode_description = self.sandbox_mode_schema_description();
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "Clear description of what to accomplish"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Full description of what needs to be done"
-                    },
-                    "wait": {
-                        "type": "boolean",
-                        "description": "If true (default), wait for the container to complete and return results. \
-                                        If false, start the container and return the job_id immediately."
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": available_modes,
-                        "description": mode_description
-                    },
-                    "project_dir": {
-                        "type": "string",
-                        "description": "Path to an existing project directory to mount into the container. \
-                                        Must be under ~/.thinclaw/projects/. If omitted, a fresh directory is created."
-                    },
-                    "credentials": {
-                        "type": "object",
-                        "description": "Map of secret names to env var names. Each secret must exist in the \
-                                        secrets store (via 'thinclaw tool auth' or web UI). Example: \
-                                        {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
-                        "additionalProperties": { "type": "string" }
-                    }
-                },
-                "required": ["title", "description"]
-            })
-        } else {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "title": {
-                        "type": "string",
-                        "description": "A short title for the job (max 100 chars)"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "Full description of what needs to be done"
-                    }
-                },
-                "required": ["title", "description"]
-            })
-        }
+        job_policy::create_job_parameters_schema(
+            self.sandbox_enabled(),
+            self.available_sandbox_modes(),
+            self.sandbox_mode_schema_description(),
+        )
     }
 
     fn execution_timeout(&self) -> Duration {
@@ -816,29 +559,34 @@ impl Tool for CreateJobTool {
         params: serde_json::Value,
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let title = require_str(&params, "title")?;
-
-        let description = require_str(&params, "description")?;
+        let parsed = job_policy::parse_create_job_params(
+            &params,
+            self.sandbox_enabled(),
+            self.claude_code_enabled(),
+            self.codex_code_enabled(),
+        )?;
 
         if self.sandbox_enabled() {
-            let wait = params.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
-
-            let mode = self.resolve_sandbox_mode(params.get("mode").and_then(|v| v.as_str()))?;
-
-            let explicit_dir = params
-                .get("project_dir")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from);
+            let explicit_dir = parsed.project_dir.as_deref().map(PathBuf::from);
+            let mode = parsed.mode.ok_or_else(|| {
+                ToolError::InvalidParameters("missing sandbox execution mode".to_string())
+            })?;
 
             // Parse and validate credential grants
             let credential_grants = self.parse_credentials(&params, &ctx.user_id).await?;
 
-            // Combine title and description into the task prompt for the sub-agent.
-            let task = format!("{}\n\n{}", title, description);
-            self.execute_sandbox(&task, explicit_dir, wait, mode, credential_grants, ctx)
-                .await
+            self.execute_sandbox(
+                &parsed.task_prompt(),
+                explicit_dir,
+                parsed.wait,
+                mode,
+                credential_grants,
+                ctx,
+            )
+            .await
         } else {
-            self.execute_local(title, description, ctx).await
+            self.execute_local(&parsed.title, &parsed.description, ctx)
+                .await
         }
     }
 
@@ -885,16 +633,7 @@ impl Tool for ListJobsTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "filter": {
-                    "type": "string",
-                    "description": "Filter by status: 'active', 'completed', 'failed', 'cancelled', 'interrupted', 'stuck', or 'all' (default: 'all')",
-                    "enum": ["active", "completed", "failed", "cancelled", "interrupted", "stuck", "all"]
-                }
-            }
-        })
+        job_policy::list_jobs_parameters_schema()
     }
 
     async fn execute(
@@ -917,59 +656,17 @@ impl Tool for ListJobsTool {
         )
         .await?;
         let mut jobs = Vec::new();
-        let mut direct_total = 0usize;
-        let mut direct_pending = 0usize;
-        let mut direct_in_progress = 0usize;
-        let mut direct_completed = 0usize;
-        let mut direct_failed = 0usize;
-        let mut direct_cancelled = 0usize;
-        let mut direct_stuck = 0usize;
+        let mut summary = job_policy::JobSummaryCounts::default();
         for (job_id, job_ctx) in direct_jobs {
-            direct_total += 1;
-            match job_ctx.state {
-                JobState::Pending => direct_pending += 1,
-                JobState::InProgress => direct_in_progress += 1,
-                JobState::Completed | JobState::Submitted | JobState::Accepted => {
-                    direct_completed += 1
-                }
-                JobState::Failed => direct_failed += 1,
-                JobState::Stuck => direct_stuck += 1,
-                JobState::Cancelled => direct_cancelled += 1,
-                JobState::Abandoned => direct_failed += 1,
-            }
+            summary.record_direct_state(job_ctx.state);
 
-            let include = match filter {
-                "completed" => matches!(
-                    job_ctx.state,
-                    JobState::Completed | JobState::Submitted | JobState::Accepted
-                ),
-                "failed" => matches!(job_ctx.state, JobState::Failed | JobState::Abandoned),
-                "cancelled" => job_ctx.state == JobState::Cancelled,
-                "interrupted" => false,
-                "stuck" => job_ctx.state == JobState::Stuck,
-                "active" => job_ctx.state.is_active(),
-                _ => true,
-            };
+            let include = job_policy::direct_job_matches_filter(job_ctx.state, filter);
 
             if include {
-                jobs.push(serde_json::json!({
-                    "job_id": job_id.to_string(),
-                    "title": job_ctx.title,
-                    "status": job_ctx.state.to_string(),
-                    "created_at": job_ctx.created_at.to_rfc3339(),
-                    "kind": "local",
-                }));
+                jobs.push(job_policy::local_job_list_entry(job_id, &job_ctx));
             }
         }
 
-        let mut sandbox_total = 0usize;
-        let mut sandbox_pending = 0usize;
-        let mut sandbox_in_progress = 0usize;
-        let mut sandbox_completed = 0usize;
-        let mut sandbox_failed = 0usize;
-        let mut sandbox_cancelled = 0usize;
-        let mut sandbox_interrupted = 0usize;
-        let mut sandbox_stuck = 0usize;
         for (job_id, lookup) in load_owned_sandbox_jobs(
             self.job_manager.as_ref(),
             self.store.as_ref(),
@@ -979,52 +676,21 @@ impl Tool for ListJobsTool {
         .await?
         {
             let status = lookup.status();
-            sandbox_total += 1;
-            match status.as_str() {
-                "creating" => sandbox_pending += 1,
-                "running" => sandbox_in_progress += 1,
-                "completed" => sandbox_completed += 1,
-                "failed" => sandbox_failed += 1,
-                "cancelled" => sandbox_cancelled += 1,
-                "interrupted" => sandbox_interrupted += 1,
-                "stuck" => sandbox_stuck += 1,
-                _ => {}
-            }
-            let include = match filter {
-                "completed" => status == "completed",
-                "failed" => status == "failed",
-                "cancelled" => status == "cancelled",
-                "interrupted" => status == "interrupted",
-                "stuck" => status == "stuck",
-                "active" => matches!(status.as_str(), "creating" | "running"),
-                _ => true,
-            };
+            summary.record_sandbox_status(&status);
+            let include = job_policy::sandbox_status_matches_filter(&status, filter);
 
             if include && let Some(spec) = lookup.spec() {
-                jobs.push(serde_json::json!({
-                    "job_id": job_id.to_string(),
-                    "title": spec.title,
-                    "status": crate::sandbox_jobs::normalize_sandbox_ui_state(&status),
-                    "created_at": lookup.created_at().map(|value| value.to_rfc3339()),
-                    "kind": "sandbox",
-                    "runtime_mode": spec.mode.as_str(),
-                }));
+                jobs.push(job_policy::sandbox_job_list_entry(
+                    job_id,
+                    &spec.title,
+                    &crate::sandbox_jobs::normalize_sandbox_ui_state(&status),
+                    lookup.created_at().map(|value| value.to_rfc3339()),
+                    spec.mode.as_str(),
+                ));
             }
         }
 
-        let result = serde_json::json!({
-            "jobs": jobs,
-            "summary": {
-                "total": direct_total + sandbox_total,
-                "pending": direct_pending + sandbox_pending,
-                "in_progress": direct_in_progress + sandbox_in_progress,
-                "completed": direct_completed + sandbox_completed,
-                "failed": direct_failed + sandbox_failed,
-                "cancelled": direct_cancelled + sandbox_cancelled,
-                "interrupted": sandbox_interrupted,
-                "stuck": direct_stuck + sandbox_stuck
-            }
-        });
+        let result = job_policy::list_jobs_output(jobs, &summary);
 
         Ok(ToolOutput::success(result, start.elapsed()))
     }
@@ -1072,16 +738,7 @@ impl Tool for JobStatusTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "job_id": {
-                    "type": "string",
-                    "description": "The job ID (full UUID or short prefix, e.g. 'f2854dd8')"
-                }
-            },
-            "required": ["job_id"]
-        })
+        job_policy::job_id_parameters_schema()
     }
 
     async fn execute(
@@ -1090,7 +747,7 @@ impl Tool for JobStatusTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let job_id_str = require_str(&params, "job_id")?;
+        let job_id_str = job_policy::parse_job_id_param(&params)?;
         let resolved = resolve_owned_job_ref(
             job_id_str,
             &self.context_manager,
@@ -1106,34 +763,26 @@ impl Tool for JobStatusTool {
                 job_id,
                 ctx: job_ctx,
             } => {
-                let result = serde_json::json!({
-                    "job_id": job_id.to_string(),
-                    "title": job_ctx.title,
-                    "description": job_ctx.description,
-                    "status": job_ctx.state.to_string(),
-                    "created_at": job_ctx.created_at.to_rfc3339(),
-                    "started_at": job_ctx.started_at.map(|t| t.to_rfc3339()),
-                    "completed_at": job_ctx.completed_at.map(|t| t.to_rfc3339()),
-                    "actual_cost": job_ctx.actual_cost.to_string(),
-                    "kind": "local",
-                });
+                let result = job_policy::local_job_status_output(job_id, &job_ctx);
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
             ResolvedOwnedJob::Sandbox { job_id, lookup } => {
-                let result = serde_json::json!({
-                    "job_id": job_id.to_string(),
-                    "title": lookup.spec().map(|spec| spec.title.clone()),
-                    "description": lookup.spec().map(|spec| spec.description.clone()),
-                    "status": crate::sandbox_jobs::normalize_sandbox_ui_state(&lookup.status()),
-                    "created_at": lookup.created_at().map(|value| value.to_rfc3339()),
-                    "started_at": lookup.started_at().map(|value| value.to_rfc3339()),
-                    "completed_at": lookup.completed_at().map(|value| value.to_rfc3339()),
-                    "project_dir": lookup.spec().and_then(|spec| spec.project_dir.clone()),
-                    "runtime_mode": lookup.spec().map(|spec| spec.mode.as_str()),
-                    "interactive": lookup.spec().map(|spec| spec.interactive),
-                    "failure_reason": lookup.failure_reason(),
-                    "kind": "sandbox",
-                });
+                let result = job_policy::sandbox_job_status_output(
+                    job_id,
+                    job_policy::SandboxJobStatusOutput {
+                        title: lookup.spec().map(|spec| spec.title.clone()),
+                        description: lookup.spec().map(|spec| spec.description.clone()),
+                        status: crate::sandbox_jobs::normalize_sandbox_ui_state(&lookup.status())
+                            .to_string(),
+                        created_at: lookup.created_at().map(|value| value.to_rfc3339()),
+                        started_at: lookup.started_at().map(|value| value.to_rfc3339()),
+                        completed_at: lookup.completed_at().map(|value| value.to_rfc3339()),
+                        project_dir: lookup.spec().and_then(|spec| spec.project_dir.clone()),
+                        runtime_mode: lookup.spec().map(|spec| spec.mode.as_str()),
+                        interactive: lookup.spec().map(|spec| spec.interactive),
+                        failure_reason: lookup.failure_reason(),
+                    },
+                );
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
         }
@@ -1189,16 +838,7 @@ impl Tool for CancelJobTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "job_id": {
-                    "type": "string",
-                    "description": "The job ID (full UUID or short prefix, e.g. 'f2854dd8')"
-                }
-            },
-            "required": ["job_id"]
-        })
+        job_policy::job_id_parameters_schema()
     }
 
     async fn execute(
@@ -1207,7 +847,7 @@ impl Tool for CancelJobTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let job_id_str = require_str(&params, "job_id")?;
+        let job_id_str = job_policy::parse_job_id_param(&params)?;
         let resolved = resolve_owned_job_ref(
             job_id_str,
             &self.context_manager,
@@ -1223,12 +863,7 @@ impl Tool for CancelJobTool {
                 job_id,
                 ctx: job_ctx,
             } => {
-                if !job_ctx.state.is_active() {
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "local job {} is no longer cancellable (status: {})",
-                        job_id, job_ctx.state
-                    )));
-                }
+                job_policy::ensure_local_job_cancellable(job_id, job_ctx.state)?;
 
                 if let Some(scheduler) = self.scheduler.as_ref()
                     && scheduler.is_running(job_id).await
@@ -1256,27 +891,18 @@ impl Tool for CancelJobTool {
                         tracing::warn!(job_id = %job_id, "Failed to persist cancelled job: {}", error);
                     }
                 } else {
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "local job {} is no longer cancellable (status: {})",
-                        job_id, job_ctx.state
-                    )));
+                    return Err(job_policy::local_job_not_cancellable_error(
+                        job_id,
+                        job_ctx.state,
+                    ));
                 }
 
-                let result = serde_json::json!({
-                    "job_id": job_id.to_string(),
-                    "status": "cancelled",
-                    "message": "Job cancelled successfully"
-                });
+                let result = job_policy::cancel_job_output(job_id);
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
             ResolvedOwnedJob::Sandbox { job_id, lookup } => {
                 let status = lookup.status();
-                if !matches!(status.as_str(), "creating" | "running") {
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "sandbox job {} is no longer cancellable (status: {})",
-                        job_id, status
-                    )));
-                }
+                job_policy::ensure_sandbox_job_cancellable(job_id, &status)?;
                 let controller = crate::sandbox_jobs::SandboxJobController::new(
                     self.store.clone(),
                     self.job_manager.clone(),
@@ -1287,11 +913,7 @@ impl Tool for CancelJobTool {
                     .cancel_job(job_id, "Cancelled by user")
                     .await
                     .map_err(ToolError::ExecutionFailed)?;
-                let result = serde_json::json!({
-                    "job_id": job_id.to_string(),
-                    "status": "cancelled",
-                    "message": "Job cancelled successfully"
-                });
+                let result = job_policy::cancel_job_output(job_id);
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
         }
@@ -1348,20 +970,7 @@ impl Tool for JobEventsTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "job_id": {
-                    "type": "string",
-                    "description": "The job ID (full UUID or short prefix, e.g. 'f2854dd8')"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of events to return (default 50, most recent)"
-                }
-            },
-            "required": ["job_id"]
-        })
+        job_policy::job_events_parameters_schema()
     }
 
     async fn execute(
@@ -1371,13 +980,10 @@ impl Tool for JobEventsTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let job_id_str = params
-            .get("job_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
+        let parsed = job_policy::parse_job_events_params(&params)?;
 
         let resolved = resolve_owned_job_ref(
-            job_id_str,
+            parsed.job_id,
             &self.context_manager,
             self.job_manager.as_ref(),
             Some(&self.store),
@@ -1390,37 +996,22 @@ impl Tool for JobEventsTool {
             ResolvedOwnedJob::Local { job_id, .. } => (job_id, "local"),
         };
 
-        const MAX_EVENT_LIMIT: i64 = 1000;
-        let limit = params
-            .get("limit")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(50)
-            .clamp(1, MAX_EVENT_LIMIT);
-
         let events = self
             .store
-            .list_job_events(job_id, Some(limit))
+            .list_job_events(job_id, Some(parsed.limit))
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("failed to load job events: {}", e)))?;
 
-        let recent: Vec<serde_json::Value> = events
+        let recent: Vec<job_policy::JobEventOutput> = events
             .iter()
-            .map(|ev| {
-                serde_json::json!({
-                    "event_type": ev.event_type,
-                    "data": ev.data,
-                    "created_at": ev.created_at.to_rfc3339(),
-                })
+            .map(|ev| job_policy::JobEventOutput {
+                event_type: ev.event_type.clone(),
+                data: ev.data.clone(),
+                created_at: ev.created_at.to_rfc3339(),
             })
             .collect();
 
-        let result = serde_json::json!({
-            "job_id": job_id.to_string(),
-            "kind": kind,
-            "total_events": events.len(),
-            "returned": recent.len(),
-            "events": recent,
-        });
+        let result = job_policy::job_events_output(job_id, kind, events.len(), recent);
 
         Ok(ToolOutput::success(result, start.elapsed()))
     }
@@ -1482,25 +1073,7 @@ impl Tool for JobPromptTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "job_id": {
-                    "type": "string",
-                    "description": "The job ID (full UUID or short prefix, e.g. 'f2854dd8')"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The follow-up prompt text to send"
-                },
-                "done": {
-                    "type": "boolean",
-                    "description": "If true, signals the sub-agent that no more prompts are coming \
-                                    and it should finish up. Default false."
-                }
-            },
-            "required": ["job_id"]
-        })
+        job_policy::job_prompt_parameters_schema()
     }
 
     async fn execute(
@@ -1510,10 +1083,7 @@ impl Tool for JobPromptTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let job_id_str = params
-            .get("job_id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
+        let job_id_str = job_policy::parse_job_id_param(&params)?;
 
         let resolved = resolve_owned_job_ref(
             job_id_str,
@@ -1525,57 +1095,34 @@ impl Tool for JobPromptTool {
         )
         .await?;
 
-        let done = params
-            .get("done")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let content = params
-            .get("content")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        if !done && content.as_deref().unwrap_or("").trim().is_empty() {
-            return Err(ToolError::InvalidParameters(
-                "missing 'content' parameter".into(),
-            ));
-        }
+        let prompt_params = job_policy::parse_job_prompt_params(&params)?;
         let job_id = match resolved {
             ResolvedOwnedJob::Sandbox { job_id, lookup } => {
-                if !lookup.is_interactive() {
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "job_prompt only supports interactive sandbox jobs ({} is non-interactive)",
-                        job_id
-                    )));
-                }
-                if !lookup.accepts_prompts() {
-                    return Err(ToolError::ExecutionFailed(format!(
-                        "sandbox job {} is no longer accepting prompts (status: {})",
-                        job_id,
-                        lookup.status()
-                    )));
-                }
+                job_policy::ensure_sandbox_job_accepts_prompt(
+                    job_id,
+                    lookup.is_interactive(),
+                    lookup.accepts_prompts(),
+                    &lookup.status(),
+                )?;
                 job_id
             }
             ResolvedOwnedJob::Local { job_id, .. } => {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "job_prompt only supports sandbox jobs ({} is local)",
-                    job_id
-                )));
+                return Err(job_policy::local_job_prompt_unsupported_error(job_id));
             }
         };
 
-        let prompt = PendingPrompt { content, done };
+        let prompt = PendingPrompt {
+            content: prompt_params.content,
+            done: prompt_params.done,
+        };
+        let done = prompt.done;
 
         {
             let mut queue = self.prompt_queue.lock().await;
             queue.entry(job_id).or_default().push_back(prompt);
         }
 
-        let result = serde_json::json!({
-            "job_id": job_id.to_string(),
-            "status": "queued",
-            "message": "Prompt queued",
-            "done": done,
-        });
+        let result = job_policy::job_prompt_output(job_id, done);
 
         Ok(ToolOutput::success(result, start.elapsed()))
     }
@@ -2337,8 +1884,12 @@ mod tests {
         let cm = ContextManager::new(5);
         let job_id = cm.create_job("Test", "Desc").await.unwrap();
 
-        let resolved = resolve_job_id(&job_id.to_string(), &cm).await.unwrap();
-        assert_eq!(resolved, job_id);
+        let resolved = job_policy::resolve_job_reference(
+            &job_id.to_string(),
+            cm.all_jobs().await,
+            std::iter::empty::<Uuid>(),
+        );
+        assert_eq!(resolved.unwrap().job_id, job_id);
     }
 
     #[tokio::test]
@@ -2349,8 +1900,12 @@ mod tests {
         // Use first 8 hex chars (without dashes)
         let hex = job_id.to_string().replace('-', "");
         let prefix = &hex[..8];
-        let resolved = resolve_job_id(prefix, &cm).await.unwrap();
-        assert_eq!(resolved, job_id);
+        let resolved = job_policy::resolve_job_reference(
+            prefix,
+            cm.all_jobs().await,
+            std::iter::empty::<Uuid>(),
+        );
+        assert_eq!(resolved.unwrap().job_id, job_id);
     }
 
     #[tokio::test]
@@ -2358,7 +1913,11 @@ mod tests {
         let cm = ContextManager::new(5);
         cm.create_job("Test", "Desc").await.unwrap();
 
-        let result = resolve_job_id("00000000", &cm).await;
+        let result = job_policy::resolve_job_reference(
+            "00000000",
+            cm.all_jobs().await,
+            std::iter::empty::<Uuid>(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -2371,7 +1930,11 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_job_id_invalid_input() {
         let cm = ContextManager::new(5);
-        let result = resolve_job_id("not-hex-at-all!", &cm).await;
+        let result = job_policy::resolve_job_reference(
+            "not-hex-at-all!",
+            cm.all_jobs().await,
+            std::iter::empty::<Uuid>(),
+        );
         assert!(result.is_err());
     }
 

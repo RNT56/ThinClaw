@@ -83,23 +83,29 @@ thinclaw doctor --profile pi-os-lite-64
 
 ## Native Release Install
 
-Native install is the preferred low-overhead path. Use the
-`aarch64-unknown-linux-gnu` release artifact.
+Native install is the preferred low-overhead path. For Pi, VPS, and SD-card
+hosts, prefer the edge artifact. The root setup script downloads the matching
+prebuilt release binary, verifies its checksum, installs it under
+`/usr/local/bin`, and keeps state under `/var/lib/thinclaw/.thinclaw`:
 
 ```bash
-export THINCLAW_VERSION=v0.13.7  # replace with the latest release tag
-
 curl -L -o deploy-setup.sh \
   https://raw.githubusercontent.com/RNT56/ThinClaw/main/deploy/setup.sh
 
-curl -L -o thinclaw-pi.tar.gz \
-  "https://github.com/RNT56/ThinClaw/releases/download/${THINCLAW_VERSION}/thinclaw-aarch64-unknown-linux-gnu.tar.gz"
-
-tar -xzf thinclaw-pi.tar.gz
-
-sudo bash deploy-setup.sh --mode native --binary ./thinclaw \
+sudo bash deploy-setup.sh --mode native --profile edge \
   --token "$(openssl rand -hex 32)"
 ```
+
+Use the full `aarch64-unknown-linux-gnu` release artifact when you need ACP,
+tunnels, Docker sandbox, browser automation, Nostr, PostgreSQL, or the local
+WASM runtime.
+
+```bash
+sudo bash deploy-setup.sh --mode native --profile full \
+  --token "$(openssl rand -hex 32)"
+```
+
+Use `--binary /path/to/thinclaw` only when installing a locally patched binary.
 
 If you are running from a repo checkout on the Pi, `--mode auto` selects native
 mode automatically on Raspberry Pi OS Lite 64-bit:
@@ -222,16 +228,15 @@ rustup target add wasm32-wasip2
 
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
-cargo build --release --features full --bin thinclaw
+cargo build --release --no-default-features --features edge --bin thinclaw
 
 sudo bash deploy/setup.sh --mode native \
   --binary target/release/thinclaw \
   --token "$(openssl rand -hex 32)"
 ```
 
-Use `cargo build --release --bin thinclaw` only if you intentionally want the
-smaller `light` profile. The `light` profile includes the gateway and libSQL but
-excludes ACP, tunnels, Docker sandbox, browser automation, and Nostr.
+Use `cargo build --release --features full --bin thinclaw` only if you need the
+full native runtime surface on the Pi.
 
 ## Private Access With Tailscale
 
