@@ -3,15 +3,22 @@
 use std::io::Read;
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::time::sleep;
 
 const AUTH_TOKEN: &str = "thinclaw-smoke-token";
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
+static RUNTIME_SMOKE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+async fn runtime_smoke_guard() -> MutexGuard<'static, ()> {
+    RUNTIME_SMOKE_LOCK.lock().await
+}
 
 fn reserve_local_port() -> u16 {
     TcpListener::bind(("127.0.0.1", 0))
@@ -201,6 +208,7 @@ async fn wait_for_gateway_ready(child: &mut Child, port: u16) -> Result<(), Stri
 
 #[tokio::test]
 async fn run_no_onboard_binds_gateway() {
+    let _guard = runtime_smoke_guard().await;
     let temp = TempDir::new().expect("create temp dir");
     let port = reserve_local_port();
     let mut child = spawn_runtime(&temp, port);
@@ -215,6 +223,7 @@ async fn run_no_onboard_binds_gateway() {
 
 #[tokio::test]
 async fn run_no_onboard_binds_explicit_gateway_port_3000_when_available() {
+    let _guard = runtime_smoke_guard().await;
     let Ok(listener) = TcpListener::bind(("127.0.0.1", 3000)) else {
         eprintln!("skipping explicit 3000 smoke because the port is already in use");
         return;
@@ -234,6 +243,7 @@ async fn run_no_onboard_binds_explicit_gateway_port_3000_when_available() {
 
 #[tokio::test]
 async fn run_no_onboard_binds_gateway_port_zero() {
+    let _guard = runtime_smoke_guard().await;
     let temp = TempDir::new().expect("create temp dir");
     let bound_addr_file = temp.path().join("gateway-bound-addr");
     let mut child = spawn_runtime_with_port_env(&temp, "0", Some(&bound_addr_file));
