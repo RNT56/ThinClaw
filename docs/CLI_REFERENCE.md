@@ -61,6 +61,20 @@ These flags can be appended to almost any command:
   - `list`: Show configured MCP servers.
   - `test`: Run a diagnostic test on an MCP server.
 - `thinclaw browser`: Launch or debug the headless Chrome browser automation.
+- `thinclaw comfy`: Manage and use ComfyUI media generation.
+  - `health`: Check the configured ComfyUI server and object-info availability.
+  - `hardware-check`: Print local hardware suitability information for local generation.
+  - `setup --gpu cpu|nvidia|amd|m-series`: Install ComfyUI through `comfy-cli`.
+  - `launch`: Launch local ComfyUI through `comfy-cli`.
+  - `stop`: Stop local ComfyUI through `comfy-cli`.
+  - `list-workflows`: List bundled workflow names.
+  - `check-deps <WORKFLOW>`: Report missing models/custom nodes for a bundled or approved API-format workflow.
+  - `generate <PROMPT>`: Generate media through the configured ComfyUI server.
+    Common flags: `--workflow <NAME_OR_PATH>`, `--aspect-ratio square|wide|portrait`, `--negative-prompt <TEXT>`, `--seed <N>`, `--width <PX>`, `--height <PX>`, `--steps <N>`, `--cfg <N>`, `--model <NAME>`, `--input-image <PATH>`, `--mask-image <PATH>`, `--no-wait`.
+
+ComfyUI generation is disabled until `comfyui.enabled = true` or
+`COMFYUI_ENABLED=true` is set. See [COMFYUI_MEDIA_GENERATION.md](COMFYUI_MEDIA_GENERATION.md)
+for configuration, local/cloud mode, and workflow security details.
 
 ## Memory & Sessions
 

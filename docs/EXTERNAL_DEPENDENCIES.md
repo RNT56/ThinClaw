@@ -33,6 +33,8 @@ This document lists every **optional external tool and service** that ThinClaw f
 - [Local Inference Engines](#local-inference-engines)
   - [Ollama](#ollama)
   - [llama.cpp](#llamacpp)
+- [Media Generation](#media-generation)
+  - [ComfyUI / comfy-cli](#comfyui--comfy-cli)
 - [Reverse Proxies (for TLS)](#reverse-proxies-for-tls)
   - [nginx](#nginx)
   - [Caddy](#caddy)
@@ -55,6 +57,7 @@ This document lists every **optional external tool and service** that ThinClaw f
 | [PostgreSQL](#postgresql--pgvector) | Production database with vector search | Optional | ✅ Free (OSS) | `brew install postgresql@15` / `apt install postgresql` |
 | [Ollama](#ollama) | Local LLM inference | Optional | ✅ Free (OSS) | [ollama.com](https://ollama.com/download) |
 | [llama.cpp](#llamacpp) | Local LLM inference (server mode) | Optional | ✅ Free (OSS) | [github.com/ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) |
+| [ComfyUI / comfy-cli](#comfyui--comfy-cli) | `image_generate` and ComfyUI workflow execution | Optional | ✅ Free locally / cloud varies | `python -m pip install --user comfy-cli` |
 | [Claude Code](#claude-code-cli) | Delegated coding tasks in sandbox | Optional | API key required | `npm install -g @anthropic-ai/claude-code` / [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code) |
 | [Whisper endpoint](#whisper-compatible-stt-endpoint) | Audio transcription / talk mode | Optional | Varies | OpenAI API or local whisper.cpp server |
 | [nginx](#nginx) / [Caddy](#caddy) | TLS termination (reverse proxy) | Optional | ✅ Free (OSS) | `brew install nginx` / `brew install caddy` |
@@ -704,6 +707,42 @@ llama-server -m /path/to/model.gguf --host 0.0.0.0 --port 8080
 LLM_BACKEND=llama_cpp
 LLAMA_CPP_SERVER_URL=http://localhost:8080
 ```
+
+---
+
+## Media Generation
+
+### ComfyUI / comfy-cli
+
+**What it does:** Runs the ComfyUI media-generation server used by
+`image_generate`, `comfy_run_workflow`, and the `thinclaw comfy ...` CLI
+commands. ThinClaw talks to ComfyUI over REST/WebSocket APIs; `comfy-cli` is
+used only for explicit lifecycle actions such as install, launch, stop, model
+download, and custom node installation.
+
+**Where to get it:**
+
+| Component | Install Command | Notes |
+|-----------|----------------|-------|
+| comfy-cli | `python -m pip install --user comfy-cli` | Required only for `thinclaw comfy setup`, `launch`, `stop`, and lifecycle management |
+| ComfyUI server | `thinclaw comfy setup --gpu cpu` | Use `--gpu nvidia`, `--gpu amd`, or `--gpu m-series` when appropriate |
+| Comfy Cloud | Provider account/API key | Store the key as ThinClaw secret `comfy_cloud_api_key` or set `COMFY_CLOUD_API_KEY` |
+
+**ThinClaw configuration:**
+
+```toml
+[comfyui]
+enabled = true
+mode = "local_existing" # local_existing, local_managed, cloud
+host = "http://127.0.0.1:8188"
+allow_lifecycle_management = false
+allow_untrusted_workflows = false
+```
+
+ComfyUI is an operator-trusted sidecar, not a WASM sandbox. Custom nodes and
+arbitrary workflows can execute Python and download large model files. See
+[COMFYUI_MEDIA_GENERATION.md](COMFYUI_MEDIA_GENERATION.md) for the complete
+setup and security model.
 
 ---
 

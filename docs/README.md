@@ -14,6 +14,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 - Understanding memory, continuity, and `/compress`: go to [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
 - Understanding outcome-backed learning, Learning Ledger outcomes, and deferred review: go to [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md)
 - Understanding skill trust, provenance, quarantine, and lifecycle tools: go to [SKILLS_ECOSYSTEM.md](SKILLS_ECOSYSTEM.md)
+- Generating images with ComfyUI: go to [COMFYUI_MEDIA_GENERATION.md](COMFYUI_MEDIA_GENERATION.md)
 - Running ThinClaw in editor-native ACP clients: go to [ACP_INTEGRATION.md](ACP_INTEGRATION.md)
 - Understanding research workspaces, experiments, and GPU clouds: go to [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md)
 - Understanding eval/SFT agent environments: go to [AGENT_ENV.md](AGENT_ENV.md)
@@ -41,6 +42,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 - [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md)
 - [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md)
 - [SKILLS_ECOSYSTEM.md](SKILLS_ECOSYSTEM.md)
+- [COMFYUI_MEDIA_GENERATION.md](COMFYUI_MEDIA_GENERATION.md)
 - [ACP_INTEGRATION.md](ACP_INTEGRATION.md)
 - [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md)
 - [AGENT_ENV.md](AGENT_ENV.md)
@@ -77,6 +79,7 @@ Use this page to pick the right path for your role instead of relying on whichev
 | Memory, continuity, and growth surfaces | [MEMORY_AND_GROWTH.md](MEMORY_AND_GROWTH.md) |
 | Outcome-backed learning and Learning Ledger outcomes | [OUTCOME_BACKED_LEARNING.md](OUTCOME_BACKED_LEARNING.md) |
 | Skills ecosystem and lifecycle | [SKILLS_ECOSYSTEM.md](SKILLS_ECOSYSTEM.md) |
+| ComfyUI media generation | [COMFYUI_MEDIA_GENERATION.md](COMFYUI_MEDIA_GENERATION.md) |
 | ACP editor integration | [ACP_INTEGRATION.md](ACP_INTEGRATION.md) |
 | Desktop autonomy profile, bootstrap, and rollback | [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md) |
 | Research, experiments, and remote runners | [RESEARCH_AND_EXPERIMENTS.md](RESEARCH_AND_EXPERIMENTS.md) |

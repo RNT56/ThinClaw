@@ -130,6 +130,7 @@ Persistent host integrations, hot-reloadable components, and external tool ecosy
 | Service mode | Long-running host, Mac Mini, VPS, Raspberry Pi, Windows service | [docs/deploy/](docs/deploy/) |
 | Native channels | Telegram, Signal, Discord, Slack, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail | [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md) |
 | WASM channels and tools | Packaged, capability-scoped extension components | [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md) |
+| ComfyUI media generation | Prompt-to-image, workflow execution, and managed local/cloud ComfyUI setup | [docs/COMFYUI_MEDIA_GENERATION.md](docs/COMFYUI_MEDIA_GENERATION.md) |
 | Scrappy backend | Embedding ThinClaw as a local or remote runtime | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | Reckless desktop autonomy | Operator-approved host-level desktop automation | [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md) |
 
@@ -146,6 +147,7 @@ Persistent host integrations, hot-reloadable components, and external tool ecosy
 | Extensions | Built-in tools, WASM tools, WASM channels, MCP servers, registries, and policy boundaries |
 | Models | Multi-provider routing, failover, provider setup, and cost controls |
 | Gateway | Chat, memory, routines, logs, extensions, providers, projects, skills, and settings |
+| Media generation | ComfyUI-backed `image_generate`, workflow health/dependency checks, and renderable generated-media artifacts |
 | Subagents | Detail-level transparency controls and Telegram subagent session routing |
 | Desktop autonomy | Native app adapters, UI automation, evidence capture, managed code autorollout, and rollback |
 
@@ -186,6 +188,7 @@ The local gateway listens on port `3000` unless configured otherwise. For the fu
 | WASM tools | Sandboxed and capability-scoped | Hot-reloadable tool components with credential isolation |
 | WASM channels | Sandboxed and capability-scoped | Packaged channel components with explicit host capabilities |
 | MCP servers | Operator-trusted external process or service | External tool ecosystems and services managed outside the sandbox |
+| ComfyUI sidecar | Operator-trusted local or cloud media runtime | Image generation, workflow execution, model/node lifecycle actions |
 | Desktop autonomy | Privileged opt-in profile | Host-level app control, UI automation, evidence capture, rollout, and rollback |
 
 ## Security and Trust
@@ -194,7 +197,7 @@ ThinClaw aims for operator control, but it does not claim every configured integ
 
 - Local data paths, secrets, and policy enforcement live in the trusted host runtime.
 - WASM components are sandboxed and capability-scoped.
-- MCP servers, tunnels, LLM providers, and external services are real trust boundaries.
+- MCP servers, ComfyUI sidecars, tunnels, LLM providers, and external services are real trust boundaries.
 - Restricted workspace modes disable unsupported execution paths instead of implying isolation that is not present.
 - Docker remains the portable hard-isolation path for code execution; host-local isolation reports its actual backend and capabilities.
 - Tool outputs and job surfaces expose runtime backend, runtime family, runtime mode, capabilities, and network-isolation metadata.
@@ -206,6 +209,7 @@ Read the deep docs before relying on a surface for sensitive workflows:
 - [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md)
 - [src/NETWORK_SECURITY.md](src/NETWORK_SECURITY.md)
 - [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md)
+- [docs/COMFYUI_MEDIA_GENERATION.md](docs/COMFYUI_MEDIA_GENERATION.md)
 - [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md)
 
 ## Install And Source Builds
@@ -278,6 +282,7 @@ Full details, custom combinations, and CI matrix: [docs/BUILD_PROFILES.md](docs/
 |---|---|
 | Audience-first docs index | [docs/README.md](docs/README.md) |
 | Deployment decision tree | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| ComfyUI image generation | [docs/COMFYUI_MEDIA_GENERATION.md](docs/COMFYUI_MEDIA_GENERATION.md) |
 | Platform runbooks | [docs/deploy/](docs/deploy/) |
 | CLI command reference | [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) |
 | Build profiles and feature flags | [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md) |

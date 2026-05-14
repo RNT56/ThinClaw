@@ -23,6 +23,7 @@ That means:
 | WASM tools | sandboxed and capability-scoped |
 | WASM channels | package-based and host-managed |
 | MCP servers | operator-trusted external processes or services |
+| ComfyUI media runtime | operator-trusted local sidecar or configured cloud endpoint |
 | External providers and APIs | explicit data egress paths when configured |
 | `desktop_autonomy.profile = "reckless_desktop"` | privileged host-level desktop control with managed code rollout/rollback |
 
@@ -41,6 +42,7 @@ Do not treat all integrations as if they had the same isolation guarantees.
 - Supports network controls and allowlists
 - Keeps execution-surface guarantees mode-aware: background `process` is disabled in restricted workspace modes, `execute_code` only runs in `sandboxed` mode when an actual Docker sandbox backend is available, and research `local_docker` trials use the same Docker-backed execution path
 - Separates sandboxed extension paths from operator-trusted external paths
+- Treats ComfyUI as a trusted media sidecar: lifecycle actions are explicit and approval-gated, untrusted workflow paths are disabled by default, cloud API keys stay in the secrets store, and generated output paths are sanitized before being returned
 - Makes the gateway, channels, tools, and extension surfaces part of the security model
 - Keeps reckless desktop autonomy explicit instead of implying it has the same trust profile as a normal local run
 
@@ -103,6 +105,7 @@ ThinClaw does not claim that:
 - all data always stays local once you configure external providers or remote services
 - local encryption protects secrets from a compromised running host process
 - MCP servers have the same trust profile as WASM tools
+- ComfyUI custom nodes or arbitrary workflows are sandboxed by ThinClaw; ComfyUI can execute Python and should be installed, launched, and extended only when the operator trusts that sidecar
 - configured or PATH-provided external shell scanners are automatically sandboxed or cryptographically trusted unless provenance enforcement is enabled; otherwise they are operator-trusted local binaries
 - the current shell-scanner provenance path is a local manifest/hash/signature check, not a full public transparency-log or Sigstore/Cosign distribution system
 - host-local execution with `allow_network = false` is universally the same across platforms; today hard host-local no-network enforcement is available on macOS via `sandbox-exec` and on Linux via `bwrap` when it is installed, while the Docker-backed sandbox path provides the portable hard guarantee and unsupported host-local platforms are surfaced as best-effort through runtime metadata
@@ -115,6 +118,7 @@ Those distinctions are part of the product design and should stay visible in the
 - [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md)
 - [../src/NETWORK_SECURITY.md](../src/NETWORK_SECURITY.md)
 - [EXTENSION_SYSTEM.md](EXTENSION_SYSTEM.md)
+- [COMFYUI_MEDIA_GENERATION.md](COMFYUI_MEDIA_GENERATION.md)
 - [CHANNEL_ARCHITECTURE.md](CHANNEL_ARCHITECTURE.md)
 - [../src/tools/README.md](../src/tools/README.md)
 - [../src/setup/README.md](../src/setup/README.md)

@@ -5,6 +5,10 @@ for explicit lifecycle actions such as install, launch, stop, model download,
 and custom node installation. Workflow execution uses ComfyUI REST and
 WebSocket APIs directly.
 
+For the terminal command catalog, see [CLI_REFERENCE.md](CLI_REFERENCE.md). For
+Python/comfy-cli and host dependency notes, see
+[EXTERNAL_DEPENDENCIES.md](EXTERNAL_DEPENDENCIES.md#comfyui--comfy-cli).
+
 ## Configuration
 
 Enable the tools with either TOML/settings or environment variables:
@@ -35,6 +39,8 @@ Cloud mode uses the ThinClaw secret named `comfy_cloud_api_key` by default, with
 
 Generated outputs are saved under `~/.thinclaw/media_cache/generated` by
 default and returned as JSON plus renderable tool artifacts for web clients.
+ACP editor sessions currently keep media prompt/artifact support disabled; use
+the standard CLI/TUI/WebUI runtime profile for ComfyUI generation.
 
 ## CLI
 
