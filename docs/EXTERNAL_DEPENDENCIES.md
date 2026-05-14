@@ -22,6 +22,7 @@ This document lists every **optional external tool and service** that ThinClaw f
   - [Docker Chromium (headless)](#docker-chromium-headless)
 - [Messaging Channel Dependencies](#messaging-channel-dependencies)
   - [signal-cli (Signal channel)](#signal-cli-signal-channel)
+  - [Provider accounts for live channel smokes](#provider-accounts-for-live-channel-smokes)
   - [ffmpeg / ffprobe (media processing)](#ffmpeg--ffprobe-media-processing)
 - [Code Delegation](#code-delegation)
   - [Claude Code CLI](#claude-code-cli)
@@ -53,6 +54,7 @@ This document lists every **optional external tool and service** that ThinClaw f
 | [Podman](#podman) | Rootless sandbox alternative to Docker | Optional | ✅ Free (OSS) | `brew install podman` / [podman.io](https://podman.io/docs/installation) |
 | [Chrome/Chromium](#chrome--chromium-local) | `BrowserTool` web automation | Optional | ✅ Free | [google.com/chrome](https://www.google.com/chrome/) / `brew install --cask chromium` |
 | [signal-cli](#signal-cli-signal-channel) | Signal messaging channel | Optional | ✅ Free (OSS) | [github.com/AsamK/signal-cli](https://github.com/AsamK/signal-cli) |
+| Provider channel accounts | Optional live smokes for Matrix, APNs, Web Push, voice-call, and WASM provider packages | Optional | Varies | Provider consoles / test tenants |
 | [ffmpeg](#ffmpeg--ffprobe-media-processing) | Video/audio media processing | Optional | ✅ Free (OSS) | `brew install ffmpeg` / `apt install ffmpeg` |
 | [PostgreSQL](#postgresql--pgvector) | Production database with vector search | Optional | ✅ Free (OSS) | `brew install postgresql@15` / `apt install postgresql` |
 | [Ollama](#ollama) | Local LLM inference | Optional | ✅ Free (OSS) | [ollama.com](https://ollama.com/download) |
@@ -473,6 +475,27 @@ SIGNAL_ATTACHMENTS_DIR=/path/to/signal-cli/attachments   # Optional override, es
 ```
 
 See also: [signal-cli documentation](https://github.com/AsamK/signal-cli/wiki)
+
+---
+
+### Provider accounts for live channel smokes
+
+ThinClaw's CI channel coverage uses mock transports and fixture payloads by
+default. Real provider smoke tests are optional and env-gated because they
+require external accounts, public callback URLs, and provider-issued secrets.
+
+Live channel validation requires the relevant provider setup:
+
+| Surface | External Requirement |
+|---------|----------------------|
+| Matrix | Homeserver URL, bot access token, test room/DM, and optional appservice registration |
+| APNs | Apple Developer team ID, key ID, bundle ID, private key, and a registered device token |
+| Browser push | VAPID key pair, subject, HTTPS origin, and at least one browser subscription endpoint |
+| Voice-call | Twilio/Telnyx or equivalent call webhook path plus a transcription/media callback path |
+| WASM provider packages | Provider-specific bot/app credentials for Mattermost, Twilio SMS, DingTalk, Feishu/Lark, WeCom, Weixin, QQ, LINE, Google Chat, Microsoft Teams, or Twitch |
+
+Use `thinclaw channels validate <name>` for local readiness and the WebUI
+extension/channel setup validator for Provider Vault-backed secret checks.
 
 ---
 

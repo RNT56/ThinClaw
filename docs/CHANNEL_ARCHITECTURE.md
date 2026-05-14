@@ -24,6 +24,10 @@ Some delivery surfaces are compiled into the trusted Rust host. Others are packa
 | iMessage | native | local `chat.db` access on macOS |
 | Apple Mail | native | local mail index access on macOS |
 | Discord Gateway | native | persistent Gateway connection |
+| Matrix | native lifecycle | room/DM ingress, webhook sync payloads, outbound replies |
+| Voice-call | native lifecycle | call transcript webhook ingress and response hook |
+| APNs | native lifecycle | iOS device registration and wake delivery path |
+| Browser push | native lifecycle | Web Push subscription registration and wake delivery path |
 | Telegram | WASM package | stateless Bot API path, host-managed credentials |
 | Slack | WASM package | stateless Events API path, host-managed credentials |
 | WhatsApp | WASM package | webhook-driven packaged channel |
@@ -143,11 +147,12 @@ New native messaging channels should convert platform payloads into `IncomingEve
 - `legacy_session_key_aliases` preserves lookup compatibility for older persisted keys.
 - `parse_slash_command` is the shared slash-command parser; channels should not open-code `/` prefix splitting.
 
-This is the foundation for Mattermost, Matrix, SMS/Twilio, browser-push, DingTalk, Feishu/Lark, WeCom, Weixin, QQ, LINE, Google Chat, Microsoft Teams, and Twitch drivers. Platform drivers should own authentication and transport details; the manager owns canonical session identity and command parsing.
+The current package catalog and native lifecycle layer cover Mattermost, Matrix, SMS/Twilio, browser-push, DingTalk, Feishu/Lark, WeCom, Weixin, QQ, LINE, Google Chat, Microsoft Teams, and Twitch. Platform drivers own authentication and transport details; the manager owns canonical session identity and command parsing.
 
 Matrix, voice-call, APNs, and browser-push are native lifecycle surfaces. They
-are config-gated descriptors that appear in channel status until a concrete
-transport instance registers with the manager:
+are config-gated transports that appear in channel status and register concrete
+native lifecycle clients when the required feature gates and credentials are
+available:
 
 - `MATRIX_ENABLED`
 - `VOICE_CALL_ENABLED` (`--features voice` required before a real transport can run)

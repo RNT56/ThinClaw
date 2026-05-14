@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refreshed channel, APNs/browser-push, ComfyUI media-generation, setup, CLI, tool/skill, parity, and dependency documentation to match the current native lifecycle, built-in sidecar, and WASM channel architecture, while keeping real-provider smoke requirements clearly marked as credential-gated validation.
+- Removed stale audit-planning closure documents from the current docs tree.
+
 ### Fixed
 
 ## [0.14.0](https://github.com/RNT56/ThinClaw/releases/tag/v0.14.0) - 2026-05-14

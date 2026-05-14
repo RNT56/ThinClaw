@@ -36,19 +36,19 @@ For shared identity vocabulary and cross-surface command names, also use:
 | Apple Mail | macOS-only mail channel | [apple-mail.md](apple-mail.md) |
 | Discord Gateway | persistent native Discord path | [discord.md](discord.md) |
 
-## Native Lifecycle Placeholders
+## Native Lifecycle Channels
 
-These surfaces are exposed as config-gated descriptors in channel status, but
-do not start transports yet. They reserve the native lifecycle shape and must
-route future inbound payloads through `IncomingEvent`, `mint_session_key`, and
-`parse_slash_command`.
+These surfaces are exposed as config-gated native lifecycle channels. When the
+required feature gates and credentials are available, they register concrete
+clients with the channel manager and route inbound payloads through
+`IncomingEvent`, `mint_session_key`, and `parse_slash_command`.
 
 | Channel | Config flag | Notes |
 |---|---|---|
-| Matrix | `MATRIX_ENABLED` | rooms and DMs |
-| Voice-call | `VOICE_CALL_ENABLED` | requires builds with `--features voice` before a real transport can run |
-| APNs | `APNS_ENABLED` | device notification lifecycle |
-| Browser push | `BROWSER_PUSH_ENABLED` | requires builds with `--features browser` before a real transport can run |
+| Matrix | `MATRIX_ENABLED` | rooms/DMs, webhook sync payloads, and outbound room replies |
+| Voice-call | `VOICE_CALL_ENABLED` | webhook transcript ingress and response hook; requires builds with `--features voice` |
+| APNs | `APNS_ENABLED` | device registration persistence and APNs wake delivery path |
+| Browser push | `BROWSER_PUSH_ENABLED` | subscription registration persistence and Web Push wake delivery path; requires builds with `--features browser` |
 
 ## Packaged WASM Channels
 
@@ -71,8 +71,11 @@ route future inbound payloads through `IncomingEvent`, `mint_session_key`, and
 | Twitch | packaged EventSub/chat channel | registry metadata |
 | Generic WASM runtime notes | runtime/operator context | [wasm.md](wasm.md) |
 
-Packaged channels are distributed through the channel registry and loaded by the ThinClaw host runtime.
-Channels marked "registry metadata" have registry package entries and capability filenames reserved; full operator setup pages should land with their channel implementations.
+Packaged channels are distributed through the channel registry and loaded by the
+ThinClaw host runtime. Channels marked "registry metadata" are implemented as
+registry packages with provider-specific capabilities and mock-backed webhook or
+API coverage; dedicated operator setup pages can be added when a provider needs
+more than the registry/setup descriptor exposes.
 
 ## Related Docs
 

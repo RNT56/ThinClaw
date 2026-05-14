@@ -76,7 +76,7 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | Channel health monitor | ✅ | ✅ | `ChannelHealthMonitor`: periodic checks, failure tracking, auto-restart with cooldown |
 | Presence system | ✅ | ❌ | Dedicated `PresenceTracker` module removed as stale/unwired; channel/runtime liveness is tracked through `ChannelHealthMonitor` + channel status surfaces |
 | Trusted-proxy auth mode | ✅ | ✅ | `TRUSTED_PROXY_HEADER` + `TRUSTED_PROXY_IPS` for reverse-proxy deployments |
-| APNs push pipeline | ✅ | ❌ | Wake disconnected iOS nodes via push |
+| APNs push pipeline | ✅ | ✅ | Native lifecycle channel with registration endpoints, signed APNs client path, persisted device registry, and mock-backed delivery coverage; real Apple delivery smoke remains credential-gated |
 | Oversized payload guard | ✅ | ✅ | HTTP webhook 64KB body limit + Content-Length check + chat history cap (`max_context_messages` default 200) |
 | Pre-prompt context diagnostics | ✅ | ✅ | `tracing::debug` logs message count, est. chars, tool count before each LLM call |
 
@@ -99,15 +99,15 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | Slack | ✅ | ✅ | - | WASM channel (Events API webhook). Native dead code (`slack.rs`) removed. |
 | iMessage | ✅ | ✅ | P3 | `IMessageChannel` + `IMessageConfig` native runtime ([`src/channels/imessage.rs`](src/channels/imessage.rs)) |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
-| Feishu/Lark | ✅ | ❌ | P3 | Bitable create app/field tools |
-| LINE | ✅ | ❌ | P3 | |
+| Feishu/Lark | ✅ | ✅ | P3 | WASM package with challenge, event callback, tenant-token, and bot-reply path; live tenant smoke remains env-gated |
+| LINE | ✅ | ✅ | P3 | WASM package with batched events, HMAC validation, reply-token routing, and Messaging API response path |
 | WebChat | ✅ | ✅ | - | Web gateway chat |
-| Matrix | ✅ | ❌ | P3 | E2EE support |
-| Mattermost | ✅ | ❌ | P3 | Emoji reactions |
-| Google Chat | ✅ | ❌ | P3 | |
-| MS Teams | ✅ | ❌ | P3 | |
-| Twitch | ✅ | ❌ | P3 | |
-| Voice Call | ✅ | ❌ | P3 | Twilio/Telnyx, stale call reaper, pre-cached greeting |
+| Matrix | ✅ | ✅ | P3 | Native lifecycle channel plus packaged channel shape; E2EE and live homeserver smoke remain follow-up checks |
+| Mattermost | ✅ | ✅ | P3 | WASM package with webhook request/response path and mock-backed delivery coverage |
+| Google Chat | ✅ | ✅ | P3 | WASM package with app event parsing and response path |
+| MS Teams | ✅ | ✅ | P3 | WASM package with Bot Framework activity parsing and reply routing |
+| Twitch | ✅ | ✅ | P3 | WASM package with EventSub challenge/HMAC path and chat response routing |
+| Voice Call | ✅ | ✅ | P3 | Native lifecycle channel with webhook transcript ingress and response client; live media/transcription smoke remains provider-gated |
 | Gmail | ✅ | ✅ | - | `GmailChannel` (700+ LOC) — Pub/Sub pull + Gmail API read/reply + sender allowlist ([`src/channels/gmail.rs`](src/channels/gmail.rs)) |
 | Apple Mail | ❌ | ✅ | P3 | `AppleMailChannel` — Envelope Index polling, sender allowlist, unread-only, mark-as-read. Wizard onboarding + WebUI settings ([`src/channels/apple_mail.rs`](src/channels/apple_mail.rs)) |
 | Nostr | ✅ | ✅ | ✅ | Owner-only encrypted DM control plus `nostr_actions` social tool, dual-stack NIP-04/Gift Wrap DM support, DM-only `send_message(platform="nostr")` |
@@ -325,6 +325,9 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | TTS (Edge TTS) | ✅ | ✅ | - | `TtsSynthesizer` with Edge TTS provider support |
 | TTS (OpenAI) | ✅ | ✅ | - | `tools/builtin/tts.rs` — OpenAI TTS tool |
 | Incremental TTS playback | ✅ | ✅ | P3 | `SentenceChunker` + `TtsChunk` streaming via SSE, progressive chunk synthesis ([`src/media/tts_streaming.rs`](src/media/tts_streaming.rs)) |
+| ComfyUI prompt-to-image generation | ❌ | ✅ | - | Built-in `image_generate` tool backed by ComfyUI REST/WebSocket workflow execution, renderable generated-media artifacts, output sanitization, and bundled starter workflows ([`src/tools/builtin/comfyui.rs`](src/tools/builtin/comfyui.rs), [`crates/thinclaw-media/src/comfyui.rs`](crates/thinclaw-media/src/comfyui.rs), [`docs/COMFYUI_MEDIA_GENERATION.md`](docs/COMFYUI_MEDIA_GENERATION.md)) |
+| ComfyUI workflow operations | ❌ | ✅ | - | `comfy_health`, `comfy_check_deps`, `comfy_run_workflow`, and approval-gated `comfy_manage`; lifecycle actions are explicit because ComfyUI is an operator-trusted sidecar, not a WASM sandbox |
+| Creative ComfyUI skill | ❌ | ✅ | - | Bundled `creative-comfyui` skill selects `image_generate` for normal image requests and reserves lifecycle changes for explicit setup/management requests ([`skills/creative-comfyui/SKILL.md`](skills/creative-comfyui/SKILL.md)) |
 | Sticker-to-image | ✅ | ✅ | P3 | WebP/TGS/WebM detection + ffmpeg conversion ([`src/media/sticker.rs`](src/media/sticker.rs)) |
 | Media pipeline integration | ❌ | ✅ | - | `MediaPipeline` auto-wired into `process_user_input()` via `IncomingMessage.attachments` |
 | Multimodal media routing | ❌ | ✅ | - | Images/audio/video → rig-core `UserContent::Image/Audio/Video` (provider-agnostic); PDFs → text extraction. Attachment size limits: 20MB/file, 50MB/msg |
@@ -432,7 +435,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 | Push-to-talk | ✅ | 🚫 | - | |
 | Location sharing | ✅ | 🚫 | - | |
 | Node pairing | ✅ | 🚫 | - | |
-| APNs push notifications | ✅ | 🚫 | - | Wake disconnected nodes before invoke |
+| APNs push notifications | ✅ | 🚫 | - | Mobile client remains out of scope; ThinClaw backend APNs registration/delivery pipeline is tracked above as complete with live Apple delivery smoke still credential-gated |
 | Share to OpenClaw (iOS) | ✅ | 🚫 | - | iOS share sheet integration |
 | Background listening toggle | ✅ | 🚫 | - | iOS background audio |
 
@@ -715,7 +718,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 
 ## 19. ThinClaw → Scrappy Integration Tracker
 
-> **Last updated:** 2026-03-25 — all sprint items complete (28 features end-to-end). 22+ Tauri commands wired.
+> **Last updated:** 2026-05-14 — sprint items complete; APNs/browser-push and channel parity notes refreshed against the current native lifecycle and WASM package architecture.
 
 ### 19.1 Active Integration Gaps
 
@@ -723,7 +726,7 @@ ThinClaw's current provider catalog also includes **Groq, Mistral, xAI, Together
 |-------------|----------|----------------------------|
 | **Multimodal media pipeline** | ✅ Done | Telegram/channel → binary download → rig-core multimodal. Frontend rendering for images/PDFs/audio in chat bubbles |
 | **WhatsApp channel** | ✅ Done | Cloud API webhook — verify-token + signed POST validation, text/media/location/contacts/interactive/reaction inbound support, outbound media replies, DM pairing, reply threading, formatting |
-| **APNs push pipeline** | Deferred | iOS push wake — needs Apple Developer cert infra |
+| **APNs push pipeline** | ✅ Done | Native registration/delivery path is implemented with mock-backed coverage; live Apple delivery still requires operator Apple Developer credentials |
 
 ### 19.2 Future Considerations
 
@@ -880,7 +883,7 @@ running inside Scrappy.
 - ✅ Control UI i18n (EN/ES/ZH/JA)
 - ✅ Stuck loop detection
 - ✅ Discord channel — native Rust Gateway WS + REST (`channels/discord.rs`) + WASM webhook (`channels-src/discord/`)
-- ❌ Matrix channel — E2EE stub
+- ✅ Matrix channel — native lifecycle and package architecture are implemented; E2EE and live homeserver sync/appservice smoke remain release validation items
 - ✅ Telegram: forum topic creation + `message_thread_id` threading
 - ✅ Telegram: `channel_post` support + `sender_chat` identification
 - ✅ Streaming draft replies — End-to-end: `respond_with_tools_streaming` in Reasoning, agent loop integration in dispatcher, DraftReplyState send-then-edit with HTML formatting, persistent draft across tool-call iterations, sequential mpsc chunk processing (FIFO guaranteed), overflow detection with fallback to `on_respond()`, `delete_message` cleanup, Discord + Telegram `send_draft`
@@ -966,7 +969,7 @@ running inside Scrappy.
 - ❌ Slack channel (native implementation — currently WASM tool)
 - ✅ WhatsApp channel — WASM Cloud API channel ([`channels-src/whatsapp/src/lib.rs`](channels-src/whatsapp/src/lib.rs)) with signed webhooks, richer inbound normalization, outbound media send/upload, DM pairing, reply threading, markdown formatting, and 19 crate tests
 - ✅ iMessage channel — `IMessageChannel` (720 LOC, [`src/channels/imessage.rs`](src/channels/imessage.rs)) with chat.db polling + osascript sending, group chats, attachments, dedup, diagnostics, 23 tests
-- ❌ Other messaging platforms (LINE, Feishu/Lark, Google Chat, MS Teams, Twitch)
+- ✅ Other messaging platforms — WASM package catalog and mock-backed webhook/API paths cover LINE, Feishu/Lark, Google Chat, MS Teams, Twitch, Mattermost, Twilio/SMS, DingTalk, WeCom, Weixin, and QQ; live provider smokes remain optional/env-gated
 
 ### P5 - Scrappy (Tauri) Integration — ✅ ThinClaw-Side Contract Complete
 > ThinClaw-side Tauri commands, macOS-facing hooks, and integration surfaces are present in this repo.
@@ -1045,9 +1048,9 @@ These are intentional architectural choices, not gaps to be filled.
 
 ---
 
-## 20. Shipped Built-in Tools (75 max; some conditional or feature-gated)
+## 20. Shipped Built-in Tools (80 max; some conditional or feature-gated)
 
-> **Updated:** 2026-04-14
+> **Updated:** 2026-05-14
 
 ### 20.1 File & Code Operations (9 tools)
 
@@ -1156,7 +1159,17 @@ These are intentional architectural choices, not gaps to be filled.
 | `consult_advisor` | [`advisor.rs`](src/tools/builtin/advisor.rs) | Advisor-executor consultation tool, registered conditionally when routing mode uses the advisor lane |
 | `agent_think` | [`agent_control.rs`](src/tools/builtin/agent_control.rs) | Explicit reasoning scratchpad (implicit capability tool) |
 
-### 20.10 Hardware & Environment (3 tools)
+### 20.10 Media Generation (5 tools)
+
+| Tool | Source | Description |
+|------|--------|-------------|
+| `image_generate` | [`comfyui.rs`](src/tools/builtin/comfyui.rs) | Prompt-to-image generation through configured ComfyUI workflow; returns JSON plus renderable image artifacts |
+| `comfy_health` | [`comfyui.rs`](src/tools/builtin/comfyui.rs) | Read-only ComfyUI server/object-info health check |
+| `comfy_check_deps` | [`comfyui.rs`](src/tools/builtin/comfyui.rs) | Read-only workflow dependency report for models and custom nodes |
+| `comfy_run_workflow` | [`comfyui.rs`](src/tools/builtin/comfyui.rs) | Run bundled or approved API-format ComfyUI workflows |
+| `comfy_manage` | [`comfyui.rs`](src/tools/builtin/comfyui.rs) | Explicit setup/lifecycle/model/node actions; registered only when lifecycle management is enabled |
+
+### 20.11 Hardware & Environment (3 tools)
 
 | Tool | Source | Description |
 |------|--------|-------------|
@@ -1166,7 +1179,7 @@ These are intentional architectural choices, not gaps to be filled.
 
 Source-present but not currently registered as built-in runtime tools: `slack_actions`, `discord_actions`, `telegram_actions`, `location`, and `camera_capture` ([`src/tools/builtin/mod.rs`](src/tools/builtin/mod.rs), [`src/tools/registry.rs`](src/tools/registry.rs), [`src/app.rs`](src/app.rs), [`src/main.rs`](src/main.rs)).
 
-### 20.11 UI & Interaction (4 tools)
+### 20.12 UI & Interaction (4 tools)
 
 | Tool | Source | Description |
 |------|--------|-------------|
@@ -1175,7 +1188,7 @@ Source-present but not currently registered as built-in runtime tools: `slack_ac
 | `vision_analyze` | [`vision.rs`](src/tools/builtin/vision.rs) | Proactive image/video analysis via multimodal LLM |
 | `emit_user_message` | [`agent_control.rs`](src/tools/builtin/agent_control.rs) | Emit messages to user (implicit capability tool) |
 
-### 20.12 Process & Task Management (3 tools)
+### 20.13 Process & Task Management (3 tools)
 
 | Tool | Source | Description |
 |------|--------|-------------|
@@ -1183,25 +1196,25 @@ Source-present but not currently registered as built-in runtime tools: `slack_ac
 | `todo` | [`todo.rs`](src/tools/builtin/todo.rs) | In-session task planner with merge/replace modes; survives context compaction |
 | `time` | [`time.rs`](src/tools/builtin/time.rs) | Current time, timezone conversion, date arithmetic |
 
-### 20.13 Smart Home & IoT (1 tool)
+### 20.14 Smart Home & IoT (1 tool)
 
 | Tool | Source | Description |
 |------|--------|-------------|
 | `homeassistant` | [`homeassistant.rs`](src/tools/builtin/homeassistant.rs) | Home Assistant REST API: entity listing, state queries, service calls; gated on `HASS_URL` + `HASS_TOKEN` |
 
-### 20.14 Builder (1 tool)
+### 20.15 Builder (1 tool)
 
 | Tool | Source | Description |
 |------|--------|-------------|
 | `build_software` | [`builder/core.rs`](src/tools/builder/core.rs) | LLM-driven iterative build loop for WASM tools, CLI apps, and scripts |
 
-### 20.15 Utility (1 tool)
+### 20.16 Utility (1 tool)
 
 | Tool | Source | Description |
 |------|--------|-------------|
 | `echo` | [`echo.rs`](src/tools/builtin/echo.rs) | Echo input back (testing/debugging) |
 
-### 20.16 Supporting Infrastructure
+### 20.17 Supporting Infrastructure
 
 | Component | Source | Description |
 |-----------|--------|-------------|

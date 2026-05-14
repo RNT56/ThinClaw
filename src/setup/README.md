@@ -104,6 +104,10 @@ credentials such as `MATRIX_HOMESERVER`/`MATRIX_ACCESS_TOKEN`, APNs signing
 keys plus `APNS_REGISTRATION_SECRET`, or VAPID keys plus
 `BROWSER_PUSH_WEBHOOK_SECRET`. Voice-call needs a build with `--features voice`;
 browser-push needs a build with `--features browser`.
+APNs and browser-push endpoint registrations persist under
+`$THINCLAW_HOME/native-endpoints/` by default, with
+`APNS_ENDPOINT_REGISTRY_PATH` and `BROWSER_PUSH_ENDPOINT_REGISTRY_PATH`
+available for service-specific writable paths.
 
 ### `--guide [<topic>]`
 

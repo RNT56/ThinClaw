@@ -272,10 +272,29 @@ Create `my-channel.capabilities.json`:
 - `secret_validation: "hmac_sha256_body"` treats the configured secret as an
   HMAC key and validates the raw request body against the configured
   `secret_header` value. Use this for providers like WhatsApp or GitHub.
+- `secret_validation: "hmac_sha256_base64_body"` validates providers that send
+  base64-encoded HMAC signatures, such as LINE.
+- `secret_validation: "twilio_request_signature"` validates Twilio callback
+  signatures against the callback URL, form/query parameters, and auth token.
+- `secret_validation: "twitch_eventsub_hmac_sha256"` validates Twitch EventSub
+  signatures using the message id, timestamp, and raw body.
 - `verify_token_param` enables GET/HEAD query-param verification for webhook
   setup handshakes.
 - `verify_token_secret_name` lets GET/HEAD verification use a different secret
   from POST signature validation.
+
+### Structured Response Bodies
+
+Shared webhook packages can render response payloads as nested JSON, arrays, or
+URL-encoded forms. Prefer structured JSON bodies for provider APIs instead of
+flattening everything into string fields. This is required for providers such as
+LINE (`messages: [...]`), DingTalk (`text: { content: ... }`), Teams activity
+replies, and WeCom/Weixin callback responses.
+
+Template strings inside nested values still support `{content}`, request
+metadata placeholders, and explicit `template_values`. Secret placeholders
+remain uppercase (`{LINE_CHANNEL_ACCESS_TOKEN}`, `{TWILIO_ACCOUNT_SID}`, etc.)
+and must map to declared lowercase secret names in `allowed_names`.
 
 ## Building and Deploying
 

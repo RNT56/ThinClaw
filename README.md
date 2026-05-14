@@ -128,7 +128,7 @@ Persistent host integrations, hot-reloadable components, and external tool ecosy
 | Full-screen TUI | Keyboard-first local agent cockpit | `thinclaw tui` |
 | Web gateway | Browser-based chat, memory, routines, logs, extensions, providers, and settings | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
 | Service mode | Long-running host, Mac Mini, VPS, Raspberry Pi, Windows service | [docs/deploy/](docs/deploy/) |
-| Native channels | Telegram, Signal, Discord, Slack, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail | [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md) |
+| Native channels | Telegram, Signal, Discord, Slack, Matrix, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail, voice-call, APNs, browser-push | [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md) |
 | WASM channels and tools | Packaged, capability-scoped extension components | [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md) |
 | ComfyUI media generation | Prompt-to-image, workflow execution, and managed local/cloud ComfyUI setup | [docs/COMFYUI_MEDIA_GENERATION.md](docs/COMFYUI_MEDIA_GENERATION.md) |
 | Scrappy backend | Embedding ThinClaw as a local or remote runtime | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
@@ -142,7 +142,7 @@ Persistent host integrations, hot-reloadable components, and external tool ecosy
 | Identity | `personality_pack` defaults, `/personality` overlays, durable agent identity, and `/vibe` compatibility |
 | Shared commands | `/compress`, `/personality`, `/skills`, `/heartbeat`, `/summarize`, `/rollback` |
 | Onboarding | Humanist Cockpit CLI/TUI setup with Quick Setup, Advanced Setup, readiness summaries, and saved follow-up notes |
-| Channels | Telegram, Signal, Discord, Slack, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail, and packaged WASM channels |
+| Channels | Telegram, Signal, Discord, Slack, Matrix, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail, voice-call, APNs/browser-push wake paths, and packaged WASM channels |
 | Memory | Workspace-backed memory, search, citations, identity files, and continuity surfaces |
 | Extensions | Built-in tools, WASM tools, WASM channels, MCP servers, registries, and policy boundaries |
 | Models | Multi-provider routing, failover, provider setup, and cost controls |

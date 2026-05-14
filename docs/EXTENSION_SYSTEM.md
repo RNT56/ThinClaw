@@ -24,6 +24,7 @@ ThinClaw exposes several related but different operator paths:
 - `thinclaw tool ...` manages WASM tools.
 - `thinclaw mcp ...` manages MCP servers.
 - `thinclaw registry ...` works with installable registry metadata for packaged artifacts.
+- `thinclaw comfy ...` manages the built-in ComfyUI media-generation sidecar path.
 - Conversational agent tools such as `tool_search` or `tool_install` are part of the runtime's agent-facing extension surface, not a replacement for the CLI reference.
 
 ## Trust Model
@@ -43,6 +44,13 @@ MCP is not the sandboxed extension path.
 - MCP servers run as external processes or remote services.
 - They are configured and trusted by the operator.
 - They can still be a great integration path, but they should be described as operator-trusted execution, not as isolated plugins.
+
+### ComfyUI media generation
+
+ComfyUI is not a WASM tool, MCP server, native plugin, or registry extension.
+It is a built-in Rust tool family that talks to an operator-trusted local or
+cloud ComfyUI sidecar. Document it through the ComfyUI media-generation docs,
+tool guide, and security model rather than as an installable extension.
 
 ### Native plugins
 

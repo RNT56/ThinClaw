@@ -45,6 +45,7 @@ These flags can be appended to almost any command:
   - `list [--format table|json]`: Show configured native and WASM channel surfaces.
   - `info <NAME>`: Show channel-specific setup details.
   - `validate <NAME>`: Validate a configured native channel or installed WASM channel package. For WASM packages this checks the artifact, capabilities file, and required env-backed setup secrets; Provider Vault validation is available through the WebUI extension validator.
+    Native APNs and browser-push endpoint registrations persist under `$THINCLAW_HOME/native-endpoints/` by default; override with `APNS_ENDPOINT_REGISTRY_PATH` or `BROWSER_PUSH_ENDPOINT_REGISTRY_PATH` when the service account needs a custom writable location.
 - `thinclaw gateway`: Manage the built-in web gateway settings.
   - `access [--show-token]`: Print the bind address, WebUI URL, token URL, SSH tunnel command, auth status, health status, and service-safe warnings.
 

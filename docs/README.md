@@ -56,7 +56,6 @@ Use this page to pick the right path for your role instead of relying on whichev
 ### Contributors And Maintainers
 
 - [../CLAUDE.md](../CLAUDE.md)
-- [AUDIT_CLOSURE_WAVE7_WAVE8.md](AUDIT_CLOSURE_WAVE7_WAVE8.md)
 - [IDENTITY_AND_PERSONALITY.md](IDENTITY_AND_PERSONALITY.md)
 - [../src/setup/README.md](../src/setup/README.md)
 - [../src/tools/README.md](../src/tools/README.md)
