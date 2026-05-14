@@ -648,9 +648,9 @@ jobs:
             fi
           done
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum artifacts/thinclaw-*.tar.gz | awk '{ n=$2; sub(/^artifacts\\//, "", n); print $1 "  " n }' > artifacts/checksums.txt
+            sha256sum artifacts/thinclaw-*.tar.gz | awk '{ n=$2; sub(/^artifacts\//, "", n); print $1 "  " n }' > artifacts/checksums.txt
           else
-            shasum -a 256 artifacts/thinclaw-*.tar.gz | awk '{ n=$2; sub(/^artifacts\\//, "", n); print $1 "  " n }' > artifacts/checksums.txt
+            shasum -a 256 artifacts/thinclaw-*.tar.gz | awk '{ n=$2; sub(/^artifacts\//, "", n); print $1 "  " n }' > artifacts/checksums.txt
           fi
           cp scripts/thinclaw-installer.sh artifacts/thinclaw-installer.sh
           chmod +x artifacts/thinclaw-installer.sh
