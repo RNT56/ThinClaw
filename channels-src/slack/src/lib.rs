@@ -1200,6 +1200,7 @@ mod tests {
             thread_ts: Some("1710000000.100".to_string()),
             message_ts: "1710000000.100".to_string(),
             team_id: Some("T123".to_string()),
+            response_attachments: Vec::new(),
         };
 
         let json = serde_json::to_string(&metadata).unwrap();

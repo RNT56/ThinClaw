@@ -814,26 +814,25 @@ impl Channel for BlueBubblesChannel {
         if response.attachments.is_empty()
             && let Some(attachments) = msg.metadata.get("response_attachments")
             && let Some(arr) = attachments.as_array()
+            && let Some(resolved_att) = self.resolve_chat_guid(chat_id_for_att).await?
         {
-            if let Some(resolved_att) = self.resolve_chat_guid(chat_id_for_att).await? {
-                for att in arr {
-                    let data_b64 = att.get("data").and_then(|d| d.as_str()).unwrap_or("");
-                    let fname = att
-                        .get("filename")
-                        .and_then(|f| f.as_str())
-                        .unwrap_or("attachment");
-                    let mime = att
-                        .get("mime_type")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("application/octet-stream");
-                    if let Ok(bytes) = base64_decode(data_b64) {
-                        let is_audio = mime.starts_with("audio/");
-                        if let Err(e) = self
-                            .send_attachment(&resolved_att, bytes, fname, mime, None, is_audio)
-                            .await
-                        {
-                            tracing::warn!(error = %e, "BlueBubbles: failed to send attachment");
-                        }
+            for att in arr {
+                let data_b64 = att.get("data").and_then(|d| d.as_str()).unwrap_or("");
+                let fname = att
+                    .get("filename")
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("attachment");
+                let mime = att
+                    .get("mime_type")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("application/octet-stream");
+                if let Ok(bytes) = base64_decode(data_b64) {
+                    let is_audio = mime.starts_with("audio/");
+                    if let Err(e) = self
+                        .send_attachment(&resolved_att, bytes, fname, mime, None, is_audio)
+                        .await
+                    {
+                        tracing::warn!(error = %e, "BlueBubbles: failed to send attachment");
                     }
                 }
             }
