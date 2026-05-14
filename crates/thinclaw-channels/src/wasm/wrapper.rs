@@ -4281,6 +4281,7 @@ mod tests {
     };
     use crate::wasm::wrapper::{
         ChannelWorkspaceStore, HttpResponse, WasmChannel, default_wasm_channel_formatting_hints,
+        response_content_for_wasm,
     };
     use thinclaw_channels_core::Channel;
 
