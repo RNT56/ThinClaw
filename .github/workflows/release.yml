@@ -753,11 +753,12 @@ jobs:
           tar -C target/edge-artifacts/package -czf "target/edge-artifacts/${archive}" thinclaw
           sha256sum "target/edge-artifacts/${archive}" | awk -v f="$archive" '{print $1 "  " f}' >> target/edge-artifacts/checksums-edge.txt
           if [[ "${{ matrix.target }}" == *-musl ]]; then
-            if ldd target/edge-artifacts/package/thinclaw >/tmp/thinclaw-edge-ldd.txt 2>&1; then
+            if ldd target/edge-artifacts/package/thinclaw >/tmp/thinclaw-edge-ldd.txt 2>&1 && ! grep -qi "statically linked" /tmp/thinclaw-edge-ldd.txt; then
               cat /tmp/thinclaw-edge-ldd.txt
               echo "::error::musl/static-ish artifact appears dynamically linked"
               exit 1
             fi
+            cat /tmp/thinclaw-edge-ldd.txt || true
           fi
       - name: Upload edge artifact to release
         shell: bash
