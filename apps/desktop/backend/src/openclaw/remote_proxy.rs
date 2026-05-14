@@ -1,6 +1,6 @@
 //! RemoteGatewayProxy — HTTP/SSE client for remote IronClaw gateway.
 //!
-//! When Scrappy is in "remote" mode, all agent interactions are forwarded
+//! When ThinClaw Desktop is in "remote" mode, all agent interactions are forwarded
 //! to a remote IronClaw HTTP server instead of the embedded in-process engine.
 //!
 //! Architecture:

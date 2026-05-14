@@ -109,6 +109,7 @@ pub async fn cloud_get_status(
 #[specta::specta]
 pub async fn cloud_test_connection(
     cloud: State<'_, CloudManager>,
+    db: State<'_, sqlx::SqlitePool>,
     config: S3ConfigInput,
 ) -> Result<ConnectionTestResult, String> {
     let provider_config = CloudProviderConfig {
@@ -121,7 +122,7 @@ pub async fn cloud_test_connection(
         root: config.root,
     };
 
-    test_provider(cloud, provider_config).await
+    test_provider(cloud, db, provider_config).await
 }
 
 /// Configure and test iCloud Drive storage.
@@ -131,6 +132,7 @@ pub async fn cloud_test_connection(
 #[specta::specta]
 pub async fn cloud_test_icloud(
     cloud: State<'_, CloudManager>,
+    db: State<'_, sqlx::SqlitePool>,
 ) -> Result<ConnectionTestResult, String> {
     let provider_config = CloudProviderConfig {
         provider_type: "icloud".to_string(),
@@ -142,7 +144,7 @@ pub async fn cloud_test_icloud(
         root: None,
     };
 
-    test_provider(cloud, provider_config).await
+    test_provider(cloud, db, provider_config).await
 }
 
 /// Configure and test a WebDAV provider.
@@ -150,6 +152,7 @@ pub async fn cloud_test_icloud(
 #[specta::specta]
 pub async fn cloud_test_webdav(
     cloud: State<'_, CloudManager>,
+    db: State<'_, sqlx::SqlitePool>,
     config: WebDavConfigInput,
 ) -> Result<ConnectionTestResult, String> {
     let provider_config = CloudProviderConfig {
@@ -162,7 +165,7 @@ pub async fn cloud_test_webdav(
         root: config.root,
     };
 
-    test_provider(cloud, provider_config).await
+    test_provider(cloud, db, provider_config).await
 }
 
 /// Configure and test an SFTP provider.
@@ -170,6 +173,7 @@ pub async fn cloud_test_webdav(
 #[specta::specta]
 pub async fn cloud_test_sftp(
     cloud: State<'_, CloudManager>,
+    db: State<'_, sqlx::SqlitePool>,
     config: SftpConfigInput,
 ) -> Result<ConnectionTestResult, String> {
     let provider_config = CloudProviderConfig {
@@ -182,7 +186,7 @@ pub async fn cloud_test_sftp(
         root: config.root,
     };
 
-    test_provider(cloud, provider_config).await
+    test_provider(cloud, db, provider_config).await
 }
 
 /// Start the OAuth 2.0 PKCE flow for a cloud provider.
@@ -199,12 +203,11 @@ pub async fn cloud_oauth_start(provider: String) -> Result<OAuthStartResult, Str
 
     let client_id = match provider.as_str() {
         "gdrive" => std::env::var("GOOGLE_CLIENT_ID")
-            .unwrap_or_else(|_| "scrappy-desktop.apps.googleusercontent.com".to_string()),
-        "dropbox" => {
-            std::env::var("DROPBOX_CLIENT_ID").unwrap_or_else(|_| "scrappy_desktop_app".to_string())
-        }
+            .unwrap_or_else(|_| "thinclaw-desktop.apps.googleusercontent.com".to_string()),
+        "dropbox" => std::env::var("DROPBOX_CLIENT_ID")
+            .unwrap_or_else(|_| "thinclaw_desktop_app".to_string()),
         "onedrive" => std::env::var("ONEDRIVE_CLIENT_ID")
-            .unwrap_or_else(|_| "scrappy-desktop-app".to_string()),
+            .unwrap_or_else(|_| "thinclaw-desktop-app".to_string()),
         other => return Err(format!("OAuth not supported for provider: {}", other)),
     };
 
@@ -233,6 +236,7 @@ pub async fn cloud_oauth_start(provider: String) -> Result<OAuthStartResult, Str
 #[specta::specta]
 pub async fn cloud_oauth_complete(
     cloud: State<'_, CloudManager>,
+    db: State<'_, sqlx::SqlitePool>,
     provider: String,
     code: String,
     code_verifier: String,
@@ -242,12 +246,11 @@ pub async fn cloud_oauth_complete(
 
     let client_id = match provider.as_str() {
         "gdrive" => std::env::var("GOOGLE_CLIENT_ID")
-            .unwrap_or_else(|_| "scrappy-desktop.apps.googleusercontent.com".to_string()),
-        "dropbox" => {
-            std::env::var("DROPBOX_CLIENT_ID").unwrap_or_else(|_| "scrappy_desktop_app".to_string())
-        }
+            .unwrap_or_else(|_| "thinclaw-desktop.apps.googleusercontent.com".to_string()),
+        "dropbox" => std::env::var("DROPBOX_CLIENT_ID")
+            .unwrap_or_else(|_| "thinclaw_desktop_app".to_string()),
         "onedrive" => std::env::var("ONEDRIVE_CLIENT_ID")
-            .unwrap_or_else(|_| "scrappy-desktop-app".to_string()),
+            .unwrap_or_else(|_| "thinclaw-desktop-app".to_string()),
         other => return Err(format!("OAuth not supported for provider: {}", other)),
     };
 
@@ -297,7 +300,10 @@ pub async fn cloud_oauth_complete(
                 root: None,
             };
             // Update CloudManager's inner state with this provider
-            cloud.set_provider(boxed_provider, provider_config).await;
+            cloud
+                .set_provider(boxed_provider, provider_config.clone())
+                .await;
+            persist_provider_config(&db, &provider_config).await?;
 
             Ok(ConnectionTestResult {
                 connected: status.connected,
@@ -429,16 +435,22 @@ pub struct StorageCategory {
 /// Shared helper for testing a provider connection.
 async fn test_provider(
     cloud: State<'_, CloudManager>,
+    db: State<'_, sqlx::SqlitePool>,
     config: CloudProviderConfig,
 ) -> Result<ConnectionTestResult, String> {
     match cloud.configure_provider(config).await {
-        Ok(status) => Ok(ConnectionTestResult {
-            connected: status.connected,
-            provider_name: status.provider_name,
-            storage_used: status.storage_used as f64,
-            storage_available: status.storage_available.map(|v| v as f64),
-            error: None,
-        }),
+        Ok(status) => {
+            if let Some(config) = cloud.provider_config().await {
+                persist_provider_config(&db, &config).await?;
+            }
+            Ok(ConnectionTestResult {
+                connected: status.connected,
+                provider_name: status.provider_name,
+                storage_used: status.storage_used as f64,
+                storage_available: status.storage_available.map(|v| v as f64),
+                error: None,
+            })
+        }
         Err(e) => Ok(ConnectionTestResult {
             connected: false,
             provider_name: "Unknown".to_string(),
@@ -447,6 +459,25 @@ async fn test_provider(
             error: Some(e.to_string()),
         }),
     }
+}
+
+async fn persist_provider_config(
+    db: &sqlx::SqlitePool,
+    config: &CloudProviderConfig,
+) -> Result<(), String> {
+    super::save_provider_credentials(config)?;
+    let config_json = provider_config_json_for_persistence(config)?;
+    sqlx::query("INSERT OR REPLACE INTO cloud_config (key, value) VALUES ('provider_config', ?)")
+        .bind(config_json)
+        .execute(db)
+        .await
+        .map_err(|e| format!("Failed to persist provider config: {}", e))?;
+    Ok(())
+}
+
+fn provider_config_json_for_persistence(config: &CloudProviderConfig) -> Result<String, String> {
+    serde_json::to_string(&config.sanitized_for_persistence())
+        .map_err(|e| format!("Failed to serialize provider config: {}", e))
 }
 
 /// Recursively calculate directory size.
@@ -468,4 +499,32 @@ async fn dir_size(path: &std::path::Path) -> u64 {
         }
     }
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_provider_config_persistence_sanitizes_secrets() {
+        let config = CloudProviderConfig {
+            provider_type: "webdav".to_string(),
+            endpoint: Some("https://dav.example.com".to_string()),
+            bucket: None,
+            region: None,
+            access_key_id: Some("alice".to_string()),
+            secret_access_key: Some("password".to_string()),
+            root: Some("thinclaw-desktop/".to_string()),
+        };
+
+        let json = provider_config_json_for_persistence(&config).unwrap();
+        assert!(!json.contains("alice"));
+        assert!(!json.contains("password"));
+
+        let persisted: CloudProviderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(persisted.endpoint, config.endpoint);
+        assert_eq!(persisted.root, config.root);
+        assert_eq!(persisted.access_key_id, None);
+        assert_eq!(persisted.secret_access_key, None);
+    }
 }

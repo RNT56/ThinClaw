@@ -8,7 +8,7 @@
 //! - Content operations use `content.dropboxapi.com`
 //! - RPC operations use `api.dropboxapi.com`
 //! - Metadata is passed via `Dropbox-API-Arg` header (JSON)
-//! - Files stored under `/Scrappy/` in user's Dropbox
+//! - Files stored under `/ThinClaw Desktop/` in user's Dropbox
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -21,8 +21,9 @@ use super::super::provider::{CloudEntry, CloudError, CloudProvider, CloudStatus}
 const CONTENT_URL: &str = "https://content.dropboxapi.com/2";
 const API_URL: &str = "https://api.dropboxapi.com/2";
 
-/// Root folder in Dropbox for Scrappy data.
-const DROPBOX_ROOT: &str = "/Scrappy";
+/// Root folder in Dropbox for ThinClaw data.
+const DROPBOX_ROOT: &str = "/ThinClaw Desktop";
+const LEGACY_DROPBOX_ROOT: &str = "/Scrappy";
 
 /// Dropbox cloud storage provider.
 pub struct DropboxProvider {
@@ -88,17 +89,26 @@ impl DropboxProvider {
 
     /// Convert a cloud key to a Dropbox path.
     fn key_to_path(key: &str) -> String {
-        format!("{}/{}", DROPBOX_ROOT, key)
+        Self::key_to_path_in_root(DROPBOX_ROOT, key)
+    }
+
+    fn legacy_key_to_path(key: &str) -> String {
+        Self::key_to_path_in_root(LEGACY_DROPBOX_ROOT, key)
+    }
+
+    fn key_to_path_in_root(root: &str, key: &str) -> String {
+        format!("{}/{}", root, key)
     }
 
     /// Convert a Dropbox path back to a cloud key.
     fn path_to_key(path: &str) -> String {
         path.strip_prefix(&format!("{}/", DROPBOX_ROOT))
+            .or_else(|| path.strip_prefix(&format!("{}/", LEGACY_DROPBOX_ROOT)))
             .unwrap_or(path)
             .to_string()
     }
 
-    /// Ensure the Scrappy root folder exists.
+    /// Ensure the ThinClaw root folder exists.
     async fn ensure_root_folder(&self, token: &str) -> Result<(), CloudError> {
         let resp = self
             .client
@@ -124,6 +134,39 @@ impl DropboxProvider {
                 status, body
             )))
         }
+    }
+
+    async fn get_from_path(&self, key: &str, path: String) -> Result<Vec<u8>, CloudError> {
+        let token = self.access_token().await?;
+        let api_arg = serde_json::json!({ "path": path });
+        let resp = self
+            .client
+            .post(format!("{}/files/download", CONTENT_URL))
+            .bearer_auth(&token)
+            .header("Dropbox-API-Arg", api_arg.to_string())
+            .send()
+            .await
+            .map_err(|e| CloudError::DownloadFailed(format!("download '{}': {}", key, e)))?;
+
+        if resp.status().as_u16() == 409 {
+            return Err(CloudError::NotFound(format!(
+                "'{}' not found in Dropbox",
+                key
+            )));
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CloudError::DownloadFailed(format!(
+                "download '{}' failed ({}): {}",
+                key, status, body
+            )));
+        }
+
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| CloudError::DownloadFailed(format!("read body '{}': {}", key, e)))
     }
 }
 
@@ -227,10 +270,7 @@ impl CloudProvider for DropboxProvider {
             .map_err(|e| CloudError::DownloadFailed(format!("download '{}': {}", key, e)))?;
 
         if resp.status().as_u16() == 409 {
-            return Err(CloudError::NotFound(format!(
-                "'{}' not found in Dropbox",
-                key
-            )));
+            return self.get_from_path(key, Self::legacy_key_to_path(key)).await;
         }
 
         if !resp.status().is_success() {
@@ -396,12 +436,20 @@ mod tests {
     fn test_key_to_path() {
         assert_eq!(
             DropboxProvider::key_to_path("db/openclaw.db.enc"),
-            "/Scrappy/db/openclaw.db.enc"
+            "/ThinClaw Desktop/db/openclaw.db.enc"
         );
     }
 
     #[test]
     fn test_path_to_key() {
+        assert_eq!(
+            DropboxProvider::path_to_key("/ThinClaw Desktop/db/openclaw.db.enc"),
+            "db/openclaw.db.enc"
+        );
+    }
+
+    #[test]
+    fn test_legacy_path_to_key() {
         assert_eq!(
             DropboxProvider::path_to_key("/Scrappy/db/openclaw.db.enc"),
             "db/openclaw.db.enc"

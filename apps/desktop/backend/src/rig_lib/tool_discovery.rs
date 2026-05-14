@@ -1,7 +1,7 @@
-use scrappy_mcp_tools::discovery::{DetailLevel, SearchResult, ToolInfo};
-use scrappy_mcp_tools::skills::manager::SkillManager;
-use scrappy_mcp_tools::McpClient;
 use serde_json::json;
+use thinclaw_desktop_tools::discovery::{DetailLevel, SearchResult, ToolInfo};
+use thinclaw_desktop_tools::skills::manager::SkillManager;
+use thinclaw_desktop_tools::McpClient;
 use tracing::{debug, warn};
 
 /// Searches across Host tools, Skills, and Remote MCP tools.
@@ -71,7 +71,9 @@ pub async fn search_all_tools(
     // 3. Remote Tools
     if let Some(client) = mcp_client {
         debug!("[discovery] searching remote tools for '{}'", query);
-        match scrappy_mcp_tools::discovery::search_tools(client, query, DetailLevel::Full).await {
+        match thinclaw_desktop_tools::discovery::search_tools(client, query, DetailLevel::Full)
+            .await
+        {
             Ok(remote_result) => {
                 if let Some(remote_tools) = remote_result.tools {
                     all_tools.extend(remote_tools);

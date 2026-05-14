@@ -47,7 +47,7 @@ const NAV_ITEMS = [
         ]
     },
     {
-        section: "OpenClaw",
+        section: "ThinClaw",
         items: [
             { id: 'openclaw-slack', label: 'Slack', icon: MessageSquare },
             { id: 'openclaw-telegram', label: 'Telegram', icon: Send },

@@ -308,7 +308,7 @@ apps/desktop/
 ├── backend/                # Rust + Tauri v2
 │   ├── src/
 │   │   ├── engine/         # InferenceEngine trait + implementations
-│   │   ├── openclaw/       # OpenClaw gateway integration
+│   │   ├── openclaw/       # ThinClaw gateway integration
 │   │   ├── rig_lib/        # Rig agent, orchestrator, tools
 │   │   ├── hf_hub.rs       # HuggingFace Hub model discovery
 │   │   ├── sidecar.rs      # SidecarManager
@@ -316,7 +316,7 @@ apps/desktop/
 │   │   └── ...
 │   ├── bin/                # Sidecar binaries (downloaded)
 │   ├── scripts/            # download_ai_binaries.js, setup_chromium.sh
-│   ├── scrappy-mcp-tools/  # MCP crate (sandbox, tools, skills)
+│   ├── mcp-tools crate     # MCP crate (sandbox, tools, skills)
 │   ├── Cargo.toml          # Features: llamacpp, mlx, vllm, ollama
 │   └── tauri.conf.json     # Tauri configuration
 ├── scripts/                # Top-level build scripts

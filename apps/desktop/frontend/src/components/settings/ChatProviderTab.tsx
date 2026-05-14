@@ -227,7 +227,7 @@ export function ChatProviderTab() {
                     <p className="text-xs text-muted-foreground leading-relaxed">
                         This setting controls the inference engine for <span className="text-foreground font-medium">Standard Chat</span> and
                         <span className="text-foreground font-medium"> Rig Agent (Auto Mode)</span>.
-                        The OpenClaw Agent (Gateway) maintains its own separate brain selection in the Gateway control panel.
+                        ThinClaw Agent (Gateway) maintains its own separate brain selection in the Gateway control panel.
                     </p>
                 </div>
             </div>

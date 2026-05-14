@@ -4,6 +4,7 @@ import { appDataDir } from "@tauri-apps/api/path";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { ModelFile, SystemSpecs, commands, StandardAsset } from "../lib/bindings";
+import { getMigratedLocalStorageItem, isOnboardingInProgress, setMigratedLocalStorageItem } from "../lib/local-storage-migration";
 
 import { MODEL_LIBRARY, ExtendedModelDefinition as ModelDefinition, ModelVariant } from "../lib/model-library";
 
@@ -129,16 +130,7 @@ interface ModelProgressContextType {
 const ModelStateContext = createContext<ModelStateContextType | undefined>(undefined);
 const ModelProgressContext = createContext<ModelProgressContextType | undefined>(undefined);
 
-const STORAGE_KEY = "scrappy_model_path";
-const EMBEDDING_STORAGE_KEY = "scrappy_embedding_model_path";
-const VISION_STORAGE_KEY = "scrappy_vision_model_path";
-const STT_STORAGE_KEY = "scrappy_stt_model_path";
-const IMAGE_GEN_STORAGE_KEY = "scrappy_image_gen_model_path";
-const SUMMARIZER_STORAGE_KEY = "scrappy_summarizer_model_path";
-const TEMPLATE_STORAGE_KEY = "scrappy_model_template";
-const MAX_CONTEXT_STORAGE_KEY = "scrappy_max_context";
 const DEFAULT_PATH = "";
-const FIRST_RUN_KEY = "scrappy_first_run_check_v3"; // Bumped version to re-trigger if needed
 
 export function ModelProvider({ children }: { children: React.ReactNode }) {
     const [localModels, setLocalModels] = useState<ModelFile[]>([]);
@@ -242,39 +234,39 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
 
     // Model Selection State
     const [currentModelPath, _setCurrentModelPath] = useState<string>(() => {
-        return localStorage.getItem(STORAGE_KEY) || DEFAULT_PATH;
+        return getMigratedLocalStorageItem('modelPath') || DEFAULT_PATH;
     });
 
     const [currentEmbeddingModelPath, _setCurrentEmbeddingModelPath] = useState<string>(() => {
-        return localStorage.getItem(EMBEDDING_STORAGE_KEY) || DEFAULT_PATH;
+        return getMigratedLocalStorageItem('embeddingModelPath') || DEFAULT_PATH;
     });
 
     const [currentVisionModelPath, _setCurrentVisionModelPath] = useState<string>(() => {
-        return localStorage.getItem(VISION_STORAGE_KEY) || DEFAULT_PATH;
+        return getMigratedLocalStorageItem('visionModelPath') || DEFAULT_PATH;
     });
 
     const [currentSttModelPath, _setCurrentSttModelPath] = useState<string>(() => {
-        return localStorage.getItem(STT_STORAGE_KEY) || DEFAULT_PATH;
+        return getMigratedLocalStorageItem('sttModelPath') || DEFAULT_PATH;
     });
 
     const [currentImageGenModelPath, _setCurrentImageGenModelPath] = useState<string>(() => {
-        return localStorage.getItem(IMAGE_GEN_STORAGE_KEY) || DEFAULT_PATH;
+        return getMigratedLocalStorageItem('imageGenModelPath') || DEFAULT_PATH;
     });
 
     const [currentSummarizerModelPath, _setCurrentSummarizerModelPath] = useState<string>(() => {
-        return localStorage.getItem(SUMMARIZER_STORAGE_KEY) || DEFAULT_PATH;
+        return getMigratedLocalStorageItem('summarizerModelPath') || DEFAULT_PATH;
     });
 
     const [currentModelTemplate, _setCurrentModelTemplate] = useState<string>(() => {
-        return localStorage.getItem(TEMPLATE_STORAGE_KEY) || "chatml";
+        return getMigratedLocalStorageItem('modelTemplate') || "chatml";
     });
 
     const setModelPath = useCallback((path: string, template?: string) => {
         _setCurrentModelPath(path);
-        localStorage.setItem(STORAGE_KEY, path);
+        setMigratedLocalStorageItem('modelPath', path);
         if (template) {
             _setCurrentModelTemplate(template);
-            localStorage.setItem(TEMPLATE_STORAGE_KEY, template);
+            setMigratedLocalStorageItem('modelTemplate', template);
         } else {
             // Heuristic if not provided (e.g. local scan)
             let inferred = "chatml";
@@ -285,43 +277,43 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
             else if (lower.includes("qwen")) inferred = "qwen";
 
             _setCurrentModelTemplate(inferred);
-            localStorage.setItem(TEMPLATE_STORAGE_KEY, inferred);
+            setMigratedLocalStorageItem('modelTemplate', inferred);
         }
     }, []);
 
     const setEmbeddingModelPath = useCallback((path: string) => {
         _setCurrentEmbeddingModelPath(path);
-        localStorage.setItem(EMBEDDING_STORAGE_KEY, path);
+        setMigratedLocalStorageItem('embeddingModelPath', path);
     }, []);
 
     const setVisionModelPath = useCallback((path: string) => {
         _setCurrentVisionModelPath(path);
-        localStorage.setItem(VISION_STORAGE_KEY, path);
+        setMigratedLocalStorageItem('visionModelPath', path);
     }, []);
 
     const setSttModelPath = useCallback((path: string) => {
         _setCurrentSttModelPath(path);
-        localStorage.setItem(STT_STORAGE_KEY, path);
+        setMigratedLocalStorageItem('sttModelPath', path);
     }, []);
 
     const setImageGenModelPath = useCallback((path: string) => {
         _setCurrentImageGenModelPath(path);
-        localStorage.setItem(IMAGE_GEN_STORAGE_KEY, path);
+        setMigratedLocalStorageItem('imageGenModelPath', path);
     }, []);
 
     const setSummarizerModelPath = useCallback((path: string) => {
         _setCurrentSummarizerModelPath(path);
-        localStorage.setItem(SUMMARIZER_STORAGE_KEY, path);
+        setMigratedLocalStorageItem('summarizerModelPath', path);
     }, []);
 
     const [maxContext, _setMaxContext] = useState<number>(() => {
-        const stored = localStorage.getItem(MAX_CONTEXT_STORAGE_KEY);
+        const stored = getMigratedLocalStorageItem('maxContext');
         return stored ? parseInt(stored) : 32768; // Default to 32k
     });
 
     const setMaxContext = useCallback((size: number) => {
         _setMaxContext(size);
-        localStorage.setItem(MAX_CONTEXT_STORAGE_KEY, size.toString());
+        setMigratedLocalStorageItem('maxContext', size.toString());
     }, []);
 
     const refreshModels = useCallback(async () => {
@@ -441,13 +433,13 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                     setSystemSpecs(specs);
 
                     // Check if we need to recommend
-                    const hasChecked = localStorage.getItem(FIRST_RUN_KEY);
+                    const hasChecked = getMigratedLocalStorageItem('firstRunCheck');
                     const localFiles = await refreshModels();
 
                     if (!hasChecked && localFiles.length === 0) {
                         // Skip if onboarding wizard is handling model selection
-                        if (localStorage.getItem('scrappy_onboarding_in_progress') === 'true') {
-                            localStorage.setItem(FIRST_RUN_KEY, "true");
+                        if (isOnboardingInProgress()) {
+                            setMigratedLocalStorageItem('firstRunCheck', "true");
                             return;
                         }
                         const ramGB = specs.total_memory / (1024 * 1024 * 1024);
@@ -468,7 +460,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
                                 duration: 10000,
                             });
                         }
-                        localStorage.setItem(FIRST_RUN_KEY, "true");
+                        setMigratedLocalStorageItem('firstRunCheck', "true");
                     }
                 }
             } catch (error) {

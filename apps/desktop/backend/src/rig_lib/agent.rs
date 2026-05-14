@@ -40,7 +40,7 @@ impl RigManager {
         // Bug 40 fix: Check IRONCLAW_AGENT_NAME first for config overlay consistency.
         let agent_name = std::env::var("IRONCLAW_AGENT_NAME")
             .or_else(|_| std::env::var("AGENT_NAME"))
-            .unwrap_or_else(|_| "OpenClaw".to_string());
+            .unwrap_or_else(|_| "ThinClaw".to_string());
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
         let mut base_preamble = format!(
             "You are {}, a friendly AI assistant.
@@ -202,8 +202,6 @@ or
             Err(e) => format!("Error performing search: {}", e),
         }
     }
-
-
 
     pub fn is_cancelled(&self) -> bool {
         if let Some(app) = &self.app_handle {

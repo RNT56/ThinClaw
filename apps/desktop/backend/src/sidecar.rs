@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use rand::{distributions::Alphanumeric, Rng};
 use std::net::TcpListener;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
@@ -116,7 +116,10 @@ impl SidecarManager {
             .unwrap_or_else(|| "chatml".to_string());
 
         println!("[sidecar] Detected model family: {}", detected_family);
-        *self.detected_model_family.lock().unwrap_or_else(|e| e.into_inner()) = Some(detected_family.clone());
+        *self
+            .detected_model_family
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(detected_family.clone());
         if let Some(ref meta) = gguf_meta {
             if let Some(ref tpl) = meta.chat_template {
                 println!("[sidecar] GGUF chat_template present ({} chars)", tpl.len());
@@ -135,7 +138,7 @@ impl SidecarManager {
                 match detected_family.as_str() {
                     "llama3" => Some(crate::templates::LLAMA3_TEMPLATE),
                     "mistral" => Some(crate::templates::MISTRAL_TEMPLATE),
-                    "gemma" => None,     // Let llama-server handle Gemma natively (uses 'model' role)
+                    "gemma" => None, // Let llama-server handle Gemma natively (uses 'model' role)
                     "qwen" => Some(crate::templates::QWEN_TEMPLATE),
                     "deepseek" => None, // Let llama-server handle deepseek natively
                     "glm" => None,      // Let llama-server handle GLM natively
@@ -155,16 +158,19 @@ impl SidecarManager {
 
         if let Some(proc) = process_guard.take() {
             // Signal that this stop is intentional (restart)
-            *self.is_chat_stop_intentional.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            *self
+                .is_chat_stop_intentional
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = true;
             let old_port = proc.port;
             let _ = proc.kill();
 
             // Wait for the old port to clear (max 2s)
             for _ in 0..20 {
-               if std::net::TcpListener::bind(format!("127.0.0.1:{}", old_port)).is_ok() {
-                   break;
-               }
-               std::thread::sleep(std::time::Duration::from_millis(100));
+                if std::net::TcpListener::bind(format!("127.0.0.1:{}", old_port)).is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
 
@@ -199,10 +205,10 @@ impl SidecarManager {
 
                 // Fallback for dev mode
                 if let Ok(cwd) = std::env::current_dir() {
-                   let dev_bin = cwd.join("backend/bin");
-                   if dev_bin.exists() {
-                       lib_path = format!("{}:{}", dev_bin.to_string_lossy(), lib_path);
-                   }
+                    let dev_bin = cwd.join("backend/bin");
+                    if dev_bin.exists() {
+                        lib_path = format!("{}:{}", dev_bin.to_string_lossy(), lib_path);
+                    }
                 }
 
                 println!("[sidecar-chat] Setting DYLD_LIBRARY_PATH: {}", lib_path);
@@ -218,7 +224,11 @@ impl SidecarManager {
             "--n-gpu-layers".to_string(),
             n_gpu.to_string(),
             "--host".to_string(),
-            if expose { "0.0.0.0".to_string() } else { "127.0.0.1".to_string() },
+            if expose {
+                "0.0.0.0".to_string()
+            } else {
+                "127.0.0.1".to_string()
+            },
             "--port".to_string(),
             port.to_string(),
             "--api-key".to_string(),
@@ -251,19 +261,22 @@ impl SidecarManager {
 
         // NOTE: Stop tokens are NOT injected as CLI args (llama-server doesn't support --stop).
         // They are enforced at the API request level via OpenClaw model config (Layer 2 in config.rs).
-        println!("[sidecar] Stop tokens for family '{}' will be enforced at API request level", detected_family);
+        println!(
+            "[sidecar] Stop tokens for family '{}' will be enforced at API request level",
+            detected_family
+        );
 
         // Handles MMProj (Vision)
         // Priority: Explicit Override > .mmproj file > Smart Discovery
         let mut _found_mmproj = false;
 
         if let Some(path) = mmproj_path_override {
-             if !path.trim().is_empty() {
-                 println!("[sidecar] Using explicit mmproj: {}", path);
-                 args.push("--mmproj".to_string());
-                 args.push(path);
-                 _found_mmproj = true;
-             }
+            if !path.trim().is_empty() {
+                println!("[sidecar] Using explicit mmproj: {}", path);
+                args.push("--mmproj".to_string());
+                args.push(path);
+                _found_mmproj = true;
+            }
         }
 
         if !_found_mmproj {
@@ -317,7 +330,9 @@ impl SidecarManager {
         let bind_host = if expose { "0.0.0.0" } else { "127.0.0.1" };
         println!(
             "[sidecar] Spawning chat server: llama-server {} (listening on {}:{})",
-            args.join(" "), bind_host, port
+            args.join(" "),
+            bind_host,
+            port
         );
 
         let (mut rx, child) = command
@@ -341,18 +356,25 @@ impl SidecarManager {
 
                         // Parse progress (sometimes on stdout)
                         if msg.contains("prompt processing progress") {
-                             if let Some(idx) = msg.find("progress = ") {
-                                  let num_str = &msg[idx + 11..];
-                                  let end = num_str.find(|c: char| !c.is_numeric() && c != '.').unwrap_or(num_str.len());
-                                  if let Ok(val) = num_str[..end].trim().parse::<f32>() {
-                                       monitor_app.emit("sidecar_event", SidecarEvent::Progress {
-                                            service: "chat".into(),
-                                            message: "Reading Context".into(),
-                                            progress: val,
-                                            total: 1.0
-                                       }).ok();
-                                  }
-                             }
+                            if let Some(idx) = msg.find("progress = ") {
+                                let num_str = &msg[idx + 11..];
+                                let end = num_str
+                                    .find(|c: char| !c.is_numeric() && c != '.')
+                                    .unwrap_or(num_str.len());
+                                if let Ok(val) = num_str[..end].trim().parse::<f32>() {
+                                    monitor_app
+                                        .emit(
+                                            "sidecar_event",
+                                            SidecarEvent::Progress {
+                                                service: "chat".into(),
+                                                message: "Reading Context".into(),
+                                                progress: val,
+                                                total: 1.0,
+                                            },
+                                        )
+                                        .ok();
+                                }
+                            }
                         }
                     }
                     CommandEvent::Stderr(line) => {
@@ -361,18 +383,25 @@ impl SidecarManager {
 
                         // Parse progress (usually on stderr for llama.cpp)
                         if msg.contains("prompt processing progress") {
-                             if let Some(idx) = msg.find("progress = ") {
-                                  let num_str = &msg[idx + 11..];
-                                  let end = num_str.find(|c: char| !c.is_numeric() && c != '.').unwrap_or(num_str.len());
-                                  if let Ok(val) = num_str[..end].trim().parse::<f32>() {
-                                       monitor_app.emit("sidecar_event", SidecarEvent::Progress {
-                                            service: "chat".into(),
-                                            message: "Reading Context".into(),
-                                            progress: val,
-                                            total: 1.0
-                                       }).ok();
-                                  }
-                             }
+                            if let Some(idx) = msg.find("progress = ") {
+                                let num_str = &msg[idx + 11..];
+                                let end = num_str
+                                    .find(|c: char| !c.is_numeric() && c != '.')
+                                    .unwrap_or(num_str.len());
+                                if let Ok(val) = num_str[..end].trim().parse::<f32>() {
+                                    monitor_app
+                                        .emit(
+                                            "sidecar_event",
+                                            SidecarEvent::Progress {
+                                                service: "chat".into(),
+                                                message: "Reading Context".into(),
+                                                progress: val,
+                                                total: 1.0,
+                                            },
+                                        )
+                                        .ok();
+                                }
+                            }
                         }
                     }
                     CommandEvent::Terminated(payload) => {
@@ -407,7 +436,10 @@ impl SidecarManager {
         });
 
         // Reset intentional stop flag for the new process lifecycle
-        *self.is_chat_stop_intentional.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        *self
+            .is_chat_stop_intentional
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = false;
 
         Ok((port, token))
     }
@@ -421,7 +453,10 @@ impl SidecarManager {
         let tracker = app.state::<crate::process_tracker::ProcessTracker>();
         tracker.cleanup_by_service("embedding");
 
-        let mut process_guard = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner());
+        let mut process_guard = self
+            .embedding_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = process_guard.take() {
             let _ = proc.kill();
         }
@@ -528,7 +563,10 @@ impl SidecarManager {
 
         // Kill existing process, then DROP the lock before any await point.
         {
-            let mut process_guard = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner());
+            let mut process_guard = self
+                .embedding_process
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(proc) = process_guard.take() {
                 let _ = proc.kill();
             }
@@ -536,14 +574,19 @@ impl SidecarManager {
 
         let (port, token) = Self::generate_config(Some(53756));
 
-        let python_path = app.path().app_data_dir()
+        let python_path = app
+            .path()
+            .app_data_dir()
             .map_err(|e| anyhow!("Failed to resolve app data dir: {}", e))?
             .join("mlx-env")
             .join("bin")
             .join("python3");
 
         if !python_path.exists() {
-            return Err(anyhow!("MLX venv not bootstrapped — Python not found at {:?}", python_path));
+            return Err(anyhow!(
+                "MLX venv not bootstrapped — Python not found at {:?}",
+                python_path
+            ));
         }
 
         let script_path = Self::resolve_mlx_script(&app, "mlx_embed_server.py")?;
@@ -562,9 +605,14 @@ impl SidecarManager {
             args.push(token.clone());
         }
 
-        println!("[sidecar-embed-mlx] Spawning: {} {}", python_path.display(), args.join(" "));
+        println!(
+            "[sidecar-embed-mlx] Spawning: {} {}",
+            python_path.display(),
+            args.join(" ")
+        );
 
-        let command = app.shell()
+        let command = app
+            .shell()
             .command(python_path.to_string_lossy().as_ref())
             .args(&args);
 
@@ -585,8 +633,13 @@ impl SidecarManager {
                 Ok(Some(CommandEvent::Stdout(line))) => {
                     let msg = String::from_utf8_lossy(&line);
                     println!("[mlx-embed] {}", msg);
-                    if msg.contains("ERROR:") { startup_error = Some(msg.trim().to_string()); break; }
-                    if msg.contains("listening") || msg.contains("Model loaded") { ready = true; }
+                    if msg.contains("ERROR:") {
+                        startup_error = Some(msg.trim().to_string());
+                        break;
+                    }
+                    if msg.contains("listening") || msg.contains("Model loaded") {
+                        ready = true;
+                    }
                 }
                 Ok(Some(CommandEvent::Stderr(line))) => {
                     let msg = String::from_utf8_lossy(&line);
@@ -598,8 +651,9 @@ impl SidecarManager {
                 Ok(Some(CommandEvent::Terminated(status))) => {
                     let code = status.code.unwrap_or(-1);
                     if code != 0 {
-                        let msg = startup_error.take()
-                            .unwrap_or_else(|| format!("Embedding server exited with code {}", code));
+                        let msg = startup_error.take().unwrap_or_else(|| {
+                            format!("Embedding server exited with code {}", code)
+                        });
                         return Err(anyhow!("{}", msg));
                     }
                     break;
@@ -619,16 +673,25 @@ impl SidecarManager {
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    CommandEvent::Stderr(l) => eprintln!("[mlx-embed] {}", String::from_utf8_lossy(&l)),
-                    CommandEvent::Stdout(l) => println!("[mlx-embed] {}", String::from_utf8_lossy(&l)),
+                    CommandEvent::Stderr(l) => {
+                        eprintln!("[mlx-embed] {}", String::from_utf8_lossy(&l))
+                    }
+                    CommandEvent::Stdout(l) => {
+                        println!("[mlx-embed] {}", String::from_utf8_lossy(&l))
+                    }
                     _ => {}
                 }
             }
-            monitor_app.state::<crate::process_tracker::ProcessTracker>().remove_pid(pid);
+            monitor_app
+                .state::<crate::process_tracker::ProcessTracker>()
+                .remove_pid(pid);
         });
 
         // Re-acquire lock to store process
-        *self.embedding_process.lock().unwrap_or_else(|e| e.into_inner()) = Some(SidecarProcess {
+        *self
+            .embedding_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(SidecarProcess {
             child: Some(child),
             port,
             token: token.clone(),
@@ -658,14 +721,19 @@ impl SidecarManager {
 
         let (port, token) = Self::generate_config(Some(53757));
 
-        let python_path = app.path().app_data_dir()
+        let python_path = app
+            .path()
+            .app_data_dir()
             .map_err(|e| anyhow!("Failed to resolve app data dir: {}", e))?
             .join("mlx-env")
             .join("bin")
             .join("python3");
 
         if !python_path.exists() {
-            return Err(anyhow!("MLX venv not bootstrapped — Python not found at {:?}", python_path));
+            return Err(anyhow!(
+                "MLX venv not bootstrapped — Python not found at {:?}",
+                python_path
+            ));
         }
 
         let script_path = Self::resolve_mlx_script(&app, "mlx_stt_server.py")?;
@@ -684,9 +752,14 @@ impl SidecarManager {
             args.push(token.clone());
         }
 
-        println!("[sidecar-stt-mlx] Spawning: {} {}", python_path.display(), args.join(" "));
+        println!(
+            "[sidecar-stt-mlx] Spawning: {} {}",
+            python_path.display(),
+            args.join(" ")
+        );
 
-        let command = app.shell()
+        let command = app
+            .shell()
             .command(python_path.to_string_lossy().as_ref())
             .args(&args);
 
@@ -707,8 +780,13 @@ impl SidecarManager {
                 Ok(Some(CommandEvent::Stdout(line))) => {
                     let msg = String::from_utf8_lossy(&line);
                     println!("[mlx-stt] {}", msg);
-                    if msg.contains("ERROR:") { startup_error = Some(msg.trim().to_string()); break; }
-                    if msg.contains("listening") { ready = true; }
+                    if msg.contains("ERROR:") {
+                        startup_error = Some(msg.trim().to_string());
+                        break;
+                    }
+                    if msg.contains("listening") {
+                        ready = true;
+                    }
                 }
                 Ok(Some(CommandEvent::Stderr(line))) => {
                     let msg = String::from_utf8_lossy(&line);
@@ -720,7 +798,8 @@ impl SidecarManager {
                 Ok(Some(CommandEvent::Terminated(status))) => {
                     let code = status.code.unwrap_or(-1);
                     if code != 0 {
-                        let msg = startup_error.take()
+                        let msg = startup_error
+                            .take()
                             .unwrap_or_else(|| format!("STT server exited with code {}", code));
                         return Err(anyhow!("{}", msg));
                     }
@@ -741,12 +820,18 @@ impl SidecarManager {
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    CommandEvent::Stderr(l) => eprintln!("[mlx-stt] {}", String::from_utf8_lossy(&l)),
-                    CommandEvent::Stdout(l) => println!("[mlx-stt] {}", String::from_utf8_lossy(&l)),
+                    CommandEvent::Stderr(l) => {
+                        eprintln!("[mlx-stt] {}", String::from_utf8_lossy(&l))
+                    }
+                    CommandEvent::Stdout(l) => {
+                        println!("[mlx-stt] {}", String::from_utf8_lossy(&l))
+                    }
                     _ => {}
                 }
             }
-            monitor_app.state::<crate::process_tracker::ProcessTracker>().remove_pid(pid);
+            monitor_app
+                .state::<crate::process_tracker::ProcessTracker>()
+                .remove_pid(pid);
         });
 
         // Re-acquire lock to store process
@@ -757,7 +842,10 @@ impl SidecarManager {
             context_size: 0,
             model_family: "mlx-whisper".into(),
         });
-        *self.stt_model_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(model_path);
+        *self
+            .stt_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(model_path);
 
         Ok((port, token))
     }
@@ -783,7 +871,9 @@ impl SidecarManager {
 
         // Fallback: check CARGO_MANIFEST_DIR (compile-time)
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let script = std::path::PathBuf::from(manifest_dir).join("scripts").join(script_name);
+        let script = std::path::PathBuf::from(manifest_dir)
+            .join("scripts")
+            .join(script_name);
         if script.exists() {
             return Ok(script);
         }
@@ -802,7 +892,10 @@ impl SidecarManager {
         let tracker = app.state::<crate::process_tracker::ProcessTracker>();
         tracker.cleanup_by_service("summarizer");
 
-        let mut process_guard = self.summarizer_process.lock().unwrap_or_else(|e| e.into_inner());
+        let mut process_guard = self
+            .summarizer_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = process_guard.take() {
             let _ = proc.kill();
         }
@@ -891,10 +984,10 @@ impl SidecarManager {
 
                 // Fallback for dev mode
                 if let Ok(cwd) = std::env::current_dir() {
-                   let dev_bin = cwd.join("backend/bin");
-                   if dev_bin.exists() {
-                       lib_path = format!("{}:{}", dev_bin.to_string_lossy(), lib_path);
-                   }
+                    let dev_bin = cwd.join("backend/bin");
+                    if dev_bin.exists() {
+                        lib_path = format!("{}:{}", dev_bin.to_string_lossy(), lib_path);
+                    }
                 }
 
                 println!("[sidecar-stt] Setting DYLD_LIBRARY_PATH: {}", lib_path);
@@ -948,25 +1041,37 @@ impl SidecarManager {
         });
 
         // Also update model path for legacy check
-        *self.stt_model_path.lock().unwrap_or_else(|e| e.into_inner()) = Some(model_path);
+        *self
+            .stt_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(model_path);
 
         Ok((port, token))
     }
 
     pub fn start_image_server(&self, _app: AppHandle, model_path: String) -> Result<()> {
-        let mut model_guard = self.image_model_path.lock().unwrap_or_else(|e| e.into_inner());
+        let mut model_guard = self
+            .image_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *model_guard = Some(model_path);
         Ok(())
     }
 
     pub fn start_tts_server(&self, _app: AppHandle, model_path: String) -> Result<()> {
-        let mut model_guard = self.tts_model_path.lock().unwrap_or_else(|e| e.into_inner());
+        let mut model_guard = self
+            .tts_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *model_guard = Some(model_path);
         Ok(())
     }
 
     pub fn stop_chat_server(&self) -> Result<()> {
-        *self.is_chat_stop_intentional.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        *self
+            .is_chat_stop_intentional
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = true;
         let mut process_guard = self.chat_process.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = process_guard.take() {
             proc.kill()?;
@@ -980,12 +1085,18 @@ impl SidecarManager {
             proc.kill()?;
         }
 
-        let mut embed = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner());
+        let mut embed = self
+            .embedding_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = embed.take() {
             proc.kill()?;
         }
 
-        let mut summ = self.summarizer_process.lock().unwrap_or_else(|e| e.into_inner());
+        let mut summ = self
+            .summarizer_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(proc) = summ.take() {
             proc.kill()?;
         }
@@ -996,66 +1107,133 @@ impl SidecarManager {
         }
 
         // Just clear paths
-        *self.stt_model_path.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.image_model_path.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *self.tts_model_path.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .stt_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .image_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .tts_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
 
         Ok(())
     }
 
     pub fn set_chat_intentional_stop(&self, val: bool) {
-        *self.is_chat_stop_intentional.lock().unwrap_or_else(|e| e.into_inner()) = val;
+        *self
+            .is_chat_stop_intentional
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = val;
     }
 
     pub fn get_chat_config(&self) -> Option<(u16, String, u32, String)> {
         let guard = self.chat_process.lock().unwrap_or_else(|e| e.into_inner());
-        guard.as_ref().map(|p| (p.port, p.token.clone(), p.context_size, p.model_family.clone()))
+        guard.as_ref().map(|p| {
+            (
+                p.port,
+                p.token.clone(),
+                p.context_size,
+                p.model_family.clone(),
+            )
+        })
     }
 
     pub fn get_embedding_config(&self) -> Option<(u16, String)> {
-        let guard = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .embedding_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|p| (p.port, p.token.clone()))
     }
 
     pub fn get_summarizer_config(&self) -> Option<(u16, String)> {
-        let guard = self.summarizer_process.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .summarizer_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         guard.as_ref().map(|p| (p.port, p.token.clone()))
     }
 
     // No config for CLI, just state
     pub fn is_stt_active(&self) -> bool {
-        self.stt_model_path.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.stt_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     pub fn is_image_active(&self) -> bool {
-        self.image_model_path.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.image_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     pub fn is_tts_active(&self) -> bool {
-        self.tts_model_path.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+        self.tts_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     pub fn get_stt_model(&self) -> Option<String> {
-        self.stt_model_path.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.stt_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn get_image_model(&self) -> Option<String> {
-        self.image_model_path.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.image_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn get_tts_model(&self) -> Option<String> {
-        self.tts_model_path.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.tts_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn get_status(&self) -> (bool, bool, bool, bool, bool, bool) {
-        let chat = self.chat_process.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-        let embed = self.embedding_process.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-        let summ = self.summarizer_process.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-        let stt = self.stt_process.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let chat = self
+            .chat_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        let embed = self
+            .embedding_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        let summ = self
+            .summarizer_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        let stt = self
+            .stt_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
         // tts and image still CLI for now? Plan says verify Streaming Voice Services (stt).
         // Let's keep tts as path check for now until implemented.
-        let tts = self.tts_model_path.lock().unwrap_or_else(|e| e.into_inner()).is_some();
-        let image = self.image_model_path.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+        let tts = self
+            .tts_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        let image = self
+            .image_model_path
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
         (chat, embed, stt, tts, image, summ)
     }
 
@@ -1066,7 +1244,8 @@ impl SidecarManager {
                 p
             } else {
                 // Fallback to random port
-                let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
+                let listener =
+                    TcpListener::bind("127.0.0.1:0").expect("Failed to bind to random port");
                 listener
                     .local_addr()
                     .expect("Failed to get local address")
@@ -1087,11 +1266,26 @@ impl SidecarManager {
 #[derive(Clone, serde::Serialize, specta::Type)]
 #[serde(tag = "type")]
 pub enum SidecarEvent {
-    Started { service: String },
-    Stopped { service: String },
-    Crashed { service: String, code: i32 },
-    Error { service: String, message: String },
-    Progress { service: String, message: String, progress: f32, total: f32 },
+    Started {
+        service: String,
+    },
+    Stopped {
+        service: String,
+    },
+    Crashed {
+        service: String,
+        code: i32,
+    },
+    Error {
+        service: String,
+        message: String,
+    },
+    Progress {
+        service: String,
+        message: String,
+        progress: f32,
+        total: f32,
+    },
 }
 
 // Commands
@@ -1202,7 +1396,10 @@ pub async fn start_chat_server(
     // Wait for server to be ready (poll /health)
     let start = std::time::Instant::now();
     let client = reqwest::Client::new();
-    println!("[sidecar] Waiting for chat server to be ready on port {}...", port);
+    println!(
+        "[sidecar] Waiting for chat server to be ready on port {}...",
+        port
+    );
 
     loop {
         if start.elapsed().as_secs() > 120 {
@@ -1211,11 +1408,20 @@ pub async fn start_chat_server(
         }
 
         // Check if process died
-        if state.chat_process.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        if state
+            .chat_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+        {
             return Err("Chat server process exited prematurely during startup".into());
         }
 
-        match client.get(format!("http://127.0.0.1:{}/health", port)).send().await {
+        match client
+            .get(format!("http://127.0.0.1:{}/health", port))
+            .send()
+            .await
+        {
             Ok(res) => {
                 if res.status().is_success() {
                     println!("[sidecar] Chat server is ready!");
@@ -1252,7 +1458,11 @@ pub async fn start_embedding_server_core(
     // Probe the actual embedding dimension from the model's config.json
     let actual_dim: Option<usize> = (|| -> Option<usize> {
         let p = std::path::Path::new(&model_path);
-        let cfg_path = if p.is_dir() { p.join("config.json") } else { return None; };
+        let cfg_path = if p.is_dir() {
+            p.join("config.json")
+        } else {
+            return None;
+        };
         let content = std::fs::read_to_string(&cfg_path).ok()?;
         let v: serde_json::Value = serde_json::from_str(&content).ok()?;
         v.get("hidden_size")
@@ -1265,14 +1475,22 @@ pub async fn start_embedding_server_core(
     if let Some(dim) = actual_dim {
         let current_dim = vector_manager.dimensions();
         if dim != current_dim {
-            eprintln!("[embedding] Dimension changed: {} → {}. Purging stale vector indices.", current_dim, dim);
+            eprintln!(
+                "[embedding] Dimension changed: {} → {}. Purging stale vector indices.",
+                current_dim, dim
+            );
             vector_manager.purge_by_dimension(current_dim);
-            vector_manager.reinit(dim).map_err(|e| format!("Failed to reinit vector store: {}", e))?;
+            vector_manager
+                .reinit(dim)
+                .map_err(|e| format!("Failed to reinit vector store: {}", e))?;
             let config_mgr = app.state::<crate::config::ConfigManager>();
             let mut cfg = config_mgr.get_config();
             cfg.vector_dimensions = dim as u32;
             config_mgr.save_config(&cfg);
-            println!("[embedding] Vector store reinitialized at dimension {}.", dim);
+            println!(
+                "[embedding] Vector store reinitialized at dimension {}.",
+                dim
+            );
         }
     }
 
@@ -1292,7 +1510,13 @@ pub async fn start_embedding_server_core(
             .map_err(|e| e.to_string())?;
     }
 
-    app.emit("sidecar_event", SidecarEvent::Started { service: "embedding".into() }).ok();
+    app.emit(
+        "sidecar_event",
+        SidecarEvent::Started {
+            service: "embedding".into(),
+        },
+    )
+    .ok();
     Ok(())
 }
 
@@ -1307,7 +1531,6 @@ pub async fn start_embedding_server(
     let res = start_embedding_server_core(&app, &state, &vec_manager, model_path).await;
     res
 }
-
 
 #[tauri::command]
 #[specta::specta]
@@ -1417,12 +1640,14 @@ pub struct ChatServerConfig {
 #[tauri::command]
 #[specta::specta]
 pub fn get_chat_server_config(state: State<'_, SidecarManager>) -> Option<ChatServerConfig> {
-    state.get_chat_config().map(|(port, token, context_size, model_family)| ChatServerConfig {
-        port,
-        token,
-        context_size,
-        model_family,
-    })
+    state.get_chat_config().map(
+        |(port, token, context_size, model_family)| ChatServerConfig {
+            port,
+            token,
+            context_size,
+            model_family,
+        },
+    )
 }
 
 #[tauri::command]

@@ -1,7 +1,7 @@
 name = "Model Comparison"
 description = "Compares AI models by provider and modality."
 version = "1.0.0"
-author = "Scrappy Team"
+author = "ThinClaw Team"
 tools_used = ["models"]
 script_file = "model_comparison.rhai"
 

@@ -19,9 +19,7 @@ impl ImagenDiffusionBackend {
             .as_deref()
             .map(|m| m.contains("pro"))
             .unwrap_or(false);
-        let images_dir = std::env::temp_dir()
-            .join("scrappy")
-            .join("imagine");
+        let images_dir = std::env::temp_dir().join("scrappy").join("imagine");
         Self {
             api_key,
             images_dir,

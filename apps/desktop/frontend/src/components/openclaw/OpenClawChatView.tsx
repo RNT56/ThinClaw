@@ -811,7 +811,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                         </div>
                         <div>
                             <h2 className="font-semibold text-sm">
-                                {isCoreView ? "OpenClaw Core System" : (sessionKey ? `${sessionKey.slice(0, 30)}...` : 'No Session')}
+                                {isCoreView ? "ThinClaw Core System" : (sessionKey ? `${sessionKey.slice(0, 30)}...` : 'No Session')}
                             </h2>
                             <div className="flex items-center gap-2">
                                 {isCoreView ? (
@@ -1154,7 +1154,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                             value={input}
                                             onChange={(e) => setInput(e.target.value)}
                                             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                                            placeholder={gatewayRunning ? (coreTab === 'chat' ? "Chat with OpenClaw..." : "Send Command...") : "Gateway offline..."}
+                                            placeholder={gatewayRunning ? (coreTab === 'chat' ? "Chat with ThinClaw..." : "Send Command...") : "Gateway offline..."}
                                             rows={1}
                                             className="flex-1 bg-transparent border-0 focus:ring-0 focus:outline-none resize-none p-2 max-h-32 min-h-[44px] text-sm"
                                         />

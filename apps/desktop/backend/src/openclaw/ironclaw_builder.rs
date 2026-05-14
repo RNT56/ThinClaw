@@ -10,17 +10,17 @@
 //!
 //! Separated for maintainability — the public API remains in `ironclaw_bridge.rs`.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::Mutex;
 
 use ironclaw::agent::{Agent, AgentDeps};
 use ironclaw::app::{AppBuilder, AppBuilderFlags};
-use ironclaw::channels::ChannelManager;
 use ironclaw::channels::web::log_layer::LogBroadcaster;
 use ironclaw::channels::web::types::SseEvent;
+use ironclaw::channels::ChannelManager;
 use ironclaw::extensions::clawhub::CatalogCache;
 use ironclaw::extensions::manifest_validator::ManifestValidator;
 
@@ -28,6 +28,26 @@ use super::ironclaw_bridge::IronClawInner;
 use super::ironclaw_channel::TauriChannel;
 use super::tool_bridge::TauriToolBridge;
 use super::ui_types::UiEvent;
+
+fn resolved_workspace_root() -> &'static std::sync::RwLock<Option<String>> {
+    static ROOT: OnceLock<std::sync::RwLock<Option<String>>> = OnceLock::new();
+    ROOT.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+fn set_resolved_workspace_root(root: &std::path::Path) {
+    let value = root.to_string_lossy().to_string();
+    match resolved_workspace_root().write() {
+        Ok(mut guard) => *guard = Some(value),
+        Err(poisoned) => *poisoned.into_inner() = Some(value),
+    }
+}
+
+pub(crate) fn get_resolved_workspace_root() -> Option<String> {
+    match resolved_workspace_root().read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
 
 /// Build a fully-configured `IronClawInner` from scratch.
 ///
@@ -59,7 +79,7 @@ pub(crate) async fn build_inner(
         );
     }
 
-    // ── 1a-2. Enable heartbeat for Scrappy desktop mode ──────────────
+    // ── 1a-2. Enable heartbeat for ThinClaw Desktop mode ─────────────
     // The heartbeat checks HEARTBEAT.md every 30 minutes and proactively
     // notifies the user if any tasks need attention. This is the IronClaw
     // equivalent of OpenClaw's periodic heartbeat system.
@@ -75,7 +95,7 @@ pub(crate) async fn build_inner(
     }
 
     // ── 1b. Set WHISPER_HTTP_ENDPOINT for IronClaw voice/talk mode ───
-    // Scrappy's STT sidecar runs on port 53757 (fixed). IronClaw uses
+    // ThinClaw Desktop's STT sidecar runs on port 53757 (fixed). IronClaw uses
     // this env var to call the local whisper server instead of bundling
     // its own whisper-rs. The endpoint is OpenAI-compatible.
     if !bridge_var_exists("WHISPER_HTTP_ENDPOINT") {
@@ -105,7 +125,7 @@ pub(crate) async fn build_inner(
 
     // ── 1b-3. Enable local dev tools (file write, shell, etc.) ──────
     // IronClaw defaults ALLOW_LOCAL_TOOLS to false (designed for SaaS where
-    // tools run in sandboxed containers). In Scrappy's desktop context the
+    // tools run in sandboxed containers). In ThinClaw Desktop's context the
     // agent should be able to create files, run commands, and edit code.
     // The setting is controlled by the user via Gateway Settings toggle.
     {
@@ -131,15 +151,14 @@ pub(crate) async fn build_inner(
         bridge_config.insert("WORKSPACE_MODE".into(), workspace_mode.clone());
 
         // ── Workspace root resolution ─────────────────────────────────
-        // Priority: user config → env override → agent_workspace in app data dir
+        // Priority: user config → agent_workspace in app data dir.
+        // WORKSPACE_ROOT is a ThinClaw bridge overlay value, not a dependable
+        // process env var for desktop-side file event handling.
         // The default uses agent_workspace (already created at first launch)
         // so files are visible in the OpenClaw folder the user can see in Finder.
         let resolved_root = if let Some(ref root) = workspace_root {
             // User explicitly configured a root in Gateway settings
             std::path::PathBuf::from(root)
-        } else if let Ok(overridden) = std::env::var("WORKSPACE_ROOT") {
-            // Already set by a previous start or env var — keep it
-            std::path::PathBuf::from(overridden)
         } else if let Some(ref bd) = base_dir {
             // Default: <app_data>/OpenClaw/agent_workspace
             // (visible folder the user can already see in Finder)
@@ -166,9 +185,10 @@ pub(crate) async fn build_inner(
             tracing::info!("[ironclaw] Workspace root: {:?}", resolved_root);
         }
 
+        set_resolved_workspace_root(&resolved_root);
         bridge_config.insert(
             "WORKSPACE_ROOT".into(),
-            resolved_root.to_str().unwrap_or("Scrappy").into(),
+            resolved_root.to_str().unwrap_or("ThinClaw").into(),
         );
 
         // Enable safe bins allowlist for sandboxed mode (belt-and-suspenders
@@ -204,12 +224,12 @@ pub(crate) async fn build_inner(
             "[ironclaw] Set ALLOW_LOCAL_TOOLS={}, WORKSPACE_MODE={}, WORKSPACE_ROOT={:?}, SAFE_BINS_ONLY={}",
             allow_local,
             workspace_mode,
-            workspace_root,
+            resolved_root,
             workspace_mode == "sandboxed",
         );
     }
 
-    // ── 1c. Set LLM_BACKEND / LLM_BASE_URL from Scrappy's config ───
+    // ── 1c. Set LLM_BACKEND / LLM_BASE_URL from ThinClaw Desktop config ───
     // IronClaw's LlmConfig::resolve() defaults to openai_compatible which
     // requires LLM_BASE_URL. We must tell it which backend to use based on
     // the user's gateway settings (local core vs cloud brain).
@@ -367,7 +387,7 @@ pub(crate) async fn build_inner(
             }
         }
 
-        // Final safety net: if still no LLM_BACKEND is set (no OpenClaw config
+        // Final safety net: if still no LLM_BACKEND is set (no ThinClaw config
         // loaded), use ollama — it needs no API key or base URL, so config
         // resolution always succeeds.
         if !bridge_config.contains_key("LLM_BACKEND") && !bridge_var_exists("LLM_BACKEND") {
@@ -443,7 +463,7 @@ pub(crate) async fn build_inner(
     // sensor tools (camera, mic, screen) with 3-tier user approval.
     builder = builder.with_tool_bridge(tool_bridge.clone());
 
-    // ── 4b. Translate Scrappy's cloud intelligence config into IronClaw
+    // ── 4b. Translate ThinClaw Desktop's cloud intelligence config into IronClaw
     //        ProvidersSettings for multi-provider failover + smart routing.
     {
         use tauri::Manager;
@@ -912,9 +932,8 @@ pub(crate) async fn build_inner(
                                     val.get("bytes_written").and_then(|v| v.as_u64()),
                                 ) {
                                     // Compute workspace-relative display path
-                                    let workspace_root =
-                                        std::env::var("WORKSPACE_ROOT").unwrap_or_default();
-                                    let relative = if !workspace_root.is_empty() {
+                                    let workspace_root = get_resolved_workspace_root();
+                                    let relative = if let Some(workspace_root) = workspace_root {
                                         path.strip_prefix(&workspace_root)
                                             .unwrap_or(path)
                                             .trim_start_matches('/')

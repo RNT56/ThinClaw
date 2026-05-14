@@ -8,7 +8,6 @@ pub struct DeepgramSttBackend {
     pub api_key: String,
 }
 
-
 impl DeepgramSttBackend {
     pub fn new(api_key: String) -> Self {
         Self { api_key }

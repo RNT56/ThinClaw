@@ -523,7 +523,11 @@ async fn run_inference(
 
     let find_standard_fallback = |category: &str, keyword: &str| -> Option<String> {
         if let Ok(app_dir) = app.path().app_data_dir() {
-            let standard_dir = app_dir.join("models").join("Diffusion").join("standard").join(category);
+            let standard_dir = app_dir
+                .join("models")
+                .join("Diffusion")
+                .join("standard")
+                .join(category);
             if let Ok(entries) = std::fs::read_dir(standard_dir) {
                 for entry in entries.flatten() {
                     let p = entry.path();
@@ -690,11 +694,9 @@ async fn run_inference(
 
                 // Detect progress bars: |====>   | 28/795
                 static PROGRESS_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-                let re = PROGRESS_RE.get_or_init(|| {
-                    regex::Regex::new(r"\|\s*([|=]+)\s*\|\s*(\d+)/(\d+)").unwrap()
-                });
-                if let Some(caps) = re.captures(&text)
-                {
+                let re = PROGRESS_RE
+                    .get_or_init(|| regex::Regex::new(r"\|\s*([|=]+)\s*\|\s*(\d+)/(\d+)").unwrap());
+                if let Some(caps) = re.captures(&text) {
                     let current = caps[2].parse::<f32>().unwrap_or(0.0);
                     let total = caps[3].parse::<f32>().unwrap_or(1.0);
                     let progress = current / total;
@@ -790,7 +792,6 @@ async fn run_inference(
         }),
     )
     .ok();
-
 
     Ok(ImageResponse {
         id,

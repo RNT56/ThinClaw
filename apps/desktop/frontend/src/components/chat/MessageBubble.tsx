@@ -15,6 +15,7 @@ import { createPortal } from 'react-dom';
 import { revealPath } from '../../lib/openclaw';
 import { ThinkingDots } from './ThinkingDots';
 import { useInferenceBackends } from '../../hooks/use-inference-backends';
+import { parseStatusTaggedContent } from '../../lib/status-tags';
 
 function extractText(node: any): string {
     if (typeof node === 'string' || typeof node === 'number') return String(node);
@@ -325,36 +326,7 @@ function parseThoughts(content: string) {
 
 // Updated Helper to separate content and status tags
 function parseContent(content: string) {
-    const parts: { type: 'text' | 'status', content?: string, props?: any }[] = [];
-    const regex = /<scrappy_status\s+type="([^"]+)"(?:\s+query="([^"]*)")?\s*\/>/g;
-
-    let lastIndex = 0;
-    let match;
-
-    while ((match = regex.exec(content)) !== null) {
-        if (match.index > lastIndex) {
-            parts.push({ type: 'text', content: content.slice(lastIndex, match.index) });
-        }
-        parts.push({
-            type: 'status',
-            props: { type: match[1], query: match[2] }
-        });
-        lastIndex = regex.lastIndex;
-    }
-
-    if (lastIndex < content.length) {
-        parts.push({ type: 'text', content: content.slice(lastIndex) });
-    }
-
-    // Check for [Stopped] at the end of the last part
-    const lastPart = parts[parts.length - 1];
-    if (lastPart && lastPart.type === 'text' && lastPart.content?.trim().endsWith('[Stopped]')) {
-        // modify content to remove [Stopped]
-        lastPart.content = lastPart.content.replace(/\[Stopped\]\s*$/, '');
-        parts.push({ type: 'status', props: { type: 'stopped' } });
-    }
-
-    return parts;
+    return parseStatusTaggedContent(content);
 }
 
 
@@ -637,7 +609,7 @@ function MessageBubbleContent({ message, conversationId, isLastUser, onResend, s
                             ) : (
                                 parseContent(sanitizedContent as string).map((part, idx) => {
                                     if (part.type === 'status') {
-                                        return <StatusIndicator key={idx} type={part.props.type} query={part.props.query} />;
+                                        return <StatusIndicator key={idx} {...part.props} />;
                                     }
                                     if (!part.content) return null;
 

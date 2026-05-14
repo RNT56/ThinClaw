@@ -15,7 +15,7 @@ interface ModeNavigatorProps {
 
 const MODES = [
     { id: 'chat' as const, label: 'Chat', Icon: ChatModeIcon },
-    { id: 'openclaw' as const, label: 'OpenClaw', Icon: OpenClawModeIcon },
+    { id: 'openclaw' as const, label: 'ThinClaw', Icon: OpenClawModeIcon },
     { id: 'imagine' as const, label: 'Imagine', Icon: ImagineModeIcon },
 ];
 
@@ -67,7 +67,7 @@ export function ModeNavigator({ activeMode, onModeChange, sidebarOpen, gatewayRu
                                     className="shrink-0"
                                 />
 
-                                {/* Gateway running indicator for OpenClaw */}
+                                {/* Gateway running indicator for the agent runtime */}
                                 {showGatewayPulse && (
                                     <motion.div
                                         className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-500 border-2 border-background"

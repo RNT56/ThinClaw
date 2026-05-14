@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::Mutex as TokioMutex;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 use ironclaw::agent::{Agent, BackgroundTasksHandle};
 use ironclaw::channels::web::log_layer::LogBroadcaster;
@@ -223,7 +223,11 @@ impl IronClawState {
                                             && !t.starts_with("<!--")
                                             && !t.starts_with("-->")
                                     });
-                                    if has_tasks { Some(doc.content) } else { None }
+                                    if has_tasks {
+                                        Some(doc.content)
+                                    } else {
+                                        None
+                                    }
                                 }
                                 _ => None,
                             }

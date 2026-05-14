@@ -17,6 +17,7 @@ import { commands } from '../../lib/bindings';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useEngineSetup } from '../../hooks/use-engine-setup';
+import { clearOnboardingProgress, startOnboardingProgress } from '../../lib/local-storage-migration';
 
 // ---------------------------------------------------------------------------
 // HF Hub types (match backend via specta)
@@ -201,8 +202,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
     // Suppress ModelProvider first-run toast during onboarding
     useEffect(() => {
-        localStorage.setItem('scrappy_onboarding_in_progress', 'true');
-        return () => { localStorage.removeItem('scrappy_onboarding_in_progress'); };
+        startOnboardingProgress();
+        return () => { clearOnboardingProgress(); };
     }, []);
 
     // HF: load file info for a model (used by per-category selections)
@@ -412,7 +413,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             }
 
             // Clear onboarding flag
-            localStorage.removeItem('scrappy_onboarding_in_progress');
+            clearOnboardingProgress();
 
             // Set inference mode
             await openclaw.toggleOpenClawLocalInference(inferenceChoice === 'local');
@@ -529,7 +530,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                 </div>
                                 <h1 className="text-3xl font-bold tracking-tight">Welcome to ThinClaw Desktop</h1>
                                 <p className="text-lg text-muted-foreground max-w-md mx-auto">
-                                    Your secure, private, and open-source AI desktop. Let's configure your OpenClaw experience.
+                                    Your secure, private, and open-source AI desktop. Let's configure your ThinClaw experience.
                                 </p>
                             </motion.div>
                         )}
@@ -670,7 +671,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                             >
                                 <div className="text-center mb-8">
                                     <h2 className="text-2xl font-bold">Agent Deployment</h2>
-                                    <p className="text-muted-foreground">Where should your OpenClaw agent run? <span className="text-xs opacity-70 block mt-1">You can change this later in Settings &gt; Gateway.</span></p>
+                                    <p className="text-muted-foreground">Where should your ThinClaw agent run? <span className="text-xs opacity-70 block mt-1">You can change this later in Settings &gt; Gateway.</span></p>
                                 </div>
 
                                 <div className="grid md:grid-cols-2 gap-4">
@@ -689,7 +690,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                         <div>
                                             <h3 className="font-semibold text-lg">Local Agent</h3>
                                             <p className="text-sm text-muted-foreground mt-1">
-                                                OpenClaw runs on this machine. Private, secure, and offline-capable.
+                                                ThinClaw runs on this machine. Private, secure, and offline-capable.
                                             </p>
                                         </div>
                                     </button>
@@ -1325,7 +1326,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                             >
                                 <div className="text-center mb-8">
                                     <h2 className="text-2xl font-bold">Grant Permissions</h2>
-                                    <p className="text-muted-foreground">OpenClaw needs access to interact with your system. <span className="text-xs opacity-70 block mt-1">These settings can be managed later.</span></p>
+                                    <p className="text-muted-foreground">ThinClaw needs access to interact with your system. <span className="text-xs opacity-70 block mt-1">These settings can be managed later.</span></p>
                                 </div>
 
                                 <div className="space-y-4">

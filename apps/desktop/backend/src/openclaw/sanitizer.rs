@@ -4,7 +4,7 @@
 //! in their output. This module provides a function to strip them before
 //! the text reaches the UI.
 //!
-//! IronClaw emits raw LLM output — Scrappy applies this sanitizer before
+//! IronClaw emits raw LLM output — ThinClaw Desktop applies this sanitizer before
 //! rendering in the frontend.
 
 use regex::Regex;

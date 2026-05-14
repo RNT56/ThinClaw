@@ -1,7 +1,7 @@
 name = "Health Research"
 description = "Searches for medical research papers and summarizes findings."
 version = "1.0.0"
-author = "Scrappy Team"
+author = "ThinClaw Team"
 tools_used = ["health", "ai_tools"]
 script_file = "health_research.rhai"
 

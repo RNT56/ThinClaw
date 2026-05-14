@@ -1,6 +1,6 @@
-use scrappy_mcp_tools::skills::manager::SkillManager;
-use scrappy_mcp_tools::McpClient;
 use serde_json::{json, Value};
+use thinclaw_desktop_tools::skills::manager::SkillManager;
+use thinclaw_desktop_tools::McpClient;
 use tracing::info;
 
 /// Registry-based tool router. Host tools are auto-discovered from
@@ -9,7 +9,7 @@ use tracing::info;
 pub struct ToolRouter<'a> {
     pub mcp_client: Option<&'a McpClient>,
     pub skill_manager: Option<&'a SkillManager>,
-    pub sandbox: Option<&'a scrappy_mcp_tools::Sandbox>,
+    pub sandbox: Option<&'a thinclaw_desktop_tools::Sandbox>,
 }
 
 impl<'a> ToolRouter<'a> {

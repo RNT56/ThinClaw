@@ -830,7 +830,7 @@ export function OpenClawAutomations() {
                 <div>
                     <h4 className="text-sm font-semibold text-amber-500 uppercase tracking-wider">Background Execution</h4>
                     <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                        Cron jobs run in the background on the OpenClaw node.
+                        Cron jobs run in the background on the ThinClaw node.
                         They can trigger tools, send notifications, or clean up local storage without active UI sessions.
                         Jobs created here are stored in ThinClaw's RoutineStore and survive engine restarts.
                     </p>

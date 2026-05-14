@@ -5,7 +5,6 @@
 use tauri::State;
 use tracing::info;
 
-
 use super::OpenClawManager;
 use crate::openclaw::ironclaw_bridge::IronClawState;
 
@@ -83,7 +82,7 @@ pub async fn openclaw_config_patch(
 }
 
 // ============================================================================
-// Settings toggles — these write to Scrappy's identity.json via OpenClawConfig
+// Settings toggles — these write to ThinClaw Desktop identity.json via OpenClawConfig
 // ============================================================================
 
 #[tauri::command]
@@ -464,7 +463,8 @@ pub async fn openclaw_logs_tail(
 pub async fn openclaw_update_run(
     _ironclaw: State<'_, IronClawState>,
 ) -> Result<serde_json::Value, String> {
-    // No separate engine to update — stub
+    // Alpha compatibility IPC: the public command name remains for existing
+    // frontend callers, but embedded IronClaw has no separate updater process.
     Ok(serde_json::json!({ "status": "embedded", "update_available": false }))
 }
 
@@ -487,7 +487,7 @@ pub async fn openclaw_web_login_telegram(
 }
 
 // ============================================================================
-// Cloud model / cloud config — write to Scrappy's identity.json
+// Cloud model / cloud config — write to ThinClaw Desktop identity.json
 // ============================================================================
 
 /// Save selected cloud model

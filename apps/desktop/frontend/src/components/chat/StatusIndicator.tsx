@@ -2,14 +2,16 @@ import { motion } from "framer-motion";
 import { Loader2, Globe, FileSearch, Image as ImageIcon, Sparkles } from "lucide-react";
 import { cn } from "../../lib/utils";
 
-type StatusType = "thinking" | "web_search" | "rag_search" | "image_gen" | "tool_call" | "stopped";
-
 interface StatusIndicatorProps {
-    type: StatusType;
+    type: string;
     query?: string;
+    name?: string;
+    status?: string;
+    msg?: string;
+    pct?: string;
 }
 
-export function StatusIndicator({ type, query }: StatusIndicatorProps) {
+export function StatusIndicator({ type, query, name, status, msg, pct }: StatusIndicatorProps) {
     const getIcon = () => {
         switch (type) {
             case "thinking": return <Sparkles className="w-3.5 h-3.5" />;
@@ -27,7 +29,8 @@ export function StatusIndicator({ type, query }: StatusIndicatorProps) {
             case "web_search": return `Searching Web for "${query || "..."}"`;
             case "rag_search": return `Searching Knowledge Base for "${query || "..."}"`;
             case "image_gen": return "Designing Image...";
-            case "tool_call": return query || "Executing Tool...";
+            case "tool_call": return [name, query, status].filter(Boolean).join(" · ") || "Executing Tool...";
+            case "progress": return [msg, pct ? `${pct}%` : undefined].filter(Boolean).join(" · ") || "Working...";
             case "stopped": return "Generation Stopped";
             default: return "Processing...";
         }

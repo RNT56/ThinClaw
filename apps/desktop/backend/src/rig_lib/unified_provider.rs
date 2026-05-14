@@ -4,7 +4,7 @@ use rig::completion::{
     CompletionError, CompletionModel, CompletionRequest, CompletionResponse, ModelChoice,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tracing::{error, info};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,7 +108,7 @@ impl UnifiedProvider {
 
         if matches!(self.kind, ProviderKind::OpenRouter) {
             request_builder = request_builder
-                .header("HTTP-Referer", "https://github.com/scrappy-ai/scrappy")
+                .header("HTTP-Referer", "https://github.com/RNT56/ThinClaw")
                 .header("X-Title", "ThinClaw Desktop");
         }
 
@@ -197,17 +197,15 @@ impl UnifiedProvider {
         if !request.tools.is_empty() {
             body.as_object_mut().unwrap().insert(
                 "tools".into(),
-                json!(
-                    request
-                        .tools
-                        .iter()
-                        .map(|t| json!({
-                            "name": t.name,
-                            "description": t.description,
-                            "input_schema": t.parameters
-                        }))
-                        .collect::<Vec<_>>()
-                ),
+                json!(request
+                    .tools
+                    .iter()
+                    .map(|t| json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.parameters
+                    }))
+                    .collect::<Vec<_>>()),
             );
         }
 

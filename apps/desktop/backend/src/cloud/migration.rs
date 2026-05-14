@@ -7,7 +7,7 @@
 //! Each flow is resumable: progress is checkpointed in the `cloud_migrations`
 //! table, so interrupted migrations can be detected on next launch.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use sqlx::SqlitePool;
 use tauri::AppHandle;
@@ -17,12 +17,13 @@ use tracing::{debug, info, warn};
 use super::encryption::{self, MasterKey};
 use super::manifest::{ArchiveManifest, FileType, ManifestFile};
 use super::progress::{MigrationPhase, ProgressTracker};
-use super::provider::CloudProvider;
+use super::provider::{CloudProvider, CloudProviderConfig};
 use super::snapshot;
 use std::sync::Arc;
 
 /// Cloud object key for the encrypted manifest.
 const MANIFEST_KEY: &str = "manifest.json.enc";
+const RESTORE_STAGING_DIR: &str = ".cloud-restore-staging";
 
 /// A file discovered for migration.
 #[derive(Debug)]
@@ -37,6 +38,14 @@ struct MigrationFile {
     size: u64,
     /// File type classification
     file_type: FileType,
+}
+
+#[derive(Debug)]
+struct RestoreTarget<'a> {
+    manifest_file: &'a ManifestFile,
+    file_type: FileType,
+    destination_path: PathBuf,
+    staged_path: PathBuf,
 }
 
 // ── Local → Cloud ─────────────────────────────────────────────────────────
@@ -57,6 +66,7 @@ pub async fn run_to_cloud(
     app_data_dir: &Path,
     provider: &dyn CloudProvider,
     master_key: &MasterKey,
+    provider_type: &str,
     migration_id: &str,
     cancel_flag: Arc<RwLock<bool>>,
 ) -> Result<(), String> {
@@ -111,6 +121,8 @@ pub async fn run_to_cloud(
     check_cancelled(&cancel_flag, &mut tracker).await?;
     tracker.set_phase(MigrationPhase::DatabaseSnapshot);
     info!("[cloud/migrate] Phase 2: Database snapshot");
+
+    sanitize_persisted_provider_config(pool).await?;
 
     let snapshot_path = app_data_dir.join("openclaw_snapshot.db");
     let snapshot_size = snapshot::create_snapshot(pool, &snapshot_path)
@@ -363,7 +375,7 @@ pub async fn run_to_cloud(
     info!("[cloud/migrate] Phase 6: Switch to cloud mode");
 
     let mode_json = serde_json::to_string(&super::StorageMode::Cloud {
-        provider_type: "s3".to_string(),
+        provider_type: provider_type.to_string(),
         provider_name: status.provider_name.clone(),
     })
     .unwrap();
@@ -468,19 +480,24 @@ pub async fn run_to_local(
         total_bytes,
     );
 
-    // ── Phase 3: Download + decrypt all files ────────────────────────────
+    // ── Phase 3: Download + decrypt all files into staging ───────────────
     tracker.set_phase(MigrationPhase::DownloadingFiles);
-    info!("[cloud/restore] Phase 3: Download + decrypt files");
+    info!("[cloud/restore] Phase 3: Download + decrypt files into staging");
 
-    // Separate DB file from other files — restore DB last
-    let (db_files, other_files): (Vec<&ManifestFile>, Vec<&ManifestFile>) = manifest
-        .files
-        .iter()
-        .partition(|f| f.file_type == FileType::Database);
+    let staging_dir = restore_staging_dir(app_data_dir, migration_id);
+    let restore_targets = build_restore_targets(app_data_dir, &staging_dir, &manifest)?;
+    prepare_restore_staging_dir(&staging_dir).await?;
+    let mut staged_targets: Vec<&RestoreTarget<'_>> = Vec::new();
 
-    // Download non-DB files first
-    for file in &other_files {
+    for target in &restore_targets {
+        let file = target.manifest_file;
         check_cancelled(&cancel_flag, &mut tracker).await?;
+
+        if target.file_type == FileType::Database {
+            tracker.set_phase(MigrationPhase::RestoringDatabase);
+        } else {
+            tracker.set_phase(MigrationPhase::DownloadingFiles);
+        }
 
         let encrypted = provider
             .get(&file.key)
@@ -490,9 +507,15 @@ pub async fn run_to_local(
         let decrypted = encryption::decrypt(master_key, &file.original_path, &encrypted)
             .map_err(|e| format!("Decrypt '{}' failed: {}", file.key, e))?;
 
-        // Verify checksum
         let hash = super::manifest::compute_sha256(&decrypted);
         if hash != file.sha256 {
+            if target.file_type == FileType::Database {
+                return Err(format!(
+                    "DB SHA-256 mismatch for '{}': expected {}, got {}. Aborting restore.",
+                    file.original_path, file.sha256, hash
+                ));
+            }
+
             warn!(
                 "[cloud/restore] SHA-256 mismatch for '{}': expected {}, got {}. Skipping.",
                 file.key, file.sha256, hash
@@ -500,20 +523,15 @@ pub async fn run_to_local(
             continue;
         }
 
-        // Write to local path
-        let local_path = app_data_dir.join(&file.original_path);
-        if let Some(parent) = local_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("mkdir failed for '{}': {}", parent.display(), e))?;
-        }
-
-        tokio::fs::write(&local_path, &decrypted)
-            .await
-            .map_err(|e| format!("Write '{}' failed: {}", local_path.display(), e))?;
+        stage_restore_file(&target.staged_path, &decrypted).await?;
+        staged_targets.push(target);
 
         tracker.file_done(file.size_bytes);
-        debug!("[cloud/restore] Restored: {}", file.original_path);
+        debug!(
+            "[cloud/restore] Staged: {} -> {}",
+            file.original_path,
+            target.staged_path.display()
+        );
 
         update_migration_progress(
             pool,
@@ -524,46 +542,44 @@ pub async fn run_to_local(
         .await;
     }
 
-    // ── Phase 4: Restore Database ────────────────────────────────────────
-    if let Some(db_file) = db_files.first() {
-        check_cancelled(&cancel_flag, &mut tracker).await?;
-        tracker.set_phase(MigrationPhase::RestoringDatabase);
-        info!("[cloud/restore] Phase 4: Restore database");
+    let staged_databases: Vec<&RestoreTarget<'_>> = staged_targets
+        .iter()
+        .copied()
+        .filter(|target| target.file_type == FileType::Database)
+        .collect();
 
-        let encrypted = provider
-            .get(&db_file.key)
-            .await
-            .map_err(|e| format!("DB download failed: {}", e))?;
+    // ── Phase 4: Activate staged outputs ─────────────────────────────────
+    if !staged_databases.is_empty() {
+        let staged_paths = staged_databases
+            .iter()
+            .map(|target| {
+                format!(
+                    "{} -> {}",
+                    target.manifest_file.original_path,
+                    target.staged_path.display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = format!(
+            "Database restore staged; restart-required database swap is needed before local mode can be activated. Staged files: {}",
+            staged_paths
+        );
+        warn!("[cloud/restore] {}", message);
+        tracker.fail(message.clone());
+        return Err(message);
+    }
 
-        let decrypted = encryption::decrypt(master_key, &db_file.original_path, &encrypted)
-            .map_err(|e| format!("DB decrypt failed: {}", e))?;
-
-        // Verify checksum
-        let hash = super::manifest::compute_sha256(&decrypted);
-        if hash != db_file.sha256 {
-            return Err(format!(
-                "DB SHA-256 mismatch: expected {}, got {}. Aborting restore.",
-                db_file.sha256, hash
-            ));
-        }
-
-        // Write the downloaded DB as a snapshot (don't overwrite the running DB)
-        let restored_db_path = app_data_dir.join("openclaw_restored.db");
-        tokio::fs::write(&restored_db_path, &decrypted)
-            .await
-            .map_err(|e| format!("DB write failed: {}", e))?;
-
-        tracker.file_done(db_file.size_bytes);
-
-        // NOTE: Actually swapping the live database requires closing the pool,
-        // renaming files, and re-opening. This is done by the caller (CloudManager)
-        // in a follow-up step. For now we just write the restored DB file.
-        info!(
-            "[cloud/restore] DB snapshot written to {} ({:.1} MB)",
-            restored_db_path.display(),
-            decrypted.len() as f64 / 1_048_576.0
+    for target in &staged_targets {
+        promote_staged_restore_file(&target.staged_path, &target.destination_path).await?;
+        debug!(
+            "[cloud/restore] Restored: {} -> {}",
+            target.manifest_file.original_path,
+            target.destination_path.display()
         );
     }
+
+    let _ = tokio::fs::remove_dir_all(&staging_dir).await;
 
     // ── Phase 5: Switch Mode ─────────────────────────────────────────────
     tracker.set_phase(MigrationPhase::Cleanup);
@@ -659,6 +675,401 @@ async fn collect_dir_recursive(
     }
 
     Ok(())
+}
+
+fn restore_staging_dir(app_data_dir: &Path, migration_id: &str) -> PathBuf {
+    app_data_dir.join(RESTORE_STAGING_DIR).join(migration_id)
+}
+
+async fn prepare_restore_staging_dir(staging_dir: &Path) -> Result<(), String> {
+    if staging_dir.exists() {
+        tokio::fs::remove_dir_all(staging_dir).await.map_err(|e| {
+            format!(
+                "Failed to clear restore staging dir '{}': {}",
+                staging_dir.display(),
+                e
+            )
+        })?;
+    }
+
+    tokio::fs::create_dir_all(staging_dir).await.map_err(|e| {
+        format!(
+            "Failed to create restore staging dir '{}': {}",
+            staging_dir.display(),
+            e
+        )
+    })
+}
+
+fn build_restore_targets<'a>(
+    app_data_dir: &Path,
+    staging_dir: &Path,
+    manifest: &'a ArchiveManifest,
+) -> Result<Vec<RestoreTarget<'a>>, String> {
+    manifest
+        .files
+        .iter()
+        .map(|manifest_file| build_restore_target(app_data_dir, staging_dir, manifest_file))
+        .collect()
+}
+
+fn build_restore_target<'a>(
+    app_data_dir: &Path,
+    staging_dir: &Path,
+    manifest_file: &'a ManifestFile,
+) -> Result<RestoreTarget<'a>, String> {
+    let relative_path = validated_manifest_relative_path(&manifest_file.original_path)?;
+    let destination_path = destination_path_for_manifest_file(app_data_dir, &relative_path)?;
+    let staged_path = staging_dir.join(&relative_path);
+    let file_type = FileType::from_path(&manifest_file.original_path);
+
+    if !staged_path.starts_with(staging_dir) {
+        return Err(format!(
+            "Rejected manifest path '{}': staging path escapes restore staging directory",
+            manifest_file.original_path
+        ));
+    }
+
+    Ok(RestoreTarget {
+        manifest_file,
+        file_type,
+        destination_path,
+        staged_path,
+    })
+}
+
+fn validated_manifest_relative_path(original_path: &str) -> Result<PathBuf, String> {
+    if original_path.is_empty() {
+        return Err("Rejected manifest path: original_path is empty".to_string());
+    }
+    if original_path.contains('\0') {
+        return Err(format!(
+            "Rejected manifest path '{}': path contains NUL byte",
+            original_path
+        ));
+    }
+    if original_path.starts_with('/') || original_path.starts_with('\\') {
+        return Err(format!(
+            "Rejected manifest path '{}': absolute paths are not allowed",
+            original_path
+        ));
+    }
+
+    let bytes = original_path.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return Err(format!(
+            "Rejected manifest path '{}': drive-prefixed paths are not allowed",
+            original_path
+        ));
+    }
+
+    let raw_path = Path::new(original_path);
+    if raw_path.is_absolute()
+        || raw_path.components().any(|component| {
+            matches!(
+                component,
+                Component::Prefix(_) | Component::RootDir | Component::ParentDir
+            )
+        })
+    {
+        return Err(format!(
+            "Rejected manifest path '{}': path escapes app data directory",
+            original_path
+        ));
+    }
+
+    let mut relative_path = PathBuf::new();
+    for segment in original_path.split(['/', '\\']) {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(format!(
+                "Rejected manifest path '{}': invalid path segment '{}'",
+                original_path, segment
+            ));
+        }
+
+        let segment_path = Path::new(segment);
+        if segment_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(format!(
+                "Rejected manifest path '{}': invalid path segment '{}'",
+                original_path, segment
+            ));
+        }
+
+        relative_path.push(segment);
+    }
+
+    Ok(relative_path)
+}
+
+fn destination_path_for_manifest_file(
+    app_data_dir: &Path,
+    relative_path: &Path,
+) -> Result<PathBuf, String> {
+    let destination_path = app_data_dir.join(relative_path);
+    if !destination_path.starts_with(app_data_dir) {
+        return Err(format!(
+            "Rejected manifest path '{}': destination escapes app data directory",
+            relative_path.display()
+        ));
+    }
+
+    Ok(destination_path)
+}
+
+async fn stage_restore_file(staged_path: &Path, data: &[u8]) -> Result<(), String> {
+    let parent = staged_path.parent().ok_or_else(|| {
+        format!(
+            "Failed to stage restore file '{}': missing parent directory",
+            staged_path.display()
+        )
+    })?;
+
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|e| format!("Failed to create staging dir '{}': {}", parent.display(), e))?;
+
+    let temp_path = restoring_temp_path(staged_path)?;
+    tokio::fs::write(&temp_path, data).await.map_err(|e| {
+        format!(
+            "Failed to write staged restore file '{}': {}",
+            temp_path.display(),
+            e
+        )
+    })?;
+
+    if staged_path.exists() {
+        tokio::fs::remove_file(staged_path).await.map_err(|e| {
+            format!(
+                "Failed to replace staged restore file '{}': {}",
+                staged_path.display(),
+                e
+            )
+        })?;
+    }
+
+    tokio::fs::rename(&temp_path, staged_path)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to finalize staged restore file '{}': {}",
+                staged_path.display(),
+                e
+            )
+        })
+}
+
+async fn promote_staged_restore_file(
+    staged_path: &Path,
+    destination_path: &Path,
+) -> Result<(), String> {
+    let parent = destination_path.parent().ok_or_else(|| {
+        format!(
+            "Failed to restore '{}': missing parent directory",
+            destination_path.display()
+        )
+    })?;
+
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|e| format!("mkdir failed for '{}': {}", parent.display(), e))?;
+
+    let temp_path = restoring_temp_path(destination_path)?;
+    tokio::fs::copy(staged_path, &temp_path)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to copy staged restore '{}' to '{}': {}",
+                staged_path.display(),
+                temp_path.display(),
+                e
+            )
+        })?;
+
+    if destination_path.exists() {
+        tokio::fs::remove_file(destination_path)
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to replace restore destination '{}': {}",
+                    destination_path.display(),
+                    e
+                )
+            })?;
+    }
+
+    tokio::fs::rename(&temp_path, destination_path)
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to finalize restore destination '{}': {}",
+                destination_path.display(),
+                e
+            )
+        })
+}
+
+fn restoring_temp_path(path: &Path) -> Result<PathBuf, String> {
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "Failed to build restore temp path for '{}': missing parent directory",
+            path.display()
+        )
+    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "Failed to build restore temp path for '{}': invalid file name",
+                path.display()
+            )
+        })?;
+
+    Ok(parent.join(format!(".{}.restoring", file_name)))
+}
+
+async fn sanitize_persisted_provider_config(pool: &SqlitePool) -> Result<(), String> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM cloud_config WHERE key = 'provider_config'")
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("Failed to read provider_config before snapshot: {}", e))?;
+
+    let Some((config_json,)) = row else {
+        return Ok(());
+    };
+
+    let config = match serde_json::from_str::<CloudProviderConfig>(&config_json) {
+        Ok(config) => config,
+        Err(e) => {
+            warn!(
+                "[cloud/migrate] Could not parse provider_config for sanitization: {}",
+                e
+            );
+            return Ok(());
+        }
+    };
+
+    let sanitized = config.sanitized_for_persistence();
+    if sanitized == config {
+        return Ok(());
+    }
+
+    let sanitized_json = serde_json::to_string(&sanitized)
+        .map_err(|e| format!("Failed to serialize sanitized provider_config: {}", e))?;
+    sqlx::query("INSERT OR REPLACE INTO cloud_config (key, value) VALUES ('provider_config', ?)")
+        .bind(sanitized_json)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to sanitize provider_config before snapshot: {}", e))?;
+
+    info!("[cloud/migrate] Sanitized provider_config before database snapshot");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_validated_manifest_relative_path_rejects_traversal() {
+        for path in [
+            "../openclaw.db",
+            "documents/../../openclaw.db",
+            "/tmp/openclaw.db",
+            "\\tmp\\openclaw.db",
+            "C:\\tmp\\openclaw.db",
+            "documents/./report.txt",
+            "documents//report.txt",
+        ] {
+            assert!(
+                validated_manifest_relative_path(path).is_err(),
+                "path should be rejected: {}",
+                path
+            );
+        }
+
+        assert_eq!(
+            validated_manifest_relative_path("documents/report.txt").unwrap(),
+            PathBuf::from("documents").join("report.txt")
+        );
+        assert_eq!(
+            validated_manifest_relative_path("documents\\report.txt").unwrap(),
+            PathBuf::from("documents").join("report.txt")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_restore_staging_keeps_live_files_unchanged_when_databases_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let staging_dir = restore_staging_dir(tmp.path(), "migration-test");
+        let open_live = tmp.path().join("openclaw.db");
+        let iron_live = tmp.path().join("ironclaw.db");
+        let doc_live = tmp.path().join("documents").join("report.txt");
+        let open_staged = staging_dir.join("openclaw.db");
+        let iron_staged = staging_dir.join("ironclaw.db");
+        let doc_staged = staging_dir.join("documents").join("report.txt");
+
+        tokio::fs::write(&open_live, b"old-open").await.unwrap();
+        tokio::fs::write(&iron_live, b"old-iron").await.unwrap();
+        tokio::fs::create_dir_all(doc_live.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&doc_live, b"old-doc").await.unwrap();
+
+        let mut manifest = ArchiveManifest::new("0.1.0".to_string(), 1, "test-key".to_string());
+        manifest.add_file(
+            "db/openclaw.db.enc".to_string(),
+            "openclaw.db".to_string(),
+            b"new-open",
+            64,
+        );
+        manifest.add_file(
+            "db/ironclaw.db.enc".to_string(),
+            "ironclaw.db".to_string(),
+            b"new-iron",
+            64,
+        );
+        manifest.add_file(
+            "documents/report.txt.enc".to_string(),
+            "documents/report.txt".to_string(),
+            b"new-doc",
+            64,
+        );
+        manifest.files[0].file_type = FileType::Other;
+        manifest.files[1].file_type = FileType::Other;
+
+        prepare_restore_staging_dir(&staging_dir).await.unwrap();
+        let targets = build_restore_targets(tmp.path(), &staging_dir, &manifest).unwrap();
+        for target in &targets {
+            let data: &[u8] = match target.manifest_file.original_path.as_str() {
+                "openclaw.db" => b"new-open",
+                "ironclaw.db" => b"new-iron",
+                "documents/report.txt" => b"new-doc",
+                other => panic!("unexpected manifest path: {}", other),
+            };
+            stage_restore_file(&target.staged_path, data).await.unwrap();
+        }
+
+        let staged_databases: Vec<&RestoreTarget<'_>> = targets
+            .iter()
+            .filter(|target| target.file_type == FileType::Database)
+            .collect();
+
+        assert_eq!(staged_databases.len(), 2);
+        assert_eq!(tokio::fs::read(&open_live).await.unwrap(), b"old-open");
+        assert_eq!(tokio::fs::read(&iron_live).await.unwrap(), b"old-iron");
+        assert_eq!(tokio::fs::read(&doc_live).await.unwrap(), b"old-doc");
+        assert_eq!(tokio::fs::read(&open_staged).await.unwrap(), b"new-open");
+        assert_eq!(tokio::fs::read(&iron_staged).await.unwrap(), b"new-iron");
+        assert_eq!(tokio::fs::read(&doc_staged).await.unwrap(), b"new-doc");
+        assert!(!staging_dir.join(".openclaw.db.restoring").exists());
+        assert!(!staging_dir.join(".ironclaw.db.restoring").exists());
+    }
 }
 
 // ── Database Helpers ──────────────────────────────────────────────────────

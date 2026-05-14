@@ -29,6 +29,8 @@ use super::super::provider::{CloudEntry, CloudError, CloudProvider, CloudStatus}
 const DRIVE_API: &str = "https://www.googleapis.com/drive/v3";
 /// Google Drive upload API base URL.
 const UPLOAD_API: &str = "https://www.googleapis.com/upload/drive/v3";
+const GDRIVE_APP_FOLDER: &str = "ThinClaw Desktop";
+const LEGACY_GDRIVE_APP_FOLDER: &str = "Scrappy";
 
 /// Google Drive cloud storage provider.
 pub struct GDriveProvider {
@@ -104,12 +106,16 @@ impl GDriveProvider {
 
         let token = self.token().await?;
 
-        // Search for existing "Scrappy" folder
-        let query = "name = 'Scrappy' and mimeType = 'application/vnd.google-apps.folder' and trashed = false";
+        // Search for existing ThinClaw folder. Legacy Scrappy folders are
+        // read fallback only, so new writes never target them.
+        let query = format!(
+            "name = '{}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+            GDRIVE_APP_FOLDER
+        );
         let url = format!(
             "{}/files?q={}&fields=files(id,name)",
             DRIVE_API,
-            urlencoding::encode(query)
+            urlencoding::encode(&query)
         );
 
         let resp: FileListResponse = self
@@ -131,7 +137,7 @@ impl GDriveProvider {
 
         // Create the folder
         let metadata = FileMetadata {
-            name: "Scrappy".to_string(),
+            name: GDRIVE_APP_FOLDER.to_string(),
             parents: None,
             mime_type: Some("application/vnd.google-apps.folder".to_string()),
         };
@@ -207,6 +213,68 @@ impl GDriveProvider {
         } else {
             Ok(None)
         }
+    }
+
+    async fn find_legacy_file(&self, key: &str) -> Result<Option<String>, CloudError> {
+        let token = self.token().await?;
+        let folder_id = match self.find_folder(LEGACY_GDRIVE_APP_FOLDER).await? {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        self.find_file_in_folder(&token, &folder_id, key).await
+    }
+
+    async fn find_folder(&self, folder_name: &str) -> Result<Option<String>, CloudError> {
+        let token = self.token().await?;
+        let query = format!(
+            "name = '{}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
+            folder_name.replace('\'', "\\'")
+        );
+        let url = format!(
+            "{}/files?q={}&fields=files(id,name)",
+            DRIVE_API,
+            urlencoding::encode(&query)
+        );
+        let resp: FileListResponse = self
+            .http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| CloudError::Provider(format!("Search folder '{}': {}", folder_name, e)))?
+            .json()
+            .await
+            .map_err(|e| CloudError::Provider(format!("Parse folder search: {}", e)))?;
+        Ok(resp.files.first().map(|folder| folder.id.clone()))
+    }
+
+    async fn find_file_in_folder(
+        &self,
+        token: &str,
+        folder_id: &str,
+        key: &str,
+    ) -> Result<Option<String>, CloudError> {
+        let filename = key_to_filename(key);
+        let query = format!(
+            "name = '{}' and '{}' in parents and trashed = false",
+            filename, folder_id
+        );
+        let url = format!(
+            "{}/files?q={}&fields=files(id,name,size)",
+            DRIVE_API,
+            urlencoding::encode(&query)
+        );
+        let resp: FileListResponse = self
+            .http
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| CloudError::Provider(format!("Find file '{}': {}", key, e)))?
+            .json()
+            .await
+            .map_err(|e| CloudError::Provider(format!("Parse find file: {}", e)))?;
+        Ok(resp.files.first().map(|file| file.id.clone()))
     }
 }
 
@@ -350,10 +418,13 @@ impl CloudProvider for GDriveProvider {
     }
 
     async fn get(&self, key: &str) -> Result<Vec<u8>, CloudError> {
-        let file_id = self
-            .find_file(key)
-            .await?
-            .ok_or_else(|| CloudError::NotFound(format!("Drive file not found: '{}'", key)))?;
+        let file_id = match self.find_file(key).await? {
+            Some(id) => id,
+            None => self
+                .find_legacy_file(key)
+                .await?
+                .ok_or_else(|| CloudError::NotFound(format!("Drive file not found: '{}'", key)))?,
+        };
 
         let token = self.token().await?;
         let url = format!("{}/files/{}?alt=media", DRIVE_API, file_id);

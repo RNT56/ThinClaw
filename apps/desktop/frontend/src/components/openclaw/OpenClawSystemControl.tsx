@@ -490,7 +490,7 @@ export function OpenClawSystemControl() {
                                         Process Lifecycle
                                     </h3>
                                     <p className="text-xs text-muted-foreground mb-6">
-                                        Stop or restart the OpenClaw Gateway process. This will disconnect all active UI sessions and halt background runners.
+                                        Stop or restart the ThinClaw Gateway process. This will disconnect all active UI sessions and halt background runners.
                                     </p>
                                     <button
                                         onClick={handleToggleGateway}

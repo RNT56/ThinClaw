@@ -27,13 +27,13 @@
     "test:backend": "cd backend && cargo test -- --skip web_search",
     "test:backend:all-engines": "cd backend && cargo test --no-default-features --features llamacpp -- --skip web_search && cargo test --no-default-features --features mlx -- engine && cargo test --no-default-features --features vllm -- engine && cargo test --no-default-features --features ollama -- engine",
     "setup:chromium": "bash backend/scripts/setup_chromium.sh",
-    "setup:ai": "node backend/scripts/download_ai_binaries.js",
+    "setup:ai": "node backend/scripts/download_ai_binaries.cjs",
     "setup:all": "npm run setup:chromium && npm run setup:ai",
     "lint:thinclaw": "cd ../.. && cargo clippy --workspace --all-targets -- -D warnings",
     "lint:thinclaw:fix": "cd ../.. && cargo clippy --fix --allow-dirty --allow-staged --lib -p thinclaw",
     "lint:fmt": "cd ../.. && cargo fmt --all -- --check",
     "lint:fmt:fix": "cd ../.. && cargo fmt --all",
-    "lint:ts": "cd frontend && npx tsc --noEmit",
+    "lint:ts": "cd frontend && tsc --noEmit",
     "lint:all": "npm run lint:fmt && npm run lint:thinclaw && npm run lint:ts",
     "test:thinclaw": "cd ../.. && cargo test --workspace",
     "ci": "npm run lint:all && npm run test:thinclaw"
@@ -91,5 +91,6 @@
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
     "vitest": "^3.2.4"
-  }
+  },
+  "packageManager": "npm@10.9.0"
 }

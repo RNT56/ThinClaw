@@ -363,17 +363,27 @@ impl OAuthManager {
 
     // ── Keychain Storage ─────────────────────────────────────────────────
 
+    fn keychain_service(&self) -> String {
+        format!("com.thinclaw.desktop.oauth.{}", self.config.provider_name)
+    }
+
+    fn legacy_keychain_service(&self) -> String {
+        format!("com.scrappy.oauth.{}", self.config.provider_name)
+    }
+
     /// Save tokens to macOS Keychain.
     #[cfg(target_os = "macos")]
     pub fn save_tokens_to_keychain(&self, tokens: &OAuthTokens) -> Result<(), CloudError> {
         use security_framework::passwords::{delete_generic_password, set_generic_password};
 
-        let service = format!("com.scrappy.oauth.{}", self.config.provider_name);
+        let service = self.keychain_service();
         let account = "tokens";
 
         let json = serde_json::to_vec(tokens)
             .map_err(|e| CloudError::Provider(format!("Token serialization failed: {}", e)))?;
 
+        // New writes use the ThinClaw service. Legacy Scrappy OAuth tokens are
+        // read-only fallback and are intentionally never deleted automatically.
         let _ = delete_generic_password(&service, account);
         set_generic_password(&service, account, &json)
             .map_err(|e| CloudError::Provider(format!("Keychain save failed: {}", e)))?;
@@ -388,12 +398,17 @@ impl OAuthManager {
     /// Load tokens from macOS Keychain.
     #[cfg(target_os = "macos")]
     pub fn load_tokens_from_keychain(&self) -> Result<Option<OAuthTokens>, CloudError> {
+        match self.load_tokens_from_service(&self.keychain_service())? {
+            Some(tokens) => Ok(Some(tokens)),
+            None => self.load_tokens_from_service(&self.legacy_keychain_service()),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn load_tokens_from_service(&self, service: &str) -> Result<Option<OAuthTokens>, CloudError> {
         use security_framework::passwords::get_generic_password;
 
-        let service = format!("com.scrappy.oauth.{}", self.config.provider_name);
-        let account = "tokens";
-
-        match get_generic_password(&service, account) {
+        match get_generic_password(service, "tokens") {
             Ok(data) => {
                 let tokens: OAuthTokens = serde_json::from_slice(&data).map_err(|e| {
                     CloudError::Provider(format!("Token deserialization failed: {}", e))
@@ -424,7 +439,7 @@ impl OAuthManager {
     pub fn delete_tokens_from_keychain(&self) -> Result<(), CloudError> {
         use security_framework::passwords::delete_generic_password;
 
-        let service = format!("com.scrappy.oauth.{}", self.config.provider_name);
+        let service = self.keychain_service();
         let _ = delete_generic_password(&service, "tokens");
         info!(
             "[oauth/{}] Tokens deleted from Keychain",

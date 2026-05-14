@@ -1,7 +1,7 @@
 name = "Daily News Digest"
 description = "Fetches top headlines and generates a concise summary."
 version = "1.0.0"
-author = "Scrappy Team"
+author = "ThinClaw Team"
 tools_used = ["news", "ai_tools"]
 script_file = "daily_news_digest.rhai"
 

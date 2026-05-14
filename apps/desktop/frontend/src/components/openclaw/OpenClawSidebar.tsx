@@ -203,7 +203,7 @@ export function OpenClawSidebar({
                 </button>
                 <div className={cn("flex items-center gap-2", !sidebarOpen && "hidden")}>
                     <Radio className="w-4 h-4 text-primary" />
-                    <span className="font-bold text-base">OpenClaw</span>
+                    <span className="font-bold text-base">ThinClaw</span>
                 </div>
             </div>
 
@@ -463,7 +463,7 @@ export function OpenClawSidebar({
                                                 <MessageCircle className={cn("w-3.5 h-3.5 mt-0.5 shrink-0", session.session_key === 'agent:main' ? "text-blue-400" : "text-muted-foreground")} />
                                                 <div className="flex-1 min-w-0">
                                                     <p className={cn("text-xs truncate", session.session_key === 'agent:main' ? "font-bold text-blue-100" : "font-medium")}>
-                                                        {session.session_key === 'agent:main' ? 'OpenClaw Core' : (session.title || session.session_key.split(':').pop()?.slice(0, 8))}
+                                                        {session.session_key === 'agent:main' ? 'ThinClaw Core' : (session.title || session.session_key.split(':').pop()?.slice(0, 8))}
                                                     </p>
                                                     <p className="text-[10px] text-muted-foreground truncate">{session.source || 'system'}</p>
                                                 </div>

@@ -2,10 +2,10 @@
 
 #[cfg(test)]
 mod skill_tests {
-    use scrappy_mcp_tools::skills::manager::SkillManager;
-    use scrappy_mcp_tools::skills::manifest::SkillManifest;
     use std::fs;
     use tempfile::tempdir;
+    use thinclaw_desktop_tools::skills::manager::SkillManager;
+    use thinclaw_desktop_tools::skills::manifest::SkillManifest;
 
     #[test]
     fn test_skill_manager_lifecycle() {

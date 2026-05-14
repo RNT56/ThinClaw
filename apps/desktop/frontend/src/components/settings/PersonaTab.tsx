@@ -18,7 +18,7 @@ import { CustomPersona } from '../../lib/bindings';
 
 const BUILTIN_PERSONAS = [
     {
-        id: 'scrappy',
+        id: 'thinclaw',
         name: 'ThinClaw',
         description: 'The versatile and insightful companion for all topics.',
         icon: Bot,
@@ -85,7 +85,9 @@ export function PersonaTab() {
 
     if (!config) return <div className="p-4 text-center text-muted-foreground">Loading personas...</div>;
 
-    const selectedId = config.selected_persona || 'scrappy';
+    const selectedId = config.selected_persona === 'scrappy'
+        ? 'thinclaw'
+        : (config.selected_persona || 'thinclaw');
     const customPersonas = config.custom_personas || [];
 
     const handleSelect = (id: string) => {
@@ -114,7 +116,7 @@ export function PersonaTab() {
         let nextSelected = selectedId;
 
         if (selectedId === id) {
-            nextSelected = 'scrappy';
+            nextSelected = 'thinclaw';
         }
 
         updateConfig({

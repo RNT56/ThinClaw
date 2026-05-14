@@ -9,7 +9,7 @@
 //! - `nvidia-smi` must be available on PATH
 //!
 //! ## First-launch bootstrap:
-//! 1. Creates `~/.scrappy/vllm-env/` via `uv venv`
+//! 1. Creates `vllm-env/` under the ThinClaw Desktop app data directory via `uv venv`
 //! 2. Installs `vllm` via `uv pip install`
 //! 3. Subsequent starts skip steps 1-2
 

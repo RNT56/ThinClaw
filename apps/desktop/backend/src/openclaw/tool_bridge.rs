@@ -1,4 +1,4 @@
-//! ToolBridge — hardware sensor bridge between IronClaw agent and Scrappy host.
+//! ToolBridge — hardware sensor bridge between IronClaw agent and ThinClaw Desktop host.
 //!
 //! This module re-exports `ironclaw::hardware_bridge::ToolBridge` and provides
 //! `TauriToolBridge`, which routes tool-execution requests through Tauri's
@@ -84,7 +84,7 @@ struct PendingApproval {
     tool_name: String,
 }
 
-/// Scrappy's implementation of `ToolBridge` for the Tauri desktop app.
+/// ThinClaw Desktop's implementation of `ToolBridge` for the Tauri desktop app.
 ///
 /// Routes approval requests through Tauri events and maintains a
 /// session-level permission cache.

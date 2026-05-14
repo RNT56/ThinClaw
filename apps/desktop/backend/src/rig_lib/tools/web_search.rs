@@ -1,5 +1,5 @@
-use crate::rig_lib::unified_provider::UnifiedProvider;
 use crate::rig_lib::tools::trusted_sources;
+use crate::rig_lib::unified_provider::UnifiedProvider;
 use futures::{stream, StreamExt};
 use rig::completion::ToolDefinition;
 use rig::completion::{CompletionModel, CompletionRequest};
@@ -7,8 +7,8 @@ use rig::tool::Tool;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use thiserror::Error;
 use std::sync::atomic::Ordering;
+use thiserror::Error;
 
 use tauri::Manager;
 
@@ -178,10 +178,13 @@ impl Tool for DDGSearchTool {
         // Emit initial results for UI cards
         if let Some(app) = &self.app {
             use tauri::Emitter;
-            let _ = app.emit("web_search_results", json!({
-                "id": self.conversation_id,
-                "results": &initial_results
-            }));
+            let _ = app.emit(
+                "web_search_results",
+                json!({
+                    "id": self.conversation_id,
+                    "results": &initial_results
+                }),
+            );
         }
 
         if let Some(token) = &cancellation_token {
@@ -488,7 +491,11 @@ return Some((parsed.score, format!("Score: {}\nReasoning: {}\nSummary: {}", pars
                     let count = summaries.len();
                     let (avg_score, combined_summary) = if count > 0 {
                         let total_score: f32 = summaries.iter().map(|(s, _)| s).sum();
-                        let combined = summaries.into_iter().map(|(_, text)| text).collect::<Vec<String>>().join("\n\n");
+                        let combined = summaries
+                            .into_iter()
+                            .map(|(_, text)| text)
+                            .collect::<Vec<String>>()
+                            .join("\n\n");
                         (total_score / count as f32, combined)
                     } else {
                         (0.0, String::new())
@@ -499,21 +506,21 @@ return Some((parsed.score, format!("Score: {}\nReasoning: {}\nSummary: {}", pars
                     // Recursive Reduce if still too big
                     if combined_summary.len() > chars_per_slot as usize {
                         if let Some(app) = &app_top {
-                             use tauri::Emitter;
-                             #[derive(Serialize, Clone, specta::Type)]
-                             struct WebSearchStatus {
-                                 id: Option<String>,
-                                 step: String,
-                                 message: String,
-                             }
-                             let _ = app.emit(
-                                 "web_search_status",
-                                 WebSearchStatus {
-                                     id: summaries_conv_id.clone(),
-                                     step: "summarizing".into(),
-                                     message: "Summarizing findings...".into(),
-                                 },
-                             );
+                            use tauri::Emitter;
+                            #[derive(Serialize, Clone, specta::Type)]
+                            struct WebSearchStatus {
+                                id: Option<String>,
+                                step: String,
+                                message: String,
+                            }
+                            let _ = app.emit(
+                                "web_search_status",
+                                WebSearchStatus {
+                                    id: summaries_conv_id.clone(),
+                                    step: "summarizing".into(),
+                                    message: "Summarizing findings...".into(),
+                                },
+                            );
                         }
 
                         let prompt = format!(
@@ -537,8 +544,7 @@ return Some((parsed.score, format!("Score: {}\nReasoning: {}\nSummary: {}", pars
                             };
                             result.snippet = format!("Analyzed Context:\n{}", content);
                         } else {
-                            result.snippet =
-                                format!("Extracted Highlights:\n{}", combined_summary);
+                            result.snippet = format!("Extracted Highlights:\n{}", combined_summary);
                         }
                     } else {
                         result.snippet = format!("Extracted Highlights:\n{}", combined_summary);
@@ -557,7 +563,6 @@ return Some((parsed.score, format!("Score: {}\nReasoning: {}\nSummary: {}", pars
                             result.snippet = original_content.clone();
                         };
                     }
-
                 } else {
                     // Fits in slot, keep as is (subject to generic truncation logic if we want)
                     if result.snippet.len() > chars_per_slot as usize {
@@ -581,9 +586,8 @@ return Some((parsed.score, format!("Score: {}\nReasoning: {}\nSummary: {}", pars
                     result.snippet.truncate(safe_end);
                     result.snippet.push_str("...");
                 }
-                }
+            }
         }
-
 
         // Sort results by their aggregate score (descending)
         scraping_result.sort_by(|a, b| {
@@ -610,10 +614,13 @@ return Some((parsed.score, format!("Score: {}\nReasoning: {}\nSummary: {}", pars
                 },
             );
             // Emit final results with summaries for UI and Persistence
-            let _ = app.emit("web_search_results", json!({
-                "id": self.conversation_id,
-                "results": &scraping_result
-            }));
+            let _ = app.emit(
+                "web_search_results",
+                json!({
+                    "id": self.conversation_id,
+                    "results": &scraping_result
+                }),
+            );
         }
 
         Ok(generate_tool_result_json(&args.query, &scraping_result))
@@ -624,15 +631,19 @@ fn generate_tool_result_json(query: &str, results: &[SearchResult]) -> String {
     use crate::rig_lib::tools::models::{Citation, ToolResult};
 
     if results.is_empty() {
-        return serde_json::to_string(&ToolResult::error("No results found".into())).unwrap_or_default();
+        return serde_json::to_string(&ToolResult::error("No results found".into()))
+            .unwrap_or_default();
     }
 
-    let citations: Vec<Citation> = results.iter().map(|r| Citation {
-        source_id: r.link.clone(),
-        title: r.title.clone(),
-        loc: Some(r.link.clone()),
-        confidence: r.score,
-    }).collect();
+    let citations: Vec<Citation> = results
+        .iter()
+        .map(|r| Citation {
+            source_id: r.link.clone(),
+            title: r.title.clone(),
+            loc: Some(r.link.clone()),
+            confidence: r.score,
+        })
+        .collect();
 
     let summary = format!("Found {} results for '{}'", results.len(), query);
 

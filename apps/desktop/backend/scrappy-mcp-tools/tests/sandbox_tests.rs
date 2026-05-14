@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use scrappy_mcp_tools::{
+    use std::sync::Arc;
+    use thinclaw_desktop_tools::{
         events::NullReporter,
         sandbox::{Sandbox, SandboxConfig, SandboxError},
     };
-    use std::sync::Arc;
 
     fn make_sandbox() -> Sandbox {
         Sandbox::new(SandboxConfig::default(), Arc::new(NullReporter))
@@ -91,8 +91,8 @@ a + b
                 format!("Hello, {}!", name)
             });
 
-        let result = sb.execute(r#"greet("Scrappy")"#).expect("should execute");
-        assert_eq!(result.output, "Hello, Scrappy!");
+        let result = sb.execute(r#"greet("ThinClaw")"#).expect("should execute");
+        assert_eq!(result.output, "Hello, ThinClaw!");
     }
 
     #[test]

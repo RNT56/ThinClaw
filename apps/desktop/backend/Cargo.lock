@@ -8315,25 +8315,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scrappy-mcp-tools"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "clawscan",
- "futures",
- "reqwest 0.12.28",
- "rhai",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.17",
- "tokio",
- "toml 0.8.23",
- "tracing",
-]
-
-[[package]]
 name = "scratch"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10410,7 +10391,6 @@ dependencies = [
  "rhai",
  "rig-core 0.7.0",
  "scraper",
- "scrappy-mcp-tools",
  "secrecy",
  "security-framework 3.6.0",
  "serde",
@@ -10431,6 +10411,7 @@ dependencies = [
  "tauri-specta",
  "tempfile",
  "thinclaw",
+ "thinclaw-desktop-tools",
  "thiserror 2.0.17",
  "tokenizers",
  "tokio",
@@ -10446,6 +10427,25 @@ dependencies = [
  "zeroize",
  "zip 0.6.6",
  "zstd 0.13.3",
+]
+
+[[package]]
+name = "thinclaw-desktop-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "clawscan",
+ "futures",
+ "reqwest 0.12.28",
+ "rhai",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]

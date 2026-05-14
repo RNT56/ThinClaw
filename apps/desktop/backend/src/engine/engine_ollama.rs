@@ -1,6 +1,6 @@
 //! Ollama inference engine implementation.
 //!
-//! Unlike llama.cpp/MLX/vLLM, Scrappy does **not** manage the Ollama
+//! Unlike llama.cpp/MLX/vLLM, ThinClaw Desktop does **not** manage the Ollama
 //! process. The user installs and runs Ollama independently (e.g.
 //! `brew install ollama && ollama serve`). This engine simply:
 //!

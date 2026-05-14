@@ -81,7 +81,7 @@ futures-util = "0.3"
 ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem"] }
 pkcs8 = { version = "0.10.2", features = ["std", "pem"] }
 regex = "1.12.3"
-scrappy-mcp-tools = { path = "scrappy-mcp-tools" }
+thinclaw-desktop-tools = { path = "scrappy-mcp-tools" }
 rhai = { version = "1", features = ["sync", "serde"] }
 async-trait = "0.1"
 clawscan = "1.0.0"

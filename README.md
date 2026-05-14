@@ -42,10 +42,10 @@ ThinClaw is self-hosted, so the agent has a place to live. It keeps a durable
 identity, remembers useful context, runs approved tools, connects to channels,
 schedules routines, and stays inside policy you control.
 
-Run it on your laptop, a Mac Mini, a Raspberry Pi, a VPS, or as the local engine
-behind Scrappy. Talk to the same agent from the terminal, full-screen TUI, web
-gateway, chat channels, or background jobs. Same identity. Same memory. Same
-rules.
+Run it on your laptop, a Mac Mini, a Raspberry Pi, a VPS, or inside ThinClaw
+Desktop. Talk to the same agent from the terminal, full-screen TUI, web gateway,
+chat channels, the desktop app, or background jobs. Same identity. Same memory.
+Same rules.
 
 > ThinClaw is for people who want an agent with a home address, not another
 > disposable chat thread.
@@ -276,7 +276,7 @@ remaining the same agent underneath.
 | Native channels | Telegram, Signal, Discord, Slack, Matrix, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail, voice-call, APNs, browser-push | [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md) |
 | WASM channels and tools | Packaged, capability-scoped extension components | [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md) |
 | ComfyUI media generation | Prompt-to-image, workflow execution, and managed local/cloud ComfyUI setup | [docs/COMFYUI_MEDIA_GENERATION.md](docs/COMFYUI_MEDIA_GENERATION.md) |
-| Scrappy backend | Embedding ThinClaw as a local or remote runtime | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| ThinClaw Desktop | Desktop companion app embedding ThinClaw as a local or remote runtime | [apps/desktop/README.md](apps/desktop/README.md) |
 | Reckless desktop autonomy | Operator-approved host-level desktop automation | [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md) |
 
 ## Core Capabilities
@@ -285,7 +285,7 @@ remaining the same agent underneath.
 |---|---|
 | Agent identity | Durable soul, `personality_pack` defaults, `/personality` overlays, custom session tones, workspace identity files, and `/vibe` compatibility |
 | Memory and continuity | Workspace-backed memory, search, citations, identity files, `/compress`, and `/summarize` |
-| Surfaces | CLI, TUI, web gateway, native channels, WASM channels, background jobs, and Scrappy embedding |
+| Surfaces | CLI, TUI, web gateway, native channels, WASM channels, background jobs, and ThinClaw Desktop |
 | Routines and jobs | Heartbeat, schedules, notifications, job logs, background work, and follow-up surfaces |
 | Channels | Telegram, Signal, Discord, Slack, Matrix, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail, voice-call, APNs/browser-push wake paths, and packaged WASM channels |
 | Tools and extensions | Built-in tools, WASM tools, WASM channels, MCP servers, registries, and policy boundaries |
@@ -306,7 +306,7 @@ remaining the same agent underneath.
 | Docker | Compose or container deployment | [docs/deploy/docker.md](docs/deploy/docker.md) |
 | Remote access | Gateway, Tailscale, webhook tunnels | [docs/deploy/remote-access.md](docs/deploy/remote-access.md) |
 | Reckless desktop autonomy | Host-level desktop control with operator approval | [docs/DESKTOP_AUTONOMY.md](docs/DESKTOP_AUTONOMY.md) |
-| Scrappy embedding | Local or remote ThinClaw runtime | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| ThinClaw Desktop | Local or remote ThinClaw runtime in the desktop companion app | [apps/desktop/README.md](apps/desktop/README.md) |
 
 The local gateway listens on port `3000` unless configured otherwise. For the full deployment decision tree, use [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 

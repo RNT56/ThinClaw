@@ -250,8 +250,9 @@ pub fn decrypt(
 
 // ── Keychain Integration (macOS) ─────────────────────────────────────────────
 
-/// Keychain service name for the cloud encryption master key.
-const KEYCHAIN_SERVICE: &str = "com.scrappy.cloud-key";
+/// Keychain service names for the cloud encryption master key.
+const KEYCHAIN_SERVICE: &str = "com.thinclaw.desktop.cloud-key";
+const LEGACY_KEYCHAIN_SERVICE: &str = "com.scrappy.cloud-key";
 const KEYCHAIN_ACCOUNT: &str = "master-key";
 
 /// Load the master key from macOS Keychain.
@@ -259,9 +260,18 @@ const KEYCHAIN_ACCOUNT: &str = "master-key";
 /// Returns `None` if no key has been stored yet.
 #[cfg(target_os = "macos")]
 pub fn load_master_key_from_keychain() -> Result<Option<MasterKey>, EncryptionError> {
+    match load_master_key_from_service(KEYCHAIN_SERVICE) {
+        Ok(Some(key)) => Ok(Some(key)),
+        Ok(None) => load_master_key_from_service(LEGACY_KEYCHAIN_SERVICE),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn load_master_key_from_service(service: &str) -> Result<Option<MasterKey>, EncryptionError> {
     use security_framework::passwords::get_generic_password;
 
-    match get_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
+    match get_generic_password(service, KEYCHAIN_ACCOUNT) {
         Ok(data) => {
             if data.len() != 32 {
                 return Err(EncryptionError::Keychain(format!(
@@ -293,7 +303,8 @@ pub fn load_master_key_from_keychain() -> Result<Option<MasterKey>, EncryptionEr
 pub fn save_master_key_to_keychain(key: &MasterKey) -> Result<(), EncryptionError> {
     use security_framework::passwords::{delete_generic_password, set_generic_password};
 
-    // Delete any existing key first (set_generic_password fails if exists)
+    // New writes use the ThinClaw service. The legacy Scrappy service is
+    // read-only fallback and is intentionally never deleted automatically.
     let _ = delete_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
 
     set_generic_password(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, key.as_bytes())

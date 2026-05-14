@@ -1,8 +1,8 @@
 [package]
-name = "scrappy-mcp-tools"
+name = "thinclaw-desktop-tools"
 version = "0.1.0"
 edition = "2021"
-description = "MCP tool bindings, sandboxed code execution, and progressive discovery for Scrappy"
+description = "MCP tool bindings, sandboxed code execution, and progressive discovery for ThinClaw Desktop"
 
 [dependencies]
 # MCP Client

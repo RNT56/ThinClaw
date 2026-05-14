@@ -44,7 +44,6 @@ pub enum ChangeType {
     Deleted,
 }
 
-
 /// Status of the sync engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncStatus {
@@ -73,7 +72,10 @@ impl FileTracker {
     }
 
     /// Load known hashes from a previous state (e.g., from manifest).
-    pub fn load_from_hashes(hashes: HashMap<String, String>, last_sync: Option<DateTime<Utc>>) -> Self {
+    pub fn load_from_hashes(
+        hashes: HashMap<String, String>,
+        last_sync: Option<DateTime<Utc>>,
+    ) -> Self {
         Self {
             known_hashes: hashes,
             last_sync,
@@ -241,8 +243,6 @@ impl FileTracker {
     }
 }
 
-
-
 /// Streaming SHA-256: reads file in 64 KB chunks to avoid loading large files into RAM.
 async fn compute_sha256_streaming(path: &Path) -> Result<String, std::io::Error> {
     use tokio::io::AsyncReadExt;
@@ -326,7 +326,10 @@ impl SyncEngine {
             let wait_duration = if consecutive_failures > 0 {
                 let backoff_secs = self.interval.as_secs() * 2u64.pow(consecutive_failures.min(6));
                 let capped = backoff_secs.min(3600); // Max 1 hour
-                warn!("[cloud/sync] Backoff: waiting {}s after {} consecutive failures", capped, consecutive_failures);
+                warn!(
+                    "[cloud/sync] Backoff: waiting {}s after {} consecutive failures",
+                    capped, consecutive_failures
+                );
                 Duration::from_secs(capped)
             } else {
                 self.interval
@@ -367,16 +370,25 @@ impl SyncEngine {
                         }
                         Err(e) => {
                             consecutive_failures += 1;
-                            warn!("[cloud/sync] Sync failed ({}/{}): {}", consecutive_failures, MAX_CONSECUTIVE_FAILURES, e);
+                            warn!(
+                                "[cloud/sync] Sync failed ({}/{}): {}",
+                                consecutive_failures, MAX_CONSECUTIVE_FAILURES, e
+                            );
                             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                                warn!("[cloud/sync] {} consecutive failures reached, continuing with backoff", MAX_CONSECUTIVE_FAILURES);
+                                warn!(
+                                    "[cloud/sync] {} consecutive failures reached, continuing with backoff",
+                                    MAX_CONSECUTIVE_FAILURES
+                                );
                             }
                         }
                     }
                 }
                 Err(e) => {
                     consecutive_failures += 1;
-                    warn!("[cloud/sync] Change detection failed ({}/{}): {}", consecutive_failures, MAX_CONSECUTIVE_FAILURES, e);
+                    warn!(
+                        "[cloud/sync] Change detection failed ({}/{}): {}",
+                        consecutive_failures, MAX_CONSECUTIVE_FAILURES, e
+                    );
                 }
             }
         }

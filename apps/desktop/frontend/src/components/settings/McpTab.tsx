@@ -605,8 +605,8 @@ export function McpTab() {
                 </p>
                 <div className="grid grid-cols-2 gap-2 mt-1">
                     {[
-                        ['SCRAPPY_MCP_URL', 'Server Base URL'],
-                        ['SCRAPPY_MCP_TOKEN', 'Auth Token'],
+                        ['THINCLAW_MCP_URL', 'Server Base URL'],
+                        ['THINCLAW_MCP_TOKEN', 'Auth Token'],
                     ].map(([env, label]) => (
                         <div key={env} className="flex flex-col gap-0.5 bg-background/50 p-2.5 rounded-lg border border-border/30">
                             <code className="text-[11px] font-mono text-primary/80">{env}</code>

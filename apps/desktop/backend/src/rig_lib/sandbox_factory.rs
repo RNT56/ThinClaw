@@ -1,8 +1,8 @@
 use crate::rig_lib::RigManager;
-use scrappy_mcp_tools::events::StatusReporter;
-use scrappy_mcp_tools::sandbox::{Sandbox, SandboxConfig};
 use serde_json::json;
 use std::sync::Arc;
+use thinclaw_desktop_tools::events::StatusReporter;
+use thinclaw_desktop_tools::sandbox::{Sandbox, SandboxConfig};
 use tracing::{info, warn};
 
 /// Configuration for the MCP sandbox factory
@@ -42,7 +42,7 @@ where
 
     // -- Register Skills System (list_skills, run_skill) --
     if let Some(user_path) = &mcp_config.user_skills_path {
-        use scrappy_mcp_tools::skills::manager::SkillManager;
+        use thinclaw_desktop_tools::skills::manager::SkillManager;
         let manager = SkillManager::new(user_path.clone(), mcp_config.builtin_skills_path.clone());
         let manager_arc = Arc::new(manager);
 
@@ -122,7 +122,9 @@ where
                 result.len(),
                 {
                     let mut end = std::cmp::min(200, result.len());
-                    while end > 0 && !result.is_char_boundary(end) { end -= 1; }
+                    while end > 0 && !result.is_char_boundary(end) {
+                        end -= 1;
+                    }
                     &result[..end]
                 }
             );
@@ -181,7 +183,9 @@ where
                     Ok(content) => {
                         if content.len() > 20000 {
                             let mut end = 20000;
-                            while !content.is_char_boundary(end) { end -= 1; }
+                            while !content.is_char_boundary(end) {
+                                end -= 1;
+                            }
                             rhai::Dynamic::from(format!("{}... (truncated)", &content[..end]))
                         } else {
                             rhai::Dynamic::from(content)
@@ -227,7 +231,7 @@ where
 
     // -- search_tools(query) → progressive discovery --
     let mcp_client_for_discovery = if let Some(base_url) = &mcp_config.mcp_base_url {
-        scrappy_mcp_tools::McpClient::new(scrappy_mcp_tools::McpConfig {
+        thinclaw_desktop_tools::McpClient::new(thinclaw_desktop_tools::McpConfig {
             base_url: base_url.clone(),
             auth_token: mcp_config.mcp_auth_token.clone().unwrap_or_default(),
             timeout_ms: 30_000,
@@ -249,7 +253,7 @@ where
 
             let result = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(async {
-                    use scrappy_mcp_tools::skills::manager::SkillManager;
+                    use thinclaw_desktop_tools::skills::manager::SkillManager;
                     let skill_manager = upath.map(|up| SkillManager::new(up, bpath));
 
                     let sr = crate::rig_lib::tool_discovery::search_all_tools(
@@ -287,8 +291,8 @@ where
             let description = description.clone();
 
             let result = tokio::task::block_in_place(|| {
-                use scrappy_mcp_tools::skills::manager::SkillManager;
-                use scrappy_mcp_tools::skills::manifest::SkillManifest;
+                use thinclaw_desktop_tools::skills::manager::SkillManager;
+                use thinclaw_desktop_tools::skills::manifest::SkillManifest;
 
                 if let Some(up) = upath {
                     // Construct manifest
@@ -317,12 +321,12 @@ where
 
     // -- Register remote MCP tools (only when server URL is configured) --
     if let Some(base_url) = &mcp_config.mcp_base_url {
-        let client_mcp_config = scrappy_mcp_tools::McpConfig {
+        let client_mcp_config = thinclaw_desktop_tools::McpConfig {
             base_url: base_url.clone(),
             auth_token: mcp_config.mcp_auth_token.clone().unwrap_or_default(),
             timeout_ms: 30_000,
         };
-        if let Ok(client) = scrappy_mcp_tools::McpClient::new(client_mcp_config) {
+        if let Ok(client) = thinclaw_desktop_tools::McpClient::new(client_mcp_config) {
             // -- mcp_call(tool_name, args_json) → generic remote tool caller --
             let client_for_call = client.clone();
             sandbox.engine_mut().register_fn(
@@ -356,7 +360,7 @@ where
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
-                                scrappy_mcp_tools::tools::finance::get_stock_price(&c, &symbol)
+                                thinclaw_desktop_tools::tools::finance::get_stock_price(&c, &symbol)
                                     .await
                                     .map(|r| rhai::serde::to_dynamic(r).unwrap())
                                     .unwrap_or_else(|e| format!("Error: {}", e).into())
@@ -381,7 +385,7 @@ where
                                 } else {
                                     Some(category.as_str())
                                 };
-                                scrappy_mcp_tools::tools::news::get_news(
+                                thinclaw_desktop_tools::tools::news::get_news(
                                     &c,
                                     cat,
                                     Some(limit as usize),
@@ -401,7 +405,7 @@ where
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
-                                scrappy_mcp_tools::tools::news::search_news(&c, &query, None)
+                                thinclaw_desktop_tools::tools::news::search_news(&c, &query, None)
                                     .await
                                     .map(|r| rhai::serde::to_dynamic(r).unwrap())
                                     .unwrap_or_else(|e| format!("Error: {}", e).into())
@@ -417,7 +421,7 @@ where
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
-                                scrappy_mcp_tools::tools::news::get_headlines(
+                                thinclaw_desktop_tools::tools::news::get_headlines(
                                     &c,
                                     &country,
                                     Some(limit as usize),
@@ -441,10 +445,12 @@ where
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
-                                scrappy_mcp_tools::tools::knowledge::rag_query(&c, &query, None)
-                                    .await
-                                    .map(|r| rhai::serde::to_dynamic(r).unwrap())
-                                    .unwrap_or_else(|e| format!("Error: {}", e).into())
+                                thinclaw_desktop_tools::tools::knowledge::rag_query(
+                                    &c, &query, None,
+                                )
+                                .await
+                                .map(|r| rhai::serde::to_dynamic(r).unwrap())
+                                .unwrap_or_else(|e| format!("Error: {}", e).into())
                             })
                         });
                         rhai::Dynamic::from(result)
@@ -461,7 +467,7 @@ where
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
-                                scrappy_mcp_tools::tools::economics::get_economic_data(
+                                thinclaw_desktop_tools::tools::economics::get_economic_data(
                                     &c, &country, None,
                                 )
                                 .await
@@ -483,10 +489,12 @@ where
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
-                                scrappy_mcp_tools::tools::models::get_model_catalog(&c, None, None)
-                                    .await
-                                    .map(|r| rhai::serde::to_dynamic(r).unwrap())
-                                    .unwrap_or_else(|e| format!("Error: {}", e).into())
+                                thinclaw_desktop_tools::tools::models::get_model_catalog(
+                                    &c, None, None,
+                                )
+                                .await
+                                .map(|r| rhai::serde::to_dynamic(r).unwrap())
+                                .unwrap_or_else(|e| format!("Error: {}", e).into())
                             })
                         });
                         rhai::Dynamic::from(result)
@@ -503,7 +511,7 @@ where
                         let c = c.clone();
                         let result = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(async {
-                                scrappy_mcp_tools::tools::health::search_medical_research(
+                                thinclaw_desktop_tools::tools::health::search_medical_research(
                                     &c,
                                     &query,
                                     Some(limit as usize),
@@ -532,7 +540,7 @@ where
                                 } else {
                                     Some(length.as_str())
                                 };
-                                scrappy_mcp_tools::tools::ai_tools::summarize_text(
+                                thinclaw_desktop_tools::tools::ai_tools::summarize_text(
                                     &c, &text, len_opt,
                                 )
                                 .await

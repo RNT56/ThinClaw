@@ -310,11 +310,9 @@ impl OpenClawConfig {
         // Define Main Agent explicitly
         agents_list.push(serde_json::json!({
              "id": "main",
-             // Update name to OpenClaw
-             "name": "OpenClaw",
+             "name": "ThinClaw",
              "model": agent_model,
         }));
-
 
         OpenClawEngineConfig {
             gateway: GatewayConfig {

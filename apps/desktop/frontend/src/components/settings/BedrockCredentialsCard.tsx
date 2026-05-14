@@ -187,8 +187,8 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
                 <div className="pt-3 border-t border-border/50">
                     <div className="flex items-center justify-between">
                         <div>
-                            <div className="text-sm font-medium">Access for OpenClaw Agents</div>
-                            <div className="text-xs text-muted-foreground">Allow OpenClaw to use Bedrock for inference</div>
+                            <div className="text-sm font-medium">Access for ThinClaw Agents</div>
+                            <div className="text-xs text-muted-foreground">Allow ThinClaw to use Bedrock for inference</div>
                         </div>
                         <button
                             onClick={() => handleToggle('amazon-bedrock', !granted)}

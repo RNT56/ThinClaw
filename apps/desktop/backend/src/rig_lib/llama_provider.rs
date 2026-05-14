@@ -230,7 +230,7 @@ impl CompletionModel for LlamaProvider {
 
         if self.base_url.contains("openrouter.ai") {
             request_builder = request_builder
-                .header("HTTP-Referer", "https://github.com/scrappy-ai/scrappy")
+                .header("HTTP-Referer", "https://github.com/RNT56/ThinClaw")
                 .header("X-Title", "ThinClaw Desktop");
         }
 
@@ -414,7 +414,7 @@ impl LlamaProvider {
 
         if self.base_url.contains("openrouter.ai") {
             request_builder = request_builder
-                .header("HTTP-Referer", "https://github.com/scrappy-ai/scrappy")
+                .header("HTTP-Referer", "https://github.com/RNT56/ThinClaw")
                 .header("X-Title", "ThinClaw Desktop");
         }
 
@@ -641,7 +641,7 @@ impl LlamaProvider {
 
         if self.base_url.contains("openrouter.ai") {
             request_builder = request_builder
-                .header("HTTP-Referer", "https://github.com/scrappy-ai/scrappy")
+                .header("HTTP-Referer", "https://github.com/RNT56/ThinClaw")
                 .header("X-Title", "ThinClaw Desktop");
         }
 

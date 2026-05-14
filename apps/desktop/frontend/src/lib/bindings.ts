@@ -2532,7 +2532,7 @@ async cloudGetStorageBreakdown() : Promise<Result<StorageCategory[], string>> {
  * Return the local filesystem workspace root path.
  *
  * This is the directory where the agent writes local files (write_file, shell, etc.).
- * Defaults to ~/Scrappy/ if not configured.
+ * Defaults to the same app-data agent workspace used by the ThinClaw bridge.
  */
 async openclawGetWorkspacePath() : Promise<Result<string, string>> {
     try {
@@ -3220,12 +3220,14 @@ export type UserConfig = { search_concurrency_limit?: number; scrape_concurrency
  */
 ptt_shortcut?: string; disabled_providers?: string[];
 /**
- * MCP server base URL (e.g. "https://api.scrappy.dev")
- * Falls back to SCRAPPY_MCP_URL env var if not set in config.
+ * MCP server base URL (e.g. "https://api.thinclaw.dev")
+ * Falls back to THINCLAW_MCP_URL, then legacy SCRAPPY_MCP_URL, if not set
+ * in config.
  */
 mcp_base_url?: string | null;
 /**
- * MCP JWT auth token. Falls back to SCRAPPY_MCP_TOKEN env var.
+ * MCP JWT auth token. Falls back to THINCLAW_MCP_TOKEN, then legacy
+ * SCRAPPY_MCP_TOKEN.
  */
 mcp_auth_token?: string | null;
 /**
@@ -3308,7 +3310,6 @@ export type WebSearchResult = { title: string; link: string; snippet: string }
 /** tauri-specta globals **/
 
 import { invoke as TAURI_INVOKE } from "@tauri-apps/api/core";
-
 export type Result<T, E> =
 	| { status: "ok"; data: T }
 	| { status: "error"; error: E };

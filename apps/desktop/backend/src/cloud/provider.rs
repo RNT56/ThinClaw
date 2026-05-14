@@ -88,8 +88,11 @@ pub struct CloudStatus {
     pub provider_name: String,
 }
 
-/// Cloud provider configuration (stored encrypted in DB).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Cloud provider configuration.
+///
+/// Full values may live in memory while a provider is being configured, but
+/// persisted copies must be sanitized before being written to SQLite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CloudProviderConfig {
     /// Provider type slug: "s3", "icloud", "gdrive", "dropbox", "onedrive", "webdav", "sftp"
     pub provider_type: String,
@@ -103,8 +106,18 @@ pub struct CloudProviderConfig {
     pub access_key_id: Option<String>,
     /// S3: secret access key
     pub secret_access_key: Option<String>,
-    /// Root prefix within the bucket (default: "scrappy/")
+    /// Root prefix within the bucket (default: "thinclaw-desktop/")
     pub root: Option<String>,
+}
+
+impl CloudProviderConfig {
+    /// Return a copy safe to persist in SQLite and cloud DB snapshots.
+    pub fn sanitized_for_persistence(&self) -> Self {
+        let mut sanitized = self.clone();
+        sanitized.access_key_id = None;
+        sanitized.secret_access_key = None;
+        sanitized
+    }
 }
 
 impl fmt::Display for CloudProviderConfig {
@@ -115,6 +128,43 @@ impl fmt::Display for CloudProviderConfig {
             self.provider_type,
             self.endpoint.as_deref().unwrap_or("default")
         )
+    }
+}
+
+/// Default object root for path-addressed providers.
+pub const DEFAULT_OBJECT_ROOT: &str = "thinclaw-desktop/";
+
+/// Legacy object root used by Scrappy builds. Read-only fallback only.
+pub const LEGACY_OBJECT_ROOT: &str = "scrappy/";
+
+/// Return the configured primary object root, defaulting to ThinClaw Desktop.
+pub fn primary_object_root(config: &CloudProviderConfig) -> &str {
+    config.root.as_deref().unwrap_or(DEFAULT_OBJECT_ROOT)
+}
+
+/// Whether reads should also check the legacy Scrappy object root.
+pub fn should_read_legacy_object_root(config: &CloudProviderConfig) -> bool {
+    match config.root.as_deref() {
+        None => true,
+        Some(root) => object_roots_equivalent(root, DEFAULT_OBJECT_ROOT),
+    }
+}
+
+/// Whether a configured root is explicitly the legacy Scrappy root.
+pub fn is_legacy_object_root(root: &str) -> bool {
+    object_roots_equivalent(root, LEGACY_OBJECT_ROOT)
+}
+
+fn object_roots_equivalent(a: &str, b: &str) -> bool {
+    comparable_object_root(a) == comparable_object_root(b)
+}
+
+fn comparable_object_root(root: &str) -> String {
+    let trimmed = root.trim_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", trimmed)
     }
 }
 
@@ -212,5 +262,65 @@ pub fn create_provider(config: &CloudProviderConfig) -> Result<Box<dyn CloudProv
             "Unknown provider type: '{}'. Supported: s3, icloud, gdrive, dropbox, onedrive, webdav, sftp",
             other
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_object_root_is_thinclaw() {
+        assert_eq!(DEFAULT_OBJECT_ROOT, "thinclaw-desktop/");
+        assert_eq!(LEGACY_OBJECT_ROOT, "scrappy/");
+    }
+
+    #[test]
+    fn test_legacy_object_root_fallback_policy() {
+        let mut config = CloudProviderConfig {
+            provider_type: "s3".to_string(),
+            endpoint: None,
+            bucket: Some("bucket".to_string()),
+            region: None,
+            access_key_id: None,
+            secret_access_key: None,
+            root: None,
+        };
+
+        assert_eq!(primary_object_root(&config), DEFAULT_OBJECT_ROOT);
+        assert!(should_read_legacy_object_root(&config));
+
+        config.root = Some("thinclaw-desktop".to_string());
+        assert!(should_read_legacy_object_root(&config));
+
+        config.root = Some("scrappy".to_string());
+        assert!(is_legacy_object_root(primary_object_root(&config)));
+        assert!(!should_read_legacy_object_root(&config));
+
+        config.root = Some("custom-root".to_string());
+        assert!(!should_read_legacy_object_root(&config));
+    }
+
+    #[test]
+    fn test_provider_config_sanitized_for_persistence() {
+        let config = CloudProviderConfig {
+            provider_type: "s3".to_string(),
+            endpoint: Some("https://s3.example.com".to_string()),
+            bucket: Some("bucket".to_string()),
+            region: Some("us-east-1".to_string()),
+            access_key_id: Some("AKIA_TEST".to_string()),
+            secret_access_key: Some("secret".to_string()),
+            root: Some("thinclaw-desktop/".to_string()),
+        };
+
+        let sanitized = config.sanitized_for_persistence();
+
+        assert_eq!(sanitized.provider_type, "s3");
+        assert_eq!(sanitized.endpoint, config.endpoint);
+        assert_eq!(sanitized.bucket, config.bucket);
+        assert_eq!(sanitized.region, config.region);
+        assert_eq!(sanitized.root, config.root);
+        assert_eq!(sanitized.access_key_id, None);
+        assert_eq!(sanitized.secret_access_key, None);
     }
 }

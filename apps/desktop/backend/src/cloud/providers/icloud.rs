@@ -25,21 +25,27 @@
 //! - Storage limits depend on user's iCloud plan
 
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 use super::super::provider::{CloudEntry, CloudError, CloudProvider, CloudStatus};
 
-/// iCloud container bundle identifier for Scrappy.
-const ICLOUD_CONTAINER_ID: &str = "iCloud~com~scrappy~app";
+/// Native iCloud container entitlement work is deferred for the alpha.
+const ICLOUD_CONTAINER_ID: &str = "iCloud~com~thinclaw~desktop";
+const LEGACY_ICLOUD_CONTAINER_ID: &str = "iCloud~com~scrappy~app";
+const ICLOUD_FOLDER: &str = "ThinClaw Desktop";
+const LEGACY_ICLOUD_FOLDER: &str = "Scrappy";
 
 /// iCloud Drive storage provider.
 ///
 /// Reads/writes to the local iCloud container directory.
 /// macOS handles the actual cloud sync transparently.
 pub struct ICloudProvider {
-    /// Root directory of the iCloud container
+    /// Primary ThinClaw root directory in iCloud Drive.
     container_dir: PathBuf,
+    /// Legacy Scrappy root directory, used only as a read fallback.
+    legacy_dir: Option<PathBuf>,
     /// Whether the container was detected and is accessible
     available: bool,
 }
@@ -50,7 +56,7 @@ impl ICloudProvider {
     /// Detects the iCloud container directory automatically.
     /// Returns an error if iCloud is not available.
     pub fn new() -> Result<Self, CloudError> {
-        let container_dir = detect_icloud_container().ok_or_else(|| {
+        let roots = detect_icloud_roots().ok_or_else(|| {
             CloudError::ConnectionFailed(
                 "iCloud Drive is not available. Make sure you're signed into iCloud \
                  and the app has iCloud entitlements configured."
@@ -59,21 +65,22 @@ impl ICloudProvider {
         })?;
 
         info!(
-            "[cloud/icloud] Container detected at: {}",
-            container_dir.display()
+            "[cloud/icloud] Primary root detected at: {}",
+            roots.primary_dir.display()
         );
 
-        // Create the Scrappy subdirectory within the container
-        let scrappy_dir = container_dir.join("Scrappy");
-        std::fs::create_dir_all(&scrappy_dir).map_err(|e| {
+        // New writes always target the ThinClaw folder. Legacy Scrappy folders
+        // are kept as read-only fallback roots for migration/import.
+        std::fs::create_dir_all(&roots.primary_dir).map_err(|e| {
             CloudError::Provider(format!(
-                "Failed to create Scrappy directory in iCloud: {}",
+                "Failed to create ThinClaw directory in iCloud: {}",
                 e
             ))
         })?;
 
         Ok(Self {
-            container_dir: scrappy_dir,
+            container_dir: roots.primary_dir,
+            legacy_dir: roots.legacy_dir,
             available: true,
         })
     }
@@ -83,6 +90,17 @@ impl ICloudProvider {
         std::fs::create_dir_all(&dir).ok();
         Self {
             container_dir: dir,
+            legacy_dir: None,
+            available: true,
+        }
+    }
+
+    /// Create a provider with explicit primary and legacy roots (for testing).
+    pub fn with_legacy_dir(primary_dir: PathBuf, legacy_dir: PathBuf) -> Self {
+        std::fs::create_dir_all(&primary_dir).ok();
+        Self {
+            container_dir: primary_dir,
+            legacy_dir: Some(legacy_dir),
             available: true,
         }
     }
@@ -90,6 +108,10 @@ impl ICloudProvider {
     /// Resolve a cloud key to a local file path.
     fn key_to_path(&self, key: &str) -> PathBuf {
         self.container_dir.join(key)
+    }
+
+    fn legacy_key_to_path(&self, key: &str) -> Option<PathBuf> {
+        self.legacy_dir.as_ref().map(|dir| dir.join(key))
     }
 }
 
@@ -150,16 +172,29 @@ impl CloudProvider for ICloudProvider {
         let path = self.key_to_path(key);
         debug!("[cloud/icloud] GET {} ← {}", key, path.display());
 
-        if !path.exists() {
-            return Err(CloudError::NotFound(format!(
-                "iCloud key not found: '{}'",
-                key
-            )));
+        if path.exists() {
+            return tokio::fs::read(&path).await.map_err(|e| {
+                CloudError::DownloadFailed(format!("read '{}': {}", path.display(), e))
+            });
         }
 
-        tokio::fs::read(&path)
-            .await
-            .map_err(|e| CloudError::DownloadFailed(format!("read '{}': {}", path.display(), e)))
+        if let Some(legacy_path) = self.legacy_key_to_path(key) {
+            if legacy_path.exists() {
+                debug!(
+                    "[cloud/icloud] GET {} falling back to legacy path {}",
+                    key,
+                    legacy_path.display()
+                );
+                return tokio::fs::read(&legacy_path).await.map_err(|e| {
+                    CloudError::DownloadFailed(format!("read '{}': {}", legacy_path.display(), e))
+                });
+            }
+        }
+
+        Err(CloudError::NotFound(format!(
+            "iCloud key not found: '{}'",
+            key
+        )))
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudError> {
@@ -183,18 +218,38 @@ impl CloudProvider for ICloudProvider {
             prefix_path.display()
         );
 
-        if !prefix_path.exists() {
-            return Ok(Vec::new());
+        let mut entries = Vec::new();
+
+        if prefix_path.exists() {
+            collect_entries_recursive(&prefix_path, &self.container_dir, &mut entries).await?;
         }
 
-        let mut entries = Vec::new();
-        collect_entries_recursive(&prefix_path, &self.container_dir, &mut entries).await?;
+        if let Some(legacy_dir) = &self.legacy_dir {
+            let legacy_prefix_path = legacy_dir.join(prefix);
+            if legacy_prefix_path.exists() {
+                debug!(
+                    "[cloud/icloud] LIST prefix={} includes legacy path {}",
+                    prefix,
+                    legacy_prefix_path.display()
+                );
+                let mut legacy_entries = Vec::new();
+                collect_entries_recursive(&legacy_prefix_path, legacy_dir, &mut legacy_entries)
+                    .await?;
+                merge_legacy_entries(&mut entries, legacy_entries);
+            }
+        }
 
         Ok(entries)
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudError> {
-        Ok(self.key_to_path(key).exists())
+        if self.key_to_path(key).exists() {
+            return Ok(true);
+        }
+        Ok(self
+            .legacy_key_to_path(key)
+            .map(|path| path.exists())
+            .unwrap_or(false))
     }
 
     async fn usage(&self) -> Result<u64, CloudError> {
@@ -209,24 +264,47 @@ impl CloudProvider for ICloudProvider {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/// Detect the iCloud container directory.
+struct ICloudRoots {
+    primary_dir: PathBuf,
+    legacy_dir: Option<PathBuf>,
+}
+
+/// Detect the iCloud storage roots.
 ///
 /// Looks for the standard macOS iCloud container location:
 /// `~/Library/Mobile Documents/<container-id>/`
-fn detect_icloud_container() -> Option<PathBuf> {
-    let home = dirs_next()?
-        .join("Library/Mobile Documents")
-        .join(ICLOUD_CONTAINER_ID);
-    if home.exists() {
-        Some(home)
-    } else {
-        // Also check without the tilde container variant
-        let alt = dirs_next()?.join("Library/Mobile Documents/com~apple~CloudDocs/Scrappy");
-        if alt.exists() {
-            Some(alt)
+fn detect_icloud_roots() -> Option<ICloudRoots> {
+    let mobile_documents = dirs_next()?.join("Library/Mobile Documents");
+    Some(icloud_roots_for_mobile_documents(&mobile_documents))
+}
+
+fn icloud_roots_for_mobile_documents(mobile_documents: &Path) -> ICloudRoots {
+    let entitlement_container = mobile_documents.join(ICLOUD_CONTAINER_ID);
+    if entitlement_container.exists() {
+        let legacy_entitlement_container = mobile_documents.join(LEGACY_ICLOUD_CONTAINER_ID);
+        let legacy_dir = if legacy_entitlement_container.exists() {
+            Some(legacy_entitlement_container.join(LEGACY_ICLOUD_FOLDER))
         } else {
-            None
-        }
+            Some(entitlement_container.join(LEGACY_ICLOUD_FOLDER))
+        };
+
+        return ICloudRoots {
+            primary_dir: entitlement_container.join(ICLOUD_FOLDER),
+            legacy_dir,
+        };
+    }
+
+    let cloud_docs = mobile_documents.join("com~apple~CloudDocs");
+    let legacy_entitlement_container = mobile_documents.join(LEGACY_ICLOUD_CONTAINER_ID);
+    let legacy_dir = if legacy_entitlement_container.exists() {
+        Some(legacy_entitlement_container.join(LEGACY_ICLOUD_FOLDER))
+    } else {
+        Some(cloud_docs.join(LEGACY_ICLOUD_FOLDER))
+    };
+
+    ICloudRoots {
+        primary_dir: cloud_docs.join(ICLOUD_FOLDER),
+        legacy_dir,
     }
 }
 
@@ -317,6 +395,15 @@ async fn collect_entries_recursive(
     Ok(())
 }
 
+fn merge_legacy_entries(primary: &mut Vec<CloudEntry>, legacy: Vec<CloudEntry>) {
+    let mut seen: HashSet<String> = primary.iter().map(|entry| entry.key.clone()).collect();
+    for entry in legacy {
+        if seen.insert(entry.key.clone()) {
+            primary.push(entry);
+        }
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -399,5 +486,82 @@ mod tests {
 
         provider.put("file.txt", b"version 2").await.unwrap();
         assert_eq!(provider.get("file.txt").await.unwrap(), b"version 2");
+    }
+
+    #[tokio::test]
+    async fn test_icloud_legacy_fallback_for_get_exists_and_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let primary = tmp.path().join(ICLOUD_FOLDER);
+        let legacy = tmp.path().join(LEGACY_ICLOUD_FOLDER);
+        tokio::fs::create_dir_all(legacy.join("db")).await.unwrap();
+        tokio::fs::write(legacy.join("db/openclaw.db.enc"), b"legacy-db")
+            .await
+            .unwrap();
+
+        let provider = ICloudProvider::with_legacy_dir(primary.clone(), legacy.clone());
+
+        assert_eq!(
+            provider.get("db/openclaw.db.enc").await.unwrap(),
+            b"legacy-db"
+        );
+        assert!(provider.exists("db/openclaw.db.enc").await.unwrap());
+
+        let entries = provider.list("db/").await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, "db/openclaw.db.enc");
+
+        provider
+            .put("db/openclaw.db.enc", b"thinclaw-db")
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read(primary.join("db/openclaw.db.enc"))
+                .await
+                .unwrap(),
+            b"thinclaw-db"
+        );
+        assert_eq!(
+            provider.get("db/openclaw.db.enc").await.unwrap(),
+            b"thinclaw-db"
+        );
+
+        let entries = provider.list("db/").await.unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn test_cloud_docs_detection_does_not_double_nest_thinclaw_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mobile_documents = tmp.path().join("Library/Mobile Documents");
+        let cloud_docs = mobile_documents.join("com~apple~CloudDocs");
+        let thinclaw = cloud_docs.join(ICLOUD_FOLDER);
+        std::fs::create_dir_all(&thinclaw).unwrap();
+
+        let roots = icloud_roots_for_mobile_documents(&mobile_documents);
+
+        assert_eq!(roots.primary_dir, thinclaw);
+        assert_ne!(roots.primary_dir, roots.primary_dir.join(ICLOUD_FOLDER));
+        assert_eq!(
+            roots.legacy_dir.unwrap(),
+            cloud_docs.join(LEGACY_ICLOUD_FOLDER)
+        );
+    }
+
+    #[test]
+    fn test_icloud_detection_uses_thinclaw_container_and_legacy_scrappy_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mobile_documents = tmp.path().join("Library/Mobile Documents");
+        let thinclaw_container = mobile_documents.join(ICLOUD_CONTAINER_ID);
+        let scrappy_container = mobile_documents.join(LEGACY_ICLOUD_CONTAINER_ID);
+        std::fs::create_dir_all(&thinclaw_container).unwrap();
+        std::fs::create_dir_all(&scrappy_container).unwrap();
+
+        let roots = icloud_roots_for_mobile_documents(&mobile_documents);
+
+        assert_eq!(roots.primary_dir, thinclaw_container.join(ICLOUD_FOLDER));
+        assert_eq!(
+            roots.legacy_dir.unwrap(),
+            scrappy_container.join(LEGACY_ICLOUD_FOLDER)
+        );
     }
 }

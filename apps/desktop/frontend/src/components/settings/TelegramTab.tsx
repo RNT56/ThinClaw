@@ -60,7 +60,7 @@ export function TelegramTab({ className }: TelegramTabProps) {
                 </div>
                 <div>
                     <h2 className="text-lg font-semibold">Telegram Integration</h2>
-                    <p className="text-sm text-muted-foreground">Connect OpenClaw to Telegram</p>
+                    <p className="text-sm text-muted-foreground">Connect ThinClaw to Telegram</p>
                 </div>
             </div>
 
@@ -68,7 +68,7 @@ export function TelegramTab({ className }: TelegramTabProps) {
             <div className="flex items-center justify-between p-4 rounded-lg bg-card border border-border">
                 <div>
                     <p className="font-medium">Enable Telegram</p>
-                    <p className="text-sm text-muted-foreground">Allow OpenClaw to respond via Telegram</p>
+                    <p className="text-sm text-muted-foreground">Allow ThinClaw to respond via Telegram</p>
                 </div>
                 <button
                     onClick={() => setEnabled(!enabled)}

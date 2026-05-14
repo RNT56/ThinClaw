@@ -2,7 +2,7 @@
 //!
 //! Dual-mode operation:
 //!   Local mode:  IronClaw runs in-process via TauriChannel (default)
-//!   Remote mode: Scrappy connects to an external IronClaw HTTP gateway
+//!   Remote mode: ThinClaw Desktop connects to an external IronClaw HTTP gateway
 //!                via RemoteGatewayProxy — no local engine is started
 //!
 //! The mode is selected by `identity.json:gateway_mode`:
@@ -12,8 +12,8 @@
 use tauri::State;
 use tracing::info;
 
-use super::OpenClawManager;
 use super::types::*;
+use super::OpenClawManager;
 use crate::openclaw::ironclaw_bridge::IronClawState;
 
 /// Get OpenClaw status.
@@ -264,7 +264,7 @@ pub async fn openclaw_get_status(
     })
 }
 
-/// Sync Local LLM config (llama-server) to OpenClaw config.
+/// Sync Local LLM config (llama-server) to ThinClaw config.
 ///
 /// Still needed: ThinClaw Desktop manages the local llama-server sidecar and needs to
 /// sync its port/model info to the config that IronClaw reads on restart.
@@ -459,10 +459,17 @@ pub async fn openclaw_start_gateway(
     }
 
     // ── Start IronClaw engine ────────────────────────────────────────
-    // Create secrets adapter (bridges macOS Keychain to IronClaw)
+    // Create secrets adapter (bridges macOS Keychain to IronClaw and enforces grants)
+    let cfg_for_secrets = if let Some(cfg) = state.get_config().await {
+        cfg
+    } else {
+        state.init_config().await?
+    };
     let secrets_store: Option<std::sync::Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> =
         Some(std::sync::Arc::new(
-            crate::openclaw::ironclaw_secrets::KeychainSecretsAdapter::new(),
+            crate::openclaw::ironclaw_secrets::KeychainSecretsAdapter::with_config(
+                &cfg_for_secrets,
+            ),
         ));
 
     match ironclaw.start(secrets_store).await {
@@ -523,13 +530,20 @@ pub async fn openclaw_stop_gateway(
 /// This is a no-op if the engine isn't running.
 #[tauri::command]
 #[specta::specta]
-pub async fn openclaw_reload_secrets(ironclaw: State<'_, IronClawState>) -> Result<(), String> {
+pub async fn openclaw_reload_secrets(
+    state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
+) -> Result<(), String> {
     info!("[ironclaw] Reload secrets requested");
 
-    // Create a fresh secrets adapter (reads live from Keychain)
+    // Create a fresh secrets adapter (reads live from Keychain, grants from config)
+    let cfg = state
+        .get_config()
+        .await
+        .ok_or_else(|| "ThinClaw config is not initialized".to_string())?;
     let secrets_store: Option<std::sync::Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>> =
         Some(std::sync::Arc::new(
-            crate::openclaw::ironclaw_secrets::KeychainSecretsAdapter::new(),
+            crate::openclaw::ironclaw_secrets::KeychainSecretsAdapter::with_config(&cfg),
         ));
 
     ironclaw.reload_secrets(secrets_store).await?;

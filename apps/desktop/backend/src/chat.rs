@@ -233,7 +233,6 @@ pub async fn chat_stream(
         return Err("Last message must be from user".into());
     }
 
-
     use tauri::Emitter;
 
     #[derive(Serialize, Clone, Type)]
@@ -712,8 +711,7 @@ pub async fn count_tokens(
     if let Some((port, token, _, model_family)) = state.get_chat_config() {
         let mut check_history: Vec<serde_json::Value> = Vec::new();
         for msg in &messages {
-            check_history
-                .push(serde_json::json!({ "role": msg.role, "content": msg.content }));
+            check_history.push(serde_json::json!({ "role": msg.role, "content": msg.content }));
         }
 
         let base_url = format!("http://127.0.0.1:{}/v1", port);

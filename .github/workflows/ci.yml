@@ -147,14 +147,25 @@ jobs:
       - name: TypeScript check
         working-directory: apps/desktop
         run: npm run lint:ts
+      - name: Frontend tests
+        working-directory: apps/desktop
+        run: npm test
       - name: Frontend build smoke
         working-directory: apps/desktop
         run: npm run build
       - name: Backend cargo check
         run: cargo check --manifest-path apps/desktop/backend/Cargo.toml --locked
+      - name: Backend tests
+        working-directory: apps/desktop
+        run: npm run test:backend
       - name: Tauri metadata smoke
         working-directory: apps/desktop
         run: npx tauri info
+      - name: Tauri build smoke (cloud/no sidecars)
+        working-directory: apps/desktop
+        run: |
+          bash scripts/generate_tauri_overrides.sh none
+          npx tauri build --config backend/tauri.override.json -- --no-default-features
 
   edge-dependency-guard:
     name: Edge dependency guard

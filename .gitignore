@@ -71,6 +71,8 @@ target-codex-check/
 
 # Desktop app local build/download artifacts
 apps/desktop/frontend/node_modules/
+apps/desktop/node_modules/
+apps/desktop/dist/
 apps/desktop/frontend/dist/
 apps/desktop/frontend/.vite/
 apps/desktop/backend/bin/

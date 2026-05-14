@@ -213,7 +213,7 @@ export function SecretCard({
 
                     <div className="flex items-center justify-between">
                         <div>
-                            <div className="text-sm font-medium">Access for OpenClaw Agents</div>
+                            <div className="text-sm font-medium">Access for ThinClaw Agents</div>
                             <div className="text-xs text-muted-foreground">Allow agents to use this key for autonomous tasks</div>
                         </div>
                         <button

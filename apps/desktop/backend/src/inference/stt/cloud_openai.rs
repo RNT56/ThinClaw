@@ -8,7 +8,6 @@ pub struct OpenAiSttBackend {
     pub api_key: String,
 }
 
-
 impl OpenAiSttBackend {
     pub fn new(api_key: String) -> Self {
         Self { api_key }

@@ -20,7 +20,7 @@ For identity and surface behavior, use
 | Docker Compose or container deployment | [deploy/docker.md](deploy/docker.md) |
 | Remote gateway, Tailscale, or webhook tunnels | [deploy/remote-access.md](deploy/remote-access.md) |
 | Reckless desktop autonomy | [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md) |
-| Scrappy connected to a local or remote ThinClaw runtime | Platform runbook plus [deploy/remote-access.md](deploy/remote-access.md) |
+| ThinClaw Desktop connected to a local or remote ThinClaw runtime | Platform runbook plus [deploy/remote-access.md](deploy/remote-access.md) |
 
 ## Defaults And Important Truths
 

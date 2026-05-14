@@ -5,7 +5,6 @@
 use tauri::State;
 use tracing::info;
 
-
 use super::OpenClawManager;
 use crate::openclaw::ironclaw_bridge::IronClawState;
 
@@ -135,7 +134,7 @@ pub async fn openclaw_install_skill_repo(
     let cfg_guard = state.config.read().await;
     let cfg = cfg_guard
         .as_ref()
-        .ok_or("OpenClaw config not initialized")?;
+        .ok_or("ThinClaw config not initialized")?;
 
     let skills_dir = cfg.workspace_dir().join("skills");
     std::fs::create_dir_all(&skills_dir).map_err(|e| e.to_string())?;

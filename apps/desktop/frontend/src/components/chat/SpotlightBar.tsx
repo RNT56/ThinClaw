@@ -10,6 +10,7 @@ import remarkGfm from 'remark-gfm';
 import { toast } from 'sonner';
 import { useModelContext } from '../model-context';
 import { useConfig } from '../../hooks/use-config';
+import { STATUS_TAG_REGEX } from '../../lib/status-tags';
 
 // Extract text from React nodes for copy functionality
 function extractText(node: any): string {
@@ -544,7 +545,7 @@ export function SpotlightBar() {
                                                                 }
                                                             }}
                                                         >
-                                                            {m.content.replace(/<scrappy_status[^>]*\/>/g, '').replace(/<think>[\s\S]*?<\/think>/g, '').trim()}
+                                                            {m.content.replace(STATUS_TAG_REGEX, '').replace(/<think>[\s\S]*?<\/think>/g, '').trim()}
                                                         </ReactMarkdown>
                                                     </div>
                                                 )}

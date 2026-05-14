@@ -13,7 +13,7 @@ interface SlackTabProps {
 const SLACK_MANIFEST = {
     "display_information": {
         "name": "ThinClaw Desktop",
-        "description": "Local-first OpenClaw mode inside ThinClaw Desktop",
+        "description": "Local-first ThinClaw mode inside ThinClaw Desktop",
         "background_color": "#111111"
     },
     "features": {
@@ -29,7 +29,7 @@ const SLACK_MANIFEST = {
         "slash_commands": [
             {
                 "command": "/clawd",
-                "description": "Send a message to ThinClaw OpenClaw",
+                "description": "Send a message to ThinClaw",
                 "should_escape": false
             }
         ]
@@ -115,7 +115,7 @@ export function SlackTab({ className }: SlackTabProps) {
                 </div>
                 <div>
                     <h2 className="text-lg font-semibold">Slack Integration</h2>
-                    <p className="text-sm text-muted-foreground">Connect OpenClaw to your Slack workspace</p>
+                    <p className="text-sm text-muted-foreground">Connect ThinClaw to your Slack workspace</p>
                 </div>
             </div>
 
@@ -123,7 +123,7 @@ export function SlackTab({ className }: SlackTabProps) {
             <div className="flex items-center justify-between p-4 rounded-lg bg-card border border-border">
                 <div>
                     <p className="font-medium">Enable Slack</p>
-                    <p className="text-sm text-muted-foreground">Allow OpenClaw to respond in Slack DMs</p>
+                    <p className="text-sm text-muted-foreground">Allow ThinClaw to respond in Slack DMs</p>
                 </div>
                 <button
                     onClick={() => setEnabled(!enabled)}

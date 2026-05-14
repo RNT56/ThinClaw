@@ -4,7 +4,7 @@
 //!
 //! # API Notes
 //!
-//! - Path-based access: `me/drive/root:/Scrappy/<key>:/content`
+//! - Path-based access: `me/drive/root:/ThinClaw Desktop/<key>:/content`
 //! - Simple upload for files ≤4 MB, upload sessions for larger
 //! - Rate limit: 10,000 API calls per 10 minutes
 //! - Deleted items go to recycle bin by default
@@ -20,7 +20,8 @@ use super::super::provider::{CloudEntry, CloudError, CloudProvider, CloudStatus}
 const GRAPH_URL: &str = "https://graph.microsoft.com/v1.0";
 
 /// Root folder path in OneDrive.
-const ONEDRIVE_ROOT: &str = "Scrappy";
+const ONEDRIVE_ROOT: &str = "ThinClaw Desktop";
+const LEGACY_ONEDRIVE_ROOT: &str = "Scrappy";
 
 /// OneDrive cloud storage provider.
 pub struct OneDriveProvider {
@@ -110,12 +111,19 @@ impl OneDriveProvider {
     /// Convert a cloud key to a OneDrive path component.
     ///
     /// Uses the Graph API path-based addressing:
-    /// `me/drive/root:/Scrappy/<key>:`
     fn key_to_graph_path(key: &str) -> String {
-        format!("me/drive/root:/{}/{}:", ONEDRIVE_ROOT, key)
+        Self::key_to_graph_path_in_root(ONEDRIVE_ROOT, key)
     }
 
-    /// Ensure the Scrappy root folder exists.
+    fn legacy_key_to_graph_path(key: &str) -> String {
+        Self::key_to_graph_path_in_root(LEGACY_ONEDRIVE_ROOT, key)
+    }
+
+    fn key_to_graph_path_in_root(root: &str, key: &str) -> String {
+        format!("me/drive/root:/{}/{}:", root, key)
+    }
+
+    /// Ensure the ThinClaw root folder exists.
     async fn ensure_root_folder(&self, token: &str) -> Result<(), CloudError> {
         let resp = self
             .client
@@ -142,6 +150,38 @@ impl OneDriveProvider {
                 status, body
             )))
         }
+    }
+
+    async fn get_from_url(&self, key: &str, url: String) -> Result<Vec<u8>, CloudError> {
+        let token = self.access_token().await?;
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| CloudError::DownloadFailed(format!("download '{}': {}", key, e)))?;
+
+        if resp.status().as_u16() == 404 {
+            return Err(CloudError::NotFound(format!(
+                "'{}' not found in OneDrive",
+                key
+            )));
+        }
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(CloudError::DownloadFailed(format!(
+                "download '{}' failed ({}): {}",
+                key, status, body
+            )));
+        }
+
+        resp.bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| CloudError::DownloadFailed(format!("read body '{}': {}", key, e)))
     }
 }
 
@@ -238,10 +278,12 @@ impl CloudProvider for OneDriveProvider {
             .map_err(|e| CloudError::DownloadFailed(format!("download '{}': {}", key, e)))?;
 
         if resp.status().as_u16() == 404 {
-            return Err(CloudError::NotFound(format!(
-                "'{}' not found in OneDrive",
-                key
-            )));
+            let legacy_url = format!(
+                "{}/{}/content",
+                GRAPH_URL,
+                Self::legacy_key_to_graph_path(key)
+            );
+            return self.get_from_url(key, legacy_url).await;
         }
 
         if !resp.status().is_success() {
@@ -404,7 +446,7 @@ mod tests {
     fn test_key_to_graph_path() {
         assert_eq!(
             OneDriveProvider::key_to_graph_path("db/openclaw.db.enc"),
-            "me/drive/root:/Scrappy/db/openclaw.db.enc:"
+            "me/drive/root:/ThinClaw Desktop/db/openclaw.db.enc:"
         );
     }
 
@@ -412,6 +454,14 @@ mod tests {
     fn test_key_to_graph_path_simple() {
         assert_eq!(
             OneDriveProvider::key_to_graph_path("manifest.json"),
+            "me/drive/root:/ThinClaw Desktop/manifest.json:"
+        );
+    }
+
+    #[test]
+    fn test_legacy_key_to_graph_path() {
+        assert_eq!(
+            OneDriveProvider::legacy_key_to_graph_path("manifest.json"),
             "me/drive/root:/Scrappy/manifest.json:"
         );
     }

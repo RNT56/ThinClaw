@@ -363,7 +363,7 @@ export function OpenClawSkills() {
                         <div>
                             <h4 className="text-sm font-semibold text-primary uppercase tracking-wider">Modular Architecture</h4>
                             <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
-                                Skills are dynamic toolsets that can be hot-reloaded on the OpenClaw node.
+                                Skills are dynamic toolsets that can be hot-reloaded on the ThinClaw node.
                                 Disabling a skill immediately removes its associated tools from the agent's available registry for subsequent runs.
                             </p>
                         </div>

@@ -744,11 +744,13 @@ pub async fn retrieve_context_internal(
 
     if let Some(pid) = &project_id {
         if is_overview {
-            let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM documents WHERE project_id = ? ORDER BY path ASC")
-                .bind(pid)
-                .fetch_all(&pool)
-                .await
-                .unwrap_or(Vec::new());
+            let paths: Vec<String> = sqlx::query_scalar(
+                "SELECT path FROM documents WHERE project_id = ? ORDER BY path ASC",
+            )
+            .bind(pid)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or(Vec::new());
 
             if !paths.is_empty() {
                 let list = paths.join("\n- ");
@@ -758,13 +760,12 @@ pub async fn retrieve_context_internal(
     }
 
     if let Some(pid) = &project_id {
-        let docs: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, path FROM documents WHERE project_id = ?",
-        )
-        .bind(pid)
-        .fetch_all(&pool)
-        .await
-        .unwrap_or(Vec::new());
+        let docs: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, path FROM documents WHERE project_id = ?")
+                .bind(pid)
+                .fetch_all(&pool)
+                .await
+                .unwrap_or(Vec::new());
 
         let mut matched_doc_id = None;
         let mut matched_path = "";
@@ -795,7 +796,9 @@ pub async fn retrieve_context_internal(
             let full_text = chunks.join("");
             let safe_text = if full_text.len() > 15000 {
                 let mut end = 15000;
-                while !full_text.is_char_boundary(end) { end -= 1; }
+                while !full_text.is_char_boundary(end) {
+                    end -= 1;
+                }
                 format!("{}... (truncated)", &full_text[..end])
             } else {
                 full_text
@@ -1117,7 +1120,11 @@ pub async fn retrieve_context_internal(
                 .take_while(|&i| i < 50)
                 .last()
                 .unwrap_or(0);
-            if prefix_end == 0 || !top_results.iter().any(|r| r.contains(&g_chunk[..prefix_end])) {
+            if prefix_end == 0
+                || !top_results
+                    .iter()
+                    .any(|r| r.contains(&g_chunk[..prefix_end]))
+            {
                 top_results.insert(0, g_chunk);
             }
         }
@@ -1129,7 +1136,11 @@ pub async fn retrieve_context_internal(
             .take_while(|&i| i < 50)
             .last()
             .unwrap_or(0);
-        if prefix_end == 0 || !top_results.iter().any(|r| r.contains(&first_intro[..prefix_end])) {
+        if prefix_end == 0
+            || !top_results
+                .iter()
+                .any(|r| r.contains(&first_intro[..prefix_end]))
+        {
             top_results.insert(0, first_intro.clone());
         }
     }

@@ -9,6 +9,7 @@ use tracing::{info, warn};
 use super::types::*;
 use super::OpenClawManager;
 use crate::openclaw::ironclaw_bridge::IronClawState;
+use crate::openclaw::ironclaw_builder::get_resolved_workspace_root;
 
 // ============================================================================
 // Sprint 13 — New Backend API commands
@@ -878,28 +879,16 @@ pub async fn openclaw_heartbeat_set_interval(
 /// Return the local filesystem workspace root path.
 ///
 /// This is the directory where the agent writes local files (write_file, shell, etc.).
-/// Defaults to ~/Scrappy/ if not configured.
+/// Defaults to the same app-data agent workspace used by the ThinClaw bridge.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_get_workspace_path(
     manager: State<'_, OpenClawManager>,
 ) -> Result<String, String> {
-    // WORKSPACE_ROOT env var is set at engine start with the resolved path
-    if let Ok(root) = std::env::var("WORKSPACE_ROOT") {
-        if !root.is_empty() {
-            return Ok(root);
-        }
-    }
-    // Fall back to config value
-    let cfg = manager.get_config().await;
-    if let Some(root) = cfg.as_ref().and_then(|c| c.workspace_root.as_ref()) {
-        return Ok(root.clone());
-    }
-    // Default: ~/Scrappy/
-    let default = std::env::var("HOME")
-        .map(|h| format!("{}/Scrappy", h))
-        .unwrap_or_else(|_| "Scrappy".to_string());
-    Ok(default)
+    Ok(workspace_root_for_commands(&manager)
+        .await
+        .to_string_lossy()
+        .to_string())
 }
 
 /// Open the local workspace directory in Finder (macOS) / Explorer (Windows).
@@ -910,24 +899,8 @@ pub async fn openclaw_get_workspace_path(
 pub async fn openclaw_reveal_workspace(
     manager: State<'_, OpenClawManager>,
 ) -> Result<String, String> {
-    let path_str = if let Ok(root) = std::env::var("WORKSPACE_ROOT") {
-        if !root.is_empty() {
-            root
-        } else {
-            std::env::var("HOME")
-                .map(|h| format!("{}/Scrappy", h))
-                .unwrap_or_else(|_| "Scrappy".to_string())
-        }
-    } else {
-        let cfg = manager.get_config().await;
-        cfg.as_ref()
-            .and_then(|c| c.workspace_root.clone())
-            .unwrap_or_else(|| {
-                std::env::var("HOME")
-                    .map(|h| format!("{}/Scrappy", h))
-                    .unwrap_or_else(|_| "Scrappy".to_string())
-            })
-    };
+    let path = workspace_root_for_commands(&manager).await;
+    let path_str = path.to_string_lossy().to_string();
 
     // Ensure directory exists
     if let Err(e) = std::fs::create_dir_all(&path_str) {
@@ -965,17 +938,9 @@ pub async fn openclaw_reveal_workspace(
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_list_agent_workspace_files(
-    _manager: State<'_, OpenClawManager>,
+    manager: State<'_, OpenClawManager>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let workspace_root = if let Ok(root) = std::env::var("WORKSPACE_ROOT") {
-        if !root.is_empty() {
-            std::path::PathBuf::from(root)
-        } else {
-            return Ok(vec![]);
-        }
-    } else {
-        return Ok(vec![]);
-    };
+    let workspace_root = workspace_root_for_commands(&manager).await;
 
     if !workspace_root.exists() {
         return Ok(vec![]);
@@ -1124,7 +1089,7 @@ pub async fn openclaw_reveal_file(path: String) -> Result<(), String> {
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_write_agent_workspace_file(
-    _manager: State<'_, OpenClawManager>,
+    manager: State<'_, OpenClawManager>,
     relative_path: String,
     content: String,
 ) -> Result<String, String> {
@@ -1133,11 +1098,7 @@ pub async fn openclaw_write_agent_workspace_file(
         return Err("Invalid path: traversal not allowed".to_string());
     }
 
-    let workspace_root = std::env::var("WORKSPACE_ROOT")
-        .ok()
-        .filter(|r| !r.is_empty())
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| "WORKSPACE_ROOT not set — cannot write file".to_string())?;
+    let workspace_root = workspace_root_for_commands(&manager).await;
 
     let target = workspace_root.join(&relative_path);
 
@@ -1169,4 +1130,31 @@ pub async fn openclaw_write_agent_workspace_file(
         "Wrote automation result to agent_workspace"
     );
     Ok(abs)
+}
+
+async fn workspace_root_for_commands(manager: &OpenClawManager) -> std::path::PathBuf {
+    if let Some(root) = get_resolved_workspace_root().filter(|root| !root.is_empty()) {
+        return std::path::PathBuf::from(root);
+    }
+
+    let cfg = manager.get_config().await;
+    if let Some(root) = cfg
+        .as_ref()
+        .and_then(|c| c.workspace_root.as_ref())
+        .filter(|root| !root.is_empty())
+    {
+        return std::path::PathBuf::from(root);
+    }
+
+    if let Some(base_dir) = cfg.as_ref().map(|c| c.base_dir.clone()) {
+        return base_dir.join("agent_workspace");
+    }
+
+    std::env::var("HOME")
+        .map(|home| {
+            std::path::PathBuf::from(home)
+                .join("ThinClaw")
+                .join("agent_workspace")
+        })
+        .unwrap_or_else(|_| std::path::PathBuf::from("agent_workspace"))
 }

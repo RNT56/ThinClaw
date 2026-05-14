@@ -9,12 +9,10 @@ pub fn specta_builder() -> tauri_specta::Builder {
     tauri_specta::Builder::new().commands(tauri_specta::collect_commands![
         // ── Core ────────────────────────────────────────────────────────
         crate::greet,
-
         // ── Chat ────────────────────────────────────────────────────────
         crate::chat::chat_stream,
         crate::chat::chat_completion,
         crate::chat::count_tokens,
-
         // ── Sidecar Management ──────────────────────────────────────────
         crate::sidecar::start_chat_server,
         crate::sidecar::stop_chat_server,
@@ -26,22 +24,18 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::sidecar::start_image_server,
         crate::sidecar::start_tts_server,
         crate::sidecar::cancel_generation,
-
         // ── Voice I/O ───────────────────────────────────────────────────
         crate::tts::tts_synthesize,
         crate::tts::tts_list_voices,
         crate::stt::transcribe_audio,
-
         // ── Web & Image ─────────────────────────────────────────────────
         crate::web_search::check_web_search,
         crate::image_gen::generate_image,
-
         // ── RAG ─────────────────────────────────────────────────────────
         crate::rag::ingest_document,
         crate::rag::upload_document,
         crate::rag::retrieve_context,
         crate::rag::check_vector_index_integrity,
-
         // ── Model Management ────────────────────────────────────────────
         crate::model_manager::list_models,
         crate::model_manager::download_model,
@@ -56,7 +50,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::model_manager::get_model_metadata,
         crate::model_manager::update_remote_model_catalog,
         crate::model_manager::get_remote_model_catalog,
-
         // ── History ─────────────────────────────────────────────────────
         crate::history::get_conversations,
         crate::history::create_conversation,
@@ -68,13 +61,11 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::history::update_conversation_project,
         crate::history::update_conversations_order,
         crate::history::delete_all_history,
-
         // ── Config ──────────────────────────────────────────────────────
         crate::config::open_config_file,
         crate::config::get_user_config,
         crate::config::update_user_config,
         crate::config::get_hf_token,
-
         // ── Images & Imagine ────────────────────────────────────────────
         crate::images::upload_image,
         crate::images::load_image,
@@ -86,7 +77,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::imagine::imagine_toggle_favorite,
         crate::imagine::imagine_delete_image,
         crate::imagine::imagine_get_stats,
-
         // ── System & Projects ───────────────────────────────────────────
         crate::system::get_system_specs,
         crate::projects::create_project,
@@ -96,11 +86,9 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::projects::update_projects_order,
         crate::projects::get_project_documents,
         crate::projects::delete_document,
-
         // ── Rig Agent ───────────────────────────────────────────────────
         crate::rig_lib::rig_check_web_search,
         crate::rig_lib::agent_chat,
-
         // ── OpenClaw / IronClaw ─────────────────────────────────────────
         crate::openclaw::commands::openclaw_get_status,
         crate::openclaw::commands::openclaw_save_anthropic_key,
@@ -177,7 +165,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::openclaw::commands::openclaw_set_setup_completed,
         crate::openclaw::commands::openclaw_toggle_auto_start,
         crate::openclaw::commands::openclaw_set_dev_mode_wizard,
-
         // Autonomy & bootstrap
         crate::openclaw::commands::openclaw_set_autonomy_mode,
         crate::openclaw::commands::openclaw_get_autonomy_mode,
@@ -191,7 +178,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::openclaw::commands::openclaw_get_bedrock_credentials,
         crate::openclaw::commands::openclaw_sync_local_llm,
         crate::openclaw::deploy::openclaw_deploy_remote,
-
         // Orchestration & Canvas
         crate::openclaw::commands::openclaw_spawn_session,
         crate::openclaw::commands::openclaw_list_child_sessions,
@@ -205,12 +191,10 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::openclaw::commands::openclaw_routine_delete,
         crate::openclaw::commands::openclaw_routine_toggle,
         crate::openclaw::commands::openclaw_heartbeat_set_interval,
-
         // New feature commands
         crate::openclaw::commands::openclaw_set_thinking,
         crate::openclaw::commands::openclaw_memory_search,
         crate::openclaw::commands::openclaw_export_session,
-
         // Hooks & extensions management
         crate::openclaw::commands::openclaw_hooks_list,
         crate::openclaw::commands::openclaw_hooks_register,
@@ -218,18 +202,15 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::openclaw::commands::openclaw_extensions_list,
         crate::openclaw::commands::openclaw_extension_activate,
         crate::openclaw::commands::openclaw_extension_remove,
-
         // Diagnostics & tools
         crate::openclaw::commands::openclaw_diagnostics,
         crate::openclaw::commands::openclaw_tools_list,
         crate::openclaw::commands::openclaw_tool_policy_get,
         crate::openclaw::commands::openclaw_tool_policy_set,
-
         // Pairing & compaction
         crate::openclaw::commands::openclaw_pairing_list,
         crate::openclaw::commands::openclaw_pairing_approve,
         crate::openclaw::commands::openclaw_compact_session,
-
         // Sprint 13 — New backend APIs
         crate::openclaw::commands::openclaw_cost_summary,
         crate::openclaw::commands::openclaw_cost_export_csv,
@@ -253,16 +234,13 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::openclaw::commands::openclaw_routing_status,
         crate::openclaw::commands::openclaw_gmail_oauth_start,
         crate::openclaw::commands::openclaw_gmail_status,
-
         // ── Permissions ─────────────────────────────────────────────────
         crate::permissions::get_permission_status,
         crate::permissions::request_permission,
         crate::permissions::open_permission_settings,
-
         // ── Spotlight ───────────────────────────────────────────────────
         crate::toggle_spotlight,
         crate::hide_spotlight,
-
         // ── Engine & HF Hub ─────────────────────────────────────────────
         crate::engine::get_active_engine_info,
         crate::engine::get_engine_setup_status,
@@ -274,13 +252,11 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::hf_hub::get_model_files,
         crate::hf_hub::download_hf_model_files,
         crate::hf_hub::discover_embedding_dimension,
-
         // ── Inference Router ────────────────────────────────────────────
         crate::inference::get_inference_backends,
         crate::inference::update_inference_backend,
         crate::inference::discover_cloud_models,
         crate::inference::refresh_cloud_models,
-
         // ── Cloud Storage ───────────────────────────────────────────────
         crate::cloud::commands::cloud_get_status,
         crate::cloud::commands::cloud_test_connection,
@@ -295,7 +271,6 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::cloud::commands::cloud_get_recovery_key,
         crate::cloud::commands::cloud_import_recovery_key,
         crate::cloud::commands::cloud_get_storage_breakdown,
-
         // ── Workspace ───────────────────────────────────────────────────
         crate::openclaw::commands::openclaw_get_workspace_path,
         crate::openclaw::commands::openclaw_reveal_workspace,

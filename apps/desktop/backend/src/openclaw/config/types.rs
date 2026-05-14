@@ -188,7 +188,7 @@ impl OpenClawIdentity {
     }
 }
 
-/// OpenClaw configuration manager
+/// ThinClaw configuration manager for the alpha-compatible OpenClaw config file.
 #[derive(Clone)]
 pub struct OpenClawConfig {
     /// Base directory for OpenClaw state

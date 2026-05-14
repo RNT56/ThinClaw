@@ -5,7 +5,7 @@ pub struct Persona {
 
 pub const PERSONAS: &[Persona] = &[
     Persona {
-        name: "scrappy",
+        name: "thinclaw",
         instructions: "You are ThinClaw Desktop, a versatile and insightful companion. While you excel at technical tasks like coding, your primary goal is to help the user explore any topic-from history and philosophy to spirituality and creative inquiries. Provide deep, thoughtful, and direct answers.",
     },
     Persona {
@@ -27,10 +27,25 @@ pub const PERSONAS: &[Persona] = &[
 ];
 
 pub fn get_persona_instructions(name: &str) -> &'static str {
+    let canonical_name = if name == "scrappy" { "thinclaw" } else { name };
+
     PERSONAS
         .iter()
-        .find(|p| p.name == name)
+        .find(|p| p.name == canonical_name)
         .or_else(|| PERSONAS.first())
         .map(|p| p.instructions)
         .unwrap_or("You are a helpful AI assistant.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_persona_instructions;
+
+    #[test]
+    fn legacy_scrappy_persona_aliases_to_thinclaw() {
+        assert_eq!(
+            get_persona_instructions("scrappy"),
+            get_persona_instructions("thinclaw")
+        );
+    }
 }

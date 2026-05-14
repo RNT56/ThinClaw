@@ -12,9 +12,7 @@ pub struct TogetherDiffusionBackend {
 
 impl TogetherDiffusionBackend {
     pub fn new(api_key: String, _model_override: Option<String>) -> Self {
-        let images_dir = std::env::temp_dir()
-            .join("scrappy")
-            .join("imagine");
+        let images_dir = std::env::temp_dir().join("scrappy").join("imagine");
         Self {
             api_key,
             images_dir,

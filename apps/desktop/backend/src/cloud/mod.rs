@@ -65,6 +65,8 @@ use tauri::AppHandle;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
+const CLOUD_CREDENTIAL_KEY_PREFIX: &str = "cloud_provider";
+
 // ── Storage Mode ─────────────────────────────────────────────────────────────
 
 /// The global storage mode.
@@ -114,7 +116,7 @@ struct CloudManagerInner {
     /// Current storage mode
     mode: StorageMode,
     /// Active cloud provider (None in local mode)
-    provider: Option<Box<dyn CloudProvider>>,
+    provider: Option<Arc<dyn CloudProvider>>,
     /// Provider configuration (for reconnections)
     provider_config: Option<CloudProviderConfig>,
     /// Encryption master key (loaded from Keychain)
@@ -168,18 +170,21 @@ impl CloudManager {
                         if let Ok(config) =
                             serde_json::from_str::<CloudProviderConfig>(&config_json)
                         {
+                            let config = hydrate_provider_credentials(config);
+                            let sanitized_config = config.sanitized_for_persistence();
+                            let should_sanitize_persisted_config = sanitized_config != config;
                             match provider::create_provider(&config) {
                                 Ok(provider) => {
-                                    inner.provider = Some(provider);
-                                    inner.provider_config = Some(config);
+                                    inner.provider = Some(Arc::from(provider));
+                                    inner.provider_config = Some(config.clone());
                                 }
                                 Err(_) => {
                                     // OAuth providers (gdrive, dropbox, onedrive) can't be
                                     // created from config alone — reconstruct from Keychain tokens.
                                     match Self::create_oauth_provider(&config) {
                                         Ok(Some(provider)) => {
-                                            inner.provider = Some(provider);
-                                            inner.provider_config = Some(config);
+                                            inner.provider = Some(Arc::from(provider));
+                                            inner.provider_config = Some(config.clone());
                                             info!("[cloud] OAuth provider restored from Keychain");
                                         }
                                         Ok(None) => {
@@ -193,6 +198,26 @@ impl CloudManager {
                                         }
                                     }
                                 }
+                            }
+
+                            if should_sanitize_persisted_config {
+                                let sanitized_json = serde_json::to_string(&sanitized_config)
+                                    .map_err(|e| {
+                                        format!(
+                                            "Failed to serialize sanitized provider_config: {}",
+                                            e
+                                        )
+                                    })?;
+                                sqlx::query(
+                                    "INSERT OR REPLACE INTO cloud_config (key, value) VALUES ('provider_config', ?)",
+                                )
+                                .bind(sanitized_json)
+                                .execute(pool)
+                                .await
+                                .map_err(|e| {
+                                    format!("Failed to sanitize provider_config: {}", e)
+                                })?;
+                                info!("[cloud] Sanitized persisted provider_config");
                             }
                         }
                     }
@@ -256,7 +281,13 @@ impl CloudManager {
         let status = provider.test_connection().await?;
 
         let mut inner = self.inner.write().await;
-        inner.provider = Some(provider);
+        if inner.migration_in_progress {
+            return Err(CloudError::Provider(
+                "Cannot replace cloud provider while a migration is in progress".into(),
+            ));
+        }
+
+        inner.provider = Some(Arc::from(provider));
         inner.provider_config = Some(config);
 
         info!("[cloud] Provider configured: {}", status.provider_name);
@@ -273,8 +304,13 @@ impl CloudManager {
         config: CloudProviderConfig,
     ) {
         let mut inner = self.inner.write().await;
+        if inner.migration_in_progress {
+            warn!("[cloud] Ignoring provider replacement while migration is in progress");
+            return;
+        }
+
         info!("[cloud] Provider set directly: {}", provider.name());
-        inner.provider = Some(provider);
+        inner.provider = Some(Arc::from(provider));
         inner.provider_config = Some(config);
     }
 
@@ -286,6 +322,10 @@ impl CloudManager {
             .as_ref()
             .ok_or_else(|| CloudError::Provider("No provider configured".into()))?;
         provider.test_connection().await
+    }
+
+    pub async fn provider_config(&self) -> Option<CloudProviderConfig> {
+        self.inner.read().await.provider_config.clone()
     }
 
     /// Get the recovery key (base64-encoded master key).
@@ -328,7 +368,6 @@ impl CloudManager {
     ///
     /// This is the big one — see `cloud_storage_implementation.md` § 7.1.
     pub async fn migrate_to_cloud(&self, app: AppHandle, pool: &SqlitePool) -> Result<(), String> {
-        // Check prerequisites
         {
             let inner = self.inner.read().await;
             if inner.migration_in_progress {
@@ -344,42 +383,53 @@ impl CloudManager {
 
         // Mark migration as in-progress + set cancel flag
         let migration_id = uuid::Uuid::new_v4().to_string();
-        let cancel_flag;
-        {
+        let (app_data_dir, provider, master_key, provider_type, cancel_flag) = {
             let mut inner = self.inner.write().await;
+            if inner.migration_in_progress {
+                return Err("Migration already in progress".into());
+            }
+
+            let provider =
+                inner.provider.as_ref().cloned().ok_or_else(|| {
+                    "No cloud provider configured. Configure one first.".to_string()
+                })?;
+            let master_key = inner.master_key.as_ref().cloned().ok_or_else(|| {
+                "No encryption key found. Set up cloud storage first.".to_string()
+            })?;
+            let provider_type = inner
+                .provider_config
+                .as_ref()
+                .map(|c| c.provider_type.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+
             inner.migration_in_progress = true;
             let flag = Arc::new(RwLock::new(false));
-            cancel_flag = flag.clone();
+            let cancel_flag = flag.clone();
             inner.cancel_flag = Some(flag);
-        }
+
+            (
+                inner.app_data_dir.clone(),
+                provider,
+                master_key,
+                provider_type,
+                cancel_flag,
+            )
+        };
 
         info!("[cloud] Starting local → cloud migration: {}", migration_id);
 
         // Execute the full migration flow
-        let (app_data_dir, provider_ref, master_key_ref) = {
-            let inner = self.inner.read().await;
-            (
-                inner.app_data_dir.clone(),
-                // Safety: we checked provider.is_some() above
-                &**inner.provider.as_ref().unwrap() as *const dyn CloudProvider,
-                inner.master_key.as_ref().unwrap().clone(),
-            )
-        };
-        // SAFETY: provider outlives this call (held in inner via RwLock, only
-        // released after we finish). We need the raw ptr to avoid holding
-        // the RwLock across the await.
-        let result = unsafe {
-            migration::run_to_cloud(
-                app.clone(),
-                pool,
-                &app_data_dir,
-                &*provider_ref,
-                &master_key_ref,
-                &migration_id,
-                cancel_flag,
-            )
-            .await
-        };
+        let result = migration::run_to_cloud(
+            app.clone(),
+            pool,
+            &app_data_dir,
+            provider.as_ref(),
+            &master_key,
+            &provider_type,
+            &migration_id,
+            cancel_flag,
+        )
+        .await;
 
         // Clear migration flag + update mode on success
         {
@@ -418,50 +468,62 @@ impl CloudManager {
 
     /// Migrate all data from cloud to local.
     pub async fn migrate_to_local(&self, app: AppHandle, pool: &SqlitePool) -> Result<(), String> {
-        let inner = self.inner.read().await;
-        if inner.migration_in_progress {
-            return Err("Migration already in progress".into());
+        {
+            let inner = self.inner.read().await;
+            if inner.migration_in_progress {
+                return Err("Migration already in progress".into());
+            }
+            if matches!(&inner.mode, StorageMode::Local) {
+                return Err("Already in local mode".into());
+            }
         }
-        if matches!(&inner.mode, StorageMode::Local) {
-            return Err("Already in local mode".into());
-        }
-        drop(inner);
 
         // Ensure master key
         self.ensure_master_key().await?;
 
         let migration_id = uuid::Uuid::new_v4().to_string();
-        let cancel_flag;
-        {
+        let (app_data_dir, provider, master_key, cancel_flag) = {
             let mut inner = self.inner.write().await;
+            if inner.migration_in_progress {
+                return Err("Migration already in progress".into());
+            }
+            if matches!(&inner.mode, StorageMode::Local) {
+                return Err("Already in local mode".into());
+            }
+
+            let provider =
+                inner.provider.as_ref().cloned().ok_or_else(|| {
+                    "No cloud provider configured. Configure one first.".to_string()
+                })?;
+            let master_key = inner.master_key.as_ref().cloned().ok_or_else(|| {
+                "No encryption key found. Set up cloud storage first.".to_string()
+            })?;
+
             inner.migration_in_progress = true;
             let flag = Arc::new(RwLock::new(false));
-            cancel_flag = flag.clone();
+            let cancel_flag = flag.clone();
             inner.cancel_flag = Some(flag);
-        }
+
+            (
+                inner.app_data_dir.clone(),
+                provider,
+                master_key,
+                cancel_flag,
+            )
+        };
 
         info!("[cloud] Starting cloud → local migration: {}", migration_id);
 
-        let (app_data_dir, provider_ref, master_key_ref) = {
-            let inner = self.inner.read().await;
-            (
-                inner.app_data_dir.clone(),
-                &**inner.provider.as_ref().unwrap() as *const dyn CloudProvider,
-                inner.master_key.as_ref().unwrap().clone(),
-            )
-        };
-        let result = unsafe {
-            migration::run_to_local(
-                app.clone(),
-                pool,
-                &app_data_dir,
-                &*provider_ref,
-                &master_key_ref,
-                &migration_id,
-                cancel_flag,
-            )
-            .await
-        };
+        let result = migration::run_to_local(
+            app.clone(),
+            pool,
+            &app_data_dir,
+            provider.as_ref(),
+            &master_key,
+            &migration_id,
+            cancel_flag,
+        )
+        .await;
 
         {
             let mut inner = self.inner.write().await;
@@ -526,11 +588,11 @@ impl CloudManager {
 
         let client_id = match provider_type {
             "gdrive" => std::env::var("GOOGLE_CLIENT_ID")
-                .unwrap_or_else(|_| "scrappy-desktop.apps.googleusercontent.com".to_string()),
+                .unwrap_or_else(|_| "thinclaw-desktop.apps.googleusercontent.com".to_string()),
             "dropbox" => std::env::var("DROPBOX_CLIENT_ID")
-                .unwrap_or_else(|_| "scrappy_desktop_app".to_string()),
+                .unwrap_or_else(|_| "thinclaw_desktop_app".to_string()),
             "onedrive" => std::env::var("ONEDRIVE_CLIENT_ID")
-                .unwrap_or_else(|_| "scrappy-desktop-app".to_string()),
+                .unwrap_or_else(|_| "thinclaw-desktop-app".to_string()),
             _ => return Ok(None), // Not an OAuth provider
         };
 
@@ -568,5 +630,98 @@ impl CloudManager {
         };
 
         Ok(Some(provider))
+    }
+}
+
+pub(crate) fn save_provider_credentials(config: &CloudProviderConfig) -> Result<(), String> {
+    if let Some(access_key_id) = config.access_key_id.as_deref() {
+        crate::openclaw::config::keychain::set_key(
+            &cloud_provider_credential_key(config, "access_key_id"),
+            Some(access_key_id),
+        )?;
+    }
+    if let Some(secret_access_key) = config.secret_access_key.as_deref() {
+        crate::openclaw::config::keychain::set_key(
+            &cloud_provider_credential_key(config, "secret_access_key"),
+            Some(secret_access_key),
+        )?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn hydrate_provider_credentials(mut config: CloudProviderConfig) -> CloudProviderConfig {
+    if config.access_key_id.is_none() {
+        config.access_key_id = crate::openclaw::config::keychain::get_key(
+            &cloud_provider_credential_key(&config, "access_key_id"),
+        );
+    }
+    if config.secret_access_key.is_none() {
+        config.secret_access_key = crate::openclaw::config::keychain::get_key(
+            &cloud_provider_credential_key(&config, "secret_access_key"),
+        );
+    }
+
+    config
+}
+
+pub(crate) fn cloud_provider_credential_key(config: &CloudProviderConfig, field: &str) -> String {
+    let endpoint = credential_key_segment(config.endpoint.as_deref().unwrap_or("default"));
+    let bucket = credential_key_segment(config.bucket.as_deref().unwrap_or("default"));
+    let root = credential_key_segment(config.root.as_deref().unwrap_or("default"));
+    format!(
+        "{CLOUD_CREDENTIAL_KEY_PREFIX}.{}.{}.{}.{}.{}",
+        credential_key_segment(&config.provider_type),
+        endpoint,
+        bucket,
+        root,
+        field
+    )
+}
+
+fn credential_key_segment(value: &str) -> String {
+    let mut segment = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            segment.push(ch.to_ascii_lowercase());
+        } else {
+            segment.push('_');
+        }
+    }
+    let trimmed = segment.trim_matches('_');
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn credential_test_config() -> CloudProviderConfig {
+        CloudProviderConfig {
+            provider_type: "s3".to_string(),
+            endpoint: Some("https://s3.example.com".to_string()),
+            bucket: Some("thin-bucket".to_string()),
+            region: Some("eu-central-1".to_string()),
+            access_key_id: Some("AKIA".to_string()),
+            secret_access_key: Some("secret".to_string()),
+            root: Some("thinclaw-desktop/".to_string()),
+        }
+    }
+
+    #[test]
+    fn cloud_credential_key_is_stable_without_secret_fields() {
+        let full = credential_test_config();
+        let sanitized = full.sanitized_for_persistence();
+
+        assert_eq!(
+            cloud_provider_credential_key(&full, "secret_access_key"),
+            cloud_provider_credential_key(&sanitized, "secret_access_key")
+        );
+        assert!(cloud_provider_credential_key(&full, "access_key_id")
+            .starts_with("cloud_provider.s3.https___s3_example_com.thin_bucket"));
     }
 }

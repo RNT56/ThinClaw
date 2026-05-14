@@ -3,7 +3,7 @@ use serde::Serialize;
 
 /// Trait for reporting sandbox/tool activity back to the host application.
 /// The host (e.g. Orchestrator) implements this to convert events into
-/// frontend-visible status updates (like `<scrappy_status>` XML tags).
+/// frontend-visible status updates (like `<thinclaw_status>` XML tags).
 #[async_trait]
 pub trait StatusReporter: Send + Sync {
     async fn report(&self, event: ToolEvent);
@@ -13,7 +13,7 @@ pub trait StatusReporter: Send + Sync {
 pub enum ToolEvent {
     /// Simple status update (e.g., "Connecting to Finance Server...")
     Status { msg: String, icon: Option<String> },
-    /// Detailed tool activity (renders as <scrappy_status>)
+    /// Detailed tool activity (renders as <thinclaw_status>)
     ToolActivity {
         tool_name: String,
         input_summary: String,

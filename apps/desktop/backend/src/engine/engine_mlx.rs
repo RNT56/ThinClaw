@@ -5,7 +5,7 @@
 //! as an OpenAI-compatible HTTP server on a dynamic port.
 //!
 //! ## First-launch bootstrap:
-//! 1. Creates `~/.scrappy/mlx-env/` via `uv venv`
+//! 1. Creates `mlx-env/` under the ThinClaw Desktop app data directory via `uv venv`
 //! 2. Installs `mlx_lm` via `uv pip install`
 //! 3. Subsequent starts skip steps 1-2
 //!
@@ -61,7 +61,7 @@ impl MlxEngine {
     }
 
     /// Get the path to the uv binary.
-    /// Falls back to checking $PATH, then ~/.scrappy/uv.
+    /// Falls back to checking $PATH, then the ThinClaw Desktop uv cache.
     fn uv_bin(&self) -> Option<String> {
         // 1. Use the explicitly set sidecar path (set by EngineManager::create_engine)
         if let Some(p) = self
@@ -85,11 +85,18 @@ impl MlxEngine {
             }
         }
 
-        // 3. Check auto-download location
+        // 3. Check auto-download locations. Prefer the ThinClaw Desktop cache,
+        // but keep the legacy Scrappy cache readable for rollback.
         if let Ok(home) = std::env::var("HOME") {
-            let local_uv = PathBuf::from(home).join(".scrappy").join("uv");
+            let home = PathBuf::from(home);
+            let local_uv = home.join(".thinclaw-desktop").join("uv");
             if local_uv.exists() {
                 return Some(local_uv.to_string_lossy().into_owned());
+            }
+
+            let legacy_uv = home.join(".scrappy").join("uv");
+            if legacy_uv.exists() {
+                return Some(legacy_uv.to_string_lossy().into_owned());
             }
         }
 
@@ -388,7 +395,7 @@ impl MlxEngine {
         };
 
         // Already patched?
-        if source.contains("PATCH (scrappy)") {
+        if source.contains("PATCH (thinclaw)") || source.contains("PATCH (scrappy)") {
             println!("[mlx] Patch: attention_mask fix already applied");
             return;
         }
@@ -398,7 +405,7 @@ impl MlxEngine {
         let needle = "                    vision_inputs[key] = mx.array(value)\n";
         let patch = r#"                    vision_inputs[key] = mx.array(value)
 
-            # PATCH (scrappy): mlx-vlm's stream_generate expects "mask" but the
+            # PATCH (thinclaw): mlx-vlm's stream_generate expects "mask" but the
             # HuggingFace processor returns "attention_mask". Without this
             # rename, Gemma 3 crashes with expand_dims(NoneType, int).
             if "attention_mask" in vision_inputs and "mask" not in vision_inputs:
@@ -446,7 +453,9 @@ impl MlxEngine {
         };
 
         // Already patched?
-        if source.contains("PATCH (scrappy): normalize list content") {
+        if source.contains("PATCH (thinclaw): normalize list content")
+            || source.contains("PATCH (scrappy): normalize list content")
+        {
             println!("[mlx] Patch: content normalization already applied");
             return;
         }
@@ -458,8 +467,8 @@ impl MlxEngine {
                 continue"#;
 
         let patch = r#"            if message.role in ["system", "assistant"]:
-                # PATCH (scrappy): normalize list content to plain text.
-                # IronClaw sends multipart content format (list of ContentPart
+                # PATCH (thinclaw): normalize list content to plain text.
+                # ThinClaw sends multipart content format (list of ContentPart
                 # objects) for all roles. Without normalization, Pydantic objects
                 # cause "'ChatCompletionContentPartText' object is not subscriptable".
                 msg_content = message.content
@@ -501,7 +510,7 @@ impl MlxEngine {
         Ok(port)
     }
 
-    /// Auto-download `uv` from GitHub releases into `~/.scrappy/uv`.
+    /// Auto-download `uv` from GitHub releases into `~/.thinclaw-desktop/uv`.
     ///
     /// This is called during `bootstrap()` if no `uv` binary was found.
     /// The download is a one-time operation — subsequent bootstraps find
@@ -530,10 +539,10 @@ impl MlxEngine {
         let dest_dir = std::env::var("HOME")
             .map(PathBuf::from)
             .map_err(|_| "HOME not set")?
-            .join(".scrappy");
+            .join(".thinclaw-desktop");
 
         std::fs::create_dir_all(&dest_dir)
-            .map_err(|e| format!("Failed to create ~/.scrappy: {}", e))?;
+            .map_err(|e| format!("Failed to create ~/.thinclaw-desktop: {}", e))?;
 
         let dest_path = dest_dir.join("uv");
         let archive_path = dest_dir.join(asset);

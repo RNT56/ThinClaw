@@ -26,7 +26,7 @@ pub type McpResult<T> = Result<T, McpError>;
 
 #[derive(Debug, Clone)]
 pub struct McpConfig {
-    /// Base URL of the FastAPI MCP server (e.g. "https://api.scrappy.dev")
+    /// Base URL of the FastAPI MCP server (e.g. "https://api.thinclaw.dev")
     pub base_url: String,
     /// JWT bearer token
     pub auth_token: String,

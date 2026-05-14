@@ -132,6 +132,13 @@ fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
         }
     }
 
+    let mut lines = source.lines().map(str::trim_end).collect::<Vec<_>>();
+    while matches!(lines.last(), Some(line) if line.is_empty()) {
+        lines.pop();
+    }
+    source = lines.join("\n");
+    source.push('\n');
+
     if source != original {
         std::fs::write(path, source)?;
     }
@@ -162,13 +169,13 @@ fn migrate_legacy_app_data(app_data_dir: &std::path::Path) {
             legacy = %legacy_dir.display(),
             target = %app_data_dir.display(),
             error = %error,
-            "Failed to migrate legacy Scrappy app data"
+            "Failed to import legacy desktop app data"
         );
     } else {
         tracing::info!(
             legacy = %legacy_dir.display(),
             target = %app_data_dir.display(),
-            "Migrated legacy Scrappy app data to ThinClaw Desktop"
+            "Imported legacy desktop app data to ThinClaw Desktop"
         );
     }
 }
@@ -411,10 +418,10 @@ pub fn run() {
                 eprintln!("[main] Integrity Check Failed: {}", e);
             }
 
-            // Init OpenClaw Config (Critical for paths to work before gateway start)
+            // Init ThinClaw config (critical for paths to work before engine start)
             let openclaw_state = handle.state::<openclaw::OpenClawManager>();
             if let Err(e) = openclaw_state.init_config().await {
-                eprintln!("[main] Failed to init OpenClaw config: {}", e);
+                eprintln!("[main] Failed to init ThinClaw config: {}", e);
             } else {
                 // IronClaw is in-process — no separate gateway to auto-start
             }

@@ -1,11 +1,11 @@
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use specta::Type;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
-use specta::Type;
 
 #[derive(Serialize, Clone, Type)]
 pub struct ModelFile {
@@ -55,9 +55,10 @@ fn scan_models_recursive(
                 let path = entry.path();
                 if file_type.is_dir() {
                     // Skip standard directory and hidden dirs
-                    if path.file_name().is_some_and(|n| {
-                        n != "standard" && !n.to_string_lossy().starts_with(".")
-                    }) {
+                    if path
+                        .file_name()
+                        .is_some_and(|n| n != "standard" && !n.to_string_lossy().starts_with("."))
+                    {
                         // Check if this directory IS a model bundle
                         // (contains config.json + .safetensors or .bin weight files)
                         if is_model_bundle_dir(&path) {
@@ -175,7 +176,7 @@ pub async fn list_models(app: AppHandle) -> Result<Vec<ModelFile>, String> {
     for category in ["LLM", "Diffusion", "Embedding", "STT", "TTS"] {
         let cat_dir = models_dir.join(category);
         if !cat_dir.exists() {
-             let _ = fs::create_dir_all(&cat_dir);
+            let _ = fs::create_dir_all(&cat_dir);
         }
     }
 
@@ -232,7 +233,8 @@ fn engine_filter_models(models: Vec<ModelFile>) -> Vec<ModelFile> {
                 if !p.is_file() {
                     return false;
                 }
-                let ext_ok = p.extension()
+                let ext_ok = p
+                    .extension()
                     .map(|e| e.to_string_lossy().to_ascii_lowercase() == "gguf")
                     .unwrap_or(false);
                 if !ext_ok {
@@ -240,7 +242,8 @@ fn engine_filter_models(models: Vec<ModelFile>) -> Vec<ModelFile> {
                 }
                 // Exclude mmproj companion files — they contain "mmproj" in the filename
                 // (convention used across all llava/minicpmv/idefics models)
-                let is_mmproj = p.file_name()
+                let is_mmproj = p
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_ascii_lowercase().contains("mmproj"))
                     .unwrap_or(false);
                 !is_mmproj
@@ -311,7 +314,8 @@ pub async fn download_model(
             if let Some(token) = store.huggingface_token() {
                 if !token.trim().is_empty() {
                     println!("[download_model] Using HF Token from SecretStore for authentication");
-                    request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
+                    request_builder =
+                        request_builder.header("Authorization", format!("Bearer {}", token));
                 }
             }
         }
@@ -488,7 +492,7 @@ pub async fn open_models_folder(app: AppHandle) -> Result<(), String> {
     for category in ["LLM", "Diffusion", "Embedding", "STT", "TTS"] {
         let cat_dir = models_dir.join(category);
         if !cat_dir.exists() {
-             let _ = fs::create_dir_all(&cat_dir);
+            let _ = fs::create_dir_all(&cat_dir);
         }
     }
 
@@ -527,7 +531,7 @@ pub async fn open_models_folder(app: AppHandle) -> Result<(), String> {
 pub async fn open_standard_models_folder(app: AppHandle) -> Result<(), String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let models_dir = app_data_dir.join("models");
-    let standard_dir = models_dir.join("Diffusion").join("standard");  // Updated path
+    let standard_dir = models_dir.join("Diffusion").join("standard"); // Updated path
 
     if !standard_dir.exists() {
         fs::create_dir_all(&standard_dir).map_err(|e| e.to_string())?;
@@ -578,7 +582,7 @@ pub async fn delete_local_model(app: AppHandle, filename: String) -> Result<(), 
 
     // Check if the file/folder exists before canonicalizing
     if !file_path.exists() {
-         return Err(format!("File not found: {}", filename));
+        return Err(format!("File not found: {}", filename));
     }
 
     let canonical_target = file_path.canonicalize().map_err(|e| e.to_string())?;
@@ -697,7 +701,10 @@ pub fn get_standard_assets() -> Vec<StandardAsset> {
 #[specta::specta]
 pub async fn check_missing_standard_assets(app: AppHandle) -> Result<Vec<StandardAsset>, String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let standard_dir = app_data_dir.join("models").join("Diffusion").join("standard");
+    let standard_dir = app_data_dir
+        .join("models")
+        .join("Diffusion")
+        .join("standard");
 
     let mut missing = Vec::new();
     let assets = get_standard_assets();
@@ -720,13 +727,19 @@ pub async fn download_standard_asset(
     state: State<'_, DownloadManager>,
     filename: String,
 ) -> Result<String, String> {
-
     // Find asset
     let assets = get_standard_assets();
-    let asset = assets.iter().find(|a| a.filename == filename).ok_or("Asset not found in standard list")?;
+    let asset = assets
+        .iter()
+        .find(|a| a.filename == filename)
+        .ok_or("Asset not found in standard list")?;
 
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let target_dir = app_data_dir.join("models").join("Diffusion").join("standard").join(&asset.category);
+    let target_dir = app_data_dir
+        .join("models")
+        .join("Diffusion")
+        .join("standard")
+        .join(&asset.category);
 
     if !target_dir.exists() {
         fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
@@ -753,7 +766,7 @@ pub async fn download_standard_asset(
     {
         let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
         if downloads.contains_key(&filename) {
-             return Err("Download already in progress".to_string());
+            return Err("Download already in progress".to_string());
         }
         downloads.insert(filename.clone(), notify.clone());
     }
@@ -772,7 +785,8 @@ pub async fn download_standard_asset(
             if let Some(token) = store.huggingface_token() {
                 if !token.trim().is_empty() {
                     println!("[download_standard] Using HF Token for authentication");
-                    request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
+                    request_builder =
+                        request_builder.header("Authorization", format!("Bearer {}", token));
                 }
             }
         }
@@ -781,9 +795,9 @@ pub async fn download_standard_asset(
     let res = match request_builder.send().await {
         Ok(r) => r.error_for_status().map_err(|e| e.to_string())?,
         Err(e) => {
-             let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-             downloads.remove(&filename);
-             return Err(e.to_string());
+            let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+            downloads.remove(&filename);
+            return Err(e.to_string());
         }
     };
 
@@ -795,48 +809,52 @@ pub async fn download_standard_asset(
     let mut last_percentage = 0.0;
 
     loop {
-         tokio::select! {
-            _ = notify.notified() => {
-                 drop(file);
-                 let _ = fs::remove_file(&dest_path);
-                 let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
-                 downloads.remove(&filename);
-                 return Err("Download cancelled".to_string());
-            }
-            chunk_option = stream.next() => {
-                match chunk_option {
-                    Some(chunk_res) => {
-                         let chunk = chunk_res.map_err(|e| e.to_string())?;
-                         file.write_all(&chunk).map_err(|e| e.to_string())?;
-                         downloaded += chunk.len() as u64;
+        tokio::select! {
+           _ = notify.notified() => {
+                drop(file);
+                let _ = fs::remove_file(&dest_path);
+                let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
+                downloads.remove(&filename);
+                return Err("Download cancelled".to_string());
+           }
+           chunk_option = stream.next() => {
+               match chunk_option {
+                   Some(chunk_res) => {
+                        let chunk = chunk_res.map_err(|e| e.to_string())?;
+                        file.write_all(&chunk).map_err(|e| e.to_string())?;
+                        downloaded += chunk.len() as u64;
 
-                         let now = std::time::Instant::now();
-                         let percentage = if total_size > 0 { (downloaded as f64 / total_size as f64) * 100.0 } else { 0.0 };
+                        let now = std::time::Instant::now();
+                        let percentage = if total_size > 0 { (downloaded as f64 / total_size as f64) * 100.0 } else { 0.0 };
 
-                         if (percentage - last_percentage >= 0.1) || now.duration_since(last_emit_time).as_millis() > 200 {
-                             last_percentage = percentage;
-                             last_emit_time = now;
-                             app.emit("download_progress", DownloadProgress {
-                                 filename: filename.clone(),
-                                 total: total_size,
-                                 downloaded,
-                                 percentage,
-                             }).ok();
-                         }
-                    }
-                    None => break,
-                }
-            }
-         }
+                        if (percentage - last_percentage >= 0.1) || now.duration_since(last_emit_time).as_millis() > 200 {
+                            last_percentage = percentage;
+                            last_emit_time = now;
+                            app.emit("download_progress", DownloadProgress {
+                                filename: filename.clone(),
+                                total: total_size,
+                                downloaded,
+                                percentage,
+                            }).ok();
+                        }
+                   }
+                   None => break,
+               }
+           }
+        }
     }
 
     // Finish
-    app.emit("download_progress", DownloadProgress {
-        filename: filename.clone(),
-        total: total_size,
-        downloaded,
-        percentage: 100.0,
-    }).ok();
+    app.emit(
+        "download_progress",
+        DownloadProgress {
+            filename: filename.clone(),
+            total: total_size,
+            downloaded,
+            percentage: 100.0,
+        },
+    )
+    .ok();
 
     {
         let mut downloads = state.downloads.lock().unwrap_or_else(|e| e.into_inner());
@@ -908,11 +926,15 @@ pub async fn get_remote_model_catalog(
     let entries = rows
         .into_iter()
         .map(|row| {
-             use sqlx::Row;
-             RemoteModelEntry {
+            use sqlx::Row;
+            RemoteModelEntry {
                 id: row.try_get("id").unwrap_or_default(),
                 name: row.try_get("name").unwrap_or_default(),
-                metadata: serde_json::from_str(&row.try_get::<String, _>("metadata").unwrap_or_else(|_| "{}".to_string())).unwrap_or_default(),
+                metadata: serde_json::from_str(
+                    &row.try_get::<String, _>("metadata")
+                        .unwrap_or_else(|_| "{}".to_string()),
+                )
+                .unwrap_or_default(),
                 local_version: row.try_get("local_version").ok(),
                 remote_version: row.try_get("remote_version").ok(),
                 last_checked_at: row.try_get("last_checked_at").ok(),

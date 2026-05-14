@@ -94,12 +94,14 @@ pub struct UserConfig {
     pub disabled_providers: Vec<String>,
 
     // --- MCP Integration ---
-    /// MCP server base URL (e.g. "https://api.scrappy.dev")
-    /// Falls back to SCRAPPY_MCP_URL env var if not set in config.
+    /// MCP server base URL (e.g. "https://api.thinclaw.dev")
+    /// Falls back to THINCLAW_MCP_URL, then legacy SCRAPPY_MCP_URL, if not set
+    /// in config.
     #[serde(default = "default_mcp_base_url")]
     pub mcp_base_url: Option<String>,
 
-    /// MCP JWT auth token. Falls back to SCRAPPY_MCP_TOKEN env var.
+    /// MCP JWT auth token. Falls back to THINCLAW_MCP_TOKEN, then legacy
+    /// SCRAPPY_MCP_TOKEN.
     #[serde(default = "default_mcp_auth_token")]
     pub mcp_auth_token: Option<String>,
 
@@ -234,7 +236,7 @@ fn default_false() -> bool {
     false
 }
 fn default_persona() -> String {
-    "scrappy".to_string()
+    "thinclaw".to_string()
 }
 fn default_memory_reservation() -> u32 {
     4
@@ -261,15 +263,24 @@ fn default_mcp_tool_result_max_chars() -> u32 {
 }
 
 fn default_mcp_base_url() -> Option<String> {
-    std::env::var("SCRAPPY_MCP_URL")
+    std::env::var("THINCLAW_MCP_URL")
+        .or_else(|_| std::env::var("SCRAPPY_MCP_URL"))
         .ok()
         .filter(|s| !s.is_empty())
 }
 
 fn default_mcp_auth_token() -> Option<String> {
-    std::env::var("SCRAPPY_MCP_TOKEN")
+    std::env::var("THINCLAW_MCP_TOKEN")
+        .or_else(|_| std::env::var("SCRAPPY_MCP_TOKEN"))
         .ok()
         .filter(|s| !s.is_empty())
+}
+
+fn normalize_user_config(mut config: UserConfig) -> UserConfig {
+    if config.selected_persona == "scrappy" {
+        config.selected_persona = default_persona();
+    }
+    config
 }
 
 pub struct ConfigManager {
@@ -288,7 +299,7 @@ impl ConfigManager {
         let config = if config_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&config_path) {
                 let loaded: UserConfig = serde_json::from_str(&content).unwrap_or_default();
-                loaded
+                normalize_user_config(loaded)
             } else {
                 UserConfig::default()
             }
@@ -316,10 +327,11 @@ impl ConfigManager {
     }
 
     pub fn save_config(&self, new_config: &UserConfig) {
-        *self.config.lock().unwrap_or_else(|e| e.into_inner()) = new_config.clone();
+        let normalized = normalize_user_config(new_config.clone());
+        *self.config.lock().unwrap_or_else(|e| e.into_inner()) = normalized.clone();
         // Spawn an async write so we never block the Tokio thread-pool under
         // lock contention (the in-memory cache above is already updated).
-        if let Ok(json) = serde_json::to_string_pretty(new_config) {
+        if let Ok(json) = serde_json::to_string_pretty(&normalized) {
             let path = self.config_path.clone();
             tauri::async_runtime::spawn(async move {
                 let _ = tokio::fs::write(&path, json).await;
@@ -330,7 +342,8 @@ impl ConfigManager {
     pub fn reload(&self) {
         if let Ok(content) = std::fs::read_to_string(&self.config_path) {
             if let Ok(new_config) = serde_json::from_str(&content) {
-                *self.config.lock().unwrap_or_else(|e| e.into_inner()) = new_config;
+                *self.config.lock().unwrap_or_else(|e| e.into_inner()) =
+                    normalize_user_config(new_config);
             }
         }
     }
@@ -440,7 +453,7 @@ mod tests {
         assert!(cfg.knowledge_bits.is_empty());
         assert!(cfg.custom_personas.is_empty());
         assert!(!cfg.image_prompt_enhance_enabled);
-        assert_eq!(cfg.selected_persona, "scrappy");
+        assert_eq!(cfg.selected_persona, "thinclaw");
         assert!(cfg.selected_chat_provider.is_none());
         assert_eq!(cfg.memory_reservation_gb, 4);
         assert!(cfg.enable_memory_reservation);
@@ -455,6 +468,8 @@ mod tests {
     fn mcp_defaults_are_correct() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
+            std::env::remove_var("THINCLAW_MCP_URL");
+            std::env::remove_var("THINCLAW_MCP_TOKEN");
             std::env::remove_var("SCRAPPY_MCP_URL");
             std::env::remove_var("SCRAPPY_MCP_TOKEN");
         }
@@ -473,9 +488,31 @@ mod tests {
     }
 
     #[test]
-    fn mcp_defaults_read_from_env() {
+    fn mcp_defaults_read_from_thinclaw_env() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
+            std::env::set_var("THINCLAW_MCP_URL", "https://api.example.com");
+            std::env::set_var("THINCLAW_MCP_TOKEN", "tok_abc123");
+            std::env::remove_var("SCRAPPY_MCP_URL");
+            std::env::remove_var("SCRAPPY_MCP_TOKEN");
+        }
+        let cfg = UserConfig::default();
+        // Ensure cleanup even if assertion panics
+        unsafe {
+            std::env::remove_var("THINCLAW_MCP_URL");
+            std::env::remove_var("THINCLAW_MCP_TOKEN");
+        }
+
+        assert_eq!(cfg.mcp_base_url.as_deref(), Some("https://api.example.com"));
+        assert_eq!(cfg.mcp_auth_token.as_deref(), Some("tok_abc123"));
+    }
+
+    #[test]
+    fn mcp_defaults_read_from_legacy_env() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("THINCLAW_MCP_URL");
+            std::env::remove_var("THINCLAW_MCP_TOKEN");
             std::env::set_var("SCRAPPY_MCP_URL", "https://api.example.com");
             std::env::set_var("SCRAPPY_MCP_TOKEN", "tok_abc123");
         }
@@ -488,6 +525,16 @@ mod tests {
 
         assert_eq!(cfg.mcp_base_url.as_deref(), Some("https://api.example.com"));
         assert_eq!(cfg.mcp_auth_token.as_deref(), Some("tok_abc123"));
+    }
+
+    #[test]
+    fn legacy_scrappy_persona_is_normalized_for_new_writes() {
+        let cfg = UserConfig {
+            selected_persona: "scrappy".to_string(),
+            ..UserConfig::default()
+        };
+
+        assert_eq!(normalize_user_config(cfg).selected_persona, "thinclaw");
     }
 
     // -------------------------------------------------------------------------
@@ -523,7 +570,7 @@ mod tests {
     #[test]
     fn partial_json_with_missing_fields_uses_serde_defaults() {
         // Simulate a config file that predates the new mcp_cache_ttl_secs field.
-        let minimal_json = r#"{ "selected_persona": "scrappy" }"#;
+        let minimal_json = r#"{ "selected_persona": "thinclaw" }"#;
         let cfg: UserConfig = serde_json::from_str(minimal_json).expect("parse failed");
 
         // New fields should have their #[serde(default)] values
@@ -539,7 +586,7 @@ mod tests {
     fn make_manager_from_config(cfg: UserConfig) -> ConfigManager {
         ConfigManager {
             config: Mutex::new(cfg),
-            config_path: std::path::PathBuf::from("/tmp/scrappy_test_config.json"),
+            config_path: std::path::PathBuf::from("/tmp/thinclaw_desktop_test_config.json"),
         }
     }
 

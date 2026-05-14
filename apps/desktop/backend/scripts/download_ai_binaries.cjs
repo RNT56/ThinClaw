@@ -4,7 +4,18 @@ const https = require('https');
 const { execSync } = require('child_process');
 
 const binDir = path.join(__dirname, '..', 'bin');
-if (!fs.existsSync(binDir)) fs.mkdirSync(binDir, { recursive: true });
+const dryRun = process.argv.includes('--dry-run');
+const help = process.argv.includes('--help') || process.argv.includes('-h');
+
+if (help) {
+    console.log(`Usage: node backend/scripts/download_ai_binaries.cjs [--dry-run]
+
+Downloads AI sidecar binaries into backend/bin for the current desktop app.
+Currently this helper targets macOS ARM64 release artifacts.`);
+    process.exit(0);
+}
+
+if (!dryRun && !fs.existsSync(binDir)) fs.mkdirSync(binDir, { recursive: true });
 
 // Configuration for binaries
 const LLAMA_VERSION = 'b4618';
@@ -73,6 +84,13 @@ function extractZip(file, dest) {
 
 async function setup() {
     console.log("Setting up AI sidecar binaries for macOS ARM64...");
+
+    if (dryRun) {
+        for (const bin of binaries) {
+            console.log(`[dry-run] would download ${bin.name} from ${bin.url}`);
+        }
+        return;
+    }
 
     for (const bin of binaries) {
         const targetPath = path.join(binDir, bin.name);

@@ -10,20 +10,23 @@
 //! - `endpoint`: Host and port (e.g. `sftp://server.example.com:22`)
 //! - `access_key_id`: SSH username
 //! - `secret_access_key`: SSH password (or key passphrase)
-//! - `root`: Remote path prefix (default: `scrappy/`)
+//! - `root`: Remote path prefix (default: `thinclaw-desktop/`)
 
 use async_trait::async_trait;
 use opendal::services::Sftp;
 use opendal::Operator;
+use std::collections::HashSet;
 use tracing::{debug, info};
 
 use super::super::provider::{
-    CloudEntry, CloudError, CloudProvider, CloudProviderConfig, CloudStatus,
+    primary_object_root, should_read_legacy_object_root, CloudEntry, CloudError, CloudProvider,
+    CloudProviderConfig, CloudStatus, LEGACY_OBJECT_ROOT,
 };
 
 /// SFTP storage provider.
 pub struct SftpProvider {
     operator: Operator,
+    legacy_operator: Option<Operator>,
     endpoint: String,
 }
 
@@ -35,11 +38,36 @@ impl SftpProvider {
             .as_deref()
             .ok_or_else(|| CloudError::Provider("SFTP host:port is required".into()))?;
 
+        let root = primary_object_root(config).to_string();
+        let operator = Self::build_operator(config, &root)?;
+        let legacy_operator = if should_read_legacy_object_root(config) {
+            Some(Self::build_operator(config, LEGACY_OBJECT_ROOT)?)
+        } else {
+            None
+        };
+
+        info!(
+            "[cloud/sftp] Created SFTP provider: endpoint={}, root={}, legacy_read_fallback={}",
+            endpoint,
+            root,
+            legacy_operator.is_some()
+        );
+
+        Ok(Self {
+            operator,
+            legacy_operator,
+            endpoint: endpoint.to_string(),
+        })
+    }
+
+    fn build_operator(config: &CloudProviderConfig, root: &str) -> Result<Operator, CloudError> {
+        let endpoint = config
+            .endpoint
+            .as_deref()
+            .ok_or_else(|| CloudError::Provider("SFTP host:port is required".into()))?;
+
         let mut builder = Sftp::default();
         builder = builder.endpoint(endpoint);
-
-        // Root prefix (default: "scrappy/")
-        let root = config.root.as_deref().unwrap_or("scrappy/");
         builder = builder.root(root);
 
         // Authentication
@@ -58,19 +86,74 @@ impl SftpProvider {
             // as it requires interactive auth. SSH key is the recommended approach.
         }
 
-        let operator = Operator::new(builder)
+        Ok(Operator::new(builder)
             .map_err(|e| CloudError::Provider(format!("Failed to create SFTP operator: {}", e)))?
-            .finish();
+            .finish())
+    }
 
-        info!(
-            "[cloud/sftp] Created SFTP provider: endpoint={}, root={}",
-            endpoint, root
-        );
+    async fn read_key(operator: &Operator, key: &str) -> Result<Vec<u8>, CloudError> {
+        let data = operator.read(key).await.map_err(|e| {
+            if e.kind() == opendal::ErrorKind::NotFound {
+                CloudError::NotFound(format!("'{}' not found", key))
+            } else {
+                CloudError::DownloadFailed(format!("read '{}': {}", key, e))
+            }
+        })?;
 
-        Ok(Self {
-            operator,
-            endpoint: endpoint.to_string(),
-        })
+        Ok(data.to_vec())
+    }
+
+    async fn list_from(operator: &Operator, prefix: &str) -> Result<Vec<CloudEntry>, CloudError> {
+        let path = if prefix.is_empty() { "/" } else { prefix };
+
+        let entries_stream = operator.list(path).await.map_err(|e| {
+            if e.kind() == opendal::ErrorKind::NotFound {
+                CloudError::NotFound(format!("'{}' not found", path))
+            } else {
+                CloudError::Provider(format!("list '{}': {}", path, e))
+            }
+        })?;
+
+        let mut results = Vec::new();
+
+        for entry in entries_stream {
+            // Skip directories
+            if entry.path().ends_with('/') {
+                continue;
+            }
+            let meta = operator.stat(entry.path()).await;
+
+            match meta {
+                Ok(m) if m.is_file() => {
+                    results.push(CloudEntry {
+                        key: entry.path().to_string(),
+                        size: m.content_length(),
+                        last_modified: 0,
+                        checksum: None,
+                    });
+                }
+                _ => continue,
+            }
+        }
+
+        Ok(results)
+    }
+
+    async fn exists_in(operator: &Operator, key: &str) -> Result<bool, CloudError> {
+        match operator.stat(key).await {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(CloudError::Provider(format!("exists '{}': {}", key, e))),
+        }
+    }
+
+    fn merge_legacy_entries(primary: &mut Vec<CloudEntry>, legacy: Vec<CloudEntry>) {
+        let mut seen: HashSet<String> = primary.iter().map(|entry| entry.key.clone()).collect();
+        for entry in legacy {
+            if seen.insert(entry.key.clone()) {
+                primary.push(entry);
+            }
+        }
     }
 }
 
@@ -125,15 +208,18 @@ impl CloudProvider for SftpProvider {
     async fn get(&self, key: &str) -> Result<Vec<u8>, CloudError> {
         debug!("[cloud/sftp] GET {}", key);
 
-        let data = self.operator.read(key).await.map_err(|e| {
-            if e.kind() == opendal::ErrorKind::NotFound {
-                CloudError::NotFound(format!("'{}' not found", key))
-            } else {
-                CloudError::DownloadFailed(format!("read '{}': {}", key, e))
+        match Self::read_key(&self.operator, key).await {
+            Ok(data) => Ok(data),
+            Err(CloudError::NotFound(_)) => {
+                if let Some(legacy_operator) = &self.legacy_operator {
+                    debug!("[cloud/sftp] GET {} falling back to legacy root", key);
+                    Self::read_key(legacy_operator, key).await
+                } else {
+                    Err(CloudError::NotFound(format!("'{}' not found", key)))
+                }
             }
-        })?;
-
-        Ok(data.to_vec())
+            Err(e) => Err(e),
+        }
     }
 
     async fn delete(&self, key: &str) -> Result<(), CloudError> {
@@ -150,43 +236,35 @@ impl CloudProvider for SftpProvider {
 
         debug!("[cloud/sftp] LIST prefix={}", path);
 
-        let entries_stream = self
-            .operator
-            .list(path)
-            .await
-            .map_err(|e| CloudError::Provider(format!("list '{}': {}", path, e)))?;
+        let mut results = match Self::list_from(&self.operator, prefix).await {
+            Ok(entries) => entries,
+            Err(CloudError::NotFound(_)) => Vec::new(),
+            Err(e) => return Err(e),
+        };
 
-        let mut results = Vec::new();
-
-        for entry in entries_stream {
-            // Skip directories
-            if entry.path().ends_with('/') {
-                continue;
-            }
-            let meta = self.operator.stat(entry.path()).await;
-
-            match meta {
-                Ok(m) if m.is_file() => {
-                    results.push(CloudEntry {
-                        key: entry.path().to_string(),
-                        size: m.content_length(),
-                        last_modified: 0,
-                        checksum: None,
-                    });
-                }
-                _ => continue,
-            }
+        if let Some(legacy_operator) = &self.legacy_operator {
+            debug!("[cloud/sftp] LIST prefix={} includes legacy root", path);
+            let legacy_entries = match Self::list_from(legacy_operator, prefix).await {
+                Ok(entries) => entries,
+                Err(CloudError::NotFound(_)) => Vec::new(),
+                Err(e) => return Err(e),
+            };
+            Self::merge_legacy_entries(&mut results, legacy_entries);
         }
 
         Ok(results)
     }
 
     async fn exists(&self, key: &str) -> Result<bool, CloudError> {
-        match self.operator.stat(key).await {
-            Ok(_) => Ok(true),
-            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(false),
-            Err(e) => Err(CloudError::Provider(format!("exists '{}': {}", key, e))),
+        if Self::exists_in(&self.operator, key).await? {
+            return Ok(true);
         }
+
+        if let Some(legacy_operator) = &self.legacy_operator {
+            return Self::exists_in(legacy_operator, key).await;
+        }
+
+        Ok(false)
     }
 
     async fn usage(&self) -> Result<u64, CloudError> {

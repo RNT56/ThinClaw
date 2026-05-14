@@ -186,7 +186,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
         try {
             await openclaw.startOpenClawGateway();
             await fetchStatus();
-            toast.success('OpenClaw Gateway started');
+            toast.success('ThinClaw Gateway started');
         } catch (e) {
             console.error('Failed to start gateway:', e);
             setStatus(s => ({ ...s, gateway: 'error' }));
@@ -219,7 +219,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
         try {
             await openclaw.stopOpenClawGateway();
             await fetchStatus();
-            toast.info('OpenClaw Gateway stopped');
+            toast.info('ThinClaw Gateway stopped');
         } catch (e) {
             console.error('Failed to stop gateway:', e);
             toast.error('Failed to stop gateway', { description: String(e) });
@@ -297,7 +297,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                 <div className="relative z-10 flex flex-col justify-between h-full space-y-4">
                     <div className="space-y-1">
                         <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 uppercase tracking-[0.2em]">Connection Pulse</span>
-                        <h4 className="text-xl font-bold tracking-tight">OpenClawEngine Sync</h4>
+                        <h4 className="text-xl font-bold tracking-tight">ThinClaw Engine Sync</h4>
                     </div>
                     <div className="flex items-center justify-between">
                         <div className="flex flex-col">
@@ -479,7 +479,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             <Zap className="w-6 h-6 text-primary" />
                         </div>
                         <div>
-                            <h2 className="text-2xl font-bold tracking-tight">OpenClaw Gateway</h2>
+                            <h2 className="text-2xl font-bold tracking-tight">ThinClaw Gateway</h2>
                             <p className="text-sm text-muted-foreground font-medium">Runtime Management & Connection Orchestration</p>
                         </div>
                     </div>
@@ -507,7 +507,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 <Server className="w-6 h-6 text-indigo-500" />
                                 <div>
                                     <h4 className="font-bold text-lg">Remote Bridge Connection</h4>
-                                    <p className="text-xs text-muted-foreground">Linking your desktop client to an external OpenClawEngine instance.</p>
+                                    <p className="text-xs text-muted-foreground">Linking your desktop client to an external ThinClaw engine instance.</p>
                                 </div>
                             </div>
                             <button
@@ -1268,7 +1268,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             <div className="space-y-2">
                                 <h3 className="text-xl font-bold tracking-tight">Intelligence Ceiling</h3>
                                 <p className="text-sm text-muted-foreground leading-relaxed">
-                                    The OpenClaw engine requires <span className="text-foreground font-bold italic">32,768 tokens</span> of context to operate effectively.
+                                    The ThinClaw engine requires <span className="text-foreground font-bold italic">32,768 tokens</span> of context to operate effectively.
                                 </p>
                             </div>
                             <div className="p-4 rounded-2xl bg-muted/50 border border-border flex justify-between items-center text-xs font-bold">

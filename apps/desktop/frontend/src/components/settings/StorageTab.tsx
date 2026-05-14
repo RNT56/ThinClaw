@@ -148,7 +148,7 @@ function S3ConfigForm({
                 </div>
                 <div className="space-y-1.5">
                     <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">Bucket *</label>
-                    <input type="text" value={bucket} onChange={e => setBucket(e.target.value)} placeholder="my-scrappy-backup" required
+                    <input type="text" value={bucket} onChange={e => setBucket(e.target.value)} placeholder="my-thinclaw-backup" required
                         className="w-full h-10 rounded-xl border border-border/50 bg-background/50 px-4 text-sm font-mono focus:ring-2 focus:ring-primary/20 focus:border-primary/30 outline-none transition-all" />
                 </div>
                 <div className="space-y-1.5">
@@ -160,7 +160,7 @@ function S3ConfigForm({
 
             <InputField label="Access Key ID *" value={accessKey} onChange={setAccessKey} placeholder="AKIA..." required />
             <SecretField label="Secret Access Key *" value={secretKey} onChange={setSecretKey} show={showSecret} onToggle={() => setShowSecret(!showSecret)} placeholder="wJal..." required />
-            <InputField label="Root Path" value={root} onChange={setRoot} placeholder="scrappy-data" sublabel="(prefix inside bucket)" />
+            <InputField label="Root Path" value={root} onChange={setRoot} placeholder="thinclaw-data" sublabel="(prefix inside bucket)" />
 
             <TestButton testing={testing} disabled={!bucket || !accessKey || !secretKey} />
         </form>
@@ -199,7 +199,7 @@ function WebDavConfigForm({
             <InputField label="Username" value={username} onChange={setUsername} placeholder="admin" />
             <SecretField label="Password" value={password} onChange={setPassword} show={showPassword}
                 onToggle={() => setShowPassword(!showPassword)} placeholder="•••••" />
-            <InputField label="Root Path" value={root} onChange={setRoot} placeholder="scrappy/" sublabel="(folder on server)" />
+            <InputField label="Root Path" value={root} onChange={setRoot} placeholder="thinclaw/" sublabel="(folder on server)" />
             <TestButton testing={testing} disabled={!endpoint} />
         </form>
     );
@@ -238,7 +238,7 @@ function SftpConfigForm({
             <SecretField label="SSH Key Path" value={keyOrPassword} onChange={setKeyOrPassword}
                 show={showKey} onToggle={() => setShowKey(!showKey)} placeholder="~/.ssh/id_rsa"
                 sublabel="(path to private key)" />
-            <InputField label="Remote Path" value={root} onChange={setRoot} placeholder="scrappy/" sublabel="(directory on server)" />
+            <InputField label="Remote Path" value={root} onChange={setRoot} placeholder="thinclaw/" sublabel="(directory on server)" />
             <TestButton testing={testing} disabled={!endpoint} />
         </form>
     );

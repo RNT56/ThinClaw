@@ -120,16 +120,16 @@ function PageHeader({ page }: { page: SettingsPage }) {
         },
         'openclaw-slack': {
             title: "Slack Integration",
-            description: "Connect OpenClaw to your Slack workspace.",
+            description: "Connect ThinClaw to your Slack workspace.",
             icon: Settings
         },
         'openclaw-telegram': {
             title: "Telegram Integration",
-            description: "Connect OpenClaw to Telegram.",
+            description: "Connect ThinClaw to Telegram.",
             icon: Settings
         },
         'openclaw-gateway': {
-            title: "OpenClaw Gateway",
+            title: "ThinClaw Gateway",
             description: "Manage autonomy, connectivity and agent runtime.",
             icon: Radio
         },

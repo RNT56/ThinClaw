@@ -1,10 +1,14 @@
 use crate::rig_lib::RigManager;
-use scrappy_mcp_tools::events::{StatusReporter, ToolEvent};
-use scrappy_mcp_tools::sandbox::Sandbox;
 use serde_json::json;
 use std::sync::Arc;
+use thinclaw_desktop_tools::events::{StatusReporter, ToolEvent};
+use thinclaw_desktop_tools::sandbox::Sandbox;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+
+fn status_tag(attrs: &str) -> String {
+    format!("\n<thinclaw_status {attrs} />\n")
+}
 
 /// Extract the text-only portion from a message content string.
 ///
@@ -61,7 +65,7 @@ pub struct ToolPermissions {
 /// Configuration for the optional remote MCP server connection.
 #[derive(Clone, Debug, Default)]
 pub struct McpOrchestratorConfig {
-    /// Base URL of the FastAPI MCP server (e.g. "https://api.scrappy.dev")
+    /// Base URL of the FastAPI MCP server (e.g. "https://api.thinclaw.dev")
     pub mcp_base_url: Option<String>,
     /// JWT bearer token for the MCP server
     pub mcp_auth_token: Option<String>,
@@ -88,24 +92,20 @@ impl StatusReporter for OrchestratorStatusReporter {
                 tool_name,
                 input_summary,
                 status,
-            } => {
-                format!(
-                    "\n<scrappy_status type=\"tool_call\" name=\"{}\" query=\"{}\" status=\"{}\" />\n",
-                    tool_name, input_summary, status
-                )
-            }
+            } => status_tag(&format!(
+                "type=\"tool_call\" name=\"{}\" query=\"{}\" status=\"{}\"",
+                tool_name, input_summary, status
+            )),
             ToolEvent::Status { msg, .. } => {
-                format!("\n<scrappy_status type=\"thinking\" msg=\"{}\" />\n", msg)
+                status_tag(&format!("type=\"thinking\" msg=\"{}\"", msg))
             }
             ToolEvent::Progress {
                 percentage,
                 message,
-            } => {
-                format!(
-                    "\n<scrappy_status type=\"progress\" pct=\"{:.0}\" msg=\"{}\" />\n",
-                    percentage, message
-                )
-            }
+            } => status_tag(&format!(
+                "type=\"progress\" pct=\"{:.0}\" msg=\"{}\"",
+                percentage, message
+            )),
         };
 
         if !xml_tag.is_empty() {
@@ -286,10 +286,16 @@ impl Orchestrator {
             let needs_precise_count = heuristic_tokens > (threshold_tokens as f32 * 0.8) as u32;
 
             let token_count_res = if needs_precise_count {
-                info!("[orchestrator] Heuristic estimate {} near threshold {}, performing precise count", heuristic_tokens, threshold_tokens);
+                info!(
+                    "[orchestrator] Heuristic estimate {} near threshold {}, performing precise count",
+                    heuristic_tokens, threshold_tokens
+                );
                 rig_clone.provider.count_tokens(check_history.clone()).await
             } else {
-                info!("[orchestrator] Heuristic token estimate: {} (threshold: {}), skipping precise count", heuristic_tokens, threshold_tokens);
+                info!(
+                    "[orchestrator] Heuristic token estimate: {} (threshold: {}), skipping precise count",
+                    heuristic_tokens, threshold_tokens
+                );
                 Ok(heuristic_tokens)
             };
 
@@ -325,9 +331,9 @@ impl Orchestrator {
             if should_summarize {
                 info!("[orchestrator] Starting summarization...");
                 let _ = tx
-                    .send(Ok(ProviderEvent::Content(
-                        "\n<scrappy_status type=\"summarizing\" />\n".into(),
-                    )))
+                    .send(Ok(ProviderEvent::Content(status_tag(
+                        "type=\"summarizing\"",
+                    ))))
                     .await;
 
                 // Identify chunk to summarize
@@ -339,9 +345,13 @@ impl Orchestrator {
 
                     // Prepare summarization prompt
                     let summary_prompt = format!(
-                             "Summarize the following conversation history into a concise paragraph. Capture key decisions, user preferences, and important context. \n\nHISTORY:\n{}",
-                             chunk_to_summarize.iter().map(|m| format!("{}: {}", m.role, m.content)).collect::<Vec<_>>().join("\n\n")
-                         );
+                        "Summarize the following conversation history into a concise paragraph. Capture key decisions, user preferences, and important context. \n\nHISTORY:\n{}",
+                        chunk_to_summarize
+                            .iter()
+                            .map(|m| format!("{}: {}", m.role, m.content))
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    );
 
                     // Call LLM for summary (Quick non-streaming call)
                     let summary_req = vec![json!({ "role": "user", "content": summary_prompt })];
@@ -380,7 +390,9 @@ impl Orchestrator {
                             .send(Ok(ProviderEvent::ContextUpdate(final_history.clone())))
                             .await;
                     } else {
-                        warn!("[orchestrator] Summarization failed (empty response). History truncated regardless to save context.");
+                        warn!(
+                            "[orchestrator] Summarization failed (empty response). History truncated regardless to save context."
+                        );
                         let _ = tx
                             .send(Ok(ProviderEvent::ContextUpdate(final_history.clone())))
                             .await;
@@ -422,7 +434,11 @@ impl Orchestrator {
                 let mut visual_messages = Vec::new();
 
                 if !all_doc_ids.is_empty() || project_id_clone.is_some() {
-                    let _ = tx.send(Ok(ProviderEvent::Content("\n<scrappy_status type=\"rag_search\" query=\"Retrieving context...\" />\n".into()))).await;
+                    let _ = tx
+                        .send(Ok(ProviderEvent::Content(status_tag(
+                            "type=\"rag_search\" query=\"Retrieving context...\"",
+                        ))))
+                        .await;
 
                     if let Some(app) = &rig_clone.app_handle {
                         use tauri::Manager;
@@ -497,9 +513,7 @@ impl Orchestrator {
 
                 // Always start with feedback
                 let _ = tx
-                    .send(Ok(ProviderEvent::Content(
-                        "\n<scrappy_status type=\"thinking\" />\n".into(),
-                    )))
+                    .send(Ok(ProviderEvent::Content(status_tag("type=\"thinking\""))))
                     .await;
 
                 // 2. Manual Conversation Assembly
@@ -835,9 +849,7 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
 
         // Thinking status
         let _ = tx
-            .send(Ok(ProviderEvent::Content(
-                "\n<scrappy_status type=\"thinking\" />\n".into(),
-            )))
+            .send(Ok(ProviderEvent::Content(status_tag("type=\"thinking\""))))
             .await;
 
         // ReAct loop
@@ -882,7 +894,9 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
                         ));
                     }
                 }
-                info!("[orchestrator] Last turn — injected synthesis instruction into existing message");
+                info!(
+                    "[orchestrator] Last turn — injected synthesis instruction into existing message"
+                );
             }
 
             use futures::StreamExt;
@@ -934,9 +948,9 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
                                 code_detected = true;
                                 if buffer.ends_with("<rhai_code>") {
                                     let _ = tx
-                                        .send(Ok(ProviderEvent::Content(
-                                            "\n<scrappy_status type=\"thinking\" />\n".into(),
-                                        )))
+                                        .send(Ok(ProviderEvent::Content(status_tag(
+                                            "type=\"thinking\"",
+                                        ))))
                                         .await;
                                 }
                             } else if !code_detected {
@@ -997,10 +1011,9 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
                     );
 
                     let _ = tx
-                        .send(Ok(ProviderEvent::Content(
-                            "\n<scrappy_status type=\"tool_call\" query=\"Executing script...\" />\n"
-                                .into(),
-                        )))
+                        .send(Ok(ProviderEvent::Content(status_tag(
+                            "type=\"tool_call\" query=\"Executing script...\"",
+                        ))))
                         .await;
 
                     match sandbox.execute(script) {
@@ -1043,9 +1056,16 @@ If a script fails, the error message will appear in <tool_result>. Fix your scri
                                 "role": "user",
                                 "content": format!("<tool_result>\n{}\n</tool_result>", summarized_output)
                             }));
-                            eprintln!("[DEBUG tool_result] Injected {} chars into conversation. Total messages: {}", summarized_output.len(), conversation.len());
+                            eprintln!(
+                                "[DEBUG tool_result] Injected {} chars into conversation. Total messages: {}",
+                                summarized_output.len(),
+                                conversation.len()
+                            );
                             code_executed = true;
-                            info!("[orchestrator] Tool result injected. Conversation now has {} messages.", conversation.len());
+                            info!(
+                                "[orchestrator] Tool result injected. Conversation now has {} messages.",
+                                conversation.len()
+                            );
                         }
                         Err(e) => {
                             warn!("[orchestrator] Script error: {}", e);

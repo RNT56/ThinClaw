@@ -203,9 +203,9 @@ describe('PageHeader content', () => {
         await waitFor(() => expect(screen.getByRole('heading', { name: /Model Management/i })).toBeInTheDocument());
     });
 
-    it('shows "OpenClaw Gateway" heading on the gateway page', async () => {
+    it('shows "ThinClaw Gateway" heading on the gateway page', async () => {
         renderPage('openclaw-gateway');
-        await waitFor(() => expect(screen.getByRole('heading', { name: /OpenClaw Gateway/i })).toBeInTheDocument());
+        await waitFor(() => expect(screen.getByRole('heading', { name: /ThinClaw Gateway/i })).toBeInTheDocument());
     });
 
     it('shows "API Secrets" heading on the secrets page', async () => {

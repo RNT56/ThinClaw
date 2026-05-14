@@ -1,4 +1,4 @@
-//! Conversion layer: IronClaw StatusUpdate → Scrappy UiEvent
+//! Conversion layer: IronClaw StatusUpdate → ThinClaw Desktop UiEvent
 //!
 //! IronClaw's Channel trait receives StatusUpdate variants during a turn.
 //! This module converts them to UiEvent variants that the frontend consumes.
@@ -9,7 +9,7 @@ use serde_json::Value;
 use super::sanitizer::strip_llm_tokens;
 use super::ui_types::UiEvent;
 
-/// Convert an IronClaw `StatusUpdate` to a Scrappy `UiEvent`.
+/// Convert an IronClaw `StatusUpdate` to a ThinClaw Desktop `UiEvent`.
 ///
 /// The `session_key` and `run_id` are injected from the channel's routing
 /// metadata (extracted from IncomingMessage::metadata).

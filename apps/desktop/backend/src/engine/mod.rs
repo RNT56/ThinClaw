@@ -1,6 +1,6 @@
 //! Multi-engine inference abstraction.
 //!
-//! Each build of Scrappy targets **one** inference engine per platform
+//! Each ThinClaw Desktop build targets **one** inference engine per platform
 //! (determined by Cargo feature flags at compile time). This module provides
 //! the `InferenceEngine` trait that all engines implement, plus the
 //! `get_active_engine_info` Tauri command that tells the frontend which
@@ -314,7 +314,8 @@ impl EngineManager {
     /// 1. `backend/bin/uv-{target-triple}` (dev builds — compile-time CARGO_MANIFEST_DIR)
     /// 2. Next to the app executable (production Tauri bundles)
     /// 3. `uv` on system PATH
-    /// 4. `~/.scrappy/uv` (auto-downloaded fallback)
+    /// 4. `~/.thinclaw-desktop/uv` (auto-downloaded fallback)
+    /// 5. `~/.scrappy/uv` (legacy readable fallback)
     ///
     /// If none found, returns `None` — the engine will auto-download in `bootstrap()`.
     #[allow(dead_code)]
@@ -354,12 +355,19 @@ impl EngineManager {
             }
         }
 
-        // 4. Check ~/.scrappy/uv (auto-download location)
+        // 4. Check ~/.thinclaw-desktop/uv (auto-download location)
         if let Ok(home) = std::env::var("HOME") {
-            let local_uv = PathBuf::from(home).join(".scrappy").join("uv");
+            let home = PathBuf::from(home);
+            let local_uv = home.join(".thinclaw-desktop").join("uv");
             if local_uv.exists() {
                 println!("[engine] Found local uv at {:?}", local_uv);
                 return Some(local_uv);
+            }
+
+            let legacy_uv = home.join(".scrappy").join("uv");
+            if legacy_uv.exists() {
+                println!("[engine] Found legacy local uv at {:?}", legacy_uv);
+                return Some(legacy_uv);
             }
         }
 

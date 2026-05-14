@@ -240,7 +240,7 @@ pub async fn openclaw_get_sessions(
 
         session_list.push(OpenClawSession {
             session_key: "agent:main".to_string(),
-            title: assistant.title.or(Some("OpenClaw Core".to_string())),
+            title: assistant.title.or(Some("ThinClaw Core".to_string())),
             updated_at_ms: Some(updated_ms),
             source: Some("system".to_string()),
         });
@@ -272,7 +272,7 @@ pub async fn openclaw_get_sessions(
             0,
             OpenClawSession {
                 session_key: "agent:main".to_string(),
-                title: Some("OpenClaw Core".to_string()),
+                title: Some("ThinClaw Core".to_string()),
                 updated_at_ms: Some(now),
                 source: Some("system".to_string()),
             },
@@ -858,19 +858,23 @@ pub async fn openclaw_clear_memory(
                 }
             }
 
-            // ── 4b. Wipe default ~/Scrappy/ workspace ────────────────────
+            // ── 4b. Wipe default ThinClaw workspace ──────────────────────
             // The engine resolves this at runtime in build_inner() but never
             // persists it to cfg.workspace_root, so the block above misses it.
             // On factory reset we must wipe it so agents start clean.
-            let default_scrappy = std::env::var("HOME")
-                .map(|h| std::path::PathBuf::from(h).join("Scrappy"))
-                .unwrap_or_else(|_| std::path::PathBuf::from("Scrappy"));
-            if default_scrappy.exists() && default_scrappy != agent_workspace {
-                if let Err(e) = std::fs::remove_dir_all(&default_scrappy) {
-                    tracing::warn!("[openclaw] Failed to wipe ~/Scrappy/: {}", e);
+            let default_thinclaw = std::env::var("HOME")
+                .map(|h| {
+                    std::path::PathBuf::from(h)
+                        .join("ThinClaw")
+                        .join("agent_workspace")
+                })
+                .unwrap_or_else(|_| std::path::PathBuf::from("agent_workspace"));
+            if default_thinclaw.exists() && default_thinclaw != agent_workspace {
+                if let Err(e) = std::fs::remove_dir_all(&default_thinclaw) {
+                    tracing::warn!("[openclaw] Failed to wipe ThinClaw workspace: {}", e);
                 } else {
-                    let _ = std::fs::create_dir_all(&default_scrappy);
-                    info!("[openclaw] Wiped ~/Scrappy/ workspace directory");
+                    let _ = std::fs::create_dir_all(&default_thinclaw);
+                    info!("[openclaw] Wiped ThinClaw workspace directory");
                 }
             }
 

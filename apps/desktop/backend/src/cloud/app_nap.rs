@@ -78,9 +78,13 @@ pub use platform::AppNapGuard;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static APP_NAP_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_app_nap_guard_lifecycle() {
+        let _guard_lock = APP_NAP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         // Before: not active
         assert!(!AppNapGuard::is_active());
 
@@ -98,6 +102,7 @@ mod tests {
 
     #[test]
     fn test_multiple_guards() {
+        let _guard_lock = APP_NAP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         let _g1 = AppNapGuard::begin("sync 1");
         let _g2 = AppNapGuard::begin("sync 2");
         // Both drop — should not panic

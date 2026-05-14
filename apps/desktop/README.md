@@ -4,7 +4,7 @@
 
 # ThinClaw Desktop: The ThinClaw Companion App
 
-ThinClaw Desktop is a professional, open-source AI cockpit designed for executive-level workflows, privacy-focused developers, and power users. Built on a high-performance **Tauri v2 / Rust** backend, it features a dual-engine agent architecture: the **OpenClaw** engine (powered by ThinClaw, an in-process Rust library) for autonomous tasks and a **Native Rust Agent (Rig)** for high-efficiency RAG and search.
+ThinClaw Desktop is a professional, open-source AI cockpit designed for executive-level workflows, privacy-focused developers, and power users. Built on a high-performance **Tauri v2 / Rust** backend, it features a dual-engine agent architecture: the **ThinClaw** engine for autonomous tasks and a **Native Rust Agent (Rig)** for high-efficiency RAG and search.
 
 ![ThinClaw Desktop App Preview](assets/app-preview.png)
 
@@ -45,13 +45,13 @@ npm run tauri dev
 
 ## Vision & Key Capabilities
 
-*   **OpenClaw Agent Architecture**: Full implementation of the OpenClaw streaming protocol, enabling agents to plan, execute tools, and reflect in real-time.
+*   **ThinClaw Agent Architecture**: Full implementation of the ThinClaw streaming protocol, enabling agents to plan, execute tools, and reflect in real-time.
 *   **Native Rust Agency (Rig)**: A high-performance agent built on `rig-core` for specialized RAG, deep web search, and visual asset generation.
-*   **Autonomous Agency**: The `OpenClaw Agent` ecosystem enables human-in-the-loop agents that can execute shell commands, manage files, and browse the web.
+*   **Autonomous Agency**: The ThinClaw agent ecosystem enables human-in-the-loop agents that can execute shell commands, manage files, and browse the web.
 *   **Custom Secrets & Privacy**: Securely manage Anthropic, OpenAI, Gemini, Groq, OpenRouter, and custom API keys with granular "Grant Access" controls.
 *   **Multi-Engine Inference**: Supports **llama.cpp** (Metal/CUDA), **MLX** (Apple Silicon), **vLLM** (CUDA), and **Ollama** as swappable local inference backends — selected at compile time via Cargo feature flags. Each engine exposes a unified OpenAI-compatible HTTP API.
 *   **HuggingFace Hub Discovery**: Live search of HuggingFace models filtered by the active engine, with GGUF quantization picker, auto-mmproj detection, and streamed downloads.
-*   **Standalone Gateway Support**: Connect to local OpenClaw sidecars or remote gateways for distributed agent control.
+*   **Standalone Gateway Support**: Connect to local ThinClaw sidecars or remote gateways for distributed agent control.
 *   **Imagine Studio**: A dedicated creative suite for image generation with custom bespoke icons, multiple provider support (Local Stable Diffusion, Gemini Imagen 3), and a high-performance integrated **Gallery** with real-time generation progress tracking, horizontal recent-generations strip, and settings restoration support.
 *   **MCP Server Integration**: Connect a custom FastAPI MCP server to extend the agent with remote tools — finance APIs, news feeds, domain-specific capabilities — via the Rhai script sandbox.
 *   **Voice I/O (TTS & STT)**: Native Text-to-Speech (Piper) and Speech-to-Text (Whisper) sidecars for fully voice-enabled conversations.
@@ -86,7 +86,7 @@ graph TD
     subgraph Frontend [React 19 Frontend - frontend/src/]
         UI[User Interface / Glassmorphism]
         State[State Mgmt / Hooks]
-        Stream[OpenClaw Stream Hook]
+        Stream[ThinClaw Stream Hook]
     end
 
     subgraph Backend [Rust Core - backend/src/]
@@ -100,7 +100,7 @@ graph TD
     subgraph Sidecars [Sidecar Processes]
         EngineManager[/EngineManager\]
         Llama[llama.cpp / MLX / vLLM / Ollama]
-        OpenClaw[OpenClaw / ThinClaw Agent \n In-Process Rust Library]
+        Claw[ThinClaw Agent \n In-Process Rust Library]
         Chromium[Chromium Web Scraper]
         Whisper[Whisper STT]
         TTS[Piper TTS]
@@ -117,13 +117,13 @@ graph TD
     Tauri -->|Spawns/Monitors| Sidecars
     Tauri <-->|Reads/Writes| Storage
     EngineManager -->|Manages| Llama
-    OpenClaw <-->|ACP WebSockets| UI
-    Gateway <-->|Remote/Local| OpenClaw
+    Claw <-->|ACP WebSockets| UI
+    Gateway <-->|Remote/Local| Claw
     RigAgent -->|Tools| Sidecars
     McpSandbox -->|HTTP/JWT| MCP[(External MCP Server)]
 ```
 
-### 1. The OpenClaw Engine (Powered by ThinClaw)
+### 1. The ThinClaw Engine
 The heart of ThinClaw Desktop's autonomous agency. Built on the **ThinClaw** Rust agent runtime, running **in-process** as a library crate — no Node.js sidecar, no WebSocket bridge:
 -   **Session Management**: Each conversation has a dedicated thread with persistent history.
 -   **Tool System**: Built-in tools for `exec` (shell), `file_io`, `browser`, `skill` extensions, and **MCP remote tools**.
@@ -137,14 +137,14 @@ A specialized agent engine built using **Rig**. It focuses on performance and re
 
 ---
 
-## OpenClaw Configuration & Lifecycle
+## ThinClaw Configuration & Lifecycle
 
-OpenClaw is highly configurable through a combination of system files and workspace-level markdown instructions.
+ThinClaw is highly configurable through a combination of system files and workspace-level markdown instructions.
 
 ### 1. System Infrastructure
 These files handle the mechanical aspects of the agent:
-- **`identity.json`**: (`$APP_DATA/OpenClaw/state/identity.json`) - Your persistent device ID, auth token, grant flags, and enabled provider/model lists. **Does not contain API keys** — those are stored in the macOS Keychain.
-- **`openclaw.json`**: Core runtime config defining the gateway port (default `18789`), model providers, and channel settings.
+- **`identity.json`**: Stores your persistent device ID, auth token, grant flags, and enabled provider/model lists. **Does not contain API keys** — those are stored in the macOS Keychain.
+- **Runtime config**: Core ThinClaw runtime config defining the gateway port (default `18789`), model providers, and channel settings. During alpha it is stored in the legacy-compatible `openclaw.json` file.
 
 ### 2. Workspace Markdown (The Agent's "Brain")
 The agent's personality and rules are defined by markdown files in its workspace. These are injected into the system prompt on session start:
@@ -162,7 +162,7 @@ The agent's personality and rules are defined by markdown files in its workspace
 ### 4. Management & Visibility
 - **Settings Tab**: Manage API keys, model selection, gateway connection modes, and customize your **Spotlight Global Shortcut**.
 - **Persona Editing**: Modify `.md` files in the workspace directory to refine the agent's behavior in real-time. For built-in personas, you can find the prompt definitions in `backend/src/personas.rs`.
-- **Logs/Transcripts**: Full interaction logs and tool histories are stored as JSONL in `OpenClaw/agents/main/sessions/`.
+- **Logs/Transcripts**: Full interaction logs and tool histories are stored as JSONL in the ThinClaw session directory.
 
 ### 5. Cloud Inference Providers
 ThinClaw Desktop features native integration with the world's most powerful inference engines:
@@ -180,7 +180,7 @@ Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key 
 ## Project Structure
 
 ### Backend (`backend/`)
--   `src/openclaw/`: OpenClaw / ThinClaw integration layer.
+-   `src/openclaw/`: ThinClaw integration layer.
     -   `commands/`: Tauri IPC command handlers (`gateway.rs`, `keys.rs`, `sessions.rs`, `rpc.rs`, etc.)
     -   `ironclaw_bridge.rs`: ThinClaw agent lifecycle — init, config, Agent construction, shutdown.
     -   `ironclaw_channel.rs`: `TauriChannel` bridging ThinClaw events to Tauri `emit()`.
@@ -200,12 +200,12 @@ Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key 
 -   `src/templates.rs`: Prompt templates (ChatML, Llama3, Mistral, **Gemma**, **Qwen**) used for model formatting.
 -   `src/tts.rs` / `src/stt.rs`: Text-to-Speech (Piper) and Speech-to-Text (Whisper) integration.
 -   `src/imagine.rs` / `src/image_gen.rs` / `src/images.rs`: Imagine Studio and image generation pipeline.
--   `scrappy-mcp-tools/`: Rust crate providing the MCP sandbox (Rhai scripts, tool discovery, HTTP client).
+-   MCP tools crate: Rust crate providing the MCP sandbox (Rhai scripts, tool discovery, HTTP client).
 -   `documentation/openclaw/`: Historical architectural deep-dives from the pre-ThinClaw integration era.
 
 ### Frontend (`frontend/src/`)
 -   `components/chat/`: The high-performance chat interface.
--   `components/openclaw/`: Visualizations for agent status and tool execution.
+-   `components/openclaw/`: Visualizations for ThinClaw status and tool execution.
 -   `components/imagine/`: Imagine Studio UI (gallery, prompt, style presets).
 -   `components/settings/`: Settings pages including `McpTab.tsx`, `SettingsSidebar.tsx`, `SettingsPages.tsx`.
 -   `hooks/use-openclaw-stream.ts`: Real-time agent event processing.
@@ -220,9 +220,9 @@ Templates are defined in `backend/src/templates.rs`. To add one:
 1.  Define a new `pub const` with your Jinja-like template (ChatML, Llama3, Mistral, Gemma, and Qwen formats already exist).
 2.  Add it to the renderer logic in the model manager (`src/model_manager.rs`).
 
-### Adding a New OpenClaw Skill
-Skills extend the **OpenClaw** agent (powered by ThinClaw):
-1.  Create a skill definition with a JSON schema in the OpenClaw skill directory.
+### Adding a New ThinClaw Skill
+Skills extend the **ThinClaw** agent:
+1.  Create a skill definition with a JSON schema in the ThinClaw skill directory.
 2.  Implement the `execute` logic.
 3.  The UI will automatically handle rendering based on the tool metadata.
 
@@ -234,7 +234,7 @@ Skills extend the **OpenClaw** agent (powered by ThinClaw):
 ### Adding an MCP Remote Tool
 1.  Expose a new endpoint on your FastAPI MCP server.
 2.  Connect the server URL and token in **Settings > MCP Server**.
-3.  The Rhai sandbox (`scrappy-mcp-tools/`) will auto-discover and expose the tool to the agent.
+3.  The Rhai sandbox will auto-discover and expose the tool to the agent.
 
 ---
 

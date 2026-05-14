@@ -1,4 +1,7 @@
-//! Tauri commands for OpenClaw integration
+//! Tauri commands for OpenClaw integration.
+//!
+//! The `openclaw_*` Tauri command names are kept as alpha compatibility IPC
+//! even when the implementation delegates to embedded IronClaw internals.
 //!
 //! Split into focused submodules:
 //! - `types`: Response/input structs

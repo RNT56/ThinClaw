@@ -242,7 +242,9 @@ pub async fn openclaw_spawn_session(
             // 5. Feed-back loop: silent notice into parent session context
             let notice = format!(
                 "[INTERNAL:SUB_AGENT_DONE] Sub-agent task finished.\nChild: {}\nStatus: {}\nResult: {}",
-                child_bg, status, preview.as_deref().unwrap_or("(none)"),
+                child_bg,
+                status,
+                preview.as_deref().unwrap_or("(none)"),
             );
             let _ = ironclaw::api::chat::send_message(agent, parent, &notice, false).await;
         }

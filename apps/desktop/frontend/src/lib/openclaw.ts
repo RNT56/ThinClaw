@@ -1502,7 +1502,7 @@ export async function triggerBootstrap(): Promise<void> {
 
 // ── Workspace path & Finder reveal ────────────────────────────────────────────
 
-/** Returns the local filesystem workspace root (e.g. ~/Scrappy). */
+/** Returns the local filesystem workspace root. */
 export async function getWorkspacePath(): Promise<string> {
     return safeInvoke('openclaw_get_workspace_path');
 }

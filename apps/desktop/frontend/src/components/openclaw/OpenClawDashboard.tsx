@@ -102,7 +102,7 @@ export function OpenClawDashboard() {
             <div className="flex items-center justify-between">
                 <div>
                     <h1 className="text-3xl font-bold tracking-tight">System Overview</h1>
-                    <p className="text-muted-foreground mt-1">Real-time health and status of your OpenClaw node.</p>
+                    <p className="text-muted-foreground mt-1">Real-time health and status of your ThinClaw node.</p>
                 </div>
                 <button
                     onClick={() => {
@@ -124,7 +124,7 @@ export function OpenClawDashboard() {
                 <div>
                     <h3 className="text-sm font-semibold text-amber-500">Experimental Feature</h3>
                     <p className="text-sm text-muted-foreground mt-1">
-                        The OpenClaw implementation in this application is currently in an <strong>alpha state</strong>.
+                        ThinClaw Desktop is currently in an <strong>alpha state</strong>.
                         Features may be unstable or incomplete. Please use with caution and report any issues you encounter.
                     </p>
                 </div>
@@ -264,7 +264,7 @@ export function OpenClawDashboard() {
                             Software Version
                         </h3>
                         <div className="flex items-center justify-between">
-                            <span className="text-xs text-muted-foreground">OpenClaw Core</span>
+                            <span className="text-xs text-muted-foreground">ThinClaw Core</span>
                             <span className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-mono">0.4.2-stable</span>
                         </div>
                         <div className="flex items-center justify-between mt-2">

@@ -19,7 +19,7 @@ pub(crate) struct TrayState {
 /// Set up the macOS/Windows/Linux system tray icon with menu items.
 pub fn setup_tray(app: &tauri::App) {
     let quit_i = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>);
-    let show_i = MenuItem::with_id(app, "show", "Show OpenClaw", true, None::<&str>);
+    let show_i = MenuItem::with_id(app, "show", "Show ThinClaw", true, None::<&str>);
 
     if let (Ok(quit_i), Ok(show_i)) = (quit_i, show_i) {
         let menu = Menu::with_items(app, &[&show_i, &quit_i]);
