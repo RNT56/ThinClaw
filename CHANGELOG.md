@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+## [0.14.0](https://github.com/RNT56/ThinClaw/releases/tag/v0.14.0) - 2026-05-14
+
+### Added
+
+- ComfyUI-backed media generation with native `image_generate`, `comfy_health`, `comfy_check_deps`, `comfy_run_workflow`, and approval-gated `comfy_manage` tools.
+- ComfyUI REST/WebSocket workflow execution, API-format workflow validation, output sanitization, dependency scanning, and bundled starter workflows.
+- Trusted `creative-comfyui` skill, ComfyUI configuration/settings, CLI commands, and documentation for local/cloud setup and generation.
+- Renderable generated-media artifacts in web gateway tool results.
+
 ## [0.13.7](https://github.com/RNT56/ThinClaw/releases/tag/v0.13.7) - 2026-04-24
 
 ### Added
