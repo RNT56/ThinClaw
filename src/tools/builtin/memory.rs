@@ -20,122 +20,36 @@ use uuid::Uuid;
 use crate::agent::session_search::{SessionSearchRender, SessionSearchService};
 use crate::context::JobContext;
 use crate::db::Database;
-use crate::identity::ConversationKind as IdentityConversationKind;
 use crate::llm::LlmProvider;
 use crate::tools::tool::{Tool, ToolError, ToolMetadata, ToolOutput, ToolRouteIntent, require_str};
 use crate::workspace::{SearchConfig, Workspace, paths};
+use thinclaw_tools::builtin::memory as memory_policy;
 
 /// Files the LLM may only APPEND to — never fully overwrite.
 ///
 /// Currently empty: IDENTITY.md was moved to freely-rewritable to prevent
 /// identity accretion during repeated bootstrap runs. If a file should be
 /// strictly append-only in the future, add it here.
-const APPEND_ONLY_IDENTITY_FILES: &[&str] = &[];
-
-/// Files protected from deletion through memory_delete.
-const DELETE_PROTECTED_FILES: &[&str] = &[paths::IDENTITY];
+const APPEND_ONLY_IDENTITY_FILES: &[&str] = memory_policy::APPEND_ONLY_IDENTITY_FILES;
 
 /// Files the agent may FULLY REWRITE (replace entire content, append: false).
 ///
 /// IDENTITY.md remains writable through memory_write because prompt_manage
 /// intentionally excludes it.
-const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] = &[paths::IDENTITY];
+const FREELY_REWRITABLE_IDENTITY_FILES: &[&str] = memory_policy::FREELY_REWRITABLE_IDENTITY_FILES;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MemoryScope {
-    Shared,
-    Actor,
-}
-
-fn split_scoped_target(target: &str) -> (Option<MemoryScope>, String) {
-    let trimmed = target.trim();
-    for (prefix, scope) in [
-        ("shared:", MemoryScope::Shared),
-        ("root:", MemoryScope::Shared),
-        ("household:", MemoryScope::Shared),
-        ("actor:", MemoryScope::Actor),
-    ] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            return (Some(scope), rest.trim().trim_start_matches('/').to_string());
-        }
-    }
-    (None, trimmed.to_string())
-}
-
-fn actor_scoped_path(actor_id: &str, path: &str) -> String {
-    if path.is_empty() {
-        paths::actor_root(actor_id)
-    } else if path.eq_ignore_ascii_case("memory") || path.eq_ignore_ascii_case(paths::MEMORY) {
-        paths::actor_memory(actor_id)
-    } else if path.eq_ignore_ascii_case(paths::USER) {
-        paths::actor_user(actor_id)
-    } else if path.eq_ignore_ascii_case("profile") || path.eq_ignore_ascii_case(paths::PROFILE) {
-        paths::actor_profile(actor_id)
-    } else if path.starts_with("actors/") {
-        path.to_string()
-    } else {
-        format!("{}/{}", paths::actor_root(actor_id), path)
-    }
-}
-
-fn shared_root_path(path: &str) -> String {
-    if path.eq_ignore_ascii_case("memory") {
-        paths::MEMORY.to_string()
-    } else if path.eq_ignore_ascii_case("heartbeat") {
-        paths::HEARTBEAT.to_string()
-    } else if path.eq_ignore_ascii_case("profile") || path.eq_ignore_ascii_case(paths::PROFILE) {
-        paths::PROFILE.to_string()
-    } else {
-        path.to_string()
-    }
-}
-
-fn job_conversation_kind(metadata: &serde_json::Value) -> IdentityConversationKind {
-    let kind = metadata
-        .get("conversation_kind")
-        .and_then(|v| v.as_str())
-        .or_else(|| metadata.get("chat_type").and_then(|v| v.as_str()))
-        .unwrap_or("direct")
-        .to_ascii_lowercase();
-    match kind.as_str() {
-        "group" | "channel" | "supergroup" => IdentityConversationKind::Group,
-        _ => IdentityConversationKind::Direct,
-    }
+fn job_conversation_kind(metadata: &serde_json::Value) -> memory_policy::MemoryConversationKind {
+    memory_policy::memory_conversation_kind(metadata)
 }
 
 fn resolve_memory_write_path(ctx: &JobContext, target: &str) -> (String, bool) {
-    let (explicit_scope, bare_target) = split_scoped_target(target);
     let actor_id = ctx
         .metadata
         .get("actor_id")
         .or_else(|| ctx.metadata.get("actor"))
         .and_then(|v| v.as_str())
         .or(ctx.actor_id.as_deref());
-    let direct_actor = job_conversation_kind(&ctx.metadata) == IdentityConversationKind::Direct
-        && actor_id.is_some();
-
-    match explicit_scope {
-        Some(MemoryScope::Shared) => (shared_root_path(&bare_target), false),
-        Some(MemoryScope::Actor) => {
-            let actor_id = actor_id.unwrap_or("unknown");
-            (actor_scoped_path(actor_id, &bare_target), true)
-        }
-        None if direct_actor
-            && (bare_target.eq_ignore_ascii_case("memory")
-                || bare_target.eq_ignore_ascii_case(paths::MEMORY)
-                || bare_target.eq_ignore_ascii_case(paths::USER)
-                || bare_target.eq_ignore_ascii_case("profile")
-                || bare_target.eq_ignore_ascii_case(paths::PROFILE)) =>
-        {
-            let actor_id = actor_id.expect("checked is_some above");
-            (actor_scoped_path(actor_id, &bare_target), true)
-        }
-        None if direct_actor && bare_target.starts_with("actors/") => {
-            let actor_id = actor_id.expect("checked is_some above");
-            (actor_scoped_path(actor_id, &bare_target), true)
-        }
-        None => (shared_root_path(&bare_target), false),
-    }
+    memory_policy::resolve_memory_write_path(&ctx.metadata, actor_id, target)
 }
 
 fn workspace_for_ctx(base: &Arc<Workspace>, ctx: &JobContext) -> Workspace {
@@ -177,33 +91,7 @@ impl Tool for MemorySearchTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The search query. Use natural language to describe what you're looking for."
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of results to return (default: 6, max: 20)",
-                    "default": 6,
-                    "minimum": 1,
-                    "maximum": 20
-                },
-                "mmr": {
-                    "type": "boolean",
-                    "description": "Enable MMR diversity re-ranking (default: true). Set false only when you want raw ranked results.",
-                    "default": true
-                },
-                "temporal_decay": {
-                    "type": "boolean",
-                    "description": "Downweight older notes (default: true). Set false to treat all notes equally regardless of age.",
-                    "default": true
-                }
-            },
-            "required": ["query"]
-        })
+        memory_policy::memory_search_parameters_schema()
     }
 
     fn metadata(&self) -> ToolMetadata {
@@ -218,26 +106,18 @@ impl Tool for MemorySearchTool {
         let start = std::time::Instant::now();
         let workspace = workspace_for_ctx(&self.workspace, ctx);
 
-        let query = require_str(&params, "query")?;
-
-        let limit = params
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(6)
-            .min(20) as usize;
+        let parsed = memory_policy::parse_memory_search_params(&params)?;
+        let query = parsed.query.as_str();
 
         // MMR re-ranking on by default — reduces near-duplicate daily notes.
         // Lambda 0.7 = slight relevance bias (matches openclaw recommendation).
-        let use_mmr = params.get("mmr").and_then(|v| v.as_bool()).unwrap_or(true);
+        let use_mmr = parsed.use_mmr;
 
         // Temporal decay on by default — 30-day half-life so older notes don't
         // crowd out recent ones on equal semantic similarity.
-        let use_decay = params
-            .get("temporal_decay")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let use_decay = parsed.use_temporal_decay;
 
-        let mut config = SearchConfig::default().with_limit(limit);
+        let mut config = SearchConfig::default().with_limit(parsed.limit);
         if use_mmr {
             config = config.with_mmr(0.7);
         }
@@ -251,19 +131,21 @@ impl Tool for MemorySearchTool {
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Search failed: {}", e)))?;
 
-        let output = serde_json::json!({
-            "query": query,
-            "results": results.iter().map(|r| {
-                serde_json::json!({
-                    "path": r.path.clone(),
-                    "content": r.content,
-                    "score": r.score,
-                    "document_id": r.document_id.to_string(),
-                    "is_hybrid_match": r.is_hybrid(),
+        let output = memory_policy::memory_search_output(
+            query,
+            results
+                .iter()
+                .map(|result| {
+                    memory_policy::memory_search_result_entry(
+                        &result.path,
+                        &result.content,
+                        result.score.into(),
+                        result.document_id.to_string(),
+                        result.is_hybrid(),
+                    )
                 })
-            }).collect::<Vec<_>>(),
-            "result_count": results.len(),
-        });
+                .collect(),
+        );
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
@@ -297,42 +179,12 @@ impl SessionSearchTool {
         self
     }
 
-    fn current_scope_filters(&self, ctx: &JobContext) -> (String, String, bool, Option<Uuid>) {
-        let principal_id = ctx
-            .metadata
-            .get("principal_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .unwrap_or_else(|| ctx.principal_id.clone());
-        let actor_id = ctx
-            .metadata
-            .get("actor_id")
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .or_else(|| ctx.actor_id.clone())
-            .unwrap_or_else(|| principal_id.clone());
-        let include_group_history =
-            job_conversation_kind(&ctx.metadata) == IdentityConversationKind::Group;
-        let conversation_id = ctx
-            .conversation_id
-            .or_else(|| {
-                ctx.metadata
-                    .get("conversation_id")
-                    .or_else(|| ctx.metadata.get("thread_id"))
-                    .and_then(|v| v.as_str())
-                    .and_then(|value| Uuid::parse_str(value).ok())
-            })
-            .or_else(|| {
-                ctx.metadata
-                    .get("conversation_id")
-                    .and_then(|v| v.as_str())
-                    .and_then(|value| Uuid::parse_str(value).ok())
-            });
-        (
-            principal_id,
-            actor_id,
-            include_group_history,
-            conversation_id,
+    fn current_scope_filters(&self, ctx: &JobContext) -> memory_policy::SessionSearchScope {
+        memory_policy::resolve_session_search_scope(
+            &ctx.metadata,
+            &ctx.principal_id,
+            ctx.actor_id.as_deref(),
+            ctx.conversation_id,
         )
     }
 
@@ -385,20 +237,20 @@ impl SessionSearchTool {
         Ok(recent
             .into_iter()
             .map(|conversation| {
-                serde_json::json!({
-                    "conversation_id": conversation.id,
-                    "user_id": conversation.user_id,
-                    "actor_id": conversation.actor_id,
-                    "channel": conversation.channel,
-                    "conversation_kind": conversation.conversation_kind.as_str(),
-                    "title": conversation.title,
-                    "message_count": conversation.message_count,
-                    "started_at": conversation.started_at.to_rfc3339(),
-                    "last_activity": conversation.last_activity.to_rfc3339(),
-                    "thread_type": conversation.thread_type,
-                    "handoff": conversation.handoff,
-                    "stable_external_conversation_key": conversation.stable_external_conversation_key,
-                })
+                memory_policy::session_metadata_entry(
+                    conversation.id,
+                    &conversation.user_id,
+                    conversation.actor_id.as_deref(),
+                    &conversation.channel,
+                    conversation.conversation_kind.as_str(),
+                    conversation.title.as_deref(),
+                    conversation.message_count,
+                    conversation.started_at.to_rfc3339(),
+                    conversation.last_activity.to_rfc3339(),
+                    conversation.thread_type.as_deref(),
+                    conversation.handoff,
+                    conversation.stable_external_conversation_key.as_deref(),
+                )
             })
             .collect())
     }
@@ -418,38 +270,7 @@ impl Tool for SessionSearchTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The transcript search query."
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of results to return (default: 8, max: 25)",
-                    "default": 8,
-                    "minimum": 1,
-                    "maximum": 25
-                },
-                "include_current_thread": {
-                    "type": "boolean",
-                    "description": "If true, constrain search to the current thread when thread metadata is available. In direct chats the default is false so linked history can be searched.",
-                    "default": true
-                },
-                "all_channels": {
-                    "type": "boolean",
-                    "description": "If true, search all channels for this actor/user scope. In direct chats linked cross-channel history is searched by default.",
-                    "default": false
-                },
-                "summarize_sessions": {
-                    "type": "boolean",
-                    "description": "If true, summarize matching sessions with the auxiliary/cheap model when available. Defaults to true only when a cheap model is configured.",
-                    "default": false
-                }
-            },
-            "required": ["query"]
-        })
+        memory_policy::session_search_parameters_schema()
     }
 
     fn metadata(&self) -> ToolMetadata {
@@ -462,26 +283,18 @@ impl Tool for SessionSearchTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let query = require_str(&params, "query")?;
-        let result_limit = params
-            .get("limit")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(8)
-            .clamp(1, 25) as usize;
-        let direct_scope = job_conversation_kind(&ctx.metadata) == IdentityConversationKind::Direct;
-        let include_current_thread = params
-            .get("include_current_thread")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(!direct_scope);
-        let all_channels = params
-            .get("all_channels")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(direct_scope);
+        let direct_scope =
+            job_conversation_kind(&ctx.metadata) == memory_policy::MemoryConversationKind::Direct;
+        let parsed = memory_policy::parse_session_search_params(
+            &params,
+            direct_scope,
+            self.service.summarizer_configured(),
+        )?;
+        let query = parsed.query.as_str();
 
-        let (principal_id, actor_id, _include_group_history, _conversation_id) =
-            self.current_scope_filters(ctx);
+        let scope = self.current_scope_filters(ctx);
 
-        let channel_filter = if all_channels {
+        let channel_filter = if parsed.all_channels {
             None
         } else {
             ctx.metadata
@@ -489,7 +302,7 @@ impl Tool for SessionSearchTool {
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         };
-        let thread_filter = if include_current_thread {
+        let thread_filter = if parsed.include_current_thread {
             ctx.metadata
                 .get("thread_id")
                 .and_then(|v| v.as_str())
@@ -498,39 +311,29 @@ impl Tool for SessionSearchTool {
             None
         };
 
-        let summarize_sessions = params
-            .get("summarize_sessions")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(self.service.summarizer_configured());
-
         if query.trim().is_empty() {
             let recent = self
                 .recent_conversation_metadata(
-                    &principal_id,
-                    &actor_id,
+                    &scope.principal_id,
+                    &scope.actor_id,
                     channel_filter.as_deref(),
                     direct_scope,
-                    result_limit,
+                    parsed.limit,
                 )
                 .await?;
-            let output = serde_json::json!({
-                "query": query,
-                "result_count": recent.len(),
-                "recent_sessions": recent,
-                "summarized": false,
-            });
+            let output = memory_policy::session_recent_output(query, recent);
             return Ok(ToolOutput::success(output, start.elapsed()));
         }
 
         let hits = self
             .store
             .search_conversation_messages(
-                &principal_id,
+                &scope.principal_id,
                 query,
-                Some(&actor_id),
+                Some(&scope.actor_id),
                 channel_filter.as_deref(),
                 thread_filter.as_deref(),
-                result_limit as i64,
+                parsed.limit as i64,
             )
             .await
             .map_err(|e| ToolError::ExecutionFailed(format!("Transcript search failed: {}", e)))?;
@@ -540,18 +343,10 @@ impl Tool for SessionSearchTool {
             fallback,
         } = self
             .service
-            .render_results(&self.store, query, hits, summarize_sessions)
+            .render_results(&self.store, query, hits, parsed.summarize_sessions)
             .await;
 
-        let mut output = serde_json::json!({
-            "query": query,
-            "result_count": results.len(),
-            "results": results,
-            "summarized": summarized,
-        });
-        if fallback {
-            output["fallback"] = serde_json::json!(true);
-        }
+        let output = memory_policy::session_search_output(query, results, summarized, fallback);
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
@@ -602,26 +397,7 @@ impl Tool for MemoryWriteTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "The content to write to memory. Be concise but include relevant context."
-                },
-                "target": {
-                    "type": "string",
-                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, 'shared:...' to force the household root, or a path like 'projects/alpha/notes.md'",
-                    "default": "daily_log"
-                },
-                "append": {
-                    "type": "boolean",
-                    "description": "If true, append to existing content. If false, replace entirely.",
-                    "default": true
-                }
-            },
-            "required": ["content"]
-        })
+        memory_policy::memory_write_parameters_schema()
     }
 
     async fn execute(
@@ -632,23 +408,10 @@ impl Tool for MemoryWriteTool {
         let start = std::time::Instant::now();
         let workspace = workspace_for_ctx(&self.workspace, ctx);
 
-        let content = require_str(&params, "content")?;
-
-        if content.trim().is_empty() {
-            return Err(ToolError::InvalidParameters(
-                "content cannot be empty".to_string(),
-            ));
-        }
-
-        let target = params
-            .get("target")
-            .and_then(|v| v.as_str())
-            .unwrap_or("daily_log");
-
-        let append = params
-            .get("append")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+        let parsed = memory_policy::parse_memory_write_params(&params)?;
+        let content = parsed.content.as_str();
+        let target = parsed.target.as_str();
+        let append = parsed.append;
 
         let (path, _is_actor_scoped) = resolve_memory_write_path(ctx, target);
         let normalized_path = path.trim_start_matches('/');
@@ -671,13 +434,13 @@ impl Tool for MemoryWriteTool {
                 .append(&path, content)
                 .await
                 .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-            let output = serde_json::json!({
-                "status": "appended",
-                "path": path,
-                "append": true,
-                "content_length": content.len(),
-                "note": "Identity file updated (append-only)",
-            });
+            let output = memory_policy::memory_write_output(
+                "appended",
+                &path,
+                true,
+                content.len(),
+                Some("Identity file updated (append-only)"),
+            );
             return Ok(ToolOutput::success(output, start.elapsed()));
         }
 
@@ -708,17 +471,17 @@ impl Tool for MemoryWriteTool {
                     .await
                     .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
             }
-            let output = serde_json::json!({
-                "status": if append { "appended" } else { "rewritten" },
-                "path": path,
-                "append": append,
-                "content_length": content.len(),
-                "note": if append {
+            let output = memory_policy::memory_write_output(
+                if append { "appended" } else { "rewritten" },
+                &path,
+                append,
+                content.len(),
+                Some(if append {
                     "Personality file updated (new section appended)"
                 } else {
                     "Personality file fully restructured — well-formed markdown expected"
-                },
-            });
+                }),
+            );
             return Ok(ToolOutput::success(output, start.elapsed()));
         }
 
@@ -793,22 +556,13 @@ impl Tool for MemoryWriteTool {
                 }
             };
 
-        let output = serde_json::json!({
-            "status": "written",
-            "path": path,
-            "append": append,
-            "content_length": content.len(),
-        });
+        let output =
+            memory_policy::memory_write_output("written", &path, append, content.len(), None);
 
         if let Some(orchestrator) = self.orchestrator.as_ref() {
             let orchestrator = Arc::clone(orchestrator);
             let user_id = ctx.user_id.clone();
-            let payload = serde_json::json!({
-                "tool": "memory_write",
-                "path": path,
-                "append": append,
-                "content_preview": content.chars().take(240).collect::<String>(),
-            });
+            let payload = memory_policy::memory_write_mirror_payload(&path, append, content);
             tokio::spawn(async move {
                 orchestrator
                     .mirror_workspace_write(&user_id, &payload)
@@ -856,26 +610,7 @@ impl Tool for MemoryReadTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file (e.g., 'MEMORY.md', 'daily/2024-01-15.md', 'TOOLS.md')"
-                },
-                "start_line": {
-                    "type": "integer",
-                    "description": "1-indexed line to start reading from (optional). Useful for large files like MEMORY.md.",
-                    "minimum": 1
-                },
-                "num_lines": {
-                    "type": "integer",
-                    "description": "Maximum number of lines to return (optional). Use with start_line for targeted reads.",
-                    "minimum": 1
-                }
-            },
-            "required": ["path"]
-        })
+        memory_policy::memory_read_parameters_schema()
     }
 
     fn metadata(&self) -> ToolMetadata {
@@ -891,54 +626,27 @@ impl Tool for MemoryReadTool {
         let workspace = workspace_for_ctx(&self.workspace, ctx);
 
         let path = require_str(&params, "path")?;
+        let read_slice = memory_policy::parse_memory_read_slice(&params);
 
         if path.eq_ignore_ascii_case(paths::SOUL) {
             let content = match crate::identity::soul_store::read_home_soul() {
                 Ok(content) => content,
                 Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
-                    let output = serde_json::json!({
-                        "path": path,
-                        "content": "",
-                        "word_count": 0,
-                        "exists": false,
-                    });
-                    return Ok(ToolOutput::success(output, start.elapsed()));
+                    return Ok(ToolOutput::success(
+                        memory_policy::memory_read_missing_output(path),
+                        start.elapsed(),
+                    ));
                 }
                 Err(e) => return Err(ToolError::ExecutionFailed(format!("Read failed: {}", e))),
             };
 
-            let total_lines = content.lines().count();
-            let sliced = if params.get("start_line").is_some() || params.get("num_lines").is_some()
-            {
-                let start_line = params
-                    .get("start_line")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1)
-                    .max(1) as usize;
-                let num_lines = params
-                    .get("num_lines")
-                    .and_then(|v| v.as_u64())
-                    .map(|n| n as usize);
-                let lines: Vec<&str> = content.lines().collect();
-                let from = (start_line - 1).min(lines.len());
-                let to = match num_lines {
-                    Some(n) => (from + n).min(lines.len()),
-                    None => lines.len(),
-                };
-                lines[from..to].join("\n")
-            } else {
-                content.clone()
-            };
+            let (sliced, total_lines) =
+                memory_policy::apply_memory_read_slice(&content, read_slice);
 
-            let output = serde_json::json!({
-                "path": path,
-                "content": sliced,
-                "word_count": sliced.split_whitespace().count(),
-                "total_lines": total_lines,
-                "updated_at": serde_json::Value::Null,
-                "exists": true,
-            });
-            return Ok(ToolOutput::success(output, start.elapsed()));
+            return Ok(ToolOutput::success(
+                memory_policy::memory_read_output(path, &sliced, total_lines, None),
+                start.elapsed(),
+            ));
         }
 
         // Graceful degradation: missing file → empty content, not an error.
@@ -946,53 +654,23 @@ impl Tool for MemoryReadTool {
         let doc = match workspace.read(path).await {
             Ok(doc) => doc,
             Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
-                let output = serde_json::json!({
-                    "path": path,
-                    "content": "",
-                    "word_count": 0,
-                    "exists": false,
-                });
-                return Ok(ToolOutput::success(output, start.elapsed()));
+                return Ok(ToolOutput::success(
+                    memory_policy::memory_read_missing_output(path),
+                    start.elapsed(),
+                ));
             }
             Err(e) => return Err(ToolError::ExecutionFailed(format!("Read failed: {}", e))),
         };
 
         // Optional line-range slicing.
-        let content = if params.get("start_line").is_some() || params.get("num_lines").is_some() {
-            let start_line = params
-                .get("start_line")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1)
-                .max(1) as usize;
-            let num_lines = params
-                .get("num_lines")
-                .and_then(|v| v.as_u64())
-                .map(|n| n as usize);
-
-            let lines: Vec<&str> = doc.content.lines().collect();
-            let total_lines = lines.len();
-
-            // Convert 1-indexed start_line to 0-indexed.
-            let from = (start_line - 1).min(total_lines);
-            let to = match num_lines {
-                Some(n) => (from + n).min(total_lines),
-                None => total_lines,
-            };
-
-            lines[from..to].join("\n")
-        } else {
-            doc.content.clone()
-        };
-
-        let total_lines = doc.content.lines().count();
-        let output = serde_json::json!({
-            "path": doc.path,
-            "content": content,
-            "word_count": content.split_whitespace().count(),
-            "total_lines": total_lines,
-            "updated_at": doc.updated_at.to_rfc3339(),
-            "exists": true,
-        });
+        let (content, total_lines) =
+            memory_policy::apply_memory_read_slice(&doc.content, read_slice);
+        let output = memory_policy::memory_read_output(
+            &doc.path,
+            &content,
+            total_lines,
+            Some(doc.updated_at.to_rfc3339()),
+        );
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
@@ -1074,23 +752,7 @@ impl Tool for MemoryTreeTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Root path to start from (empty string for workspace root)",
-                    "default": ""
-                },
-                "depth": {
-                    "type": "integer",
-                    "description": "Maximum depth to traverse (1 = immediate children only)",
-                    "default": 1,
-                    "minimum": 1,
-                    "maximum": 10
-                }
-            }
-        })
+        memory_policy::memory_tree_parameters_schema()
     }
 
     async fn execute(
@@ -1101,15 +763,11 @@ impl Tool for MemoryTreeTool {
         let start = std::time::Instant::now();
         let workspace = workspace_for_ctx(&self.workspace, ctx);
 
-        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let parsed = memory_policy::parse_memory_tree_params(&params);
 
-        let depth = params
-            .get("depth")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1)
-            .clamp(1, 10) as usize;
-
-        let tree = self.build_tree(&workspace, path, 1, depth).await?;
+        let tree = self
+            .build_tree(&workspace, parsed.path.as_str(), 1, parsed.depth)
+            .await?;
 
         // Compact output: just the tree array
         Ok(ToolOutput::success(
@@ -1167,16 +825,7 @@ impl Tool for MemoryDeleteTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file to delete (e.g. 'BOOTSTRAP.md', 'daily/2024-01-15.md')"
-                }
-            },
-            "required": ["path"]
-        })
+        memory_policy::memory_delete_parameters_schema()
     }
 
     async fn execute(
@@ -1189,32 +838,11 @@ impl Tool for MemoryDeleteTool {
 
         let path = require_str(&params, "path")?;
 
-        // IDENTITY.md is delete-protected.
-        // SOUL/SOUL.local/AGENTS/USER should be restructured with prompt_manage instead.
-        let normalized = path.trim_start_matches('/');
-        if [paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER]
-            .iter()
-            .any(|p| normalized.eq_ignore_ascii_case(p))
-        {
-            return Err(ToolError::NotAuthorized(format!(
-                "'{}' cannot be deleted. Use prompt_manage to rewrite or refine prompt-managed identity files.",
-                path
-            )));
-        }
-
-        if DELETE_PROTECTED_FILES
-            .iter()
-            .any(|p| normalized.eq_ignore_ascii_case(p))
-        {
-            return Err(ToolError::NotAuthorized(format!(
-                "'{}' cannot be deleted. Use memory_write to edit identity content. \
-                 To restructure SOUL.md / SOUL.local.md / AGENTS.md / USER.md entirely, use \
-                 prompt_manage instead of deleting.",
-                path
-            )));
-        }
-
-        let is_bootstrap = normalized.eq_ignore_ascii_case(crate::workspace::paths::BOOTSTRAP);
+        let delete_action = memory_policy::resolve_memory_delete_action(path)?;
+        let is_bootstrap = matches!(
+            delete_action,
+            memory_policy::MemoryDeleteAction::FinalizeBootstrap
+        );
         if is_bootstrap {
             // Keep a non-empty completion sentinel so workspace seeding does not
             // recreate BOOTSTRAP.md on next startup.
@@ -1275,12 +903,10 @@ impl Tool for MemoryDeleteTool {
             tracing::info!("[memory_delete] Emitted BootstrapCompleted SSE event");
         }
 
-        let output = serde_json::json!({
-            "status": "deleted",
-            "path": path,
-        });
-
-        Ok(ToolOutput::success(output, start.elapsed()))
+        Ok(ToolOutput::success(
+            memory_policy::memory_delete_output(path),
+            start.elapsed(),
+        ))
     }
 
     fn requires_sanitization(&self) -> bool {

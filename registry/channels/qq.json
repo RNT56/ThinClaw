@@ -1,0 +1,24 @@
+{
+  "name": "qq",
+  "display_name": "QQ",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "QQ bot webhook channel",
+  "keywords": ["messaging", "chat", "qq", "bot"],
+  "source": {
+    "dir": "channels-src/qq",
+    "capabilities": "qq.capabilities.json",
+    "crate_name": "qq-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "QQ",
+    "secrets": ["qq_bot_token", "qq_webhook_secret"],
+    "shared_auth": null,
+    "setup_url": "https://bot.q.qq.com/"
+  },
+  "tags": ["messaging"]
+}

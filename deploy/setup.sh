@@ -18,7 +18,10 @@
 #
 # Optional features (via flags):
 #   --mode <auto|native|docker>
-#   --binary <path>          Native install source binary
+#   --binary <path>          Native install source binary (overrides release download)
+#   --profile <full|edge>    Native release profile (default: edge)
+#   --version <tag>          Release tag to install (default: latest)
+#   --static                 Prefer Linux musl/static-ish native artifacts
 #   --image <image>          Docker image for Compose
 #   --tailscale <auth-key>   Install Tailscale VPN and join the network
 #   --systemd                Create a systemd service for ThinClaw
@@ -44,6 +47,9 @@ TAILSCALE_KEY=""
 ENABLE_SYSTEMD=false
 MODE="auto"
 BINARY_PATH=""
+NATIVE_PROFILE="${THINCLAW_NATIVE_PROFILE:-edge}"
+THINCLAW_VERSION="${THINCLAW_VERSION:-latest}"
+PREFER_STATIC=false
 THINCLAW_IMAGE="${THINCLAW_IMAGE:-ghcr.io/rnt56/thinclaw:latest}"
 
 while [[ "$#" -gt 0 ]]; do
@@ -51,15 +57,21 @@ while [[ "$#" -gt 0 ]]; do
         --token) TOKEN="$2"; shift ;;
         --mode) MODE="$2"; shift ;;
         --binary) BINARY_PATH="$2"; shift ;;
+        --profile) NATIVE_PROFILE="$2"; shift ;;
+        --version) THINCLAW_VERSION="$2"; shift ;;
+        --static) PREFER_STATIC=true ;;
         --image) THINCLAW_IMAGE="$2"; shift ;;
         --tailscale) TAILSCALE_KEY="$2"; shift ;;
         --systemd) ENABLE_SYSTEMD=true ;;
         --help|-h)
-            echo "Usage: sudo bash setup.sh --token <token> [--mode auto|native|docker] [--binary <path>] [--image <image>] [--tailscale <auth-key>] [--systemd]"
+            echo "Usage: sudo bash setup.sh --token <token> [--mode auto|native|docker] [--profile edge|full] [--version <tag>|latest] [--static] [--binary <path>] [--image <image>] [--tailscale <auth-key>] [--systemd]"
             echo ""
             echo "  --token <token>         Gateway auth token (required)"
             echo "  --mode <mode>           Install mode: auto, native, or docker (default: auto)"
-            echo "  --binary <path>         Native install source binary"
+            echo "  --binary <path>         Native install source binary (overrides release download)"
+            echo "  --profile <profile>     Native release profile: edge or full (default: $NATIVE_PROFILE)"
+            echo "  --version <tag>         GitHub release tag for native install (default: $THINCLAW_VERSION)"
+            echo "  --static                Prefer Linux musl/static-ish native artifact"
             echo "  --image <image>         Docker image for Compose (default: $THINCLAW_IMAGE)"
             echo "  --tailscale <auth-key>  Install Tailscale VPN and authenticate with this key"
             echo "  --systemd               In docker mode, create a systemd service for auto-start management"
@@ -82,6 +94,11 @@ if [[ "$MODE" != "auto" && "$MODE" != "native" && "$MODE" != "docker" ]]; then
     exit 1
 fi
 
+if [[ "$NATIVE_PROFILE" != "edge" && "$NATIVE_PROFILE" != "full" ]]; then
+    echo "ERROR: --profile must be one of: edge, full"
+    exit 1
+fi
+
 # ── Detect environment ──────────────────────────────────────────────────────
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -94,6 +111,8 @@ echo ""
 echo "Deploy directory: $DEPLOY_DIR"
 echo "Gateway port:     $THINCLAW_PORT"
 echo "Requested mode:   $MODE"
+echo "Native profile:   $NATIVE_PROFILE"
+echo "Native version:   $THINCLAW_VERSION"
 echo "Tailscale:        $([ -n "$TAILSCALE_KEY" ] && echo 'Yes' || echo 'No')"
 echo "Systemd service:  $([ "$ENABLE_SYSTEMD" = true ] && echo 'Yes' || echo 'No')"
 echo ""
@@ -551,7 +570,71 @@ resolve_native_binary() {
         command -v thinclaw
         return 0
     fi
-    return 1
+    download_native_binary
+}
+
+native_release_base_url() {
+    if [[ "$THINCLAW_VERSION" == "latest" ]]; then
+        echo "https://github.com/RNT56/ThinClaw/releases/latest/download"
+    else
+        echo "https://github.com/RNT56/ThinClaw/releases/download/$THINCLAW_VERSION"
+    fi
+}
+
+native_target_triple() {
+    local arch os_suffix
+    arch="$(uname -m)"
+    os_suffix="gnu"
+    if [[ "$PREFER_STATIC" == "true" ]]; then
+        os_suffix="musl"
+    fi
+    case "$arch" in
+        x86_64|amd64) echo "x86_64-unknown-linux-$os_suffix" ;;
+        aarch64|arm64) echo "aarch64-unknown-linux-$os_suffix" ;;
+        *)
+            echo "ERROR: Unsupported native install architecture: $arch" >&2
+            return 1
+            ;;
+    esac
+}
+
+download_native_binary() {
+    local target archive checksums base_url download_dir archive_path checksums_path expected actual
+    target="$(native_target_triple)" || return 1
+    if [[ "$NATIVE_PROFILE" == "edge" ]]; then
+        archive="thinclaw-edge-${target}.tar.gz"
+        checksums="checksums-edge.txt"
+    else
+        archive="thinclaw-${target}.tar.gz"
+        checksums="checksums.txt"
+    fi
+
+    base_url="$(native_release_base_url)"
+    download_dir="$ROLLBACK_DIR/native-release"
+    mkdir -p "$download_dir"
+    archive_path="$download_dir/$archive"
+    checksums_path="$download_dir/$checksums"
+
+    echo "    Downloading ThinClaw $NATIVE_PROFILE release artifact: $archive" >&2
+    curl -fsSL "$base_url/$archive" -o "$archive_path"
+    curl -fsSL "$base_url/$checksums" -o "$checksums_path"
+
+    expected="$(awk -v file="$archive" '$2 == file {print $1; exit}' "$checksums_path")"
+    if [[ -z "$expected" ]]; then
+        echo "ERROR: No checksum entry for $archive in $checksums" >&2
+        return 1
+    fi
+    actual="$(sha256sum "$archive_path" | awk '{print $1}')"
+    if [[ "$actual" != "$expected" ]]; then
+        echo "ERROR: SHA256 mismatch for $archive" >&2
+        echo "Expected: $expected" >&2
+        echo "Actual:   $actual" >&2
+        return 1
+    fi
+
+    tar -xzf "$archive_path" -C "$download_dir" thinclaw
+    chmod +x "$download_dir/thinclaw"
+    echo "$download_dir/thinclaw"
 }
 
 install_native_pi() {
@@ -570,7 +653,7 @@ install_native_pi() {
     local source_binary=""
     if ! source_binary="$(resolve_native_binary)"; then
         echo "ERROR: Could not find a ThinClaw binary to install."
-        echo "Provide one with --binary /path/to/thinclaw, or install the aarch64-unknown-linux-gnu release artifact first."
+        echo "Provide one with --binary /path/to/thinclaw, or check --profile/--version for release download."
         exit 1
     fi
 

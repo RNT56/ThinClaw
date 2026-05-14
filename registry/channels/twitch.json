@@ -1,0 +1,24 @@
+{
+  "name": "twitch",
+  "display_name": "Twitch",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "Twitch EventSub/channel chat webhook channel",
+  "keywords": ["messaging", "chat", "twitch", "streaming"],
+  "source": {
+    "dir": "channels-src/twitch",
+    "capabilities": "twitch.capabilities.json",
+    "crate_name": "twitch-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Twitch",
+    "secrets": ["twitch_app_access_token", "twitch_client_id", "twitch_webhook_secret"],
+    "shared_auth": null,
+    "setup_url": "https://dev.twitch.tv/docs/eventsub/"
+  },
+  "tags": ["messaging"]
+}

@@ -35,7 +35,9 @@ Do not treat all integrations as if they had the same isolation guarantees.
 - Uses the OS secure store as the default master-key source; `SECRETS_MASTER_KEY` is ignored unless `THINCLAW_ALLOW_ENV_MASTER_KEY=1` or `secrets.allow_env_master_key = true`
 - Keeps general OS keychain secret caching disabled by default; provider/API-key caching is opt-in via `THINCLAW_KEYCHAIN_CACHE=1`, and master-key caching is disabled unless explicitly enabled
 - Uses policy and validation layers around dangerous tools and external content
+- Sanitizes prompt-bound workspace and identity context by stripping invisible Unicode, replacing detected prompt-injection spans or lines, and redacting known PII/secrets before they reach the model
 - Adds a first-party pre-exec shell scanner ahead of approval for high-risk shell commands, with explicit fail-open or fail-closed operator control
+- Verifies bundled and cached external shell scanner binaries with manifest hash/signature metadata; set `safety.external_scanner_require_verified = true` or `SAFETY_EXTERNAL_SCANNER_REQUIRE_VERIFIED=1` to reject configured or PATH scanners that do not carry verified provenance
 - Supports network controls and allowlists
 - Keeps execution-surface guarantees mode-aware: background `process` is disabled in restricted workspace modes, `execute_code` only runs in `sandboxed` mode when an actual Docker sandbox backend is available, and research `local_docker` trials use the same Docker-backed execution path
 - Separates sandboxed extension paths from operator-trusted external paths
@@ -69,7 +71,7 @@ Master-key rotation is exposed as `thinclaw secrets rotate-master`. The command 
 
 Backups need both pieces: the database and the OS secure-store master key. Losing the secure-store item makes encrypted local secret values unrecoverable. A host compromise while ThinClaw is running can still access secrets that the trusted host is authorized to inject; encryption protects at-rest storage, not a fully compromised runtime.
 
-The codebase now has a `SecretBackend` boundary for future remote backends. The first supported implementation remains `local_encrypted`; planned external implementations should store only metadata/references locally while preserving the same audit, leak-detection, Provider Vault, and sensitive-route policy path. The intended next providers are HashiCorp Vault KV v2, AWS Secrets Manager, and 1Password Connect.
+The codebase has a `SecretBackend` boundary, but the only supported runtime backend today is `local_encrypted`. Remote secret-manager integrations such as HashiCorp Vault KV v2, AWS Secrets Manager, or 1Password Connect are not implemented yet; when added, they should store only metadata/references locally while preserving the same audit, leak-detection, Provider Vault, and sensitive-route policy path.
 
 ## Desktop Autonomy Trust Boundary
 
@@ -101,6 +103,8 @@ ThinClaw does not claim that:
 - all data always stays local once you configure external providers or remote services
 - local encryption protects secrets from a compromised running host process
 - MCP servers have the same trust profile as WASM tools
+- configured or PATH-provided external shell scanners are automatically sandboxed or cryptographically trusted unless provenance enforcement is enabled; otherwise they are operator-trusted local binaries
+- the current shell-scanner provenance path is a local manifest/hash/signature check, not a full public transparency-log or Sigstore/Cosign distribution system
 - host-local execution with `allow_network = false` is universally the same across platforms; today hard host-local no-network enforcement is available on macOS via `sandbox-exec` and on Linux via `bwrap` when it is installed, while the Docker-backed sandbox path provides the portable hard guarantee and unsupported host-local platforms are surfaced as best-effort through runtime metadata
 - reckless desktop autonomy is equivalent to standard local execution; it is materially more powerful and should be enabled only on machines and accounts you intentionally grant host control to
 

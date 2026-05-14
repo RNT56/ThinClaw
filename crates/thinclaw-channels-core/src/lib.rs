@@ -2,4 +2,7 @@
 
 pub mod channel;
 
-pub use channel::{DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StreamMode};
+pub use channel::{
+    Channel, DraftReplyState, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
+    StreamMode,
+};

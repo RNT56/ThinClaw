@@ -22,8 +22,8 @@ pub use leak_detector::{
 };
 pub use policy::{Policy, PolicyAction, PolicyRule, Severity};
 pub use sanitizer::{
-    ContextInjectionWarning, InjectionWarning, SanitizedOutput, Sanitizer,
-    sanitize_context_content, scan_context_content,
+    ContextInjectionWarning, InjectionWarning, PromptSanitization, SanitizedOutput, Sanitizer,
+    sanitize_context_content, sanitize_prompt_bound_content, scan_context_content,
 };
 pub use validator::{ValidationError, ValidationErrorCode, ValidationResult, Validator};
 

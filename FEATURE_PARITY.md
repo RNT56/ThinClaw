@@ -1,6 +1,6 @@
 # ThinClaw Parity And ThinClaw-First Feature Matrix
 
-> **Last reconciled:** 2026-04-20 (Wave 7 ownership + contract parity closure)
+> **Last reconciled:** 2026-05-13 (security, skill scanner, provider leasing, and trajectory export closure)
 
 This document tracks both feature parity against OpenClaw (TypeScript reference implementation) and ThinClaw-first capabilities that now extend well beyond parity. Use it both as a compatibility map and as a ledger of the newer Rust-native features we are actively adding.
 
@@ -25,15 +25,15 @@ These are the higher-signal capabilities that now go beyond simple OpenClaw catc
 | Capability | Status | Notes |
 |---------|--------|-------|
 | Channel-owned formatting hints | ✅ | Native channels own formatting guidance through `Channel::formatting_hints()`. WASM channels can declare `formatting_hints` in `*.capabilities.json`, and prompt assembly consumes the resolved hint through `ChannelManager::formatting_hints_for()` instead of hard-coded channel-name switches. |
-| Watched OAuth credential sync | ✅ | Claude Code, Codex, and custom JSON auth files can seed provider credentials and hot-reload updated tokens into the live runtime without restart. |
-| External pre-exec shell scanner | ✅ | First-party `thinclaw-shell-scan` adds a pre-approval structural scanner with configured/PATH/bundled/cached resolution, verified cache install, and fail-open/fail-closed policy control. |
+| Watched OAuth credential sync | ✅ | Claude Code, Codex, and custom JSON auth files can seed provider credentials and hot-reload updated tokens into the live runtime without restart when providers opt into external OAuth sources. Multi-key pools use process-local credential leases with health snapshots for capacity diagnostics. |
+| External pre-exec shell scanner | ✅ | First-party `thinclaw-shell-scan` adds a pre-approval structural scanner with configured/PATH/bundled/cached resolution, bundled/cache manifest hash/signature verification, optional `external_scanner_require_verified`, and fail-open/fail-closed policy control. |
 | Filesystem checkpoints + `/rollback` | ✅ | Shadow-git checkpoints create reversible file mutation history with list, diff, and restore support. |
-| Remote skill federation | ✅ | ThinClaw now supports GitHub taps plus `/.well-known/skills` registries, quarantine scanning, provenance lock files, and risky-install approval gates. |
+| Remote skill federation | ✅ | ThinClaw now supports GitHub taps plus `/.well-known/skills` registries, v2 quarantine scanning across package files, scanner-version/content-hash provenance locks, finding summaries, package-layout rejection, and risky-install approval gates. |
 | Accessibility-tree browser automation | ✅ | Managed `agent-browser` integration and cloud browser routing move ThinClaw from screenshot-only inspection toward interaction-oriented browsing. |
 | Session-level `/personality` overlays (`/vibe` alias) | ✅ | Session-scoped personality overlays add temporary tone shifts without mutating durable identity files. |
 | CLI skin system | ✅ | Shared TOML-backed local skins now cover boot, REPL, full-screen TUI, onboarding TUI, setup prompts, and human-readable CLI subcommands with prompt symbols, ASCII art, taglines, and tool emoji labels. Extended with `border_style` (plain/rounded/double/thick), `header_alignment`, `status_gradient`, `spinner_style` (kawaii/braille/dots/arrows), and custom `spinner_frames`. All new fields are optional with backward-compatible defaults. |
 | Reckless desktop autonomy | ✅ | Privileged host-level desktop autonomy adds native app adapters, generic UI automation, evidence capture, seeded desktop routines, managed shadow-canary code autorollout, and rollback for promoted builds. |
-| Trajectory archive + training export | ✅ | Structured turn archives and `trajectory export` provide SFT/DPO-friendly offline training datasets. |
+| Trajectory archive + training export | ✅ | Structured turn archives and `trajectory export` provide validated SFT/DPO offline datasets with score filtering, max-record limits, skipped-record accounting, and optional manifest hashes. |
 | Anthropic prompt caching | ✅ | Provider-scoped message metadata now carries Anthropic-compatible cache hints where supported. |
 
 ---
@@ -206,7 +206,7 @@ Slack remains a supported WASM Events API channel with webhook ingestion, thread
 | Pi agent runtime | ✅ | ➖ | ThinClaw uses custom runtime |
 | RPC-based execution | ✅ | ✅ | Orchestrator/worker pattern |
 | Worker completion + tool-result event schema | ✅ | ✅ | Canonical completion payload (`status`, `session_id`, `success`, `message`) and structured tool-result projection (`output_text`, `output_json`) are now preserved end-to-end for orchestrator/SSE consumers |
-| Multi-provider failover | ✅ | ✅ | `FailoverProvider` tries providers sequentially on retryable errors, applies per-provider cooldowns, leases individual credential entries (not just provider slots) with fill-first / round-robin / least-used / random selection strategies so multi-key backends can spread parallel traffic across keys, and participates in live OAuth credential refresh via watched auth-file sync + runtime reload ([`src/llm/failover.rs`](src/llm/failover.rs), [`src/llm/credential_sync.rs`](src/llm/credential_sync.rs), [`src/app.rs`](src/app.rs)) |
+| Multi-provider failover | ✅ | ✅ | `FailoverProvider` tries providers sequentially on retryable errors, applies per-provider cooldowns, leases individual credential entries (not just provider slots) with fill-first / round-robin / least-used / random selection strategies so multi-key backends can spread parallel traffic across keys, exposes process-local credential pool health snapshots, and participates in live OAuth credential refresh via watched auth-file sync + runtime reload when the provider opts in ([`src/llm/failover.rs`](src/llm/failover.rs), [`src/llm/credential_sync.rs`](src/llm/credential_sync.rs), [`src/app.rs`](src/app.rs)) |
 | Per-sender sessions | ✅ | ✅ | Direct sessions are canonicalized by principal scope (cross-channel/device continuity); group scopes remain isolated |
 | Global sessions | ✅ | ✅ | Cross-channel shared context with LRU eviction ([`src/agent/global_session.rs`](src/agent/global_session.rs)) |
 | Session pruning | ✅ | ✅ | `sessions prune` CLI + auto-cleanup with configurable TTL |
@@ -241,7 +241,7 @@ Slack remains a supported WASM Events API channel with webhook ingestion, thread
 | `list_subagents` tool | ✅ | ✅ | Query active/recent sub-agents with ID, status, task, timing info ([`src/tools/builtin/subagent.rs`](src/tools/builtin/subagent.rs)) |
 | `cancel_subagent` tool | ✅ | ✅ | Cancel running sub-agents by UUID; watch channel + task abort ([`src/tools/builtin/subagent.rs`](src/tools/builtin/subagent.rs)) |
 | Sub-agent lifecycle | ✅ | ✅ | Concurrency limits (default 5), per-agent timeout, periodic `StatusUpdate::SubagentProgress` heartbeat updates during long-running runs, status tracking (Running/Completed/Failed/TimedOut/Cancelled), user progress notifications via StatusUpdate::AgentMessage, and worker-side inactivity keepalives so long-running delegated work does not trip the parent wall-clock timeout |
-| Trajectory archive + training export | ❌ | ✅ | Per-turn trajectory logging now stores structured assessment metadata, hydrates explicit learning feedback when available, and exports `json`, `jsonl`, `sft`, and `dpo` datasets for offline training workflows ([`src/agent/learning.rs`](src/agent/learning.rs), [`src/cli/trajectory.rs`](src/cli/trajectory.rs)) |
+| Trajectory archive + training export | ❌ | ✅ | Per-turn trajectory logging now stores structured assessment metadata, hydrates explicit learning feedback when available, and exports `json`, `jsonl`, `sft`, and `dpo` datasets with validation, score filtering, max-record limits, skipped-record counts, and optional manifests for offline training workflows ([`src/agent/learning.rs`](src/agent/learning.rs), [`src/cli/trajectory.rs`](src/cli/trajectory.rs)) |
 | Subagent transparency controls | ❌ | ✅ | End-to-end transparency controls shipped: typed Web subagent SSE events + temporal Web subsessions + `agent.subagent_transparency_level` (`balanced`, `detailed`) filtering + Telegram session mode routing |
 | `/subagents spawn` command | ✅ | ✅ | Command parsing + tracking ([`src/cli/subagent_spawn.rs`](src/cli/subagent_spawn.rs)) |
 | Persistent multi-agent orchestration | ❌ | ✅ | `AgentRegistry` with DB-backed CRUD, 5 LLM tools (`create_agent`/`list_agents`/`update_agent`/`remove_agent`/`message_agent`), workspace seeding, validation, dual-backend persistence ([`src/agent/agent_registry.rs`](src/agent/agent_registry.rs), [`src/tools/builtin/agent_management.rs`](src/tools/builtin/agent_management.rs)) |
@@ -844,7 +844,7 @@ running inside Scrappy.
 - ✅ Configurable image resize dimensions (`with_max_dimensions()`, OpenAI `detail` level hints)
 - ✅ Multiple images per tool call (`format_multiple_for_llm()`)
 - ✅ Skills routing blocks (`use_when`/`dont_use_when` in ActivationCriteria)
-- ✅ Remote skill federation + quarantine pipeline (`GitHubSkillSource`, `WellKnownSkillSource`, `QuarantineManager`, provenance lock files, risky-install approval gate)
+- ✅ Remote skill federation + quarantine pipeline (`GitHubSkillSource`, `WellKnownSkillSource`, `QuarantineManager`, v2 package scanner, provenance lock files, risky-install approval gate)
 - ✅ Accessibility-tree browser backend + managed cloud browser routing (`agent-browser`, Browserbase, Browser Use)
 - ✅ Anthropic prompt caching (`with_prompt_caching()` compatibility path + provider-scoped message metadata seam with Anthropic `cache_control` hints on supported providers)
 - ✅ `before_agent_start` / `before_message_write` hooks
@@ -867,8 +867,9 @@ running inside Scrappy.
 - ✅ TAURI_INTEGRATION.md §9–§11 verified against code — comprehensive and accurate
 - ✅ Allowlist/blocklist — allow_from + block_from + pairing store (blocklist precedence), CLI `pairing block/unblock/blocked`
 - ✅ OAuth flows — full Auth Code + PKCE browser flow ([`src/cli/tool.rs`](src/cli/tool.rs): `auth_tool_oauth()`, 192 LOC), auto-refresh (`OAuthRefreshConfig`), scope aggregation across tools, built-in Google/GitHub/Notion credentials ([`src/cli/oauth_defaults.rs`](src/cli/oauth_defaults.rs), 571 LOC), token storage with expiry
-- ✅ Watched OAuth credential sync — Claude Code, Codex, and custom JSON auth files can prime injected provider credentials, merge updated tokens into the live runtime overlay, and trigger runtime reloads without restart ([`src/llm/credential_sync.rs`](src/llm/credential_sync.rs), [`src/app.rs`](src/app.rs), [`src/config/mod.rs`](src/config/mod.rs))
-- ✅ External pre-exec shell scanner — `thinclaw-shell-scan` runs before smart approval, supports configured/PATH/bundled/cached resolution, SHA-256-verified cache installs, and fail-open / fail-closed modes ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs), [`src/tools/builtin/shell_security.rs`](src/tools/builtin/shell_security.rs), [`src/bin/thinclaw-shell-scan.rs`](src/bin/thinclaw-shell-scan.rs))
+- ✅ Prompt-bound context sanitation — workspace/identity context strips invisible Unicode, redacts detected prompt-injection spans/lines, and redacts PII/secrets before model assembly ([`src/safety/sanitizer.rs`](src/safety/sanitizer.rs), [`src/safety/pii_redactor.rs`](src/safety/pii_redactor.rs))
+- ✅ Watched OAuth credential sync — Claude Code, Codex, and custom JSON auth files can prime injected provider credentials, merge updated tokens into the live runtime overlay, and trigger runtime reloads without restart when providers opt into external OAuth sources ([`src/llm/credential_sync.rs`](src/llm/credential_sync.rs), [`src/app.rs`](src/app.rs), [`src/config/mod.rs`](src/config/mod.rs))
+- ✅ External pre-exec shell scanner — `thinclaw-shell-scan` runs before smart approval, supports configured/PATH/bundled/cached resolution, manifest-backed bundled/cache verification, optional verified-provenance enforcement, and fail-open / fail-closed modes ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs), [`src/tools/builtin/shell_security.rs`](src/tools/builtin/shell_security.rs), [`src/bin/thinclaw-shell-scan.rs`](src/bin/thinclaw-shell-scan.rs))
 
 ### P3 - Lower Priority
 **Channels**
@@ -936,7 +937,7 @@ running inside Scrappy.
 - ✅ Dangerous tool re-enable warning — `DangerousToolTracker` with state history and warning generation ([`src/safety/dangerous_tools.rs`](src/safety/dangerous_tools.rs))
 - ✅ Workspace sandbox modes — `WORKSPACE_MODE` (unrestricted/sandboxed/project) with `WORKSPACE_ROOT`; drives `register_dev_tools_with_config()` + dynamic system prompt ([`src/config/agent.rs`](src/config/agent.rs))
 - ✅ Shell 3-layer sandbox — When `base_dir` set: (1) `check_safe_bins_forced()`, (2) workdir parameter validation, (3) `detect_path_escape()` with `..` traversal detection. 11 tests ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs))
-- ✅ External pre-exec shell scanner — first-party `thinclaw-shell-scan` with configured/PATH/bundled/cached resolution, SHA-256-verified cache install, 24h failure cooldown, and fail-open / fail-closed enforcement before smart approval ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs), [`src/tools/builtin/shell_security.rs`](src/tools/builtin/shell_security.rs), [`src/bin/thinclaw-shell-scan.rs`](src/bin/thinclaw-shell-scan.rs))
+- ✅ External pre-exec shell scanner — first-party `thinclaw-shell-scan` with configured/PATH/bundled/cached resolution, manifest-backed bundled/cache verification, optional verified-provenance enforcement, 24h failure cooldown, and fail-open / fail-closed enforcement before smart approval ([`src/tools/builtin/shell.rs`](src/tools/builtin/shell.rs), [`src/tools/builtin/shell_security.rs`](src/tools/builtin/shell_security.rs), [`src/bin/thinclaw-shell-scan.rs`](src/bin/thinclaw-shell-scan.rs))
 - ✅ Screen capture opt-in — `ScreenCaptureTool` gated on `SCREEN_CAPTURE_ENABLED` env var (user toggle in Scrappy UI) + `ALLOW_LOCAL_TOOLS` ([`src/app.rs`](src/app.rs))
 - ✅ OS governance env vars — Scrappy passes `ACCESSIBILITY_GRANTED` + `SCREEN_RECORDING_GRANTED` from live macOS permission checks
 

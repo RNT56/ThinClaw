@@ -703,11 +703,6 @@ fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
     payloads
 }
 
-/// Recursively copy files and directories from `src` to `dst`, skipping
-/// entries that can't be read (e.g. permission-restricted files owned by a
-/// different uid on a read-only bind mount). Returns the number of files
-/// successfully copied.
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -24,31 +24,8 @@ pub use crate::orchestrator::job_manager::{
 
 #[cfg(not(feature = "docker-sandbox"))]
 mod fallback {
-    use serde::{Deserialize, Serialize};
+    pub use thinclaw_types::sandbox::{CredentialGrant, JobMode};
     use uuid::Uuid;
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct CredentialGrant {
-        pub secret_name: String,
-        pub env_var: String,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-    pub enum JobMode {
-        Worker,
-        ClaudeCode,
-        CodexCode,
-    }
-
-    impl JobMode {
-        pub fn as_str(&self) -> &'static str {
-            match self {
-                Self::Worker => "worker",
-                Self::ClaudeCode => "claude_code",
-                Self::CodexCode => "codex_code",
-            }
-        }
-    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ContainerState {

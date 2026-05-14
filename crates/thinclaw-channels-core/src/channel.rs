@@ -1,11 +1,16 @@
 //! Core channel message and streaming-draft types.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::Stream;
 use thinclaw_identity::{IncomingIdentityMessage, ResolvedIdentity};
+use thinclaw_tools_core::CanvasAction;
+use thinclaw_types::SubagentTaskPacket;
+use thinclaw_types::error::ChannelError;
 use thinclaw_types::media::MediaContent;
 use uuid::Uuid;
 
@@ -218,5 +223,411 @@ impl DraftReplyState {
     /// Get the final accumulated text (no typing indicator).
     pub fn final_text(&self) -> &str {
         &self.accumulated
+    }
+}
+
+/// Status update types for showing agent activity.
+#[derive(Debug, Clone)]
+pub enum StatusUpdate {
+    /// Agent is thinking/processing.
+    Thinking(String),
+    /// Tool execution started.
+    ToolStarted {
+        name: String,
+        /// Tool input parameters (optional — may be omitted for performance).
+        parameters: Option<serde_json::Value>,
+    },
+    /// Tool execution completed.
+    ToolCompleted {
+        name: String,
+        success: bool,
+        /// Brief preview of the result (truncated to keep events small).
+        result_preview: Option<String>,
+    },
+    /// Brief preview of tool execution output.
+    ToolResult {
+        name: String,
+        preview: String,
+        artifacts: Vec<thinclaw_tools_core::ToolArtifact>,
+    },
+    /// Streaming text chunk.
+    StreamChunk(String),
+    /// General status message.
+    Status(String),
+    /// Structured plan update for clients that can render agent plans.
+    Plan { entries: Vec<serde_json::Value> },
+    /// LLM token/cost usage for the most recent model turn.
+    Usage {
+        input_tokens: u32,
+        output_tokens: u32,
+        cost_usd: Option<f64>,
+        model: Option<String>,
+    },
+    /// A sandbox job has started (shown as a clickable card in the UI).
+    JobStarted {
+        job_id: String,
+        title: String,
+        browse_url: String,
+    },
+    /// Tool requires user approval before execution.
+    ApprovalNeeded {
+        request_id: String,
+        tool_name: String,
+        description: String,
+        parameters: serde_json::Value,
+    },
+    /// Extension needs user authentication (token or OAuth).
+    AuthRequired {
+        extension_name: String,
+        instructions: Option<String>,
+        auth_url: Option<String>,
+        setup_url: Option<String>,
+        auth_mode: String,
+        auth_status: String,
+        shared_auth_provider: Option<String>,
+        missing_scopes: Vec<String>,
+        thread_id: Option<String>,
+    },
+    /// Extension authentication completed.
+    AuthCompleted {
+        extension_name: String,
+        success: bool,
+        message: String,
+        auth_mode: Option<String>,
+        auth_status: Option<String>,
+        shared_auth_provider: Option<String>,
+        missing_scopes: Vec<String>,
+        thread_id: Option<String>,
+    },
+    /// Turn-level error surfaced to the UI (e.g., LLM unreachable, safety rejection).
+    ///
+    /// Emitted by the API layer when a spawned agent turn fails. Without this,
+    /// turn errors are only logged and the UI shows an infinite spinner.
+    Error {
+        message: String,
+        code: Option<String>,
+    },
+    /// Canvas / A2UI action — agent wants to show, update, or dismiss a UI panel.
+    ///
+    /// Emitted after the `canvas` tool executes successfully. The channel
+    /// layer forwards this to the frontend (Tauri event, SSE, etc.) for
+    /// immediate rendering, while the agent loop also persists the panel
+    /// in the `CanvasStore` for HTTP access.
+    CanvasAction(CanvasAction),
+    /// Agent-initiated progress message sent via the `emit_user_message` tool.
+    ///
+    /// Unlike `Thinking` (ephemeral status), this is a persistent message the
+    /// agent wants the user to see. Channels should render it as a real chat
+    /// message or notification, not a transient indicator.
+    AgentMessage {
+        content: String,
+        message_type: String,
+    },
+
+    /// Run lifecycle start — emitted immediately when a run is accepted,
+    /// before any LLM call. Lets the frontend show a thinking indicator
+    /// instantly, matching openclaw's `lifecycle: phase=start` event.
+    LifecycleStart {
+        /// Unique ID for this run (correlates Start ↔ End events).
+        run_id: String,
+    },
+
+    /// Run lifecycle end — emitted after the final response is produced
+    /// or when the run terminates (error or interrupt).
+    LifecycleEnd {
+        /// Unique ID matching the corresponding LifecycleStart.
+        run_id: String,
+        /// How the run ended: "response" | "interrupted" | "error".
+        phase: String,
+    },
+
+    /// A sub-agent was spawned by the main agent.
+    SubagentSpawned {
+        /// Unique sub-agent ID.
+        agent_id: String,
+        /// Human-readable name (e.g., "researcher").
+        name: String,
+        /// Task description.
+        task: String,
+        /// Canonical bounded task packet.
+        task_packet: SubagentTaskPacket,
+        /// Effective explicit tool grants after parent intersection.
+        allowed_tools: Vec<String>,
+        /// Effective explicit skill grants after parent intersection.
+        allowed_skills: Vec<String>,
+        /// Effective memory policy.
+        memory_mode: String,
+        /// Effective tool policy.
+        tool_mode: String,
+        /// Effective skill policy.
+        skill_mode: String,
+    },
+
+    /// A running sub-agent reports progress (tool use, thinking, etc.).
+    SubagentProgress {
+        /// Sub-agent ID.
+        agent_id: String,
+        /// Progress message.
+        message: String,
+        /// Message category: "tool" | "thinking" | "question".
+        category: String,
+    },
+
+    /// A sub-agent completed, failed, or was cancelled.
+    SubagentCompleted {
+        /// Sub-agent ID.
+        agent_id: String,
+        /// Sub-agent name.
+        name: String,
+        /// Whether it succeeded.
+        success: bool,
+        /// The sub-agent's final response / findings.
+        response: String,
+        /// Duration in milliseconds.
+        duration_ms: u64,
+        /// Number of tool iterations used.
+        iterations: usize,
+        /// Canonical bounded task packet.
+        task_packet: SubagentTaskPacket,
+        /// Effective explicit tool grants after parent intersection.
+        allowed_tools: Vec<String>,
+        /// Effective explicit skill grants after parent intersection.
+        allowed_skills: Vec<String>,
+        /// Effective memory policy.
+        memory_mode: String,
+        /// Effective tool policy.
+        tool_mode: String,
+        /// Effective skill policy.
+        skill_mode: String,
+    },
+}
+
+/// Trait for message channels.
+///
+/// Channels receive messages from external sources and convert them to
+/// a unified format. They also handle sending responses back.
+#[async_trait]
+pub trait Channel: Send + Sync {
+    /// Get the channel name (e.g., "cli", "slack", "telegram", "http").
+    fn name(&self) -> &str;
+
+    /// Start listening for messages.
+    ///
+    /// Returns a stream of incoming messages. The channel should handle
+    /// reconnection and error recovery internally.
+    async fn start(&self) -> Result<MessageStream, ChannelError>;
+
+    /// Send a response back to the user.
+    ///
+    /// The response is sent in the context of the original message
+    /// (same channel, same thread if applicable).
+    async fn respond(
+        &self,
+        msg: &IncomingMessage,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError>;
+
+    /// Send a status update (thinking, tool execution, etc.).
+    ///
+    /// The metadata contains channel-specific routing info (e.g., Telegram chat_id)
+    /// needed to deliver the status to the correct destination.
+    ///
+    /// Default implementation does nothing (for channels that don't support status).
+    async fn send_status(
+        &self,
+        _status: StatusUpdate,
+        _metadata: &serde_json::Value,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    /// Send a proactive message without a prior incoming message.
+    ///
+    /// Used for alerts, heartbeat notifications, and other agent-initiated communication.
+    /// The user_id helps target a specific user within the channel.
+    ///
+    /// Default implementation does nothing (for channels that don't support broadcast).
+    async fn broadcast(
+        &self,
+        _user_id: &str,
+        _response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    /// Send a streaming draft update for progressive message rendering.
+    ///
+    /// Channels that support message editing (Slack, Discord) can override this
+    /// to post an initial placeholder and then edit it as chunks arrive.
+    ///
+    /// Returns the platform message ID (for subsequent edits).
+    async fn send_draft(
+        &self,
+        _draft: &DraftReplyState,
+        _metadata: &serde_json::Value,
+    ) -> Result<Option<String>, ChannelError> {
+        Ok(None)
+    }
+
+    /// Delete a previously sent message (best-effort).
+    ///
+    /// Used by the streaming fallback path to remove partial streaming
+    /// messages before resending the complete response via `on_respond()`.
+    ///
+    /// Default implementation does nothing (for channels that don't support deletion).
+    async fn delete_message(
+        &self,
+        _message_id: &str,
+        _metadata: &serde_json::Value,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    /// Get the stream mode for this channel.
+    ///
+    /// Default: StreamMode::None (no streaming drafts).
+    fn stream_mode(&self) -> StreamMode {
+        StreamMode::None
+    }
+
+    /// Return a short formatting hint for the active platform, if useful.
+    ///
+    /// Channels that render markdown, HTML, or plain text differently can
+    /// override this to help prompt assembly tailor its response style.
+    fn formatting_hints(&self) -> Option<String> {
+        None
+    }
+
+    /// Update the stream mode at runtime (e.g., from WebUI settings).
+    ///
+    /// Default implementation does nothing. Channels that support runtime
+    /// stream mode changes (e.g., WASM Telegram) should override this.
+    async fn set_stream_mode(&self, _mode: StreamMode) {}
+
+    /// Update channel-specific runtime config values without recreating the channel object.
+    ///
+    /// Useful for WASM-backed channels whose startup config needs to be adjusted
+    /// before a restart (for example Telegram transport policy changes).
+    async fn update_runtime_config(&self, _updates: HashMap<String, serde_json::Value>) {}
+
+    /// Clear transient connection/runtime state before a manual reconnect.
+    ///
+    /// This should not be used for routine health-monitor restarts because
+    /// some channels intentionally persist fallback state across restarts.
+    async fn reset_connection_state(&self) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    /// Check if the channel is healthy.
+    async fn health_check(&self) -> Result<(), ChannelError>;
+
+    /// Return channel-specific diagnostics for UI/status surfaces.
+    ///
+    /// Default implementation exposes no diagnostics.
+    async fn diagnostics(&self) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// React to a message with an emoji.
+    ///
+    /// Default implementation does nothing (for channels that don't support reactions).
+    async fn react(
+        &self,
+        _chat_id: &str,
+        _message_id: &str,
+        _emoji: &str,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    /// Send a poll to a chat.
+    ///
+    /// Default implementation does nothing (for channels that don't support polls).
+    async fn poll(
+        &self,
+        _chat_id: &str,
+        _question: &str,
+        _options: &[String],
+        _is_anonymous: bool,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    /// Gracefully shut down the channel.
+    async fn shutdown(&self) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    /// Send a typing indicator to a chat.
+    ///
+    /// Platforms like Telegram, Discord, and Slack show a "... is typing"
+    /// indicator. The `chat_id` is channel-specific (e.g. Telegram chat ID,
+    /// Discord channel ID).
+    ///
+    /// Default implementation does nothing (for channels without typing support).
+    async fn send_typing(&self, _chat_id: &str) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
+    /// Toggle debug mode for this channel and return the new state.
+    ///
+    /// When debug mode is on, tool-level status events (ToolStarted,
+    /// ToolCompleted, ToolResult) are forwarded to the channel. When off
+    /// (default), they are silently suppressed to avoid spamming chat
+    /// channels with one message per tool call.
+    ///
+    /// Default implementation returns `false` (no-op for channels that
+    /// don't support runtime debug toggling, like the REPL which has its
+    /// own local toggle).
+    async fn toggle_debug_mode(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    struct DummyChannel;
+
+    #[async_trait]
+    impl Channel for DummyChannel {
+        fn name(&self) -> &str {
+            "dummy"
+        }
+
+        async fn start(&self) -> Result<MessageStream, ChannelError> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        async fn respond(
+            &self,
+            _msg: &IncomingMessage,
+            _response: OutgoingResponse,
+        ) -> Result<(), ChannelError> {
+            Ok(())
+        }
+
+        async fn health_check(&self) -> Result<(), ChannelError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn formatting_hints_defaults_to_none() {
+        assert_eq!(DummyChannel.formatting_hints(), None);
+    }
+
+    #[test]
+    fn stream_mode_parses_event_chunks_aliases() {
+        assert_eq!(
+            StreamMode::from_str_value("event_chunks"),
+            StreamMode::EventChunks
+        );
+        assert_eq!(
+            StreamMode::from_str_value("events"),
+            StreamMode::EventChunks
+        );
     }
 }

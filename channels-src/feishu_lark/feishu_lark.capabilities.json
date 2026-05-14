@@ -1,0 +1,134 @@
+{
+  "type": "channel",
+  "name": "feishu_lark",
+  "description": "Feishu/Lark event callback channel",
+  "formatting_hints": "Feishu/Lark supports post and text messages. Keep replies concise and avoid unsupported raw HTML.",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "feishu_lark_app_token",
+        "prompt": "Enter your Feishu/Lark app access token",
+        "optional": false
+      },
+      {
+        "name": "feishu_lark_webhook_secret",
+        "prompt": "Enter your Feishu/Lark webhook secret",
+        "optional": false
+      },
+      {
+        "name": "feishu_lark_verification_token",
+        "prompt": "Enter your Feishu/Lark verification token",
+        "optional": false
+      }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "open.feishu.cn",
+          "path_prefix": "/open-apis/"
+        }
+      ],
+      "credentials": {
+        "feishu_lark_app_token": {
+          "secret_name": "feishu_lark_app_token",
+          "location": {
+            "type": "bearer"
+          },
+          "host_patterns": [
+            "open.feishu.cn",
+            "open.larksuite.com"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 3000
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "feishu_*",
+        "lark_*"
+      ]
+    },
+    "channel": {
+      "allowed_paths": [
+        "/webhook/feishu_lark"
+      ],
+      "allow_polling": false,
+      "workspace_prefix": "channels/feishu_lark/",
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      },
+      "webhook": {
+        "secret_header": "X-Webhook-Secret",
+        "secret_name": "feishu_lark_verification_token",
+        "secret_validation": "equals"
+      }
+    }
+  },
+  "config": {
+    "channel_name": "feishu_lark",
+    "display_name": "Feishu/Lark",
+    "webhook_path": "/webhook/feishu_lark",
+    "mapping": {
+      "text": [
+        "event.message.content",
+        "event.message.text",
+        "message.content",
+        "text"
+      ],
+      "user_id": [
+        "event.sender.sender_id.open_id",
+        "event.sender.sender_id.user_id",
+        "user.id"
+      ],
+      "user_name": [
+        "event.sender.sender_type",
+        "user.name"
+      ],
+      "chat_id": [
+        "event.message.chat_id",
+        "chat_id"
+      ],
+      "chat_type": [
+        "event.message.chat_type",
+        "chat_type"
+      ],
+      "message_id": [
+        "event.message.message_id"
+      ],
+      "metadata": {
+        "message_id": [
+          "event.message.message_id"
+        ],
+        "tenant_key": [
+          "tenant_key"
+        ]
+      }
+    },
+    "response": {
+      "url": "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+      "method": "POST",
+      "body_format": "json",
+      "body": {
+        "receive_id": "{chat_id}",
+        "msg_type": "text",
+        "content": "$json_string:{\"text\":\"{content}\"}"
+      },
+      "headers": {
+        "Authorization": "Bearer {FEISHU_LARK_APP_TOKEN}"
+      }
+    },
+    "challenge": {
+      "method": "POST",
+      "match_path": "type",
+      "match_value": "url_verification",
+      "response_path": "challenge",
+      "response_format": "json_challenge"
+    }
+  }
+}

@@ -1,0 +1,115 @@
+{
+  "type": "channel",
+  "name": "mattermost",
+  "description": "Mattermost outgoing webhook channel for receiving and responding to posts",
+  "formatting_hints": "Mattermost supports Markdown. Prefer compact sections and avoid raw HTML.",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "mattermost_base_url",
+        "prompt": "Enter your Mattermost base URL, for example https://chat.example.com",
+        "optional": false
+      },
+      {
+        "name": "mattermost_bot_token",
+        "prompt": "Enter your Mattermost bot token",
+        "optional": false
+      },
+      {
+        "name": "mattermost_webhook_secret",
+        "prompt": "Enter your Mattermost webhook secret",
+        "optional": false
+      }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "*",
+          "path_prefix": "/api/v4/"
+        }
+      ],
+      "credentials": {
+        "mattermost_bot_token": {
+          "secret_name": "mattermost_bot_token",
+          "location": {
+            "type": "bearer"
+          },
+          "host_patterns": [
+            "*"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 3000
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "mattermost_*"
+      ]
+    },
+    "channel": {
+      "allowed_paths": [
+        "/webhook/mattermost"
+      ],
+      "allow_polling": false,
+      "workspace_prefix": "channels/mattermost/",
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      },
+      "webhook": {
+        "secret_header": "X-Webhook-Secret",
+        "secret_name": "mattermost_webhook_secret",
+        "secret_validation": "equals"
+      }
+    }
+  },
+  "config": {
+    "channel_name": "mattermost",
+    "display_name": "Mattermost",
+    "webhook_path": "/webhook/mattermost",
+    "mapping": {
+      "text": [
+        "text",
+        "post.message",
+        "message"
+      ],
+      "user_id": [
+        "user_id",
+        "user.id"
+      ],
+      "user_name": [
+        "user_name",
+        "user.username"
+      ],
+      "chat_id": [
+        "channel_id",
+        "channel.id"
+      ],
+      "chat_type": [
+        "channel_type",
+        "chat_type"
+      ],
+      "message_id": [
+        "post_id",
+        "post.id"
+      ]
+    },
+    "response": {
+      "url": "{MATTERMOST_BASE_URL}/api/v4/posts",
+      "method": "POST",
+      "body_format": "json",
+      "body": {
+        "channel_id": "{chat_id}",
+        "message": "{content}"
+      },
+      "headers": {
+        "Authorization": "Bearer {MATTERMOST_BOT_TOKEN}"
+      }
+    }
+  }
+}

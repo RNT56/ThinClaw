@@ -22,55 +22,18 @@ use crate::skills::{
     parser::parse_skill_md,
     registry::{SkillRegistry, SkillRegistryError, check_gating},
 };
-use crate::tools::ToolRegistry;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{Workspace, paths};
+use thinclaw_tools::builtin::learning as learning_policy;
 
-const PROMPT_TARGETS: &[&str] = &[paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER];
-const SKILL_FILE_NAME: &str = "SKILL.md";
+const SKILL_FILE_NAME: &str = learning_policy::SKILL_FILE_NAME;
 
 fn tool_error_from_skill(err: SkillRegistryError) -> ToolError {
     ToolError::ExecutionFailed(err.to_string())
 }
 
-fn normalize_prompt_target(target: &str) -> Result<&'static str, ToolError> {
-    let trimmed = target.trim().trim_start_matches('/');
-    PROMPT_TARGETS
-        .iter()
-        .copied()
-        .find(|candidate| trimmed.eq_ignore_ascii_case(candidate))
-        .ok_or_else(|| {
-            ToolError::InvalidParameters(format!(
-                "target must be one of: {}, got '{}'",
-                PROMPT_TARGETS.join(", "),
-                target
-            ))
-        })
-}
-
 fn validate_prompt_content(content: &str) -> Result<(), ToolError> {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return Err(ToolError::InvalidParameters(
-            "prompt content cannot be empty".to_string(),
-        ));
-    }
-    if !trimmed.contains('#') {
-        return Err(ToolError::InvalidParameters(
-            "prompt content must include markdown headings".to_string(),
-        ));
-    }
-    let lowered = trimmed.to_ascii_lowercase();
-    let suspicious_markers = ["role: user", "role: assistant", "tool_result", "<tool_call"];
-    if suspicious_markers
-        .iter()
-        .any(|marker| lowered.contains(marker))
-    {
-        return Err(ToolError::InvalidParameters(
-            "prompt content appears to include transcript/tool residue".to_string(),
-        ));
-    }
-    Ok(())
+    learning_policy::validate_prompt_content(content)
 }
 
 fn validate_prompt_safety(target: &str, content: &str) -> Result<(), ToolError> {
@@ -79,156 +42,17 @@ fn validate_prompt_safety(target: &str, content: &str) -> Result<(), ToolError> 
             .map_err(ToolError::InvalidParameters),
         paths::SOUL_LOCAL => crate::identity::soul::validate_local_overlay(content)
             .map_err(ToolError::InvalidParameters),
-        paths::AGENTS => {
-            let lowered = content.to_ascii_lowercase();
-            let required_markers = ["red lines", "ask first", "don't"];
-            if required_markers
-                .iter()
-                .all(|marker| !lowered.contains(marker))
-            {
-                return Err(ToolError::InvalidParameters(format!(
-                    "{} update rejected: core safety guidance appears to be missing",
-                    target
-                )));
-            }
-            Ok(())
-        }
+        paths::AGENTS => learning_policy::validate_agents_prompt_safety(content),
         _ => Ok(()),
     }
 }
 
-fn normalize_heading_name(raw: &str) -> String {
-    raw.trim()
-        .trim_start_matches('#')
-        .trim()
-        .to_ascii_lowercase()
-}
-
-fn parse_markdown_heading(line: &str) -> Option<(usize, String)> {
-    let trimmed = line.trim_start();
-    if !trimmed.starts_with('#') {
-        return None;
-    }
-    let level = trimmed.chars().take_while(|ch| *ch == '#').count();
-    if level == 0 {
-        return None;
-    }
-    let title = trimmed[level..].trim();
-    if title.is_empty() {
-        return None;
-    }
-    Some((level, title.to_string()))
-}
-
-fn find_section_byte_range(doc: &str, heading_name: &str) -> Option<(usize, usize, usize, String)> {
-    let target = normalize_heading_name(heading_name);
-    let mut offset = 0usize;
-    let mut start: Option<(usize, usize, usize, String)> = None;
-
-    for line in doc.split_inclusive('\n') {
-        let line_start = offset;
-        let line_end = offset + line.len();
-        offset = line_end;
-
-        if let Some((level, title)) = parse_markdown_heading(line) {
-            if let Some((start_offset, current_level, _, current_title)) = &start
-                && level <= *current_level
-            {
-                return Some((
-                    *start_offset,
-                    line_start,
-                    *current_level,
-                    current_title.clone(),
-                ));
-            }
-
-            if normalize_heading_name(&title) == target {
-                start = Some((line_start, level, line_end, title));
-            }
-        }
-    }
-
-    start.map(|(start_offset, level, _, title)| (start_offset, doc.len(), level, title))
-}
-
-fn upsert_markdown_section(doc: &str, heading: &str, section_content: &str) -> String {
-    let normalized_content = section_content.trim();
-    let body = if normalized_content.is_empty() {
-        String::new()
-    } else {
-        format!("\n{}\n", normalized_content)
-    };
-
-    if let Some((start, end, level, title)) = find_section_byte_range(doc, heading) {
-        let heading_line = format!("{} {}", "#".repeat(level.max(1)), title.trim());
-        let replacement = format!("{heading_line}{body}");
-        let mut merged = String::with_capacity(doc.len() + replacement.len());
-        merged.push_str(&doc[..start]);
-        merged.push_str(replacement.trim_end_matches('\n'));
-        merged.push('\n');
-        merged.push_str(doc[end..].trim_start_matches('\n'));
-        return merged.trim().to_string() + "\n";
-    }
-
-    let mut merged = doc.trim().to_string();
-    if !merged.is_empty() {
-        merged.push_str("\n\n");
-    }
-    merged.push_str(&format!("## {}\n", heading.trim()));
-    if !normalized_content.is_empty() {
-        merged.push_str(normalized_content);
-        merged.push('\n');
-    }
-    merged
-}
-
-fn append_markdown_section(doc: &str, heading: &str, section_content: &str) -> String {
-    let mut merged = doc.trim().to_string();
-    if !merged.is_empty() {
-        merged.push_str("\n\n");
-    }
-    merged.push_str(&format!("## {}\n", heading.trim()));
-    let content = section_content.trim();
-    if !content.is_empty() {
-        merged.push_str(content);
-        merged.push('\n');
-    }
-    merged
-}
-
-fn remove_markdown_section(doc: &str, heading: &str) -> Result<String, ToolError> {
-    let Some((start, end, _, _)) = find_section_byte_range(doc, heading) else {
-        return Err(ToolError::ExecutionFailed(format!(
-            "section '{}' not found",
-            heading
-        )));
-    };
-
-    let mut merged = String::with_capacity(doc.len());
-    merged.push_str(&doc[..start]);
-    merged.push_str(doc[end..].trim_start_matches('\n'));
-    Ok(merged.trim().to_string() + "\n")
-}
-
 fn validate_skill_admin_available(ctx: &JobContext, tool_name: &str) -> Result<(), ToolError> {
-    if ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_skills").is_some() {
-        Err(ToolError::ExecutionFailed(format!(
-            "Tool '{}' is not available when the current agent is restricted to a specific skill allowlist.",
-            tool_name
-        )))
-    } else {
-        Ok(())
-    }
+    learning_policy::validate_skill_admin_available(&ctx.metadata, tool_name)
 }
 
 fn validate_prompt_manage_available(ctx: &JobContext) -> Result<(), ToolError> {
-    if ToolRegistry::metadata_string_list(&ctx.metadata, "allowed_skills").is_some() {
-        Err(ToolError::NotAuthorized(
-            "prompt_manage is not available when the current agent is restricted to a specific skill allowlist.".to_string(),
-        ))
-    } else {
-        Ok(())
-    }
+    learning_policy::validate_prompt_manage_available(&ctx.metadata)
 }
 
 fn validate_prompt_manage_settings(settings: &LearningSettings) -> Result<(), ToolError> {
@@ -238,47 +62,6 @@ fn validate_prompt_manage_settings(settings: &LearningSettings) -> Result<(), To
         Err(ToolError::ExecutionFailed(
             "prompt mutation is disabled in the learning settings".to_string(),
         ))
-    }
-}
-
-fn prompt_manage_user_target(scope: &str, ctx: &JobContext) -> Result<String, ToolError> {
-    let actor_id = ctx
-        .metadata
-        .get("actor_id")
-        .and_then(|v| v.as_str())
-        .or(ctx.actor_id.as_deref());
-    let conversation_kind = ctx
-        .metadata
-        .get("conversation_kind")
-        .or_else(|| ctx.metadata.get("chat_type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("direct")
-        .to_ascii_lowercase();
-    let is_group = matches!(
-        conversation_kind.as_str(),
-        "group" | "channel" | "supergroup"
-    );
-
-    match scope {
-        "shared" => Ok(paths::USER.to_string()),
-        "actor" => {
-            let Some(actor_id) = actor_id else {
-                return Err(ToolError::InvalidParameters(
-                    "scope='actor' requires actor_id context".to_string(),
-                ));
-            };
-            Ok(paths::actor_user(actor_id))
-        }
-        "auto" => {
-            if !is_group && let Some(actor_id) = actor_id {
-                return Ok(paths::actor_user(actor_id));
-            }
-            Ok(paths::USER.to_string())
-        }
-        other => Err(ToolError::InvalidParameters(format!(
-            "unsupported scope '{}'; expected auto, actor, or shared",
-            other
-        ))),
     }
 }
 
@@ -326,53 +109,11 @@ async fn write_prompt_target_content(
 }
 
 fn validate_relative_skill_path(path: &str) -> Result<PathBuf, ToolError> {
-    let trimmed = path.trim().trim_start_matches('/');
-    if trimmed.is_empty() {
-        return Err(ToolError::InvalidParameters(
-            "path cannot be empty".to_string(),
-        ));
-    }
-
-    let path = Path::new(trimmed);
-    if path.is_absolute() {
-        return Err(ToolError::InvalidParameters(format!(
-            "skill file path must be relative, got '{}'",
-            path.display()
-        )));
-    }
-
-    let mut clean = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => clean.push(part),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir
-            | std::path::Component::RootDir
-            | std::path::Component::Prefix(_) => {
-                return Err(ToolError::InvalidParameters(format!(
-                    "skill file path '{}' must not contain path traversal components",
-                    path.display()
-                )));
-            }
-        }
-    }
-
-    if clean.as_os_str().is_empty() {
-        return Err(ToolError::InvalidParameters(
-            "path cannot resolve to an empty location".to_string(),
-        ));
-    }
-
-    Ok(clean)
+    learning_policy::validate_relative_skill_path(path)
 }
 
 fn artifact_name_for_skill(skill_name: &str, path: &Path) -> String {
-    let path_str = path.to_string_lossy();
-    if path_str.eq_ignore_ascii_case(SKILL_FILE_NAME) {
-        skill_name.to_string()
-    } else {
-        format!("{}/{}", skill_name, path_str)
-    }
+    learning_policy::artifact_name_for_skill(skill_name, path)
 }
 
 async fn read_text(path: &Path) -> Result<Option<String>, ToolError> {
@@ -459,7 +200,7 @@ async fn record_artifact_version(
 }
 
 fn serialized<T: serde::Serialize>(value: T) -> serde_json::Value {
-    serde_json::to_value(value).unwrap_or_else(|_| serde_json::json!({}))
+    learning_policy::serialize_value(value)
 }
 
 async fn loaded_skill_root(
@@ -523,41 +264,7 @@ impl Tool for PromptManageTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": ["replace", "upsert_section", "append_section", "remove_section"],
-                    "description": "Prompt mutation operation",
-                    "default": "replace"
-                },
-                "target": {
-                    "type": "string",
-                    "enum": [paths::SOUL, paths::SOUL_LOCAL, paths::AGENTS, paths::USER],
-                    "description": "Which prompt file to update"
-                },
-                "scope": {
-                    "type": "string",
-                    "enum": ["auto", "actor", "shared"],
-                    "description": "USER.md scope behavior. auto = actor USER.md in direct chats, shared USER.md in groups.",
-                    "default": "auto"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Replacement markdown content for operation=replace"
-                },
-                "heading": {
-                    "type": "string",
-                    "description": "Section heading for section-aware operations"
-                },
-                "section_content": {
-                    "type": "string",
-                    "description": "Section body for upsert_section or append_section"
-                },
-            },
-            "required": ["target"]
-        })
+        learning_policy::prompt_manage_parameters_schema()
     }
 
     async fn execute(
@@ -570,37 +277,19 @@ impl Tool for PromptManageTool {
         let settings = self.orchestrator.load_settings_for_user(&ctx.user_id).await;
         validate_prompt_manage_settings(&settings)?;
 
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .unwrap_or("replace")
-            .to_ascii_lowercase();
-        let target = normalize_prompt_target(require_str(&params, "target")?)?;
-        let scope = params
-            .get("scope")
-            .and_then(|v| v.as_str())
-            .unwrap_or("auto")
-            .to_ascii_lowercase();
-        if target != paths::USER && scope != "auto" {
-            return Err(ToolError::InvalidParameters(
-                "scope is only supported for target='USER.md'".to_string(),
-            ));
-        }
-        let resolved_target = if target == paths::USER {
-            prompt_manage_user_target(&scope, ctx)?
-        } else {
-            target.to_string()
-        };
-        let owner_actor_user = if target == paths::USER {
-            Some(paths::actor_user(&ctx.user_id))
-        } else {
-            None
-        };
-        let timezone_sync_target = target == paths::USER
-            && (resolved_target == paths::USER
-                || owner_actor_user
-                    .as_deref()
-                    .is_some_and(|path| resolved_target == path));
+        let parsed = learning_policy::parse_prompt_manage_params(&params)?;
+        let operation = parsed.operation;
+        let target = parsed.target;
+        let scope = parsed.scope;
+        let target_resolution = learning_policy::resolve_prompt_manage_target(
+            target,
+            &scope,
+            &ctx.metadata,
+            ctx.actor_id.as_deref(),
+            &ctx.user_id,
+        )?;
+        let resolved_target = target_resolution.resolved_target;
+        let timezone_sync_target = target_resolution.timezone_sync_target;
         let before = read_prompt_target_content(&self.workspace, &resolved_target).await?;
         let before_timezone = if timezone_sync_target {
             crate::timezone::extract_markdown_timezone(&before)
@@ -608,35 +297,8 @@ impl Tool for PromptManageTool {
             None
         };
 
-        let next_content = match operation.as_str() {
-            "replace" => require_str(&params, "content")?.to_string(),
-            "upsert_section" => {
-                let heading = require_str(&params, "heading")?;
-                let section_content = params
-                    .get("section_content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                upsert_markdown_section(&before, heading, section_content)
-            }
-            "append_section" => {
-                let heading = require_str(&params, "heading")?;
-                let section_content = params
-                    .get("section_content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                append_markdown_section(&before, heading, section_content)
-            }
-            "remove_section" => {
-                let heading = require_str(&params, "heading")?;
-                remove_markdown_section(&before, heading)?
-            }
-            other => {
-                return Err(ToolError::InvalidParameters(format!(
-                    "unknown prompt_manage operation '{}'",
-                    other
-                )));
-            }
-        };
+        let next_content =
+            learning_policy::prompt_manage_next_content(&params, &before, &operation)?;
         validate_prompt_content(&next_content)?;
         validate_prompt_safety(target, &next_content)?;
         if target == paths::USER {
@@ -653,14 +315,13 @@ impl Tool for PromptManageTool {
         };
         let orchestrator = Arc::clone(&self.orchestrator);
         let user_id = ctx.user_id.clone();
-        let mirror_payload = serde_json::json!({
-            "tool": "prompt_manage",
-            "target": target,
-            "resolved_target": resolved_target,
-            "scope": scope,
-            "operation": operation,
-            "content_preview": after.chars().take(240).collect::<String>(),
-        });
+        let mirror_payload = learning_policy::prompt_manage_mirror_payload(
+            target,
+            &resolved_target,
+            &scope,
+            &operation,
+            &after,
+        );
         tokio::spawn(async move {
             orchestrator
                 .mirror_workspace_write(&user_id, &mirror_payload)
@@ -668,13 +329,12 @@ impl Tool for PromptManageTool {
         });
 
         let version_label = Some(Utc::now().to_rfc3339());
-        let provenance = serde_json::json!({
-            "tool": "prompt_manage",
-            "target": target,
-            "resolved_target": resolved_target.clone(),
-            "scope": scope.clone(),
-            "user_id": ctx.user_id,
-        });
+        let provenance = learning_policy::prompt_manage_provenance(
+            target,
+            &resolved_target,
+            &scope,
+            &ctx.user_id,
+        );
         let version_result = record_artifact_version(
             &self.store,
             &ctx.user_id,
@@ -702,16 +362,15 @@ impl Tool for PromptManageTool {
             })?;
         }
 
-        let result = serde_json::json!({
-            "status": "updated",
-            "operation": operation,
-            "target": resolved_target,
-            "bytes_written": next_content.len(),
-            "user_notification_required": target == paths::SOUL || target == paths::SOUL_LOCAL,
-            "version_label": version_label,
-            "artifact_version_recorded": version_result.is_ok(),
-            "artifact_version_error": version_result.err(),
-        });
+        let result = learning_policy::prompt_manage_output(
+            &operation,
+            &resolved_target,
+            next_content.len(),
+            target == paths::SOUL || target == paths::SOUL_LOCAL,
+            version_label,
+            version_result.is_ok(),
+            version_result.err(),
+        );
         Ok(ToolOutput::success(result, start.elapsed()))
     }
 
@@ -750,35 +409,7 @@ impl Tool for SkillManageTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "operation": {
-                    "type": "string",
-                    "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file", "reload"],
-                    "description": "What to do with the skill"
-                },
-                "name": {
-                    "type": "string",
-                    "description": "Skill name"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "Relative file path inside the skill directory (defaults to SKILL.md)",
-                    "default": "SKILL.md"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "New file content for create/write/edit/patch operations"
-                },
-                "all": {
-                    "type": "boolean",
-                    "description": "When operation=reload, reload every skill instead of one",
-                    "default": false
-                }
-            },
-            "required": ["operation", "name"]
-        })
+        learning_policy::skill_manage_parameters_schema()
     }
 
     async fn execute(
@@ -788,13 +419,11 @@ impl Tool for SkillManageTool {
     ) -> Result<ToolOutput, ToolError> {
         validate_skill_admin_available(ctx, self.name())?;
         let start = std::time::Instant::now();
-        let operation = require_str(&params, "operation")?.to_ascii_lowercase();
-        let name = require_str(&params, "name")?;
-        let path_value = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(SKILL_FILE_NAME);
-        let all = params.get("all").and_then(|v| v.as_bool()).unwrap_or(false);
+        let parsed = learning_policy::parse_skill_manage_params(&params)?;
+        let operation = parsed.operation;
+        let name = parsed.name;
+        let path_value = parsed.path;
+        let all = parsed.all;
 
         match operation.as_str() {
             "reload" => {
@@ -802,26 +431,19 @@ impl Tool for SkillManageTool {
                 if all {
                     let loaded = guard.reload().await;
                     return Ok(ToolOutput::success(
-                        serde_json::json!({
-                            "status": "reloaded_all",
-                            "skills": loaded,
-                            "count": loaded.len(),
-                        }),
+                        learning_policy::skill_manage_reload_all_output(loaded),
                         start.elapsed(),
                     ));
                 }
 
-                let reloaded = guard.reload_skill(name).await.map_err(|err| {
+                let reloaded = guard.reload_skill(&name).await.map_err(|err| {
                     ToolError::ExecutionFailed(format!(
                         "failed to reload skill '{}': {}",
                         name, err
                     ))
                 })?;
                 return Ok(ToolOutput::success(
-                    serde_json::json!({
-                        "status": "reloaded",
-                        "name": reloaded,
-                    }),
+                    learning_policy::skill_manage_reload_output(&reloaded),
                     start.elapsed(),
                 ));
             }
@@ -842,7 +464,7 @@ impl Tool for SkillManageTool {
                 }
                 let parsed = parse_skill_md(&normalized)
                     .map_err(|err| ToolError::InvalidParameters(err.to_string()))?;
-                if !parsed.manifest.name.eq_ignore_ascii_case(name) {
+                if !parsed.manifest.name.eq_ignore_ascii_case(&name) {
                     return Err(ToolError::InvalidParameters(format!(
                         "skill name '{}' does not match SKILL.md frontmatter name '{}'",
                         name, parsed.manifest.name
@@ -868,7 +490,7 @@ impl Tool for SkillManageTool {
                     let guard = self.registry.read().await;
                     guard.install_target_dir().to_path_buf()
                 };
-                let existed_already = tokio::fs::try_exists(install_dir.join(name))
+                let existed_already = tokio::fs::try_exists(install_dir.join(&name))
                     .await
                     .unwrap_or(false);
                 if existed_already {
@@ -879,7 +501,7 @@ impl Tool for SkillManageTool {
                 }
 
                 let (skill_name, loaded_skill) =
-                    SkillRegistry::prepare_install_to_disk(&install_dir, name, &normalized)
+                    SkillRegistry::prepare_install_to_disk(&install_dir, &name, &normalized)
                         .await
                         .map_err(tool_error_from_skill)?;
 
@@ -888,7 +510,7 @@ impl Tool for SkillManageTool {
                     guard.commit_install(&skill_name, loaded_skill)
                 };
                 if let Err(err) = commit_result {
-                    let cleanup_path = install_dir.join(name);
+                    let cleanup_path = install_dir.join(&name);
                     let _ = SkillRegistry::delete_skill_files(&cleanup_path).await;
                     return Err(tool_error_from_skill(err));
                 }
@@ -903,65 +525,55 @@ impl Tool for SkillManageTool {
                     Some("skill created via skill_manage".to_string()),
                     None,
                     Some(normalized),
-                    serde_json::json!({
-                        "tool": "skill_manage",
-                        "agent_generated": true,
-                        "operation": "create",
-                        "path": SKILL_FILE_NAME,
-                    }),
+                    learning_policy::skill_manage_provenance("create", Some(SKILL_FILE_NAME), None),
                 )
                 .await;
 
                 return Ok(ToolOutput::success(
-                    serde_json::json!({
-                        "status": "created",
-                        "name": skill_name,
-                        "path": SKILL_FILE_NAME,
-                        "artifact_version_recorded": version_result.is_ok(),
-                        "artifact_version_error": version_result.err(),
-                    }),
+                    learning_policy::skill_manage_created_output(
+                        &skill_name,
+                        version_result.is_ok(),
+                        version_result.err(),
+                    ),
                     start.elapsed(),
                 ));
             }
             "delete" => {
                 let mut guard = self.registry.write().await;
-                let skill_path = guard.validate_remove(name).map_err(tool_error_from_skill)?;
+                let skill_path = guard
+                    .validate_remove(&name)
+                    .map_err(tool_error_from_skill)?;
                 let before_content = read_text(&skill_path.join(SKILL_FILE_NAME)).await?;
                 SkillRegistry::delete_skill_files(&skill_path)
                     .await
                     .map_err(tool_error_from_skill)?;
-                guard.commit_remove(name).map_err(tool_error_from_skill)?;
+                guard.commit_remove(&name).map_err(tool_error_from_skill)?;
 
                 let version_result = record_artifact_version(
                     &self.store,
                     &ctx.user_id,
                     "skill",
-                    name,
+                    &name,
                     Some(Utc::now().to_rfc3339()),
                     "deleted",
                     Some("skill deleted via skill_manage".to_string()),
                     before_content,
                     None,
-                    serde_json::json!({
-                        "tool": "skill_manage",
-                        "agent_generated": true,
-                        "operation": "delete",
-                    }),
+                    learning_policy::skill_manage_provenance("delete", Option::<&str>::None, None),
                 )
                 .await;
 
                 return Ok(ToolOutput::success(
-                    serde_json::json!({
-                        "status": "deleted",
-                        "name": name,
-                        "artifact_version_recorded": version_result.is_ok(),
-                        "artifact_version_error": version_result.err(),
-                    }),
+                    learning_policy::skill_manage_deleted_output(
+                        &name,
+                        version_result.is_ok(),
+                        version_result.err(),
+                    ),
                     start.elapsed(),
                 ));
             }
             "remove_file" => {
-                let relative = validate_relative_skill_path(path_value)?;
+                let relative = validate_relative_skill_path(&path_value)?;
                 if relative
                     .to_string_lossy()
                     .eq_ignore_ascii_case(SKILL_FILE_NAME)
@@ -972,7 +584,7 @@ impl Tool for SkillManageTool {
                     ));
                 }
 
-                let root = loaded_skill_root(&self.registry, name).await?;
+                let root = loaded_skill_root(&self.registry, &name).await?;
                 let target = root.0.join(&relative);
                 let before = read_text(&target).await?.ok_or_else(|| {
                     ToolError::ExecutionFailed(format!(
@@ -986,36 +598,30 @@ impl Tool for SkillManageTool {
                     &self.store,
                     &ctx.user_id,
                     "skill_file",
-                    &artifact_name_for_skill(name, &relative),
+                    &artifact_name_for_skill(&name, &relative),
                     Some(Utc::now().to_rfc3339()),
                     "deleted",
                     Some("skill file removed via skill_manage".to_string()),
                     Some(before),
                     None,
-                    serde_json::json!({
-                        "tool": "skill_manage",
-                        "agent_generated": true,
-                        "operation": "remove_file",
-                        "path": relative,
-                    }),
+                    learning_policy::skill_manage_provenance("remove_file", Some(&relative), None),
                 )
                 .await;
 
                 return Ok(ToolOutput::success(
-                    serde_json::json!({
-                        "status": "removed_file",
-                        "name": name,
-                        "path": relative,
-                        "artifact_version_recorded": version_result.is_ok(),
-                        "artifact_version_error": version_result.err(),
-                    }),
+                    learning_policy::skill_manage_removed_file_output(
+                        &name,
+                        &relative,
+                        version_result.is_ok(),
+                        version_result.err(),
+                    ),
                     start.elapsed(),
                 ));
             }
             "write_file" | "edit" | "patch" => {
                 let content = require_str(&params, "content")?;
-                let relative = validate_relative_skill_path(path_value)?;
-                let root = loaded_skill_root(&self.registry, name).await?;
+                let relative = validate_relative_skill_path(&path_value)?;
+                let root = loaded_skill_root(&self.registry, &name).await?;
                 let target = root.0.join(&relative);
 
                 if relative
@@ -1032,7 +638,7 @@ impl Tool for SkillManageTool {
                     }
                     let parsed = parse_skill_md(&normalized)
                         .map_err(|err| ToolError::InvalidParameters(err.to_string()))?;
-                    if !parsed.manifest.name.eq_ignore_ascii_case(name) {
+                    if !parsed.manifest.name.eq_ignore_ascii_case(&name) {
                         return Err(ToolError::InvalidParameters(format!(
                             "skill name '{}' does not match existing SKILL.md frontmatter name '{}'",
                             name, parsed.manifest.name
@@ -1056,7 +662,7 @@ impl Tool for SkillManageTool {
                     let before = read_text(&target).await?.unwrap_or_default();
                     write_text(&target, &normalized).await?;
                     let mut guard = self.registry.write().await;
-                    let reloaded = guard.reload_skill(name).await.map_err(|err| {
+                    let reloaded = guard.reload_skill(&name).await.map_err(|err| {
                         ToolError::ExecutionFailed(format!(
                             "failed to reload skill after writing SKILL.md: {}",
                             err
@@ -1068,30 +674,27 @@ impl Tool for SkillManageTool {
                         &self.store,
                         &ctx.user_id,
                         "skill",
-                        &artifact_name_for_skill(name, &relative),
+                        &artifact_name_for_skill(&name, &relative),
                         Some(parsed.manifest.version.clone()),
                         "applied",
                         Some(format!("{} applied via skill_manage", operation)),
                         Some(before),
                         Some(after),
-                        serde_json::json!({
-                            "tool": "skill_manage",
-                            "agent_generated": true,
-                            "operation": operation,
-                            "reloaded_name": reloaded,
-                            "path": relative,
-                        }),
+                        learning_policy::skill_manage_provenance(
+                            &operation,
+                            Some(&relative),
+                            Some(&reloaded),
+                        ),
                     )
                     .await;
 
                     return Ok(ToolOutput::success(
-                        serde_json::json!({
-                            "status": "updated",
-                            "name": reloaded,
-                            "path": SKILL_FILE_NAME,
-                            "artifact_version_recorded": version_result.is_ok(),
-                            "artifact_version_error": version_result.err(),
-                        }),
+                        learning_policy::skill_manage_updated_output(
+                            &reloaded,
+                            SKILL_FILE_NAME,
+                            version_result.is_ok(),
+                            version_result.err(),
+                        ),
                         start.elapsed(),
                     ));
                 }
@@ -1104,29 +707,23 @@ impl Tool for SkillManageTool {
                     &self.store,
                     &ctx.user_id,
                     "skill_file",
-                    &artifact_name_for_skill(name, &relative),
+                    &artifact_name_for_skill(&name, &relative),
                     Some(Utc::now().to_rfc3339()),
                     "applied",
                     Some(format!("{} applied via skill_manage", operation)),
                     Some(before),
                     Some(after),
-                    serde_json::json!({
-                        "tool": "skill_manage",
-                        "agent_generated": true,
-                        "operation": operation,
-                        "path": relative,
-                    }),
+                    learning_policy::skill_manage_provenance(&operation, Some(&relative), None),
                 )
                 .await;
 
                 return Ok(ToolOutput::success(
-                    serde_json::json!({
-                        "status": "updated",
-                        "name": name,
-                        "path": relative,
-                        "artifact_version_recorded": version_result.is_ok(),
-                        "artifact_version_error": version_result.err(),
-                    }),
+                    learning_policy::skill_manage_updated_output(
+                        &name,
+                        &relative,
+                        version_result.is_ok(),
+                        version_result.err(),
+                    ),
                     start.elapsed(),
                 ));
             }
@@ -1177,7 +774,7 @@ impl Tool for LearningStatusTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object", "properties": {}})
+        learning_policy::learning_status_parameters_schema()
     }
 
     async fn execute(
@@ -1234,24 +831,22 @@ impl Tool for LearningStatusTool {
         )
         .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
 
-        let summary = serde_json::json!({
-            "settings": serialized(&settings),
-            "provider_health": providers,
-            "outcomes": {
-                "enabled": settings.enabled && settings.outcomes.enabled,
-                "summary": outcome_stats,
-                "recent": summarize_recent(outcome_contracts),
-            },
-            "recent_activity": {
-                "events": summarize_recent(events),
-                "evaluations": summarize_recent(evaluations),
-                "candidates": summarize_recent(candidates),
-                "artifact_versions": summarize_recent(artifact_versions),
-                "feedback": summarize_recent(feedback),
-                "rollbacks": summarize_recent(rollbacks),
-                "code_proposals": summarize_recent(proposals),
-            }
-        });
+        let summary = learning_policy::learning_status_output(
+            serialized(&settings),
+            serialized(providers),
+            settings.enabled && settings.outcomes.enabled,
+            serialized(outcome_stats),
+            summarize_recent(outcome_contracts),
+            learning_policy::learning_recent_activity_output(
+                summarize_recent(events),
+                summarize_recent(evaluations),
+                summarize_recent(candidates),
+                summarize_recent(artifact_versions),
+                summarize_recent(feedback),
+                summarize_recent(rollbacks),
+                summarize_recent(proposals),
+            ),
+        );
 
         Ok(ToolOutput::success(summary, start.elapsed()))
     }
@@ -1262,10 +857,7 @@ impl Tool for LearningStatusTool {
 }
 
 fn summarize_recent<T: serde::Serialize>(items: Vec<T>) -> serde_json::Value {
-    serde_json::json!({
-        "count": items.len(),
-        "items": items,
-    })
+    learning_policy::recent_items_output(items)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1293,24 +885,7 @@ impl Tool for LearningOutcomesTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "contract_id": {
-                    "type": "string",
-                    "description": "Optional outcome contract UUID for detailed inspection"
-                },
-                "status": { "type": "string" },
-                "contract_type": { "type": "string" },
-                "source_kind": { "type": "string" },
-                "thread_id": { "type": "string" },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100
-                }
-            }
-        })
+        learning_policy::learning_outcomes_parameters_schema()
     }
 
     async fn execute(
@@ -1319,69 +894,47 @@ impl Tool for LearningOutcomesTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        if let Some(contract_id) = params.get("contract_id").and_then(|value| value.as_str()) {
-            let parsed = Uuid::parse_str(contract_id).map_err(|_| {
-                ToolError::InvalidParameters("contract_id must be a valid UUID".to_string())
-            })?;
+        let parsed = learning_policy::parse_learning_outcomes_params(&params)?;
+        if let Some(contract_id) = parsed.contract_id {
             let contract = self
                 .store
-                .get_outcome_contract(&ctx.user_id, parsed)
+                .get_outcome_contract(&ctx.user_id, contract_id)
                 .await
                 .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?
                 .ok_or_else(|| {
-                    ToolError::ExecutionFailed(format!("Outcome contract '{}' not found", parsed))
+                    ToolError::ExecutionFailed(format!(
+                        "Outcome contract '{}' not found",
+                        contract_id
+                    ))
                 })?;
             let observations = self
                 .store
-                .list_outcome_observations(parsed)
+                .list_outcome_observations(contract_id)
                 .await
                 .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
             return Ok(ToolOutput::success(
-                serde_json::json!({
-                    "contract": contract,
-                    "observations": observations,
-                }),
+                learning_policy::learning_contract_detail_output(contract, observations),
                 start.elapsed(),
             ));
         }
 
-        let limit = params
-            .get("limit")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(25)
-            .clamp(1, 100) as i64;
         let contracts = self
             .store
             .list_outcome_contracts(&DbOutcomeContractQuery {
                 user_id: ctx.user_id.clone(),
                 actor_id: None,
-                status: params
-                    .get("status")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                contract_type: params
-                    .get("contract_type")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                source_kind: params
-                    .get("source_kind")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
+                status: parsed.status,
+                contract_type: parsed.contract_type,
+                source_kind: parsed.source_kind,
                 source_id: None,
-                thread_id: params
-                    .get("thread_id")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                limit,
+                thread_id: parsed.thread_id,
+                limit: parsed.limit,
             })
             .await
             .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
 
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "count": contracts.len(),
-                "items": contracts,
-            }),
+            learning_policy::learning_items_output(contracts),
             start.elapsed(),
         ))
     }
@@ -1416,22 +969,7 @@ impl Tool for LearningHistoryTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "kind": {
-                    "type": "string",
-                    "enum": ["all", "events", "evaluations", "candidates", "artifact_versions", "feedback", "rollbacks", "code_proposals"],
-                    "default": "all"
-                },
-                "limit": {
-                    "type": "integer",
-                    "default": 20,
-                    "minimum": 1,
-                    "maximum": 100
-                }
-            }
-        })
+        learning_policy::learning_history_parameters_schema()
     }
 
     async fn execute(
@@ -1440,46 +978,60 @@ impl Tool for LearningHistoryTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let kind = params
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("all")
-            .to_ascii_lowercase();
-        let limit = params
-            .get("limit")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(20)
-            .clamp(1, 100);
+        let parsed = learning_policy::parse_learning_history_params(&params);
+        let kind = parsed.kind;
+        let limit = parsed.limit;
 
         let output = match kind.as_str() {
-            "events" => serde_json::json!({
-                "kind": kind,
-                "items": serialized(self.store.list_learning_events(&ctx.user_id, None, None, None, limit).await.map_err(|err| ToolError::ExecutionFailed(err.to_string()))?),
-            }),
-            "evaluations" => serde_json::json!({
-                "kind": kind,
-                "items": serialized(self.store.list_learning_evaluations(&ctx.user_id, limit).await.map_err(|err| ToolError::ExecutionFailed(err.to_string()))?),
-            }),
-            "candidates" => serde_json::json!({
-                "kind": kind,
-                "items": serialized(self.store.list_learning_candidates(&ctx.user_id, None, None, limit).await.map_err(|err| ToolError::ExecutionFailed(err.to_string()))?),
-            }),
-            "artifact_versions" => serde_json::json!({
-                "kind": kind,
-                "items": serialized(self.store.list_learning_artifact_versions(&ctx.user_id, None, None, limit).await.map_err(|err| ToolError::ExecutionFailed(err.to_string()))?),
-            }),
-            "feedback" => serde_json::json!({
-                "kind": kind,
-                "items": serialized(self.store.list_learning_feedback(&ctx.user_id, None, None, limit).await.map_err(|err| ToolError::ExecutionFailed(err.to_string()))?),
-            }),
-            "rollbacks" => serde_json::json!({
-                "kind": kind,
-                "items": serialized(self.store.list_learning_rollbacks(&ctx.user_id, None, None, limit).await.map_err(|err| ToolError::ExecutionFailed(err.to_string()))?),
-            }),
-            "code_proposals" => serde_json::json!({
-                "kind": kind,
-                "items": serialized(self.store.list_learning_code_proposals(&ctx.user_id, None, limit).await.map_err(|err| ToolError::ExecutionFailed(err.to_string()))?),
-            }),
+            "events" => learning_policy::learning_history_single_output(
+                &kind,
+                self.store
+                    .list_learning_events(&ctx.user_id, None, None, None, limit)
+                    .await
+                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+            ),
+            "evaluations" => learning_policy::learning_history_single_output(
+                &kind,
+                self.store
+                    .list_learning_evaluations(&ctx.user_id, limit)
+                    .await
+                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+            ),
+            "candidates" => learning_policy::learning_history_single_output(
+                &kind,
+                self.store
+                    .list_learning_candidates(&ctx.user_id, None, None, limit)
+                    .await
+                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+            ),
+            "artifact_versions" => learning_policy::learning_history_single_output(
+                &kind,
+                self.store
+                    .list_learning_artifact_versions(&ctx.user_id, None, None, limit)
+                    .await
+                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+            ),
+            "feedback" => learning_policy::learning_history_single_output(
+                &kind,
+                self.store
+                    .list_learning_feedback(&ctx.user_id, None, None, limit)
+                    .await
+                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+            ),
+            "rollbacks" => learning_policy::learning_history_single_output(
+                &kind,
+                self.store
+                    .list_learning_rollbacks(&ctx.user_id, None, None, limit)
+                    .await
+                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+            ),
+            "code_proposals" => learning_policy::learning_history_single_output(
+                &kind,
+                self.store
+                    .list_learning_code_proposals(&ctx.user_id, None, limit)
+                    .await
+                    .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?,
+            ),
             _ => {
                 let (
                     events,
@@ -1505,16 +1057,16 @@ impl Tool for LearningHistoryTool {
                         .list_learning_code_proposals(&ctx.user_id, None, limit),
                 )
                 .map_err(|err| ToolError::ExecutionFailed(err.to_string()))?;
-                serde_json::json!({
-                    "kind": kind,
-                    "events": serialized(events),
-                    "evaluations": serialized(evaluations),
-                    "candidates": serialized(candidates),
-                    "artifact_versions": serialized(artifact_versions),
-                    "feedback": serialized(feedback),
-                    "rollbacks": serialized(rollbacks),
-                    "code_proposals": serialized(proposals),
-                })
+                learning_policy::learning_history_all_output(
+                    &kind,
+                    events,
+                    evaluations,
+                    candidates,
+                    artifact_versions,
+                    feedback,
+                    rollbacks,
+                    proposals,
+                )
             }
         };
 
@@ -1551,32 +1103,7 @@ impl Tool for LearningFeedbackTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "target_type": {
-                    "type": "string",
-                    "description": "Type of target (for example: candidate, code_proposal, prompt, skill)"
-                },
-                "target_id": {
-                    "type": "string",
-                    "description": "Identifier for the target"
-                },
-                "verdict": {
-                    "type": "string",
-                    "description": "Feedback verdict (for example: helpful, harmful, reject, dont_learn)"
-                },
-                "note": {
-                    "type": "string",
-                    "description": "Optional note explaining the verdict"
-                },
-                "metadata": {
-                    "type": "object",
-                    "description": "Optional extra metadata"
-                }
-            },
-            "required": ["target_type", "target_id", "verdict"]
-        })
+        learning_policy::learning_feedback_parameters_schema()
     }
 
     async fn execute(
@@ -1585,33 +1112,28 @@ impl Tool for LearningFeedbackTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let target_type = require_str(&params, "target_type")?;
-        let target_id = require_str(&params, "target_id")?;
-        let verdict = require_str(&params, "verdict")?;
-        let note = params.get("note").and_then(|v| v.as_str());
-        let metadata = params.get("metadata");
+        let parsed = learning_policy::parse_learning_feedback_params(&params)?;
 
         let id = self
             .orchestrator
             .submit_feedback(
                 &ctx.user_id,
-                target_type,
-                target_id,
-                verdict,
-                note,
-                metadata,
+                &parsed.target_type,
+                &parsed.target_id,
+                &parsed.verdict,
+                parsed.note.as_deref(),
+                parsed.metadata.as_ref(),
             )
             .await
             .map_err(ToolError::ExecutionFailed)?;
 
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "status": "recorded",
-                "id": id,
-                "target_type": target_type,
-                "target_id": target_id,
-                "verdict": verdict,
-            }),
+            learning_policy::learning_feedback_output(
+                id,
+                &parsed.target_type,
+                &parsed.target_id,
+                &parsed.verdict,
+            ),
             start.elapsed(),
         ))
     }
@@ -1650,25 +1172,7 @@ impl Tool for LearningProposalReviewTool {
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "proposal_id": {
-                    "type": "string",
-                    "description": "UUID of the learning code proposal"
-                },
-                "decision": {
-                    "type": "string",
-                    "enum": ["approve", "reject"],
-                    "description": "Review decision"
-                },
-                "note": {
-                    "type": "string",
-                    "description": "Optional reviewer note"
-                }
-            },
-            "required": ["proposal_id", "decision"]
-        })
+        learning_policy::learning_proposal_review_parameters_schema()
     }
 
     async fn execute(
@@ -1677,29 +1181,29 @@ impl Tool for LearningProposalReviewTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let proposal_id = Uuid::parse_str(require_str(&params, "proposal_id")?)
-            .map_err(|err| ToolError::InvalidParameters(format!("invalid proposal_id: {}", err)))?;
-        let decision = require_str(&params, "decision")?;
-        let note = params.get("note").and_then(|v| v.as_str());
+        let parsed = learning_policy::parse_learning_proposal_review_params(&params)?;
 
         let proposal = self
             .orchestrator
-            .review_code_proposal(&ctx.user_id, proposal_id, decision, note)
+            .review_code_proposal(
+                &ctx.user_id,
+                parsed.proposal_id,
+                &parsed.decision,
+                parsed.note.as_deref(),
+            )
             .await
             .map_err(ToolError::ExecutionFailed)?;
 
         let Some(proposal) = proposal else {
             return Err(ToolError::ExecutionFailed(format!(
                 "proposal '{}' was not found",
-                proposal_id
+                parsed.proposal_id
             )));
         };
 
+        let proposal_status = proposal.status.clone();
         Ok(ToolOutput::success(
-            serde_json::json!({
-                "status": proposal.status,
-                "proposal": serialized(proposal),
-            }),
+            learning_policy::learning_proposal_review_output(proposal_status, proposal),
             start.elapsed(),
         ))
     }
@@ -1716,6 +1220,9 @@ impl Tool for LearningProposalReviewTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use learning_policy::{
+        append_markdown_section, remove_markdown_section, upsert_markdown_section,
+    };
 
     #[test]
     fn upsert_section_replaces_existing_block() {

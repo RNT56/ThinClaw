@@ -341,6 +341,7 @@ impl TestHarnessBuilder {
             smart_approval_mode: "off".to_string(),
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
+            external_scanner_require_verified: false,
         }));
 
         let hooks = Arc::new(HookRegistry::new());
@@ -375,6 +376,7 @@ impl TestHarnessBuilder {
             model_override: None,
             restart_requested: Arc::new(AtomicBool::new(false)),
             sandbox_children: None,
+            runtime_ports: None,
         };
 
         TestHarness {

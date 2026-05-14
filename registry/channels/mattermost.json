@@ -1,0 +1,24 @@
+{
+  "name": "mattermost",
+  "display_name": "Mattermost",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "Mattermost webhook channel for posts and replies",
+  "keywords": ["messaging", "chat", "mattermost", "workspace"],
+  "source": {
+    "dir": "channels-src/mattermost",
+    "capabilities": "mattermost.capabilities.json",
+    "crate_name": "mattermost-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Mattermost",
+    "secrets": ["mattermost_base_url", "mattermost_bot_token", "mattermost_webhook_secret"],
+    "shared_auth": null,
+    "setup_url": "https://developers.mattermost.com/integrate/webhooks/"
+  },
+  "tags": ["messaging"]
+}

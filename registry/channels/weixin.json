@@ -1,0 +1,24 @@
+{
+  "name": "weixin",
+  "display_name": "Weixin",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "Weixin/WeChat official account webhook channel",
+  "keywords": ["messaging", "chat", "weixin", "wechat"],
+  "source": {
+    "dir": "channels-src/weixin",
+    "capabilities": "weixin.capabilities.json",
+    "crate_name": "weixin-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Weixin",
+    "secrets": ["weixin_access_token", "weixin_webhook_secret"],
+    "shared_auth": null,
+    "setup_url": "https://developers.weixin.qq.com/"
+  },
+  "tags": ["messaging"]
+}

@@ -1,0 +1,13 @@
+[package]
+name = "thinclaw-app"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+thinclaw-config = { version = "0.1.0", path = "../thinclaw-config" }
+thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

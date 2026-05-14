@@ -26,6 +26,12 @@ pub enum ChannelCommand {
         /// Channel name (e.g. "telegram", "signal", "gateway")
         channel: String,
     },
+
+    /// Validate setup for a channel
+    Validate {
+        /// Channel name (e.g. "matrix", "telegram", "twilio_sms")
+        channel: String,
+    },
 }
 
 /// Run a channels CLI command.
@@ -33,6 +39,7 @@ pub async fn run_channels_command(cmd: ChannelCommand) -> anyhow::Result<()> {
     match cmd {
         ChannelCommand::List { format } => list_channels(&format).await,
         ChannelCommand::Info { channel } => channel_info(&channel).await,
+        ChannelCommand::Validate { channel } => validate_channel(&channel).await,
     }
 }
 
@@ -58,6 +65,26 @@ const KNOWN_CHANNELS: &[ChannelCheck] = &[
         name: "signal",
         env_key: "SIGNAL_HTTP_URL",
         description: "Signal messenger (signal-cli daemon)",
+    },
+    ChannelCheck {
+        name: "matrix",
+        env_key: "MATRIX_ENABLED",
+        description: "Matrix rooms and DMs (native lifecycle surface)",
+    },
+    ChannelCheck {
+        name: "voice-call",
+        env_key: "VOICE_CALL_ENABLED + --features voice",
+        description: "Voice-call lifecycle (Twilio Voice surface)",
+    },
+    ChannelCheck {
+        name: "apns",
+        env_key: "APNS_ENABLED",
+        description: "APNs device notifications (native lifecycle surface)",
+    },
+    ChannelCheck {
+        name: "browser-push",
+        env_key: "BROWSER_PUSH_ENABLED + --features browser",
+        description: "Browser push subscriptions (native lifecycle surface)",
     },
     ChannelCheck {
         name: "nostr",
@@ -250,7 +277,9 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
                 "nostr" => {
                     #[cfg(feature = "nostr")]
                     if let Some(nostr) = resolved.channels.nostr.as_ref() {
-                        let channel = crate::channels::NostrChannel::new(nostr.clone())?;
+                        let channel = crate::channels::NostrChannel::new(
+                            crate::channels::runtime_config_from_resolved_ref(nostr),
+                        )?;
                         let runtime = channel.runtime();
                         println!("{}", branding.key_value("Enabled", branding.good("yes")));
                         println!("{}", branding.key_value("Private key", "••••••• (set)"));
@@ -363,6 +392,105 @@ async fn channel_info(channel: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn validate_channel(channel: &str) -> anyhow::Result<()> {
+    let branding = TerminalBranding::current();
+    let _ = dotenvy::dotenv();
+    crate::bootstrap::load_thinclaw_env();
+    let resolved = load_resolved_config().await?;
+
+    branding.print_banner("Channels", Some("Validate channel setup"));
+    if let Some(ch) = KNOWN_CHANNELS.iter().find(|known| known.name == channel) {
+        let configured = channel_is_configured(&resolved, ch.name);
+        println!("{}", branding.key_value("Channel", ch.name));
+        println!("{}", branding.key_value("Description", ch.description));
+        println!("{}", branding.key_value("Config key", ch.env_key));
+        if !configured {
+            anyhow::bail!("Channel '{}' is not configured.", ch.name);
+        }
+
+        match ch.name {
+            "voice-call" if !resolved.channels.voice_call_available => {
+                anyhow::bail!("Voice-call channel is enabled, but this build lacks voice support.");
+            }
+            "browser-push" if !resolved.channels.browser_push_available => {
+                anyhow::bail!(
+                    "Browser-push channel is enabled, but this build lacks browser support."
+                );
+            }
+            "matrix" | "apns" | "voice-call" | "browser-push" => {
+                let missing = native_lifecycle_missing_env(ch.name);
+                if !missing.is_empty() {
+                    anyhow::bail!(
+                        "Channel '{}' is enabled but missing required runtime credentials: {}",
+                        ch.name,
+                        missing.join(", ")
+                    );
+                }
+                println!(
+                    "{}",
+                    branding.warn(
+                        "Native lifecycle surface credentials are present. Live delivery still depends on provider reachability and runtime client diagnostics."
+                    )
+                );
+            }
+            _ => {}
+        }
+
+        println!(
+            "{}",
+            branding.good(format!("Channel '{}' is configured.", ch.name))
+        );
+        return Ok(());
+    }
+
+    validate_wasm_channel_installation(channel, &crate::platform::state_paths().channels_dir)?;
+    println!(
+        "{}",
+        branding.good(format!(
+            "WASM channel '{}' installation metadata is valid.",
+            channel
+        ))
+    );
+    Ok(())
+}
+
+fn validate_wasm_channel_installation(
+    channel: &str,
+    wasm_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let wasm_path = wasm_dir.join(format!("{channel}.wasm"));
+    let caps_path = wasm_dir.join(format!("{channel}.capabilities.json"));
+    if !wasm_path.exists() {
+        anyhow::bail!("WASM artifact missing: {}", wasm_path.display());
+    }
+    if !caps_path.exists() {
+        anyhow::bail!("Capabilities file missing: {}", caps_path.display());
+    }
+
+    let raw = std::fs::read_to_string(&caps_path)?;
+    let caps = crate::channels::wasm::ChannelCapabilitiesFile::from_json(&raw)?;
+    let missing: Vec<String> = caps
+        .setup
+        .required_secrets
+        .iter()
+        .filter(|secret| !secret.optional)
+        .filter(|secret| {
+            std::env::var(secret.name.to_ascii_uppercase())
+                .or_else(|_| std::env::var(&secret.name))
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+        })
+        .map(|secret| secret.name.clone())
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "Required setup secret(s) are not present in the environment: {}. If these are stored in the Provider Vault, use the WebUI extension validator for secret-backed validation.",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
 async fn load_resolved_config() -> anyhow::Result<crate::config::Config> {
     let config = crate::config::Config::from_env().await?;
     let mut builder = AppBuilder::new(
@@ -395,6 +523,12 @@ fn channel_is_configured(config: &crate::config::Config, name: &str) -> bool {
         "gateway" => config.channels.gateway.is_some(),
         "cli" => config.channels.cli.enabled,
         "signal" => config.channels.signal.is_some(),
+        "matrix" => config.channels.matrix_enabled,
+        "voice-call" => config.channels.voice_call_enabled && config.channels.voice_call_available,
+        "apns" => config.channels.apns_enabled,
+        "browser-push" => {
+            config.channels.browser_push_enabled && config.channels.browser_push_available
+        }
         "nostr" => config.channels.nostr.is_some(),
         "http" => config.channels.http.is_some(),
         "telegram" => config.channels.telegram.is_some(),
@@ -421,5 +555,128 @@ fn channel_is_configured(config: &crate::config::Config, name: &str) -> bool {
             }
         }
         _ => false,
+    }
+}
+
+fn native_lifecycle_missing_env(name: &str) -> Vec<String> {
+    let required: &[(&str, &[&str])] = match name {
+        "matrix" => &[
+            ("MATRIX_HOMESERVER", &["MATRIX_HOMESERVER"]),
+            ("MATRIX_ACCESS_TOKEN", &["MATRIX_ACCESS_TOKEN"]),
+        ],
+        "voice-call" => &[
+            ("VOICE_CALL_RESPONSE_URL", &["VOICE_CALL_RESPONSE_URL"]),
+            ("VOICE_CALL_WEBHOOK_SECRET", &["VOICE_CALL_WEBHOOK_SECRET"]),
+        ],
+        "apns" => &[
+            ("APNS_TEAM_ID", &["APNS_TEAM_ID"]),
+            ("APNS_KEY_ID", &["APNS_KEY_ID"]),
+            ("APNS_BUNDLE_ID", &["APNS_BUNDLE_ID"]),
+            (
+                "APNS_PRIVATE_KEY or APNS_PRIVATE_KEY_PATH",
+                &["APNS_PRIVATE_KEY", "APNS_PRIVATE_KEY_PATH"],
+            ),
+            ("APNS_REGISTRATION_SECRET", &["APNS_REGISTRATION_SECRET"]),
+        ],
+        "browser-push" => &[
+            (
+                "BROWSER_PUSH_VAPID_PUBLIC_KEY",
+                &["BROWSER_PUSH_VAPID_PUBLIC_KEY"],
+            ),
+            (
+                "BROWSER_PUSH_VAPID_PRIVATE_KEY or BROWSER_PUSH_VAPID_PRIVATE_KEY_PATH",
+                &[
+                    "BROWSER_PUSH_VAPID_PRIVATE_KEY",
+                    "BROWSER_PUSH_VAPID_PRIVATE_KEY_PATH",
+                ],
+            ),
+            (
+                "BROWSER_PUSH_VAPID_SUBJECT",
+                &["BROWSER_PUSH_VAPID_SUBJECT"],
+            ),
+            (
+                "BROWSER_PUSH_WEBHOOK_SECRET",
+                &["BROWSER_PUSH_WEBHOOK_SECRET"],
+            ),
+        ],
+        _ => &[],
+    };
+    required
+        .iter()
+        .filter(|(_, alternatives)| {
+            !alternatives.iter().any(|env_var| {
+                crate::config::helpers::optional_env(env_var)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+        })
+        .map(|(label, _)| (*label).to_string())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_wasm_channel_installation;
+
+    #[test]
+    fn wasm_channel_validation_requires_artifact_and_capabilities() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let err = validate_wasm_channel_installation("missing", temp.path())
+            .expect_err("missing artifact should fail");
+        assert!(err.to_string().contains("WASM artifact missing"));
+    }
+
+    #[test]
+    fn wasm_channel_validation_reports_missing_required_secrets() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("demo.wasm"), b"\0asm").expect("write wasm");
+        std::fs::write(
+            temp.path().join("demo.capabilities.json"),
+            r#"{
+                "name": "demo",
+                "setup": {
+                    "required_secrets": [
+                        {"name": "demo_missing_token", "prompt": "Token"},
+                        {"name": "demo_optional", "prompt": "Optional", "optional": true}
+                    ]
+                }
+            }"#,
+        )
+        .expect("write capabilities");
+
+        unsafe {
+            std::env::remove_var("DEMO_MISSING_TOKEN");
+            std::env::remove_var("demo_missing_token");
+        }
+        let err = validate_wasm_channel_installation("demo", temp.path())
+            .expect_err("missing required secret should fail");
+        assert!(err.to_string().contains("demo_missing_token"));
+    }
+
+    #[test]
+    fn wasm_channel_validation_accepts_env_secret() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("demo.wasm"), b"\0asm").expect("write wasm");
+        std::fs::write(
+            temp.path().join("demo.capabilities.json"),
+            r#"{
+                "name": "demo",
+                "setup": {
+                    "required_secrets": [
+                        {"name": "demo_env_token", "prompt": "Token"}
+                    ]
+                }
+            }"#,
+        )
+        .expect("write capabilities");
+
+        unsafe {
+            std::env::set_var("DEMO_ENV_TOKEN", "secret");
+        }
+        validate_wasm_channel_installation("demo", temp.path()).expect("env secret should pass");
+        unsafe {
+            std::env::remove_var("DEMO_ENV_TOKEN");
+        }
     }
 }

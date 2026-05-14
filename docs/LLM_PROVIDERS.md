@@ -9,7 +9,11 @@ It also includes a few runtime conveniences that matter in real deployments:
 
 - watched OAuth auth-file sync for Claude Code, Codex, and compatible custom JSON token files
 - automatic live runtime reload when those watched credentials change
+- process-local credential leasing for multi-key failover pools, with fill-first, round-robin, least-used, and random selection strategies
+- credential pool health snapshots that expose lease capacity, in-use counts, available counts, and OAuth sync status for diagnostics
 - Anthropic-compatible prompt caching hints when the active provider supports them
+
+Watched OAuth sync is disabled unless the provider explicitly opts into external OAuth sources and watched auth-file configuration is present. Credential lease limits are normalized so `max_concurrent` never falls below one, but leases are process-local; ThinClaw does not yet coordinate provider-key leases across multiple running processes.
 
 ## Quick Start (Recommended)
 

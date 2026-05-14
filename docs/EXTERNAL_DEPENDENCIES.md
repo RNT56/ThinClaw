@@ -785,11 +785,11 @@ These are only needed if you **compile ThinClaw from source**:
 **One-click setup scripts** (install all build dependencies automatically):
 
 ```bash
-# macOS — full deploy:
+# macOS — release install:
 ./scripts/mac-deploy.sh
 
-# macOS — prerequisites only:
-./scripts/mac-deploy.sh --install-only
+# macOS — source-build prerequisites only:
+./scripts/mac-deploy.sh --from-source --install-only
 
 # Developer setup (any OS):
 ./scripts/dev-setup.sh

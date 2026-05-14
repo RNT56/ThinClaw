@@ -1,9 +1,9 @@
 # ACP Integration
 
 ThinClaw can run as an Agent Client Protocol (ACP) agent for editor-native clients.
-The implementation is buildable and uses the official ACP v1 flow, but it
-should remain marked as compatibility-hardening work until the golden
-transcript, schema, and real-editor smoke tests all pass.
+The implementation is buildable and uses the official ACP v1 flow. It should
+remain marked as compatibility-hardening work until real-editor smoke tests are
+completed against Zed and VS Code.
 
 ## Transport
 
@@ -55,11 +55,17 @@ ThinClaw advertises image/audio prompt support as disabled until the media pipel
 
 ## Acceptance Coverage
 
-CI runs `cargo check --features acp --bin thinclaw-acp`, ACP unit acceptance tests, and a subprocess stdio transcript smoke. The subprocess transcript currently covers parse errors, `initialize`, no-auth `authenticate`, invalid params, unsupported MCP transport rejection, `session/new`, `session/list`, `session/load`, method-not-found errors, stdout NDJSON cleanliness, and lifecycle method error shapes when the lightweight smoke harness is intentionally running without an agent runtime.
+CI runs `cargo check --features acp --bin thinclaw-acp`, ACP unit acceptance tests, and a subprocess stdio transcript smoke. Unit coverage validates emitted public messages against ACP v1 schema fixtures, typed content/resource blocks, typed update variants, client filesystem/terminal bridges, MCP descriptor translation, and session list/load replay. The subprocess transcript covers parse errors, `initialize`, no-auth `authenticate`, invalid params, unsupported MCP transport rejection, `session/new`, `session/list`, `session/load`, method-not-found errors, stdout NDJSON cleanliness, prompt streaming from a real test agent runtime, permission approve/reject/cancel/timeout flows, real `session/cancel`, and real `session/close`. Shared agent dispatcher tests also prove that turn cancellation drops in-flight provider and tool futures promptly.
 
 ## Remaining Acceptance Gates
 
-- Agent-backed subprocess golden transcripts for prompt streaming, permissions, cancel, and close
-- Schema validation against the published ACP schema, beyond the current typed serde conformance tests
-- Real Zed and VS Code ACP smoke tests
-- Native provider/cancel propagation deeper than the existing ThinClaw interrupt path
+- Real Zed and VS Code ACP smoke tests. These are release-blocking manual/live
+  checks because they validate the editor integration layer outside the stdio
+  harness. Do not call ACP complete until both editors have run the same flow:
+  initialize, create a new session, load an existing session, stream a prompt
+  response, read and write a file through the editor bridge, approve and reject
+  a permission request, cancel an active turn, and close the session.
+- Record the exact editor version, ThinClaw commit, workspace path, and pass/fail
+  notes in the release checklist. If `zed` or `code` is unavailable in the test
+  environment, mark the gate as blocked rather than substituting subprocess
+  smoke coverage.

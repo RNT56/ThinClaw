@@ -4444,6 +4444,34 @@ function createReconfigureButton(extName) {
   return btn;
 }
 
+function renderSetupStatusLine(setup) {
+  if (!setup || !setup.state) return null;
+  const line = document.createElement('div');
+  line.className = 'ext-setup-status ui-resource-note';
+  const state = String(setup.state || '').replace(/_/g, ' ');
+  const auth = String(setup.auth_mode || 'none').replace(/_/g, ' ');
+  const actions = Array.isArray(setup.actions) ? setup.actions.map(function(action) {
+    return String(action).replace(/_/g, ' ');
+  }).join(', ') : '';
+  const required = Array.isArray(setup.required_secrets) ? setup.required_secrets : [];
+  const requiredCount = required.filter(function(secret) { return !secret.optional; }).length;
+  const detail = [];
+  if (setup.message) detail.push(setup.message);
+  if (required.length) {
+    detail.push('Secrets: ' + required.map(function(secret) {
+      return secret.name + (secret.optional ? ' (optional)' : '');
+    }).join(', '));
+  }
+  if (setup.validation_url) detail.push('Validation: ' + setup.validation_url);
+  line.textContent = 'Setup: ' + state + ' · auth: ' + auth
+    + (required.length ? ' · secrets: ' + requiredCount + '/' + required.length + ' required' : '')
+    + (actions ? ' · next: ' + actions : '');
+  if (detail.length) {
+    line.title = detail.join('\n');
+  }
+  return line;
+}
+
 function renderExtensionCard(ext) {
   const card = document.createElement('div');
   card.className = 'ui-panel ui-panel--compact ui-panel--interactive ui-resource-card ext-card';
@@ -4474,6 +4502,11 @@ function renderExtensionCard(ext) {
   // WASM channels get a progress stepper
   if (ext.kind === 'wasm_channel') {
     card.appendChild(renderWasmChannelStepper(ext));
+  }
+
+  const setupLine = renderSetupStatusLine(ext.setup);
+  if (setupLine) {
+    card.appendChild(setupLine);
   }
 
   if (ext.description) {
@@ -4605,6 +4638,14 @@ function renderExtensionCard(ext) {
     }
   }
 
+  if (ext.installed !== false && ext.setup && Array.isArray(ext.setup.actions) && ext.setup.actions.includes('validate')) {
+    const validateBtn = document.createElement('button');
+    validateBtn.className = 'btn-ext configure';
+    validateBtn.textContent = 'Validate';
+    validateBtn.addEventListener('click', () => validateExtensionSetup(ext.name));
+    actions.appendChild(validateBtn);
+  }
+
   const removeBtn = document.createElement('button');
   removeBtn.className = 'btn-ext remove';
   removeBtn.textContent = 'Remove';
@@ -4659,6 +4700,19 @@ function reconnectExtension(name) {
       loadExtensions();
     })
     .catch((err) => showToast('Reconnect failed: ' + err.message, 'error'));
+}
+
+function validateExtensionSetup(name) {
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/validate', { method: 'POST' })
+    .then((res) => {
+      if (!res.success) {
+        showToast('Validation failed: ' + (res.message || 'setup is incomplete'), 'error');
+      } else {
+        showToast(res.message || ('Validated ' + name), 'success');
+      }
+      loadExtensions();
+    })
+    .catch((err) => showToast('Validation failed: ' + err.message, 'error'));
 }
 
 function renderChannelDiagnostics(ext) {
@@ -4747,12 +4801,13 @@ function showConfigureModal(name) {
         showToast(setup.instructions || ('No configuration needed for ' + name), 'info');
         return;
       }
-      renderConfigureModal(name, setup.fields);
+      renderConfigureModal(name, setup);
     })
     .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
 }
 
-function renderConfigureModal(name, secrets) {
+function renderConfigureModal(name, setup) {
+  const secrets = setup.fields || [];
   closeConfigureModal();
   configureModalFocusReturn = document.activeElement;
   const dialog = document.createElement('dialog');
@@ -4776,6 +4831,16 @@ function renderConfigureModal(name, secrets) {
   header.textContent = 'Configure ' + name;
   modal.appendChild(header);
   dialog.setAttribute('aria-labelledby', header.id);
+
+  if (setup.instructions || setup.setup_url || setup.validation_url) {
+    const intro = document.createElement('div');
+    intro.className = 'ui-resource-note';
+    intro.textContent = setup.instructions || setup.setup_url || setup.validation_url || '';
+    if (setup.setup_url || setup.validation_url) {
+      intro.title = [setup.setup_url, setup.validation_url].filter(Boolean).join('\n');
+    }
+    modal.appendChild(intro);
+  }
 
   const form = document.createElement('div');
   form.className = 'configure-form';
@@ -8933,6 +8998,9 @@ function renderCostSummary(data) {
   var providerCostReq = rangeSnapshot.providerCostRequests || 0;
   var fallbackCostReq = rangeSnapshot.localPricingFallbackRequests || 0;
   var capturedOutput = rangeSnapshot.capturedOutput || 0;
+  var capturedTokenIds = rangeSnapshot.capturedTokenIds || 0;
+  var capturedLogprobs = rangeSnapshot.capturedLogprobs || 0;
+  var tokenCaptureReq = rangeSnapshot.tokenCaptureRequests || 0;
 
   // Spend card with optional budget progress
   var spendHtml = '<div class="ui-panel ui-panel--feature ui-panel--compact ui-panel--interactive cost-card accent">'
@@ -8957,6 +9025,10 @@ function renderCostSummary(data) {
     + '<div class="cost-card-value">' + formatTokenCount(totalIn + totalOut) + '</div>'
     + '<div class="cost-card-sub">' + formatTokenCount(totalIn) + ' input · ' + formatTokenCount(totalOut) + ' output</div>'
     + '<div class="cost-card-sub">' + providerUsageReq + ' provider-usage requests' + (capturedOutput ? ' · ' + formatTokenCount(capturedOutput) + ' captured output' : '') + '</div>'
+    + '<div class="cost-card-sub">' + tokenCaptureReq + ' token-capture requests'
+      + (capturedTokenIds ? ' · ' + formatTokenCount(capturedTokenIds) + ' token ids' : '')
+      + (capturedLogprobs ? ' · ' + formatTokenCount(capturedLogprobs) + ' logprobs' : '')
+    + '</div>'
     + '</div>';
 
   // Active models
@@ -9117,13 +9189,16 @@ function renderCostTable(data) {
   if (table) table.style.display = '';
   if (empty) empty.style.display = 'none';
 
-  var totalInput = 0, totalOutput = 0, totalCost = 0, totalReq = 0, totalCaptured = 0;
+  var totalInput = 0, totalOutput = 0, totalCost = 0, totalReq = 0, totalCaptured = 0, totalCapturedTokenIds = 0, totalCapturedLogprobs = 0, totalTokenCaptureReq = 0;
   for (var i = 0; i < models.length; i++) {
     totalInput += models[i].input_tokens || 0;
     totalOutput += models[i].output_tokens || 0;
     totalCost += models[i].cost_usd || 0;
     totalReq += models[i].requests || 0;
     totalCaptured += models[i].captured_output_tokens || 0;
+    totalCapturedTokenIds += models[i].captured_token_ids || 0;
+    totalCapturedLogprobs += models[i].captured_logprobs || 0;
+    totalTokenCaptureReq += models[i].token_capture_requests || 0;
   }
 
   var html = '';
@@ -9134,11 +9209,18 @@ function renderCostTable(data) {
     var cost = m.cost_usd || 0;
     var req = m.requests || 0;
     var captured = m.captured_output_tokens || 0;
+    var capturedTokenIds = m.captured_token_ids || 0;
+    var capturedLogprobs = m.captured_logprobs || 0;
+    var tokenCaptureReq = m.token_capture_requests || 0;
     var share = totalCost > 0 ? (cost / totalCost * 100) : 0;
     var color = MODEL_COLORS[i % MODEL_COLORS.length];
     var provenance = (m.provider_usage_requests || 0) + ' usage src';
+    if (m.provider_cost_requests) provenance += ' · ' + m.provider_cost_requests + ' provider cost';
     if (m.local_pricing_fallback_requests) provenance += ' · ' + m.local_pricing_fallback_requests + ' priced locally';
     if (captured) provenance += ' · ' + formatTokenCount(captured) + ' captured';
+    if (tokenCaptureReq) provenance += ' · ' + tokenCaptureReq + ' capture req';
+    if (capturedTokenIds) provenance += ' · ' + formatTokenCount(capturedTokenIds) + ' token ids';
+    if (capturedLogprobs) provenance += ' · ' + formatTokenCount(capturedLogprobs) + ' logprobs';
 
     html += '<tr>'
       + '<td><span class="cost-model-dot" style="background:' + color + '"></span><span class="cost-model-name" title="' + escapeHtml(m.model) + '">' + escapeHtml(displayCostModelLabel(m.model, shortLabelCounts)) + '</span><div class="cost-card-sub">' + escapeHtml(provenance) + '</div></td>'
@@ -9159,7 +9241,13 @@ function renderCostTable(data) {
       + '<td>' + formatTokenCount(totalInput + totalOutput) + '</td>'
       + '<td>' + formatCost(String(totalCost)) + '</td>'
       + '<td>' + totalReq + '</td>'
-      + '<td>100%' + (totalCaptured ? '<div class="cost-card-sub">' + formatTokenCount(totalCaptured) + ' captured output</div>' : '') + '</td>'
+      + '<td>100%'
+        + (totalCaptured ? '<div class="cost-card-sub">' + formatTokenCount(totalCaptured) + ' captured output</div>' : '')
+        + (totalTokenCaptureReq ? '<div class="cost-card-sub">' + totalTokenCaptureReq + ' capture req'
+          + (totalCapturedTokenIds ? ' · ' + formatTokenCount(totalCapturedTokenIds) + ' ids' : '')
+          + (totalCapturedLogprobs ? ' · ' + formatTokenCount(totalCapturedLogprobs) + ' logprobs' : '')
+        + '</div>' : '')
+      + '</td>'
       + '</tr>';
   }
 }

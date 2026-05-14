@@ -95,8 +95,14 @@ impl Agent {
                         Arc::new(crate::llm::usage_tracking::UsageTrackingProvider::new(
                             provider,
                             Arc::clone(tracker),
-                            self.deps.store.clone(),
-                            Some(Arc::clone(&self.deps.cost_guard)),
+                            self.deps.store.as_ref().map(|db| {
+                                Arc::new(crate::llm::usage_tracking::DatabaseUsageSink::new(
+                                    Arc::clone(db),
+                                ))
+                                    as Arc<dyn crate::llm::usage_tracking::LlmUsageSink>
+                            }),
+                            Some(Arc::clone(&self.deps.cost_guard)
+                                as Arc<dyn crate::llm::usage_tracking::LlmBudgetRecorder>),
                         )) as Arc<dyn crate::llm::LlmProvider>
                     } else {
                         provider
@@ -411,6 +417,7 @@ impl Agent {
                 StatusUpdate::ToolResult {
                     name: tool_call.name.clone(),
                     preview: serialized.clone(),
+                    artifacts: Vec::new(),
                 },
                 &message.metadata,
             )

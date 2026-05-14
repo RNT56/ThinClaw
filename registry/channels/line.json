@@ -1,0 +1,24 @@
+{
+  "name": "line",
+  "display_name": "LINE",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "LINE Messaging API webhook channel",
+  "keywords": ["messaging", "chat", "line", "bot"],
+  "source": {
+    "dir": "channels-src/line",
+    "capabilities": "line.capabilities.json",
+    "crate_name": "line-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "LINE",
+    "secrets": ["line_channel_access_token", "line_channel_secret"],
+    "shared_auth": null,
+    "setup_url": "https://developers.line.biz/"
+  },
+  "tags": ["messaging"]
+}

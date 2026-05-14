@@ -68,7 +68,7 @@ pub struct ChannelContribution {
     pub wasm_artifact: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryProviderContribution {
     pub id: String,
@@ -77,7 +77,7 @@ pub struct MemoryProviderContribution {
     pub config_schema: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextProviderContribution {
     pub id: String,

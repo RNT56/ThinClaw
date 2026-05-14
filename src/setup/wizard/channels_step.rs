@@ -738,9 +738,26 @@ impl SetupWizard {
                 "BlueBubbles (iMessage bridge)",
                 self.settings.channels.bluebubbles_enabled,
             ),
+            ("Matrix", self.settings.channels.matrix_enabled),
+            (
+                "Voice-call lifecycle",
+                self.settings.channels.voice_call_enabled,
+            ),
+            ("APNs", self.settings.channels.apns_enabled),
+            ("Browser push", self.settings.channels.browser_push_enabled),
         ];
         #[allow(unused_mut)]
-        let mut native_keys: Vec<&str> = vec!["signal", "discord", "slack", "gmail", "bluebubbles"];
+        let mut native_keys: Vec<&str> = vec![
+            "signal",
+            "discord",
+            "slack",
+            "gmail",
+            "bluebubbles",
+            "matrix",
+            "voice-call",
+            "apns",
+            "browser-push",
+        ];
         #[cfg(target_os = "macos")]
         {
             native_options.push(("iMessage", self.settings.channels.imessage_enabled));
@@ -761,6 +778,10 @@ impl SetupWizard {
         let enable_slack = pick_native("slack");
         let enable_gmail = pick_native("gmail");
         let enable_bluebubbles = pick_native("bluebubbles");
+        let enable_matrix = pick_native("matrix");
+        let enable_voice_call = pick_native("voice-call");
+        let enable_apns = pick_native("apns");
+        let enable_browser_push = pick_native("browser-push");
         #[cfg(target_os = "macos")]
         let enable_imessage = pick_native("imessage");
         #[cfg(target_os = "macos")]
@@ -895,6 +916,39 @@ impl SetupWizard {
             self.settings.channels.signal_dm_policy = None;
             self.settings.channels.signal_group_policy = None;
             self.settings.channels.signal_group_allow_from = None;
+        }
+
+        self.settings.channels.matrix_enabled = enable_matrix;
+        self.settings.channels.voice_call_enabled = enable_voice_call;
+        self.settings.channels.apns_enabled = enable_apns;
+        self.settings.channels.browser_push_enabled = enable_browser_push;
+        for (enabled, label, feature_hint) in [
+            (enable_matrix, "Matrix", None),
+            (
+                enable_voice_call,
+                "Voice-call lifecycle",
+                Some("the `voice` build feature"),
+            ),
+            (enable_apns, "APNs", None),
+            (
+                enable_browser_push,
+                "Browser push",
+                Some("the `browser` build feature"),
+            ),
+        ] {
+            if enabled {
+                if let Some(feature_hint) = feature_hint {
+                    print_info(&format!(
+                        "{} native lifecycle enabled. Runtime registration requires provider credentials and {}.",
+                        label, feature_hint
+                    ));
+                } else {
+                    print_info(&format!(
+                        "{} native lifecycle enabled. Runtime registration requires provider credentials.",
+                        label
+                    ));
+                }
+            }
         }
 
         // Discord channel

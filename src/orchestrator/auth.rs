@@ -16,25 +16,13 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
+pub use thinclaw_types::sandbox::CredentialGrant;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 const LLM_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 pub(crate) const LLM_RATE_LIMIT_MAX_REQUESTS: usize = 60;
-
-/// A credential grant that maps a secret (stored in SecretsStore) to an
-/// environment variable name the container worker expects.
-///
-/// For example: `{ secret_name: "github_token", env_var: "GITHUB_TOKEN" }`
-/// means "decrypt the secret named `github_token` and provide it as the
-/// env var `GITHUB_TOKEN` to the container".
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CredentialGrant {
-    pub secret_name: String,
-    pub env_var: String,
-}
 
 /// In-memory store for per-job authentication tokens and credential grants.
 #[derive(Clone)]

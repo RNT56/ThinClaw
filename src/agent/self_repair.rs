@@ -1,10 +1,9 @@
-//! Self-repair for stuck jobs and broken tools.
+//! Self-repair compatibility adapters.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::context::{ContextManager, JobState};
@@ -12,73 +11,17 @@ use crate::db::Database;
 use crate::error::RepairError;
 use crate::tools::{BuildRequirement, Language, SoftwareBuilder, SoftwareType, ToolRegistry};
 
-/// A job that has been detected as stuck.
-#[derive(Debug, Clone)]
-pub struct StuckJob {
-    pub job_id: Uuid,
-    pub last_activity: DateTime<Utc>,
-    pub stuck_duration: Duration,
-    pub last_error: Option<String>,
-    pub repair_attempts: u32,
-}
-
-/// A tool that has been detected as broken.
-#[derive(Debug, Clone)]
-pub struct BrokenTool {
-    pub name: String,
-    pub failure_count: u32,
-    pub last_error: Option<String>,
-    pub first_failure: DateTime<Utc>,
-    pub last_failure: DateTime<Utc>,
-    pub last_build_result: Option<serde_json::Value>,
-    pub repair_attempts: u32,
-}
-
-/// Result of a repair attempt.
-#[derive(Debug)]
-pub enum RepairResult {
-    /// Repair was successful.
-    Success { message: String },
-    /// Repair failed but can be retried.
-    Retry { message: String },
-    /// Repair failed permanently.
-    Failed { message: String },
-    /// Manual intervention required.
-    ManualRequired { message: String },
-}
-
-/// Trait for self-repair implementations.
-#[async_trait]
-pub trait SelfRepair: Send + Sync {
-    /// Detect stuck jobs.
-    async fn detect_stuck_jobs(&self) -> Vec<StuckJob>;
-
-    /// Attempt to repair a stuck job.
-    async fn repair_stuck_job(&self, job: &StuckJob) -> Result<RepairResult, RepairError>;
-
-    /// Detect broken tools.
-    async fn detect_broken_tools(&self) -> Vec<BrokenTool>;
-
-    /// Attempt to repair a broken tool.
-    async fn repair_broken_tool(&self, tool: &BrokenTool) -> Result<RepairResult, RepairError>;
-
-    /// Dismiss a broken tool by resetting its failure counter.
-    ///
-    /// Called when repair returns `ManualRequired` to prevent infinite
-    /// re-detection every cycle.
-    async fn dismiss_broken_tool(&self, tool_name: &str);
-}
+pub use thinclaw_agent::self_repair::{
+    BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob, StuckJobContextSnapshot,
+    ToolRepairBuildResult,
+};
+use thinclaw_agent::self_repair::{
+    BrokenToolStorePort, RepairContextPort, ToolRegistryProbePort, ToolRepairBuilderPort,
+};
 
 /// Default self-repair implementation.
 pub struct DefaultSelfRepair {
-    context_manager: Arc<ContextManager>,
-    /// Duration after which a running job is considered stuck.
-    stuck_threshold: Duration,
-    max_repair_attempts: u32,
-    store: Option<Arc<dyn Database>>,
-    builder: Option<Arc<dyn SoftwareBuilder>>,
-    /// Tool registry for hot-reloading repaired tools.
-    tools: Option<Arc<ToolRegistry>>,
+    inner: thinclaw_agent::self_repair::DefaultSelfRepair,
 }
 
 impl DefaultSelfRepair {
@@ -88,19 +31,21 @@ impl DefaultSelfRepair {
         stuck_threshold: Duration,
         max_repair_attempts: u32,
     ) -> Self {
+        let context = Arc::new(RootRepairContext { context_manager }) as Arc<dyn RepairContextPort>;
         Self {
-            context_manager,
-            stuck_threshold,
-            max_repair_attempts,
-            store: None,
-            builder: None,
-            tools: None,
+            inner: thinclaw_agent::self_repair::DefaultSelfRepair::new(
+                context,
+                stuck_threshold,
+                max_repair_attempts,
+            ),
         }
     }
 
     /// Add a Store for tool failure tracking.
     pub(crate) fn with_store(mut self, store: Arc<dyn Database>) -> Self {
-        self.store = Some(store);
+        self.inner = self
+            .inner
+            .with_store(Arc::new(RootBrokenToolStore { store }));
         self
     }
 
@@ -111,8 +56,10 @@ impl DefaultSelfRepair {
         builder: Arc<dyn SoftwareBuilder>,
         tools: Arc<ToolRegistry>,
     ) -> Self {
-        self.builder = Some(builder);
-        self.tools = Some(tools);
+        self.inner = self.inner.with_builder(
+            Arc::new(RootToolRepairBuilder { builder }),
+            Arc::new(RootToolRegistryProbe { tools }),
+        );
         self
     }
 }
@@ -120,142 +67,99 @@ impl DefaultSelfRepair {
 #[async_trait]
 impl SelfRepair for DefaultSelfRepair {
     async fn detect_stuck_jobs(&self) -> Vec<StuckJob> {
-        let stuck_ids = self.context_manager.find_stuck_jobs().await;
-        let mut stuck_jobs = Vec::new();
-
-        for job_id in stuck_ids {
-            if let Ok(ctx) = self.context_manager.get_context(job_id).await
-                && ctx.state == JobState::Stuck
-            {
-                // Skip routine-dispatched jobs — these are managed by the
-                // worker's finalize_routine_run() and should not be interfered
-                // with by the self-repair mechanism.
-                if ctx.metadata.get("routine_dispatched") == Some(&serde_json::Value::Bool(true)) {
-                    tracing::debug!(
-                        job_id = %job_id,
-                        "Skipping routine-dispatched stuck job (managed by worker)"
-                    );
-                    continue;
-                }
-
-                let stuck_duration = ctx
-                    .started_at
-                    .map(|start| {
-                        let now = Utc::now();
-                        let duration = now.signed_duration_since(start);
-                        Duration::from_secs(duration.num_seconds().max(0) as u64)
-                    })
-                    .unwrap_or_default();
-
-                // Only report jobs that have been stuck longer than the threshold
-                if stuck_duration >= self.stuck_threshold {
-                    stuck_jobs.push(StuckJob {
-                        job_id,
-                        last_activity: ctx.started_at.unwrap_or(ctx.created_at),
-                        stuck_duration,
-                        last_error: None,
-                        repair_attempts: ctx.repair_attempts,
-                    });
-                }
-            }
-        }
-
-        stuck_jobs
+        self.inner.detect_stuck_jobs().await
     }
 
     async fn repair_stuck_job(&self, job: &StuckJob) -> Result<RepairResult, RepairError> {
-        // Check if we've exceeded max repair attempts
-        if job.repair_attempts >= self.max_repair_attempts {
-            return Ok(RepairResult::ManualRequired {
-                message: format!(
-                    "Job {} has exceeded maximum repair attempts ({})",
-                    job.job_id, self.max_repair_attempts
-                ),
-            });
-        }
-
-        // Try to recover the job
-        let result = self
-            .context_manager
-            .update_context(job.job_id, |ctx| ctx.attempt_recovery())
-            .await;
-
-        match result {
-            Ok(Ok(())) => {
-                tracing::info!("Successfully recovered job {}", job.job_id);
-                Ok(RepairResult::Success {
-                    message: format!("Job {} recovered and will be retried", job.job_id),
-                })
-            }
-            Ok(Err(e)) => {
-                tracing::warn!("Failed to recover job {}: {}", job.job_id, e);
-                Ok(RepairResult::Retry {
-                    message: format!("Recovery attempt failed: {}", e),
-                })
-            }
-            Err(e) => Err(RepairError::Failed {
-                target_type: "job".to_string(),
-                target_id: job.job_id,
-                reason: e.to_string(),
-            }),
-        }
+        self.inner.repair_stuck_job(job).await
     }
 
     async fn detect_broken_tools(&self) -> Vec<BrokenTool> {
-        let Some(ref store) = self.store else {
-            return vec![];
-        };
-
-        // Threshold: 5 failures before considering a tool broken
-        match store.get_broken_tools(5).await {
-            Ok(tools) => {
-                if !tools.is_empty() {
-                    tracing::info!("Detected {} broken tools needing repair", tools.len());
-                }
-                tools
-            }
-            Err(e) => {
-                tracing::warn!("Failed to detect broken tools: {}", e);
-                vec![]
-            }
-        }
+        self.inner.detect_broken_tools().await
     }
 
     async fn repair_broken_tool(&self, tool: &BrokenTool) -> Result<RepairResult, RepairError> {
-        let Some(ref builder) = self.builder else {
-            return Ok(RepairResult::ManualRequired {
-                message: format!("Builder not available for repairing tool '{}'", tool.name),
-            });
-        };
+        self.inner.repair_broken_tool(tool).await
+    }
 
-        let Some(ref store) = self.store else {
-            return Ok(RepairResult::ManualRequired {
-                message: "Store not available for tracking repair".to_string(),
-            });
-        };
+    async fn dismiss_broken_tool(&self, tool_name: &str) {
+        self.inner.dismiss_broken_tool(tool_name).await
+    }
+}
 
-        // Check repair attempt limit
-        if tool.repair_attempts >= self.max_repair_attempts {
-            return Ok(RepairResult::ManualRequired {
-                message: format!(
-                    "Tool '{}' exceeded max repair attempts ({})",
-                    tool.name, self.max_repair_attempts
-                ),
-            });
-        }
+struct RootRepairContext {
+    context_manager: Arc<ContextManager>,
+}
 
-        tracing::info!(
-            "Attempting to repair tool '{}' (attempt {})",
-            tool.name,
-            tool.repair_attempts + 1
-        );
+#[async_trait]
+impl RepairContextPort for RootRepairContext {
+    async fn find_stuck_jobs(&self) -> Vec<Uuid> {
+        self.context_manager.find_stuck_jobs().await
+    }
 
-        // Increment repair attempts
-        if let Err(e) = store.increment_repair_attempts(&tool.name).await {
-            tracing::warn!("Failed to increment repair attempts: {}", e);
-        }
+    async fn get_stuck_job_snapshot(
+        &self,
+        job_id: Uuid,
+    ) -> Result<StuckJobContextSnapshot, String> {
+        let ctx = self
+            .context_manager
+            .get_context(job_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(StuckJobContextSnapshot {
+            job_id,
+            is_stuck: ctx.state == JobState::Stuck,
+            created_at: ctx.created_at,
+            started_at: ctx.started_at,
+            repair_attempts: ctx.repair_attempts,
+            routine_dispatched: ctx.metadata.get("routine_dispatched")
+                == Some(&serde_json::Value::Bool(true)),
+        })
+    }
 
-        // Create BuildRequirement for repair
+    async fn attempt_recovery(&self, job_id: Uuid) -> Result<(), String> {
+        self.context_manager
+            .update_context(job_id, |ctx| ctx.attempt_recovery())
+            .await
+            .map_err(|error| error.to_string())?
+    }
+}
+
+struct RootBrokenToolStore {
+    store: Arc<dyn Database>,
+}
+
+#[async_trait]
+impl BrokenToolStorePort for RootBrokenToolStore {
+    async fn get_broken_tools(&self, threshold: i32) -> Result<Vec<BrokenTool>, String> {
+        self.store
+            .get_broken_tools(threshold)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn mark_tool_repaired(&self, tool_name: &str) -> Result<(), String> {
+        self.store
+            .mark_tool_repaired(tool_name)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn increment_repair_attempts(&self, tool_name: &str) -> Result<(), String> {
+        self.store
+            .increment_repair_attempts(tool_name)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct RootToolRepairBuilder {
+    builder: Arc<dyn SoftwareBuilder>,
+}
+
+#[async_trait]
+impl ToolRepairBuilderPort for RootToolRepairBuilder {
+    async fn repair_tool(&self, tool: &BrokenTool) -> Result<ToolRepairBuildResult, String> {
         let requirement = BuildRequirement {
             name: tool.name.clone(),
             description: format!(
@@ -276,160 +180,26 @@ impl SelfRepair for DefaultSelfRepair {
             capabilities: vec!["http".to_string(), "workspace".to_string()],
         };
 
-        // Attempt to build/repair
-        match builder.build(&requirement).await {
-            Ok(result) if result.success => {
-                tracing::info!(
-                    "Successfully rebuilt tool '{}' after {} iterations",
-                    tool.name,
-                    result.iterations
-                );
-
-                // Mark as repaired in database
-                if let Err(e) = store.mark_tool_repaired(&tool.name).await {
-                    tracing::warn!("Failed to mark tool as repaired: {}", e);
-                }
-
-                // Hot-reload: re-register the repaired tool in the live registry
-                if result.registered {
-                    tracing::info!("Repaired tool '{}' auto-registered", tool.name);
-                } else if let Some(ref tools) = self.tools {
-                    // Tool wasn't auto-registered by the builder; try to
-                    // re-add it to the registry so it is available immediately.
-                    tracing::info!("Hot-reloading repaired tool '{}' into registry", tool.name);
-                    if !tools.has(&tool.name).await {
-                        tracing::debug!(
-                            "Tool '{}' not found in registry after repair — it will be available on next startup",
-                            tool.name
-                        );
-                    }
-                }
-
-                Ok(RepairResult::Success {
-                    message: format!(
-                        "Tool '{}' repaired successfully after {} iterations",
-                        tool.name, result.iterations
-                    ),
-                })
-            }
-            Ok(result) => {
-                // Build completed but failed
-                tracing::warn!(
-                    "Repair build for '{}' completed but failed: {:?}",
-                    tool.name,
-                    result.error
-                );
-                Ok(RepairResult::Retry {
-                    message: format!(
-                        "Repair attempt {} for '{}' failed: {}",
-                        tool.repair_attempts + 1,
-                        tool.name,
-                        result.error.unwrap_or_else(|| "Unknown error".to_string())
-                    ),
-                })
-            }
-            Err(e) => {
-                tracing::error!("Repair build for '{}' errored: {}", tool.name, e);
-                Ok(RepairResult::Retry {
-                    message: format!("Repair build error: {}", e),
-                })
-            }
-        }
-    }
-
-    async fn dismiss_broken_tool(&self, tool_name: &str) {
-        if let Some(ref store) = self.store
-            && let Err(e) = store.mark_tool_repaired(tool_name).await
-        {
-            tracing::warn!("Failed to dismiss broken tool '{}': {}", tool_name, e);
-        }
+        self.builder
+            .build(&requirement)
+            .await
+            .map(|result| ToolRepairBuildResult {
+                success: result.success,
+                registered: result.registered,
+                iterations: result.iterations,
+                error: result.error,
+            })
+            .map_err(|error| error.to_string())
     }
 }
 
-/// Background repair task that periodically checks for and repairs issues.
-pub struct RepairTask {
-    repair: Arc<dyn SelfRepair>,
-    check_interval: Duration,
+struct RootToolRegistryProbe {
+    tools: Arc<ToolRegistry>,
 }
 
-impl RepairTask {
-    /// Create a new repair task.
-    pub fn new(repair: Arc<dyn SelfRepair>, check_interval: Duration) -> Self {
-        Self {
-            repair,
-            check_interval,
-        }
-    }
-
-    /// Run the repair task.
-    pub async fn run(&self) {
-        loop {
-            tokio::time::sleep(self.check_interval).await;
-
-            // Check for stuck jobs
-            let stuck_jobs = self.repair.detect_stuck_jobs().await;
-            for job in stuck_jobs {
-                tracing::info!("Attempting to repair stuck job {}", job.job_id);
-                match self.repair.repair_stuck_job(&job).await {
-                    Ok(RepairResult::Success { message }) => {
-                        tracing::info!("Repair succeeded: {}", message);
-                    }
-                    Ok(RepairResult::Retry { message }) => {
-                        tracing::warn!("Repair needs retry: {}", message);
-                    }
-                    Ok(RepairResult::Failed { message }) => {
-                        tracing::error!("Repair failed: {}", message);
-                    }
-                    Ok(RepairResult::ManualRequired { message }) => {
-                        tracing::warn!("Manual intervention needed: {}", message);
-                    }
-                    Err(e) => {
-                        tracing::error!("Repair error: {}", e);
-                    }
-                }
-            }
-
-            // Check for broken tools
-            let broken_tools = self.repair.detect_broken_tools().await;
-            for tool in broken_tools {
-                tracing::info!("Attempting to repair broken tool: {}", tool.name);
-                match self.repair.repair_broken_tool(&tool).await {
-                    Ok(RepairResult::ManualRequired { message }) => {
-                        tracing::warn!(
-                            "Manual intervention needed for tool '{}': {} — clearing failure counter to stop re-detection",
-                            tool.name,
-                            message,
-                        );
-                        // Clear the failure counter so this tool isn't
-                        // endlessly re-detected every cycle.
-                        self.repair.dismiss_broken_tool(&tool.name).await;
-                    }
-                    Ok(result) => {
-                        tracing::info!("Tool repair result: {:?}", result);
-                    }
-                    Err(e) => {
-                        tracing::error!("Tool repair error: {}", e);
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_repair_result_variants() {
-        let success = RepairResult::Success {
-            message: "OK".to_string(),
-        };
-        assert!(matches!(success, RepairResult::Success { .. }));
-
-        let manual = RepairResult::ManualRequired {
-            message: "Help needed".to_string(),
-        };
-        assert!(matches!(manual, RepairResult::ManualRequired { .. }));
+#[async_trait]
+impl ToolRegistryProbePort for RootToolRegistryProbe {
+    async fn has_tool(&self, tool_name: &str) -> bool {
+        self.tools.has(tool_name).await
     }
 }

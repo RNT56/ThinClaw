@@ -91,6 +91,7 @@ fn permissive_safety() -> SafetyLayer {
         smart_approval_mode: "off".to_string(),
         external_scanner_mode: "off".to_string(),
         external_scanner_path: None,
+        external_scanner_require_verified: false,
     })
 }
 
@@ -103,6 +104,7 @@ fn strict_safety() -> SafetyLayer {
         smart_approval_mode: "off".to_string(),
         external_scanner_mode: "off".to_string(),
         external_scanner_path: None,
+        external_scanner_require_verified: false,
     })
 }
 
@@ -404,6 +406,7 @@ mod safety_layer {
             smart_approval_mode: "off".to_string(),
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
+            external_scanner_require_verified: false,
         });
         let big = "A".repeat(100);
         let out = safety.sanitize_tool_output("tool", &big);

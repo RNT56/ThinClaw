@@ -10,12 +10,15 @@ use crate::safety::SafetyLayer;
 use crate::tools::policy::ToolPolicyManager;
 use crate::tools::rate_limiter::RateLimitResult;
 use crate::tools::{
-    ApprovalRequirement, Tool, ToolApprovalClass, ToolDescriptor, ToolExecutionLane, ToolProfile,
-    ToolRegistry,
+    ApprovalRequirement, Tool, ToolApprovalClass, ToolArtifact, ToolDescriptor, ToolExecutionLane,
+    ToolProfile, ToolRegistry,
 };
+pub use thinclaw_tools::execution::ToolApprovalMode;
 
-const WASM_TOOL_INVOKE_DEPTH_KEY: &str = "wasm_tool_invoke_depth";
-const MAX_WASM_TOOL_INVOKE_DEPTH: u64 = 4;
+#[cfg(test)]
+const WASM_TOOL_INVOKE_DEPTH_KEY: &str = thinclaw_tools::execution::WASM_TOOL_INVOKE_DEPTH_KEY;
+#[cfg(test)]
+const MAX_WASM_TOOL_INVOKE_DEPTH: u64 = thinclaw_tools::execution::MAX_WASM_TOOL_INVOKE_DEPTH;
 
 /// Policy-aware tool invocation bridge for host-mediated runtimes such as WASM.
 #[derive(Clone)]
@@ -89,17 +92,6 @@ pub struct ToolHookConfig<'a> {
     pub context: &'a str,
 }
 
-/// How approval should be enforced for a tool call.
-#[derive(Debug, Clone, Copy)]
-pub enum ToolApprovalMode {
-    Interactive {
-        auto_approve_tools: bool,
-        session_auto_approved: bool,
-    },
-    Autonomous,
-    Bypass,
-}
-
 /// Inputs for shared tool preparation.
 pub struct ToolPrepareRequest<'a> {
     pub tools: &'a ToolRegistry,
@@ -143,6 +135,7 @@ pub struct ToolExecutionOutput {
     pub result_json: serde_json::Value,
     pub sanitized_content: String,
     pub sanitized_value: serde_json::Value,
+    pub artifacts: Vec<ToolArtifact>,
     pub was_modified: bool,
     pub warnings: Vec<String>,
     pub elapsed: Duration,
@@ -309,6 +302,7 @@ pub async fn execute_tool_call(
                 sanitized_value,
                 result_json: output.result,
                 sanitized_content: sanitized.content,
+                artifacts: output.artifacts,
                 was_modified: sanitized.was_modified,
                 warnings,
                 elapsed,
@@ -348,59 +342,12 @@ pub async fn execute_tool_call(
 }
 
 fn approval_required(requirement: ApprovalRequirement, mode: ToolApprovalMode) -> bool {
-    match mode {
-        ToolApprovalMode::Bypass => false,
-        ToolApprovalMode::Autonomous => matches!(requirement, ApprovalRequirement::Always),
-        ToolApprovalMode::Interactive {
-            auto_approve_tools,
-            session_auto_approved,
-        } => {
-            if auto_approve_tools {
-                matches!(requirement, ApprovalRequirement::Always)
-            } else {
-                match requirement {
-                    ApprovalRequirement::Never => false,
-                    ApprovalRequirement::UnlessAutoApproved => !session_auto_approved,
-                    ApprovalRequirement::Always => true,
-                }
-            }
-        }
-    }
+    thinclaw_tools::execution::approval_required(requirement, mode)
 }
 
 fn wasm_tool_invoke_context(job_ctx: &JobContext, tool_name: &str) -> Result<JobContext, Error> {
-    let depth = job_ctx
-        .metadata
-        .get(WASM_TOOL_INVOKE_DEPTH_KEY)
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
-    if depth >= MAX_WASM_TOOL_INVOKE_DEPTH {
-        return Err(tool_execution_failed(
-            tool_name,
-            format!(
-                "WASM tool invocation recursion depth exceeded limit of {MAX_WASM_TOOL_INVOKE_DEPTH}"
-            ),
-        ));
-    }
-
-    let mut next = job_ctx.clone();
-    let mut metadata = match next.metadata {
-        serde_json::Value::Object(map) => map,
-        _ => serde_json::Map::new(),
-    };
-    metadata
-        .entry("allowed_tools".to_string())
-        .or_insert_with(|| serde_json::json!([tool_name.to_string()]));
-    metadata.insert(
-        "wasm_tool_invoke_target".to_string(),
-        serde_json::json!(tool_name),
-    );
-    metadata.insert(
-        WASM_TOOL_INVOKE_DEPTH_KEY.to_string(),
-        serde_json::json!(depth + 1),
-    );
-    next.metadata = serde_json::Value::Object(metadata);
-    Ok(next)
+    thinclaw_tools::execution::wasm_tool_invoke_context(job_ctx, tool_name)
+        .map_err(|reason| tool_execution_failed(tool_name, reason))
 }
 
 async fn run_tool_hook(
@@ -435,70 +382,7 @@ fn deny_reason_for_profile(
     profile: ToolProfile,
     metadata: &serde_json::Value,
 ) -> Option<String> {
-    if !ToolRegistry::tool_name_allowed_by_metadata(metadata, &descriptor.name) {
-        return Some("Tool is not permitted in this agent context".to_string());
-    }
-
-    let explicit_tools = ToolRegistry::metadata_string_list(metadata, "allowed_tools");
-    if descriptor.is_coordination_tool() {
-        return None;
-    }
-
-    if let Some(explicit_tools) = explicit_tools {
-        if explicit_tools.iter().any(|name| name == &descriptor.name) {
-            return None;
-        }
-
-        return Some(format!(
-            "Tool '{}' is not granted in this delegated context. Add it to allowed_tools or keep this step in the main agent.",
-            descriptor.name
-        ));
-    }
-
-    let implicitly_allowed = match profile {
-        ToolProfile::Standard => true,
-        ToolProfile::Restricted => descriptor.is_safe_read_only_orchestrator(),
-        ToolProfile::ExplicitOnly => false,
-        ToolProfile::Acp => descriptor_allowed_for_acp(descriptor),
-    };
-
-    if implicitly_allowed {
-        None
-    } else {
-        Some(format!(
-            "Tool '{}' is blocked in the {} lane under the '{}' tool profile. Grant it explicitly via allowed_tools or keep this work in the main agent.",
-            descriptor.name,
-            lane.as_str(),
-            profile.as_str()
-        ))
-    }
-}
-
-fn descriptor_allowed_for_acp(descriptor: &ToolDescriptor) -> bool {
-    let name = descriptor.name.as_str();
-    if descriptor.is_coordination_tool() {
-        return true;
-    }
-
-    matches!(
-        name,
-        "read_file"
-            | "write_file"
-            | "list_dir"
-            | "apply_patch"
-            | "grep"
-            | "search_files"
-            | "shell"
-            | "process"
-            | "execute_code"
-            | "session_search"
-            | "browser"
-            | "vision_analyze"
-            | "llm_list_models"
-            | "llm_select"
-    ) || name.starts_with("memory_")
-        || name.starts_with("external_memory_")
-        || name.starts_with("skill_")
+    thinclaw_tools::deny_reason_for_profile(descriptor, lane, profile, metadata)
 }
 
 fn deny_reason_for_lane(
@@ -506,34 +390,7 @@ fn deny_reason_for_lane(
     descriptor: &ToolDescriptor,
     lane: ToolExecutionLane,
 ) -> Option<String> {
-    if !matches!(
-        lane,
-        ToolExecutionLane::Scheduler
-            | ToolExecutionLane::Worker
-            | ToolExecutionLane::WorkerRuntime
-            | ToolExecutionLane::Subagent
-    ) {
-        return None;
-    }
-
-    const DISPATCHER_ONLY_TOOLS: &[&str] = &["spawn_subagent", "list_subagents", "cancel_subagent"];
-    if DISPATCHER_ONLY_TOOLS.contains(&descriptor.name.as_str()) {
-        return Some(format!(
-            "Tool '{}' requires dispatcher interception and is not available in the {} lane.",
-            descriptor.name,
-            lane.as_str()
-        ));
-    }
-
-    if tool.requires_approval(&serde_json::json!({})) == ApprovalRequirement::Always {
-        return Some(format!(
-            "Tool '{}' requires explicit human approval and cannot run in the {} lane.",
-            descriptor.name,
-            lane.as_str()
-        ));
-    }
-
-    None
+    thinclaw_tools::deny_reason_for_lane(tool, descriptor, lane)
 }
 
 /// Check whether a tool descriptor is usable for the given lane/profile/metadata tuple.
@@ -556,17 +413,11 @@ pub fn tool_allowed_for_lane(
 }
 
 fn preview(content: &str, max_chars: usize) -> String {
-    let char_count = content.chars().count();
-    if char_count <= max_chars {
-        return content.to_string();
-    }
-
-    let truncated: String = content.chars().take(max_chars.saturating_sub(3)).collect();
-    format!("{truncated}...")
+    thinclaw_tools::execution::preview(content, max_chars)
 }
 
 fn parse_sanitized_value(content: &str) -> serde_json::Value {
-    serde_json::from_str(content).unwrap_or_else(|_| serde_json::Value::String(content.to_string()))
+    thinclaw_tools::execution::parse_sanitized_value(content)
 }
 
 fn format_validation_details(result: &crate::safety::ValidationResult) -> String {
@@ -600,11 +451,7 @@ fn tool_execution_failed(name: &str, reason: String) -> Error {
 
 /// Map a descriptor's metadata to an approval class when no explicit annotation exists.
 pub fn approval_class_from_requirement(requirement: ApprovalRequirement) -> ToolApprovalClass {
-    match requirement {
-        ApprovalRequirement::Never => ToolApprovalClass::Never,
-        ApprovalRequirement::UnlessAutoApproved => ToolApprovalClass::Conditional,
-        ApprovalRequirement::Always => ToolApprovalClass::Always,
-    }
+    thinclaw_tools::execution::approval_class_from_requirement(requirement)
 }
 
 #[cfg(test)]

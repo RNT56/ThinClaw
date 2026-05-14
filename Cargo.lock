@@ -4117,6 +4117,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64 0.22.1",
+ "js-sys",
+ "pem",
+ "ring",
+ "serde",
+ "serde_json",
+ "simple_asn1",
+]
+
+[[package]]
 name = "kasuari"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5177,6 +5192,16 @@ name = "peeking_take_while"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099"
+
+[[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
 
 [[package]]
 name = "percent-encoding"
@@ -7012,6 +7037,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
+name = "simple_asn1"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "thiserror 2.0.18",
+ "time",
+]
+
+[[package]]
 name = "siphasher"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7411,7 +7448,7 @@ dependencies = [
 
 [[package]]
 name = "thinclaw"
-version = "0.13.9"
+version = "0.14.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -7445,7 +7482,6 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac 0.12.1",
- "html-to-markdown-rs",
  "http-body-util",
  "hyper 1.9.0",
  "hyper-util",
@@ -7458,7 +7494,6 @@ dependencies = [
  "mime_guess",
  "nostr-sdk",
  "open",
- "pdf-extract",
  "pgvector",
  "postgres-types",
  "pretty_assertions",
@@ -7466,7 +7501,6 @@ dependencies = [
  "rand 0.8.6",
  "ratatui",
  "ratatui-textarea",
- "readabilityrs",
  "refinery",
  "regex",
  "reqwest 0.12.28",
@@ -7489,11 +7523,26 @@ dependencies = [
  "tempfile",
  "termimad",
  "textwrap",
+ "thinclaw-agent",
+ "thinclaw-app",
+ "thinclaw-channels",
  "thinclaw-channels-core",
+ "thinclaw-config",
+ "thinclaw-context",
  "thinclaw-db",
+ "thinclaw-experiments",
+ "thinclaw-gateway",
+ "thinclaw-history",
  "thinclaw-identity",
+ "thinclaw-llm",
  "thinclaw-llm-core",
+ "thinclaw-media",
+ "thinclaw-platform",
  "thinclaw-safety",
+ "thinclaw-secrets",
+ "thinclaw-settings",
+ "thinclaw-soul",
+ "thinclaw-tools",
  "thinclaw-tools-core",
  "thinclaw-types",
  "thinclaw-workspace",
@@ -7520,19 +7569,139 @@ dependencies = [
  "windows-service",
  "windows-sys 0.52.0",
  "zbus",
- "zip",
+]
+
+[[package]]
+name = "thinclaw-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.9",
+ "blake3",
+ "chrono",
+ "chrono-tz",
+ "cron",
+ "dirs",
+ "rand 0.8.6",
+ "regex",
+ "reqwest 0.12.28",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thinclaw-channels-core",
+ "thinclaw-history",
+ "thinclaw-identity",
+ "thinclaw-llm",
+ "thinclaw-llm-core",
+ "thinclaw-platform",
+ "thinclaw-safety",
+ "thinclaw-soul",
+ "thinclaw-tools-core",
+ "thinclaw-types",
+ "thinclaw-workspace",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "thinclaw-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "thinclaw-config",
+ "thinclaw-platform",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "thinclaw-channels"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.9",
+ "base64 0.22.1",
+ "chrono",
+ "dirs",
+ "fs4",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "jsonwebtoken",
+ "lru",
+ "nostr-sdk",
+ "rand 0.8.6",
+ "regex",
+ "reqwest 0.12.28",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.10.9",
+ "subtle",
+ "tempfile",
+ "thinclaw-channels-core",
+ "thinclaw-identity",
+ "thinclaw-media",
+ "thinclaw-platform",
+ "thinclaw-safety",
+ "thinclaw-secrets",
+ "thinclaw-tools-core",
+ "thinclaw-types",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite 0.26.2",
+ "tower 0.5.3",
+ "tracing",
+ "url",
+ "urlencoding",
+ "uuid",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]
 name = "thinclaw-channels-core"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "futures",
  "serde_json",
  "thinclaw-identity",
+ "thinclaw-tools-core",
  "thinclaw-types",
  "uuid",
+]
+
+[[package]]
+name = "thinclaw-config"
+version = "0.1.0"
+dependencies = [
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thinclaw-platform",
+ "thinclaw-settings",
+ "thinclaw-types",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "thinclaw-context"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thinclaw-types",
 ]
 
 [[package]]
@@ -7540,8 +7709,74 @@ name = "thinclaw-db"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "deadpool-postgres",
+ "libsql",
+ "pgvector",
+ "refinery",
+ "rust_decimal",
+ "rustls 0.23.39",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thinclaw-agent",
+ "thinclaw-experiments",
+ "thinclaw-history",
+ "thinclaw-identity",
  "thinclaw-types",
  "thinclaw-workspace",
+ "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "thinclaw-experiments"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "regex",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "thinclaw-gateway"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thinclaw-channels-core",
+ "thinclaw-identity",
+ "thinclaw-safety",
+ "thinclaw-tools-core",
+ "thinclaw-types",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "thinclaw-history"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "thinclaw-types",
  "uuid",
 ]
 
@@ -7553,6 +7788,34 @@ dependencies = [
  "serde",
  "serde_json",
  "thinclaw-safety",
+ "uuid",
+]
+
+[[package]]
+name = "thinclaw-llm"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "chrono",
+ "futures",
+ "rand 0.8.6",
+ "regex",
+ "reqwest 0.12.28",
+ "rig-core",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thinclaw-config",
+ "thinclaw-experiments",
+ "thinclaw-llm-core",
+ "thinclaw-settings",
+ "thinclaw-types",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -7569,6 +7832,41 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "thinclaw-media"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "mime_guess",
+ "pdf-extract",
+ "regex",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thinclaw-platform",
+ "thinclaw-types",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
+ "url",
+ "uuid",
+ "zip",
+]
+
+[[package]]
+name = "thinclaw-platform"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "dirs",
+ "iana-time-zone",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7591,6 +7889,111 @@ dependencies = [
  "tracing",
  "unicode-normalization",
  "url",
+]
+
+[[package]]
+name = "thinclaw-secrets"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "async-trait",
+ "chrono",
+ "deadpool-postgres",
+ "hkdf",
+ "libsql",
+ "rand 0.8.6",
+ "secrecy",
+ "secret-service",
+ "security-framework",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "uuid",
+ "windows-sys 0.52.0",
+ "zbus",
+]
+
+[[package]]
+name = "thinclaw-settings"
+version = "0.1.0"
+dependencies = [
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thinclaw-llm-core",
+ "thinclaw-platform",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "thinclaw-soul"
+version = "0.1.0"
+dependencies = [
+ "thinclaw-identity",
+]
+
+[[package]]
+name = "thinclaw-tools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "blake3",
+ "bytes",
+ "chromiumoxide",
+ "chrono",
+ "chrono-tz",
+ "deadpool-postgres",
+ "dirs",
+ "ed25519-dalek",
+ "flate2",
+ "futures",
+ "hex",
+ "html-to-markdown-rs",
+ "libsql",
+ "nostr-sdk",
+ "rand 0.8.6",
+ "readabilityrs",
+ "regex",
+ "reqwest 0.12.28",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sysinfo",
+ "tempfile",
+ "thinclaw-channels",
+ "thinclaw-config",
+ "thinclaw-llm",
+ "thinclaw-llm-core",
+ "thinclaw-media",
+ "thinclaw-platform",
+ "thinclaw-safety",
+ "thinclaw-secrets",
+ "thinclaw-tools-core",
+ "thinclaw-types",
+ "thinclaw-workspace",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "toml",
+ "tracing",
+ "unicode-normalization",
+ "url",
+ "urlencoding",
+ "uuid",
+ "wasmparser 0.220.1",
+ "wasmtime",
+ "wasmtime-wasi",
+ "zbus",
 ]
 
 [[package]]
@@ -7629,9 +8032,28 @@ dependencies = [
 name = "thinclaw-workspace"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-bedrockruntime",
+ "aws-smithy-types",
  "chrono",
+ "chrono-tz",
+ "deadpool-postgres",
+ "pgvector",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tempfile",
+ "thinclaw-identity",
+ "thinclaw-platform",
+ "thinclaw-safety",
+ "thinclaw-soul",
+ "thinclaw-types",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
  "uuid",
 ]
 

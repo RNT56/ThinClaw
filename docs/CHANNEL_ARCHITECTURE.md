@@ -28,6 +28,17 @@ Some delivery surfaces are compiled into the trusted Rust host. Others are packa
 | Slack | WASM package | stateless Events API path, host-managed credentials |
 | WhatsApp | WASM package | webhook-driven packaged channel |
 | Discord interactions | WASM package | slash-command / webhook path |
+| Mattermost | WASM package | webhook-driven workspace chat path |
+| Twilio SMS | WASM package | webhook-driven SMS path |
+| DingTalk | WASM package | HTTP callback and bot-reply path |
+| Feishu/Lark | WASM package | event callback and bot-reply path |
+| WeCom | WASM package | enterprise callback and bot-reply path |
+| Weixin | WASM package | Official Account callback and reply path |
+| QQ | WASM package | bot webhook and reply path |
+| LINE | WASM package | Messaging API webhook and reply path |
+| Google Chat | WASM package | app event and response path |
+| Microsoft Teams | WASM package | bot activity callback and reply path |
+| Twitch | WASM package | EventSub and chat-reply path |
 | ACP | native stdio | editor-native JSON-RPC agent subprocess |
 
 The installable WASM packages are represented in `registry/channels/`. The host runtime loads them from `~/.thinclaw/channels/`.
@@ -74,6 +85,7 @@ Examples:
 - Slack
 - WhatsApp
 - Discord interactions
+- Mattermost, Twilio SMS, DingTalk, Feishu/Lark, WeCom, Weixin, QQ, LINE, Google Chat, Microsoft Teams, and Twitch registry packages
 
 ## Why The Split Exists
 
@@ -99,6 +111,19 @@ For example:
 - Slack should be documented as a WASM channel package in ThinClaw.
 - Discord needs both paths documented clearly: native Gateway and packaged interactions.
 
+## Code Ownership
+
+`thinclaw-channels` owns root-independent channel primitives: channel manager,
+health/status helpers, reaction helpers, selected native runtime slices, and
+WASM channel capabilities/schema/runtime/limits/error helpers.
+
+Root `src/channels` keeps compatibility facades plus host-boundary adapters:
+native transports that depend on root config/platform/media/pairing, gateway
+route wiring, ACP submission wiring, and WASM channel wrapper/loader/router code
+that still touches root services.
+
+For the full crate map, see [CRATE_OWNERSHIP.md](CRATE_OWNERSHIP.md).
+
 ## Formatting Guidance Ownership
 
 Channel-specific formatting behavior belongs to the channel layer, not to generic prompt assembly.
@@ -118,7 +143,73 @@ New native messaging channels should convert platform payloads into `IncomingEve
 - `legacy_session_key_aliases` preserves lookup compatibility for older persisted keys.
 - `parse_slash_command` is the shared slash-command parser; channels should not open-code `/` prefix splitting.
 
-This is the foundation for Mattermost, Matrix, SMS/Twilio, browser-push, DingTalk, Feishu/Lark, WeCom, Weixin, and QQ drivers. Platform drivers should own authentication and transport details; the manager owns canonical session identity and command parsing.
+This is the foundation for Mattermost, Matrix, SMS/Twilio, browser-push, DingTalk, Feishu/Lark, WeCom, Weixin, QQ, LINE, Google Chat, Microsoft Teams, and Twitch drivers. Platform drivers should own authentication and transport details; the manager owns canonical session identity and command parsing.
+
+Matrix, voice-call, APNs, and browser-push are native lifecycle surfaces. They
+are config-gated descriptors that appear in channel status until a concrete
+transport instance registers with the manager:
+
+- `MATRIX_ENABLED`
+- `VOICE_CALL_ENABLED` (`--features voice` required before a real transport can run)
+- `APNS_ENABLED`
+- `BROWSER_PUSH_ENABLED` (`--features browser` required before a real transport can run)
+
+Gateway status and the WebUI setup surfaces expose actionable setup readiness
+for these native surfaces. Missing fields are reported using the provider
+environment variable names:
+
+- Matrix: `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN`
+- Voice-call: `VOICE_CALL_RESPONSE_URL`, `VOICE_CALL_WEBHOOK_SECRET`
+- APNs: `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_BUNDLE_ID`, `APNS_PRIVATE_KEY` or `APNS_PRIVATE_KEY_PATH`, `APNS_REGISTRATION_SECRET`
+- Browser push: `BROWSER_PUSH_VAPID_PUBLIC_KEY`, `BROWSER_PUSH_VAPID_PRIVATE_KEY` or `BROWSER_PUSH_VAPID_PRIVATE_KEY_PATH`, `BROWSER_PUSH_VAPID_SUBJECT`, `BROWSER_PUSH_WEBHOOK_SECRET`
+
+APNs and browser-push endpoint registrations are persisted under
+`$THINCLAW_HOME/native-endpoints/apns.json` and
+`$THINCLAW_HOME/native-endpoints/browser-push.json` by default. Operators can
+override those paths with `APNS_ENDPOINT_REGISTRY_PATH` and
+`BROWSER_PUSH_ENDPOINT_REGISTRY_PATH`.
+
+Use `thinclaw channels validate <name>` for a local CLI readiness check.
+
+The crate-owned native driver boundary lives in `thinclaw-channels` as
+`NativeLifecycleChannel`, `NativeLifecycleClient`, `NativeLifecycleEvent`, and
+`NativeOutboundMessage`. Provider-specific clients plug into that boundary:
+
+- ingress clients convert platform callbacks/sync records into `NativeLifecycleEvent`
+- `NativeLifecycleChannel` normalizes those events through `IncomingEvent`
+- outbound replies route through `NativeLifecycleClient::send`
+- health and diagnostics route through `NativeLifecycleClient::validate` and `diagnostics`
+
+The crate also includes provider-specific native HTTP clients for Matrix,
+voice-call response webhooks, APNs, and browser-push wake delivery. The runtime
+registers these clients when the corresponding channel is enabled and required
+credentials are present. CI coverage uses injectable mock HTTP transports to
+validate provider-native URLs, headers, JWT provider-token signing for
+APNs/VAPID, and request payloads.
+
+Enabled native lifecycle channels also mount local webhook ingress routes on the
+shared webhook server:
+
+- `POST /webhook/native/matrix`: accepts a Matrix room event, an `events` array,
+  or a `/sync`-style joined-room timeline response and emits Matrix messages
+  through the shared `IncomingEvent` path.
+- `POST /webhook/native/voice-call`: accepts call transcript payloads and
+  requires `X-ThinClaw-Voice-Secret` when `VOICE_CALL_WEBHOOK_SECRET` is set.
+- `POST /webhook/native/browser-push`: accepts notification action/wake payloads
+  and requires `X-ThinClaw-Browser-Push-Secret` when
+  `BROWSER_PUSH_WEBHOOK_SECRET` is set.
+- `POST /webhook/native/apns/register` and
+  `DELETE /webhook/native/apns/register`: register or remove APNs device tokens
+  for a ThinClaw user. These always require
+  `X-ThinClaw-Apns-Registration-Secret`.
+- `POST /webhook/native/browser-push/register` and
+  `DELETE /webhook/native/browser-push/register`: register or remove browser
+  push subscription endpoints for a ThinClaw user. These always require
+  `X-ThinClaw-Browser-Push-Secret`.
+
+Remaining live-release checks are a real Matrix sync/appservice round trip, real
+APNs delivery, real Web Push service delivery, and a real voice
+media/transcription webhook round trip.
 
 ## Operator Docs
 

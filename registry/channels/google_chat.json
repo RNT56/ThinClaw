@@ -1,0 +1,24 @@
+{
+  "name": "google_chat",
+  "display_name": "Google Chat",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "Google Chat app event channel",
+  "keywords": ["messaging", "chat", "google", "workspace"],
+  "source": {
+    "dir": "channels-src/google_chat",
+    "capabilities": "google_chat.capabilities.json",
+    "crate_name": "google-chat-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Google Chat",
+    "secrets": ["google_chat_access_token", "google_chat_webhook_secret"],
+    "shared_auth": null,
+    "setup_url": "https://developers.google.com/chat"
+  },
+  "tags": ["messaging", "google"]
+}

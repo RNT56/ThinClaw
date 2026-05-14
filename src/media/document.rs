@@ -22,8 +22,8 @@ impl DocumentExtractor {
     /// Create a new document extractor with defaults from the document_extraction module.
     pub fn new() -> Self {
         Self {
-            max_size: crate::document_extraction::MAX_DOCUMENT_SIZE,
-            max_text_length: crate::document_extraction::MAX_EXTRACTED_TEXT_LEN,
+            max_size: thinclaw_media::document_extraction::MAX_DOCUMENT_SIZE,
+            max_text_length: thinclaw_media::document_extraction::MAX_EXTRACTED_TEXT_LEN,
         }
     }
 }
@@ -49,7 +49,7 @@ impl MediaExtractor for DocumentExtractor {
 
         let filename = content.filename.as_deref();
 
-        let mut text = crate::document_extraction::extractors::extract_text(
+        let mut text = thinclaw_media::document_extraction::extractors::extract_text(
             &content.data,
             &content.mime_type,
             filename,

@@ -77,6 +77,8 @@ pub struct SkillRegistry {
     installed_dir: Option<PathBuf>,
     /// Optional workspace skills directory.
     workspace_dir: Option<PathBuf>,
+    /// Bundled trusted skills compiled into the application.
+    bundled_skills: Vec<(PathBuf, &'static str)>,
     /// Optional external read-only skill directories with display provenance.
     external_read_only_dirs: Vec<(PathBuf, SkillSourceTier)>,
 }
@@ -89,6 +91,7 @@ impl SkillRegistry {
             user_dir,
             installed_dir: None,
             workspace_dir: None,
+            bundled_skills: Vec::new(),
             external_read_only_dirs: Vec::new(),
         }
     }
@@ -115,6 +118,11 @@ impl SkillRegistry {
         self
     }
 
+    pub fn with_bundled_skill(mut self, path: PathBuf, content: &'static str) -> Self {
+        self.bundled_skills.push((path, content));
+        self
+    }
+
     /// Return the configured directories that participate in discovery.
     pub fn discovery_dirs(&self) -> Vec<PathBuf> {
         let mut dirs = Vec::new();
@@ -125,6 +133,11 @@ impl SkillRegistry {
         if let Some(dir) = self.installed_dir.as_ref() {
             dirs.push(dir.clone());
         }
+        dirs.extend(
+            self.bundled_skills
+                .iter()
+                .filter_map(|(path, _)| path.parent().map(Path::to_path_buf)),
+        );
         dirs.extend(
             self.external_read_only_dirs
                 .iter()
@@ -164,7 +177,32 @@ impl SkillRegistry {
             }
         }
 
-        // 2. User skills
+        // 2. Bundled trusted skills
+        for (path, content) in self.bundled_skills.clone() {
+            match validate_normalized_skill_content(
+                &path.display().to_string(),
+                &normalize_line_endings(content),
+                SkillTrust::Trusted,
+                SkillSource::Bundled(path.clone()),
+            )
+            .await
+            {
+                Ok((name, skill)) => {
+                    if seen.contains(&name) {
+                        tracing::debug!("Skipping bundled skill '{}' (overridden)", name);
+                        continue;
+                    }
+                    seen.insert(name.clone());
+                    loaded_names.push(name);
+                    self.skills.push(skill);
+                }
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), error = %error, "Failed to load bundled skill");
+                }
+            }
+        }
+
+        // 3. User skills
         let user_dir = self.user_dir.clone();
         let user_skills = self
             .discover_from_dir(&user_dir, SkillTrust::Trusted, SkillSource::User)
@@ -179,7 +217,7 @@ impl SkillRegistry {
             self.skills.push(skill);
         }
 
-        // 3. Installed skills (registry-installed, lowest priority)
+        // 4. Installed skills (registry-installed, lowest priority)
         if let Some(inst_dir) = self.installed_dir.clone() {
             let inst_skills = self
                 .discover_from_dir(&inst_dir, SkillTrust::Installed, SkillSource::User)

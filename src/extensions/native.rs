@@ -307,6 +307,61 @@ mod tests {
     }
 
     #[test]
+    fn native_loading_rejects_missing_manifest_signature_when_required() {
+        let mut manifest = native_manifest("libmissing.dylib", None);
+        manifest.signature = None;
+        let contribution = manifest.contributions.native_plugins.first().unwrap();
+        let settings = ExtensionsSettings {
+            allow_native_plugins: true,
+            require_plugin_signatures: true,
+            trusted_manifest_keys: vec!["test-key".to_string()],
+            ..ExtensionsSettings::default()
+        };
+
+        let err = unsafe {
+            NativePluginRuntime::load(&manifest, contribution, Path::new("."), &settings)
+        }
+        .expect_err("missing signature should be rejected before loading");
+        assert!(err.to_string().contains("signature"));
+    }
+
+    #[test]
+    fn native_loading_rejects_untrusted_manifest_key() {
+        let manifest = native_manifest("libmissing.dylib", None);
+        let contribution = manifest.contributions.native_plugins.first().unwrap();
+        let settings = ExtensionsSettings {
+            allow_native_plugins: true,
+            require_plugin_signatures: true,
+            trusted_manifest_keys: vec!["different-key".to_string()],
+            ..ExtensionsSettings::default()
+        };
+
+        let err = unsafe {
+            NativePluginRuntime::load(&manifest, contribution, Path::new("."), &settings)
+        }
+        .expect_err("untrusted key should be rejected before loading");
+        assert!(err.to_string().contains("not trusted"));
+    }
+
+    #[test]
+    fn native_loading_rejects_abi_version_mismatch() {
+        let mut manifest = native_manifest("libmissing.dylib", None);
+        manifest.contributions.native_plugins[0].abi_version = NATIVE_PLUGIN_ABI_VERSION + 1;
+        let contribution = manifest.contributions.native_plugins.first().unwrap();
+        let settings = ExtensionsSettings {
+            allow_native_plugins: true,
+            require_plugin_signatures: false,
+            ..ExtensionsSettings::default()
+        };
+
+        let err = unsafe {
+            NativePluginRuntime::load(&manifest, contribution, Path::new("."), &settings)
+        }
+        .expect_err("ABI version mismatch should be rejected before loading");
+        assert!(err.to_string().contains("ABI version"));
+    }
+
+    #[test]
     fn native_artifact_paths_must_be_relative() {
         let err = resolve_plugin_artifact_path(Path::new("."), "/tmp/libexample.dylib")
             .expect_err("absolute paths should be rejected");

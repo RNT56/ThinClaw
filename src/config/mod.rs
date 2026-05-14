@@ -8,6 +8,7 @@
 mod agent;
 mod builder;
 mod channels;
+mod comfyui;
 mod database;
 mod desktop_autonomy;
 mod embeddings;
@@ -32,7 +33,7 @@ pub mod watcher;
 mod webchat;
 
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::Arc;
 
 use crate::error::ConfigError;
 use crate::secrets::SecretsStore;
@@ -48,6 +49,7 @@ pub use self::channels::{
     BlueBubblesChannelConfig, ChannelsConfig, CliConfig, DiscordChannelConfig, GatewayConfig,
     HttpConfig, SignalConfig, SlackChannelConfig, TelegramConfig,
 };
+pub use self::comfyui::ComfyUiConfig;
 pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
 pub use self::desktop_autonomy::DesktopAutonomyConfig;
 pub use self::embeddings::EmbeddingsConfig;
@@ -74,38 +76,6 @@ pub use self::webchat::{
     WebSkinCatalogEntry,
 };
 
-/// Thread-safe overlay for legacy runtime-injected values.
-///
-/// Used by `inject_all_secrets_from_store()` and `refresh_secrets()` to make
-/// Runtime-only values available to `optional_env()` without unsafe `set_var` calls.
-///
-/// Stored secrets are intentionally not preloaded here. Runtime paths must
-/// request the one credential they need through the encrypted `SecretsStore`.
-static INJECTED_VARS: LazyLock<RwLock<HashMap<String, String>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-/// Thread-safe overlay for explicitly enabled external auth sync sources.
-///
-/// This intentionally lives outside `optional_env()` so synced Codex/Claude
-/// auth cannot silently shadow stored provider API keys. Provider resolution
-/// consults this overlay only when the user explicitly selected
-/// `external_oauth_sync` for that provider.
-static SYNCED_OAUTH_VARS: LazyLock<RwLock<HashMap<String, String>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-/// IC-007: Thread-safe overlay for bridge-injected configuration.
-///
-/// The Tauri bridge (`thinclaw_bridge.rs`) calls [`inject_bridge_vars()`] to pass
-/// UI-derived configuration (LLM backend, workspace mode, heartbeat, etc.) into
-/// ThinClaw's config resolvers **without** unsafe `std::env::set_var()` calls.
-///
-/// `optional_env()` checks this overlay FIRST (highest priority), then falls
-/// through to `INJECTED_VARS` (legacy runtime overlay), then to real env vars.
-///
-/// Lifecycle: populated on engine `start()`, cleared on engine `stop()`.
-static BRIDGE_VARS: LazyLock<RwLock<HashMap<String, String>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
 /// IC-007: Inject bridge configuration variables into the overlay.
 ///
 /// Called by the Tauri bridge to pass Scrappy UI configuration to ThinClaw's
@@ -114,15 +84,7 @@ static BRIDGE_VARS: LazyLock<RwLock<HashMap<String, String>>> =
 ///
 /// Merges into existing bridge vars (does not replace the entire map).
 pub fn inject_bridge_vars(vars: HashMap<String, String>) {
-    match BRIDGE_VARS.write() {
-        Ok(mut guard) => {
-            guard.extend(vars);
-        }
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            guard.extend(vars);
-        }
-    }
+    thinclaw_config::helpers::inject_bridge_vars(vars);
 }
 
 /// IC-007: Remove specific keys from the bridge overlay.
@@ -130,42 +92,20 @@ pub fn inject_bridge_vars(vars: HashMap<String, String>) {
 /// Called by the bridge's `stop()` to clear LLM config so the next
 /// `start()` re-detects from fresh UI state.
 pub fn remove_bridge_vars(keys: &[&str]) {
-    match BRIDGE_VARS.write() {
-        Ok(mut guard) => {
-            for key in keys {
-                guard.remove(*key);
-            }
-        }
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            for key in keys {
-                guard.remove(*key);
-            }
-        }
-    }
+    thinclaw_config::helpers::remove_bridge_vars(keys);
 }
 
 /// IC-007: Clear all bridge overlay vars.
 ///
 /// Called during full engine shutdown to reset all bridge-injected config.
 pub fn clear_bridge_vars() {
-    match BRIDGE_VARS.write() {
-        Ok(mut guard) => guard.clear(),
-        Err(poisoned) => poisoned.into_inner().clear(),
-    }
+    thinclaw_config::helpers::clear_bridge_vars();
 }
 
 /// Clear all injected secret-overlay vars (test support).
 #[cfg(test)]
 pub(crate) fn clear_injected_vars_for_tests() {
-    match INJECTED_VARS.write() {
-        Ok(mut guard) => guard.clear(),
-        Err(poisoned) => poisoned.into_inner().clear(),
-    }
-    match SYNCED_OAUTH_VARS.write() {
-        Ok(mut guard) => guard.clear(),
-        Err(poisoned) => poisoned.into_inner().clear(),
-    }
+    thinclaw_config::helpers::clear_injected_vars_for_tests();
 }
 
 /// IC-007: Check whether a key exists in the bridge overlay.
@@ -173,12 +113,7 @@ pub(crate) fn clear_injected_vars_for_tests() {
 /// Used by the bridge to replicate the `is_err()` guard logic:
 /// "only set defaults if the user hasn't already configured this var."
 pub fn bridge_var_exists(key: &str) -> bool {
-    if let Ok(guard) = BRIDGE_VARS.read()
-        && guard.contains_key(key)
-    {
-        return true;
-    }
-    std::env::var(key).is_ok()
+    thinclaw_config::helpers::bridge_var_exists(key)
 }
 
 /// Main configuration for the agent.
@@ -189,6 +124,7 @@ pub struct Config {
     pub embeddings: EmbeddingsConfig,
     pub tunnel: TunnelConfig,
     pub channels: ChannelsConfig,
+    pub comfyui: ComfyUiConfig,
     pub agent: AgentConfig,
     pub desktop_autonomy: DesktopAutonomyConfig,
     pub safety: SafetyConfig,
@@ -335,6 +271,7 @@ impl Config {
             embeddings: EmbeddingsConfig::resolve(settings)?,
             tunnel: TunnelConfig::resolve(settings)?,
             channels: ChannelsConfig::resolve(settings)?,
+            comfyui: ComfyUiConfig::resolve(settings)?,
             agent: AgentConfig::resolve(settings)?,
             desktop_autonomy: DesktopAutonomyConfig::resolve(settings)?,
             safety: SafetyConfig::resolve(settings)?,
@@ -397,39 +334,17 @@ pub async fn inject_llm_keys_from_secrets(
 ///
 /// Used by both initial injection and runtime refresh.
 fn update_injected_vars(new_vars: HashMap<String, String>) {
-    match INJECTED_VARS.write() {
-        Ok(mut guard) => {
-            *guard = new_vars;
-        }
-        Err(poisoned) => {
-            // Recover from a poisoned lock
-            let mut guard = poisoned.into_inner();
-            *guard = new_vars;
-        }
-    }
+    thinclaw_config::helpers::replace_injected_vars(new_vars);
 }
 
 /// Replace the synced external-auth overlay atomically.
 pub fn replace_synced_oauth_vars(new_vars: HashMap<String, String>) -> usize {
-    let count = new_vars.len();
-    match SYNCED_OAUTH_VARS.write() {
-        Ok(mut guard) => {
-            *guard = new_vars;
-        }
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            *guard = new_vars;
-        }
-    }
-    count
+    thinclaw_config::helpers::replace_synced_oauth_vars(new_vars)
 }
 
 /// Clear all synced external-auth values.
 pub fn clear_synced_oauth_vars() {
-    match SYNCED_OAUTH_VARS.write() {
-        Ok(mut guard) => guard.clear(),
-        Err(poisoned) => poisoned.into_inner().clear(),
-    }
+    thinclaw_config::helpers::clear_synced_oauth_vars();
 }
 
 /// Merge specific values into the legacy injected runtime overlay without
@@ -439,17 +354,7 @@ pub fn clear_synced_oauth_vars() {
 /// where a subset of provider credentials may update independently of the main
 /// secrets store.
 pub fn merge_injected_vars(vars: HashMap<String, String>) -> usize {
-    let count = vars.len();
-    match INJECTED_VARS.write() {
-        Ok(mut guard) => {
-            guard.extend(vars);
-        }
-        Err(poisoned) => {
-            let mut guard = poisoned.into_inner();
-            guard.extend(vars);
-        }
-    }
-    count
+    thinclaw_config::helpers::merge_injected_vars(vars)
 }
 
 /// Reload stored secrets and clear the legacy overlay.

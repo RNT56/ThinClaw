@@ -1,12 +1,10 @@
-use axum::{
-    extract::FromRequestParts,
-    http::{StatusCode, request::Parts},
-};
-
 use crate::channels::web::types::SseEvent;
 use crate::db::Database;
 use crate::history::ConversationKind as HistoryConversationKind;
 use crate::identity::{ConversationKind, ResolvedIdentity, scope_id_from_key};
+pub use thinclaw_gateway::web::identity::{
+    GatewayAuthSource, GatewayRequestIdentity, requested_identity_override,
+};
 
 use super::server::GatewayState;
 
@@ -15,105 +13,6 @@ const DIRECT_THREAD_ROLE_MAIN: &str = "main";
 const ORIGIN_CHANNEL_KEY: &str = "origin_channel";
 const LAST_ACTIVE_CHANNEL_KEY: &str = "last_active_channel";
 const SEEN_CHANNELS_KEY: &str = "seen_channels";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GatewayAuthSource {
-    BearerHeader,
-    BearerQuery,
-    TrustedProxy,
-}
-
-impl GatewayAuthSource {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::BearerHeader => "bearer_header",
-            Self::BearerQuery => "bearer_query",
-            Self::TrustedProxy => "trusted_proxy",
-        }
-    }
-
-    fn allows_compat_overrides(&self) -> bool {
-        matches!(self, Self::BearerHeader | Self::BearerQuery)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GatewayRequestIdentity {
-    pub principal_id: String,
-    pub actor_id: String,
-    pub auth_source: GatewayAuthSource,
-    pub compatibility_fallback: bool,
-}
-
-impl GatewayRequestIdentity {
-    pub fn new(
-        principal_id: impl Into<String>,
-        actor_id: impl Into<String>,
-        auth_source: GatewayAuthSource,
-        compatibility_fallback: bool,
-    ) -> Self {
-        Self {
-            principal_id: principal_id.into(),
-            actor_id: actor_id.into(),
-            auth_source,
-            compatibility_fallback,
-        }
-    }
-
-    pub fn resolved_identity(&self, thread_id: Option<&str>) -> ResolvedIdentity {
-        gateway_identity(&self.principal_id, &self.actor_id, thread_id)
-    }
-
-    pub fn with_compat_overrides(
-        &self,
-        requested_principal_id: Option<&str>,
-        requested_actor_id: Option<&str>,
-    ) -> Self {
-        let principal_id = requested_identity_override(requested_principal_id)
-            .unwrap_or_else(|| self.principal_id.clone());
-        let actor_id = requested_identity_override(requested_actor_id).unwrap_or_else(|| {
-            if self.actor_id.trim().is_empty() {
-                principal_id.clone()
-            } else {
-                self.actor_id.clone()
-            }
-        });
-        let compatibility_fallback = self.compatibility_fallback
-            || requested_identity_override(requested_principal_id).is_some()
-            || requested_identity_override(requested_actor_id).is_some();
-
-        Self {
-            principal_id,
-            actor_id,
-            auth_source: self.auth_source.clone(),
-            compatibility_fallback,
-        }
-    }
-
-    pub fn matches_gateway_defaults(&self, state: &GatewayState) -> bool {
-        let default_principal = default_gateway_principal_id(state);
-        let default_actor = default_gateway_actor_id(state, &default_principal);
-        self.principal_id == default_principal && self.actor_id == default_actor
-    }
-}
-
-impl<S> FromRequestParts<S> for GatewayRequestIdentity
-where
-    S: Send + Sync,
-{
-    type Rejection = (StatusCode, String);
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        parts
-            .extensions
-            .get::<GatewayRequestIdentity>()
-            .cloned()
-            .ok_or((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Gateway request identity missing from request context".to_string(),
-            ))
-    }
-}
 
 pub(crate) fn default_gateway_principal_id(state: &GatewayState) -> String {
     state.user_id.clone()
@@ -125,13 +24,6 @@ pub(crate) fn default_gateway_actor_id(state: &GatewayState, principal_id: &str)
     } else {
         state.actor_id.clone()
     }
-}
-
-pub(crate) fn requested_identity_override(requested: Option<&str>) -> Option<String> {
-    requested
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToOwned::to_owned)
 }
 
 pub(crate) async fn request_user_id(state: &GatewayState, requested: Option<&str>) -> String {
@@ -203,6 +95,15 @@ pub(crate) async fn request_identity_with_overrides(
     }
 }
 
+fn gateway_request_identity_matches_defaults(
+    identity: &GatewayRequestIdentity,
+    state: &GatewayState,
+) -> bool {
+    let default_principal = default_gateway_principal_id(state);
+    let default_actor = default_gateway_actor_id(state, &default_principal);
+    identity.principal_id == default_principal && identity.actor_id == default_actor
+}
+
 #[cfg(test)]
 pub(crate) fn conversation_visible_to_actor(
     conversation_actor_id: Option<&str>,
@@ -265,7 +166,7 @@ pub(crate) async fn sse_event_visible_to_identity(
             if let Some(thread_id) = thread_id.as_deref() {
                 conversation_event_visible_to_identity(store, state, identity, thread_id).await
             } else {
-                identity.matches_gateway_defaults(state)
+                gateway_request_identity_matches_defaults(identity, state)
             }
         }
         SseEvent::ConversationUpdated { thread_id, .. } => {
@@ -309,7 +210,7 @@ pub(crate) async fn sse_event_visible_to_identity(
         | SseEvent::CanvasUpdate { .. }
         | SseEvent::JobStarted { .. }
         | SseEvent::BootstrapCompleted
-        | SseEvent::Heartbeat => identity.matches_gateway_defaults(state),
+        | SseEvent::Heartbeat => gateway_request_identity_matches_defaults(identity, state),
     }
 }
 

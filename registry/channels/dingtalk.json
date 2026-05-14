@@ -1,0 +1,24 @@
+{
+  "name": "dingtalk",
+  "display_name": "DingTalk",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "DingTalk robot webhook channel",
+  "keywords": ["messaging", "chat", "dingtalk", "robot"],
+  "source": {
+    "dir": "channels-src/dingtalk",
+    "capabilities": "dingtalk.capabilities.json",
+    "crate_name": "dingtalk-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "DingTalk",
+    "secrets": ["dingtalk_access_token", "dingtalk_webhook_secret"],
+    "shared_auth": null,
+    "setup_url": "https://open.dingtalk.com/"
+  },
+  "tags": ["messaging"]
+}

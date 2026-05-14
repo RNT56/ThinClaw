@@ -6,7 +6,7 @@ use crate::agent::ThreadRuntimeState;
 use crate::db::Database;
 use crate::error::DatabaseError;
 
-pub const THREAD_RUNTIME_METADATA_KEY: &str = "runtime";
+pub use thinclaw_agent::thread_runtime::THREAD_RUNTIME_METADATA_KEY;
 
 pub async fn load_thread_runtime(
     store: &Arc<dyn Database>,
@@ -16,16 +16,7 @@ pub async fn load_thread_runtime(
         Some(metadata) => metadata,
         None => return Ok(None),
     };
-    let runtime = metadata
-        .get(THREAD_RUNTIME_METADATA_KEY)
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    if runtime.is_null() {
-        return Ok(None);
-    }
-    let parsed = serde_json::from_value(runtime)
-        .map_err(|e| DatabaseError::Serialization(format!("thread runtime decode failed: {e}")))?;
-    Ok(Some(parsed))
+    thinclaw_agent::thread_runtime::decode_thread_runtime(&metadata)
 }
 
 pub async fn save_thread_runtime(
@@ -33,8 +24,7 @@ pub async fn save_thread_runtime(
     thread_id: Uuid,
     runtime: &ThreadRuntimeState,
 ) -> Result<(), DatabaseError> {
-    let value = serde_json::to_value(runtime)
-        .map_err(|e| DatabaseError::Serialization(format!("thread runtime encode failed: {e}")))?;
+    let value = thinclaw_agent::thread_runtime::encode_thread_runtime(runtime)?;
     store
         .update_conversation_metadata_field(thread_id, THREAD_RUNTIME_METADATA_KEY, &value)
         .await

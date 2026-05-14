@@ -55,6 +55,10 @@ expression: settings
     "signal_dm_policy": null,
     "signal_group_policy": null,
     "signal_group_allow_from": null,
+    "matrix_enabled": false,
+    "voice_call_enabled": false,
+    "apns_enabled": false,
+    "browser_push_enabled": false,
     "telegram_owner_id": null,
     "telegram_stream_mode": null,
     "telegram_transport_mode": "auto",
@@ -106,6 +110,22 @@ expression: settings
   "prompt": {
     "session_freeze_enabled": true,
     "project_context_max_tokens": 8000
+  },
+  "comfyui": {
+    "enabled": false,
+    "mode": "local_existing",
+    "host": "http://127.0.0.1:8188",
+    "port": 8188,
+    "workspace_dir": "[home]/.thinclaw/comfyui",
+    "output_dir": "[home]/.thinclaw/media_cache/generated",
+    "default_workflow": "sdxl_txt2img",
+    "default_aspect_ratio": "square",
+    "cloud_api_key_secret": "comfy_cloud_api_key",
+    "allow_lifecycle_management": false,
+    "allow_untrusted_workflows": false,
+    "request_timeout_secs": 600,
+    "max_output_bytes": 104857600,
+    "max_concurrent_jobs": 1
   },
   "extensions": {
     "user_tools_dir": "[home]/.thinclaw/user-tools",
@@ -214,7 +234,8 @@ expression: settings
     "redact_pii_in_prompts": true,
     "smart_approval_mode": "off",
     "external_scanner_mode": "fail_open",
-    "external_scanner_path": null
+    "external_scanner_path": null,
+    "external_scanner_require_verified": false
   },
   "builder": {
     "enabled": true,

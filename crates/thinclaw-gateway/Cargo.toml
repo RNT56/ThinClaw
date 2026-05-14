@@ -1,0 +1,25 @@
+[package]
+name = "thinclaw-gateway"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+axum = "0.8"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+thinclaw-channels-core = { version = "0.1.0", path = "../thinclaw-channels-core" }
+thinclaw-identity = { version = "0.1.0", path = "../thinclaw-identity" }
+thinclaw-safety = { version = "0.1.0", path = "../thinclaw-safety" }
+thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
+thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
+tokio = { version = "1", features = ["sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = "1"

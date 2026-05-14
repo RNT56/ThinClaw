@@ -6,6 +6,12 @@ use std::time::Duration;
 use crate::llm::cost_tracker::CostTracker;
 use chrono::Utc;
 
+use thinclaw_agent::worker_runtime::{
+    RoutineFinalizationOutcome, WorkerActivityKeepalive, build_worker_system_prompt,
+    capped_worker_iterations, compact_post_plan, heartbeat_iteration_exhausted_critique,
+    heartbeat_iteration_exhausted_summary, heartbeat_iteration_exhausted_user_message,
+    is_worker_terminal_state, touch_worker_activity,
+};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -18,7 +24,6 @@ use crate::agent::routine::{
 };
 use crate::agent::routine_engine::persist_routine_runtime_update;
 use crate::agent::scheduler::WorkerMessage;
-use crate::agent::task::TaskOutput;
 use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobState};
 use crate::db::Database;
@@ -79,42 +84,6 @@ pub struct Worker {
 /// Result of a tool execution with metadata for context building.
 struct ToolExecResult {
     result: Result<String, Error>,
-}
-
-fn touch_worker_activity(activity_tx: &watch::Sender<std::time::Instant>) {
-    let _ = activity_tx.send(std::time::Instant::now());
-}
-
-struct WorkerActivityKeepalive {
-    cancel_tx: watch::Sender<bool>,
-    join_handle: tokio::task::JoinHandle<()>,
-}
-
-impl WorkerActivityKeepalive {
-    fn spawn(activity_tx: watch::Sender<std::time::Instant>, interval: Duration) -> Self {
-        let (cancel_tx, mut cancel_rx) = watch::channel(false);
-        let join_handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel_rx.changed() => break,
-                    _ = tokio::time::sleep(interval) => {
-                        touch_worker_activity(&activity_tx);
-                    }
-                }
-            }
-        });
-        Self {
-            cancel_tx,
-            join_handle,
-        }
-    }
-}
-
-impl Drop for WorkerActivityKeepalive {
-    fn drop(&mut self) {
-        let _ = self.cancel_tx.send(true);
-        self.join_handle.abort();
-    }
 }
 
 impl Worker {
@@ -278,36 +247,14 @@ impl Worker {
         // Build initial reasoning context (tool definitions refreshed each iteration in execution_loop)
         let mut reason_ctx = ReasoningContext::new().with_job(&job_ctx.description);
 
-        // Build system message with identity context
-        let identity_section = identity_block
-            .as_deref()
-            .map(|id| format!("\n\n---\n\n{}", id))
-            .unwrap_or_default();
-
         // Add system message
-        reason_ctx.messages.push(ChatMessage::system(format!(
-            r#"You are an autonomous agent working on a job.
-
-Job: {}
-Description: {}
-
-You have access to tools to complete this job. Plan your approach and execute tools as needed.
-You may request multiple tools at once if they can be executed in parallel.
-
-IMPORTANT: Use `emit_user_message` to send your results and findings to the user. This is \
-how you deliver output — the user sees these messages in real-time in their chat interface. \
-Use it for interim progress updates (message_type: "progress") and for your final results \
-(message_type: "interim_result"). Do NOT just write results to memory files — the user needs \
-to see them directly.
-
-You can also use the `canvas` tool to display rich structured content (tables, panels, etc.) \
-in the user's UI.
-
-Report when the job is complete or if you encounter issues you cannot resolve.{identity}"#,
-            job_ctx.title,
-            job_ctx.description,
-            identity = identity_section
-        )));
+        reason_ctx
+            .messages
+            .push(ChatMessage::system(build_worker_system_prompt(
+                &job_ctx.title,
+                &job_ctx.description,
+                identity_block.as_deref(),
+            )));
 
         // Main execution loop with a resettable inactivity timeout. This
         // keeps legitimately active work alive, including long-running tools
@@ -344,16 +291,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
                     .get_context(self.job_id)
                     .await
                     .ok()
-                    .map(|c| {
-                        matches!(
-                            c.state,
-                            JobState::Completed
-                                | JobState::Failed
-                                | JobState::Stuck
-                                | JobState::Cancelled
-                                | JobState::Abandoned
-                        )
-                    })
+                    .map(|c| is_worker_terminal_state(c.state))
                     .unwrap_or(false);
                 if !already_terminal && let Err(e) = self.mark_completed().await {
                     tracing::warn!("Failed to mark job {} completed: {}", self.job_id, e);
@@ -386,15 +324,13 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         activity_tx: &watch::Sender<std::time::Instant>,
     ) -> Result<(), Error> {
         touch_worker_activity(activity_tx);
-        const MAX_WORKER_ITERATIONS: usize = 500;
-        let max_iterations = self
+        let requested_iterations = self
             .context_manager()
             .get_context(self.job_id)
             .await
             .ok()
-            .and_then(|ctx| ctx.metadata.get("max_iterations").and_then(|v| v.as_u64()))
-            .unwrap_or(50) as usize;
-        let max_iterations = max_iterations.min(MAX_WORKER_ITERATIONS);
+            .and_then(|ctx| ctx.metadata.get("max_iterations").and_then(|v| v.as_u64()));
+        let max_iterations = capped_worker_iterations(requested_iterations, 50);
 
         // Heartbeat jobs set { "heartbeat": true } in metadata. When the LLM
         // produces a text response (HEARTBEAT_OK or findings), the job is done
@@ -505,14 +441,7 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
 
             // Check whether the job reached a terminal state.
             if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
-                && matches!(
-                    ctx.state,
-                    JobState::Completed
-                        | JobState::Failed
-                        | JobState::Stuck
-                        | JobState::Cancelled
-                        | JobState::Abandoned
-                )
+                && is_worker_terminal_state(ctx.state)
             {
                 return Ok(());
             }
@@ -569,42 +498,20 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
             touch_worker_activity(activity_tx);
             if iteration > max_iterations {
                 if is_heartbeat {
-                    // ── Heartbeat-specific stuck handling ─────────────────
-                    // Build a descriptive message about what the heartbeat
-                    // was trying to do when it ran out of iterations.
-                    let stuck_reason = format!(
-                        "Heartbeat ran out of iterations ({}/{}) before completing all checklist actions. \
-                         The agent may need a higher max_iterations setting, or the checklist \
-                         may contain tasks too complex for a single heartbeat run.",
-                        max_iterations, max_iterations
-                    );
+                    let stuck_reason = heartbeat_iteration_exhausted_summary(max_iterations);
 
                     // Set last_output so the notification includes useful context.
                     // This flows through finalize_routine_run → send_notification
                     // with on_failure: true, so the user sees this message.
-                    self.set_last_output(&format!(
-                        "⚠️ Heartbeat incomplete — ran out of tool iterations ({}/{}). \
-                         Some checklist actions may not have been completed. \
-                         You can increase the iteration budget in Settings → Heartbeat → Max iterations, \
-                         or help me finish by prompting me directly.",
-                        max_iterations, max_iterations
+                    self.set_last_output(&heartbeat_iteration_exhausted_user_message(
+                        max_iterations,
                     ));
 
                     // Write self-critique so the next heartbeat knows what
                     // happened and can try to finish the work.
                     if let Some(store) = self.store() {
-                        let critique = serde_json::json!({
-                            "timestamp": chrono::Utc::now().to_rfc3339(),
-                            "job_id": self.job_id.to_string(),
-                            "quality": 0,
-                            "reasoning": format!(
-                                "Heartbeat exhausted all {} iterations without completing. \
-                                 Partial work may have been saved. Pick up where the previous \
-                                 run left off — check MEMORY.md and daily logs for what was \
-                                 already done, then continue.",
-                                max_iterations
-                            ),
-                        });
+                        let critique =
+                            heartbeat_iteration_exhausted_critique(self.job_id, max_iterations);
                         if let Err(e) = store
                             .set_setting("system", "heartbeat.last_critique", &critique)
                             .await
@@ -1312,64 +1219,25 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
         };
 
         // Derive RunStatus + summary from the job's actual terminal state.
-        let (status, event, summary, job_user_id, job_actor_id) =
-            match self.context_manager().get_context(self.job_id).await {
-                Ok(ctx) => {
-                    // Extract the reason from the last state transition (if any).
-                    let reason = ctx.transitions.last().and_then(|t| t.reason.clone());
-                    match ctx.state {
-                        JobState::Completed => (
-                            crate::agent::routine::RunStatus::Ok,
-                            "completed",
-                            "Job completed successfully".to_string(),
-                            Some(ctx.user_id.clone()),
-                            Some(ctx.owner_actor_id().to_string()),
-                        ),
-                        JobState::Failed => (
-                            crate::agent::routine::RunStatus::Failed,
-                            "failed",
-                            reason.unwrap_or_else(|| "Job failed".to_string()),
-                            Some(ctx.user_id.clone()),
-                            Some(ctx.owner_actor_id().to_string()),
-                        ),
-                        JobState::Stuck => (
-                            crate::agent::routine::RunStatus::Failed,
-                            "failed",
-                            reason.unwrap_or_else(|| "Job stuck".to_string()),
-                            Some(ctx.user_id.clone()),
-                            Some(ctx.owner_actor_id().to_string()),
-                        ),
-                        JobState::Cancelled => (
-                            crate::agent::routine::RunStatus::Failed,
-                            "failed",
-                            "Job cancelled".to_string(),
-                            Some(ctx.user_id.clone()),
-                            Some(ctx.owner_actor_id().to_string()),
-                        ),
-                        JobState::Abandoned => (
-                            crate::agent::routine::RunStatus::Failed,
-                            "failed",
-                            reason.unwrap_or_else(|| "Job abandoned".to_string()),
-                            Some(ctx.user_id.clone()),
-                            Some(ctx.owner_actor_id().to_string()),
-                        ),
-                        other => (
-                            crate::agent::routine::RunStatus::Failed,
-                            "failed",
-                            format!("Job ended in unexpected state: {:?}", other),
-                            Some(ctx.user_id.clone()),
-                            Some(ctx.owner_actor_id().to_string()),
-                        ),
-                    }
-                }
-                Err(e) => (
-                    crate::agent::routine::RunStatus::Failed,
-                    "failed",
-                    format!("Could not read final job state: {}", e),
-                    None,
-                    None,
-                ),
-            };
+        let finalization = match self.context_manager().get_context(self.job_id).await {
+            Ok(ctx) => {
+                let reason = ctx.transitions.last().and_then(|t| t.reason.clone());
+                RoutineFinalizationOutcome::from_job_state(
+                    ctx.state,
+                    reason,
+                    ctx.user_id.clone(),
+                    ctx.owner_actor_id().to_string(),
+                )
+            }
+            Err(e) => RoutineFinalizationOutcome::from_context_error(e),
+        };
+        let RoutineFinalizationOutcome {
+            status,
+            event,
+            summary,
+            job_user_id,
+            job_actor_id,
+        } = finalization;
 
         // Use the last meaningful output from the worker (LLM's final response
         // or last emit_user_message) as the result_summary for the SSE event
@@ -1646,72 +1514,6 @@ Report when the job is complete or if you encounter issues you cannot resolve.{i
     }
 }
 
-/// Convert a TaskOutput to a string result for tool execution.
-impl From<TaskOutput> for Result<String, Error> {
-    fn from(output: TaskOutput) -> Self {
-        serde_json::to_string_pretty(&output.result).map_err(|e| {
-            crate::error::ToolError::ExecutionFailed {
-                name: "task".to_string(),
-                reason: format!("Failed to serialize result: {}", e),
-            }
-            .into()
-        })
-    }
-}
-
-/// Compact context messages after plan execution to prevent orphaned tool_result bloat.
-///
-/// Keeps:
-/// - All System messages (system prompt, instructions)
-/// - The first User message (the original task)
-/// - A synthetic assistant summary of the plan
-///
-/// Strips:
-/// - Plan-era tool_result messages (with synthetic `plan_*` IDs)
-/// - Plan-era assistant messages with tool_calls
-/// - Intermediate user messages from orphan rewrites
-fn compact_post_plan(messages: &mut Vec<ChatMessage>, plan_goal: &str) {
-    use crate::llm::Role;
-
-    let pre_count = messages.len();
-    let pre_chars: usize = messages.iter().map(|m| m.estimated_chars()).sum();
-
-    let mut compacted = Vec::new();
-    let mut first_user_seen = false;
-
-    for msg in messages.iter() {
-        match msg.role {
-            Role::System => {
-                compacted.push(msg.clone());
-            }
-            Role::User if !first_user_seen => {
-                compacted.push(msg.clone());
-                first_user_seen = true;
-            }
-            _ => {} // Skip all plan-era messages
-        }
-    }
-
-    // Add a summary note about the completed plan
-    compacted.push(ChatMessage::assistant(format!(
-        "I executed a plan to accomplish: {}. \
-         The plan has been completed. Now I'll check for any remaining work \
-         or deliver final results.",
-        plan_goal,
-    )));
-
-    let post_chars: usize = compacted.iter().map(|m| m.estimated_chars()).sum();
-    tracing::info!(
-        "Post-plan compaction: {} messages ({} chars) → {} messages ({} chars)",
-        pre_count,
-        pre_chars,
-        compacted.len(),
-        post_chars
-    );
-
-    *messages = compacted;
-}
-
 #[cfg(test)]
 mod tests {
     use crate::llm::ToolSelection;
@@ -1837,6 +1639,7 @@ mod tests {
                 smart_approval_mode: "off".to_string(),
                 external_scanner_mode: "off".to_string(),
                 external_scanner_path: None,
+                external_scanner_require_verified: false,
             })),
             tools: Arc::new(registry),
             store: None,
@@ -2133,6 +1936,7 @@ mod tests {
                 smart_approval_mode: "off".to_string(),
                 external_scanner_mode: "off".to_string(),
                 external_scanner_path: None,
+                external_scanner_require_verified: false,
             })),
             tools: Arc::new(ToolRegistry::new()),
             store: Some(db.clone()),

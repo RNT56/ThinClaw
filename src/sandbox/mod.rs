@@ -86,21 +86,29 @@
 //! - **Timeout enforcement**: Commands are killed after the timeout
 
 pub mod config;
+#[cfg(feature = "docker-sandbox")]
 pub mod container;
 pub mod detect;
 #[cfg(feature = "browser")]
 pub mod docker_chromium;
 pub mod docker_init;
 pub mod error;
+#[cfg(feature = "docker-sandbox")]
 pub mod manager;
 pub mod podman;
 pub mod proxy;
 
 pub use config::{ResourceLimits, SandboxConfig, SandboxPolicy};
+#[cfg(feature = "docker-sandbox")]
 pub use container::{ContainerOutput, ContainerRunner, connect_docker};
+#[cfg(not(feature = "docker-sandbox"))]
+pub use container_stub::{ContainerOutput, ContainerRunner, connect_docker};
 pub use detect::{DockerDetection, DockerStatus, Platform, check_docker};
 pub use error::{Result, SandboxError};
+#[cfg(feature = "docker-sandbox")]
 pub use manager::{ExecOutput, SandboxManager, SandboxManagerBuilder};
+#[cfg(not(feature = "docker-sandbox"))]
+pub use manager_stub::{ExecOutput, SandboxManager, SandboxManagerBuilder};
 pub use proxy::{
     CredentialResolver, DefaultPolicyDecider, DomainAllowlist, EnvCredentialResolver, HttpProxy,
     NetworkDecision, NetworkPolicyDecider, NetworkProxyBuilder, NetworkRequest,
@@ -114,4 +122,254 @@ pub fn default_allowlist() -> Vec<String> {
 /// Default credential mappings getter (re-export for convenience).
 pub fn default_credential_mappings() -> Vec<crate::secrets::CredentialMapping> {
     config::default_credential_mappings()
+}
+
+#[cfg(not(feature = "docker-sandbox"))]
+mod container_stub {
+    use std::time::Duration;
+
+    use super::{Result, SandboxError};
+
+    #[derive(Debug, Clone)]
+    pub struct ContainerOutput {
+        pub exit_code: i64,
+        pub stdout: String,
+        pub stderr: String,
+        pub duration: Duration,
+        pub truncated: bool,
+    }
+
+    pub struct ContainerRunner;
+
+    pub async fn connect_docker() -> Result<()> {
+        Err(SandboxError::DockerNotAvailable {
+            reason: "ThinClaw was built without the docker-sandbox feature".to_string(),
+        })
+    }
+}
+
+#[cfg(not(feature = "docker-sandbox"))]
+mod manager_stub {
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::time::Duration;
+
+    use super::{Result, SandboxConfig, SandboxError, SandboxPolicy};
+
+    #[derive(Debug, Clone)]
+    pub struct ExecOutput {
+        pub exit_code: i64,
+        pub stdout: String,
+        pub stderr: String,
+        pub output: String,
+        pub duration: Duration,
+        pub truncated: bool,
+    }
+
+    #[derive(Debug)]
+    pub struct SandboxManager {
+        config: SandboxConfig,
+        initialized: std::sync::atomic::AtomicBool,
+    }
+
+    impl SandboxManager {
+        pub fn new(config: SandboxConfig) -> Self {
+            Self {
+                config,
+                initialized: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        pub fn with_defaults() -> Self {
+            Self::new(SandboxConfig::default())
+        }
+
+        pub async fn is_available(&self) -> bool {
+            false
+        }
+
+        pub async fn initialize(&self) -> Result<()> {
+            if !self.config.enabled {
+                return Err(SandboxError::Config {
+                    reason: "sandbox is disabled".to_string(),
+                });
+            }
+            Err(SandboxError::DockerNotAvailable {
+                reason: "ThinClaw was built without the docker-sandbox feature".to_string(),
+            })
+        }
+
+        pub async fn shutdown(&self) {
+            self.initialized
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        pub async fn execute(
+            &self,
+            command: &str,
+            cwd: &Path,
+            env: HashMap<String, String>,
+        ) -> Result<ExecOutput> {
+            self.execute_with_policy_and_network(command, cwd, self.config.policy, env, true)
+                .await
+        }
+
+        pub async fn execute_with_policy(
+            &self,
+            command: &str,
+            cwd: &Path,
+            policy: SandboxPolicy,
+            env: HashMap<String, String>,
+        ) -> Result<ExecOutput> {
+            self.execute_with_policy_and_network(command, cwd, policy, env, true)
+                .await
+        }
+
+        pub async fn execute_with_policy_and_network(
+            &self,
+            command: &str,
+            cwd: &Path,
+            policy: SandboxPolicy,
+            env: HashMap<String, String>,
+            _allow_network: bool,
+        ) -> Result<ExecOutput> {
+            if policy == SandboxPolicy::FullAccess {
+                return self.execute_direct(command, cwd, env).await;
+            }
+            Err(SandboxError::DockerNotAvailable {
+                reason: "ThinClaw was built without the docker-sandbox feature".to_string(),
+            })
+        }
+
+        async fn execute_direct(
+            &self,
+            command: &str,
+            cwd: &Path,
+            env: HashMap<String, String>,
+        ) -> Result<ExecOutput> {
+            use tokio::process::Command;
+
+            let start = std::time::Instant::now();
+            let mut cmd = if cfg!(target_os = "windows") {
+                let mut c = Command::new("cmd");
+                c.args(["/C", command]);
+                c
+            } else {
+                let mut c = Command::new("sh");
+                c.args(["-c", command]);
+                c
+            };
+            cmd.current_dir(cwd);
+            cmd.envs(env);
+            let output = tokio::time::timeout(self.config.timeout, cmd.output())
+                .await
+                .map_err(|_| SandboxError::Timeout(self.config.timeout))?
+                .map_err(|e| SandboxError::ExecutionFailed {
+                    reason: e.to_string(),
+                })?;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let combined = if stderr.is_empty() {
+                stdout.clone()
+            } else if stdout.is_empty() {
+                stderr.clone()
+            } else {
+                format!("{}\n\n--- stderr ---\n{}", stdout, stderr)
+            };
+            Ok(ExecOutput {
+                exit_code: output.status.code().unwrap_or(-1) as i64,
+                stdout,
+                stderr,
+                output: combined,
+                duration: start.elapsed(),
+                truncated: false,
+            })
+        }
+
+        pub async fn build(
+            &self,
+            command: &str,
+            project_dir: &Path,
+            env: HashMap<String, String>,
+        ) -> Result<ExecOutput> {
+            self.execute_with_policy_and_network(
+                command,
+                project_dir,
+                SandboxPolicy::WorkspaceWrite,
+                env,
+                true,
+            )
+            .await
+        }
+
+        pub fn config(&self) -> &SandboxConfig {
+            &self.config
+        }
+
+        pub fn is_initialized(&self) -> bool {
+            self.initialized.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        pub async fn proxy_port(&self) -> Option<u16> {
+            None
+        }
+    }
+
+    pub struct SandboxManagerBuilder {
+        config: SandboxConfig,
+    }
+
+    impl SandboxManagerBuilder {
+        pub fn new() -> Self {
+            Self {
+                config: SandboxConfig::default(),
+            }
+        }
+
+        pub fn enabled(mut self, enabled: bool) -> Self {
+            self.config.enabled = enabled;
+            self
+        }
+
+        pub fn policy(mut self, policy: SandboxPolicy) -> Self {
+            self.config.policy = policy;
+            self
+        }
+
+        pub fn timeout(mut self, timeout: Duration) -> Self {
+            self.config.timeout = timeout;
+            self
+        }
+
+        pub fn memory_limit_mb(mut self, mb: u64) -> Self {
+            self.config.memory_limit_mb = mb;
+            self
+        }
+
+        pub fn image(mut self, image: &str) -> Self {
+            self.config.image = image.to_string();
+            self
+        }
+
+        pub fn allow_domains(mut self, domains: Vec<String>) -> Self {
+            self.config.network_allowlist.extend(domains);
+            self
+        }
+
+        pub fn build(self) -> SandboxManager {
+            SandboxManager::new(self.config)
+        }
+
+        pub async fn build_and_init(self) -> Result<SandboxManager> {
+            let manager = self.build();
+            manager.initialize().await?;
+            Ok(manager)
+        }
+    }
+
+    impl Default for SandboxManagerBuilder {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
 }

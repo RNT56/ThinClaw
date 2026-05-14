@@ -23,3 +23,15 @@ Exact token IDs and logprobs are captured only when the active provider can supp
 ## Rewarding
 
 The default `AgentLoopEnv` uses a simple heuristic reward: non-empty successful responses score high, explicit errors score low, and empty responses score zero. Benchmarks should replace or post-process this with task-specific scoring.
+
+## Training Exports
+
+The CLI can export archived trajectories for downstream training:
+
+- `thinclaw trajectory export --format sft` writes chat-format supervised records.
+- `thinclaw trajectory export --format dpo` writes preference records and requires distinct chosen/rejected scores.
+- `--min-score` filters low-quality records before conversion.
+- `--max-records` caps output size deterministically.
+- `--with-manifest` writes counts, skipped-record reasons, thresholds, and output hash metadata alongside the dataset.
+
+Export validation is local and deterministic. Full RL trainer orchestration, remote fine-tuning submission, and distributed reward-model workflows remain outside this Phase 1 environment layer.

@@ -1,22 +1,42 @@
+//! Agent run harness compatibility adapter.
+
 use std::sync::Arc;
 
-use anyhow::Context;
+use async_trait::async_trait;
 use uuid::Uuid;
 
+pub use thinclaw_agent::run_harness::RunMemorySyncObserver;
+
 use crate::agent::run_artifact::AgentRunArtifact;
-use crate::agent::run_driver::AgentRunDriver;
+use crate::agent::run_driver::{AgentRunDriver, RootRunThreadRuntimeLookup};
+
+pub struct RootRunMemorySyncObserver {
+    store: Arc<dyn crate::db::Database>,
+}
+
+impl RootRunMemorySyncObserver {
+    pub fn shared(store: Arc<dyn crate::db::Database>) -> Arc<dyn RunMemorySyncObserver> {
+        Arc::new(Self { store })
+    }
+}
+
+#[async_trait]
+impl RunMemorySyncObserver for RootRunMemorySyncObserver {
+    async fn after_turn_sync(&self, user_id: &str, artifact: &AgentRunArtifact) {
+        let manager = crate::agent::learning::MemoryProviderManager::new(Arc::clone(&self.store));
+        manager.after_turn_sync(user_id, artifact).await;
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct AgentRunHarness {
-    driver: AgentRunDriver,
-    store: Option<Arc<dyn crate::db::Database>>,
+    inner: thinclaw_agent::run_harness::AgentRunHarness,
 }
 
 impl AgentRunHarness {
     pub fn new(store: Option<Arc<dyn crate::db::Database>>) -> Self {
         Self {
-            driver: AgentRunDriver::new(),
-            store,
+            inner: build_inner(thinclaw_agent::run_harness::AgentRunHarness::new(), store),
         }
     }
 
@@ -24,21 +44,16 @@ impl AgentRunHarness {
         driver: AgentRunDriver,
         store: Option<Arc<dyn crate::db::Database>>,
     ) -> Self {
-        Self { driver, store }
+        Self {
+            inner: build_inner(
+                thinclaw_agent::run_harness::AgentRunHarness::with_driver(driver),
+                store,
+            ),
+        }
     }
 
     pub async fn append_artifact(&self, artifact: &AgentRunArtifact) -> anyhow::Result<()> {
-        self.driver
-            .append_artifact(artifact)
-            .await
-            .context("failed to append canonical run artifact")?;
-
-        if let (Some(store), Some(user_id)) = (self.store.as_ref(), artifact.user_id.as_deref()) {
-            let manager = crate::agent::learning::MemoryProviderManager::new(Arc::clone(store));
-            manager.after_turn_sync(user_id, artifact).await;
-        }
-
-        Ok(())
+        self.inner.append_artifact(artifact).await
     }
 
     pub async fn record_chat_turn(
@@ -50,24 +65,21 @@ impl AgentRunHarness {
         incoming: &crate::channels::IncomingMessage,
         turn: &crate::agent::session::Turn,
     ) -> anyhow::Result<AgentRunArtifact> {
-        let artifact = self
-            .driver
-            .record_chat_turn(
-                llm_provider,
-                llm_model,
-                self.store.clone(),
-                session,
-                thread_id,
-                incoming,
-                turn,
-            )
-            .await?;
-
-        if let (Some(store), Some(user_id)) = (self.store.as_ref(), artifact.user_id.as_deref()) {
-            let manager = crate::agent::learning::MemoryProviderManager::new(Arc::clone(store));
-            manager.after_turn_sync(user_id, &artifact).await;
-        }
-
-        Ok(artifact)
+        self.inner
+            .record_chat_turn(llm_provider, llm_model, session, thread_id, incoming, turn)
+            .await
     }
+}
+
+fn build_inner(
+    inner: thinclaw_agent::run_harness::AgentRunHarness,
+    store: Option<Arc<dyn crate::db::Database>>,
+) -> thinclaw_agent::run_harness::AgentRunHarness {
+    let runtime_lookup = store
+        .as_ref()
+        .map(|store| RootRunThreadRuntimeLookup::shared(Arc::clone(store)));
+    let memory_sync = store.map(RootRunMemorySyncObserver::shared);
+    inner
+        .with_runtime_lookup(runtime_lookup)
+        .with_memory_sync(memory_sync)
 }

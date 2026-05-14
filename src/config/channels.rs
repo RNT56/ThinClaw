@@ -15,6 +15,12 @@ pub struct ChannelsConfig {
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
+    pub matrix_enabled: bool,
+    pub voice_call_enabled: bool,
+    pub voice_call_available: bool,
+    pub apns_enabled: bool,
+    pub browser_push_enabled: bool,
+    pub browser_push_available: bool,
     #[cfg(feature = "nostr")]
     pub nostr: Option<NostrConfig>,
     #[cfg(not(feature = "nostr"))]
@@ -247,6 +253,14 @@ impl ChannelsConfig {
             .map(|s| s.to_lowercase() != "false" && s != "0")
             .or(settings.channels.cli_enabled)
             .unwrap_or(true);
+        let matrix_enabled = parse_bool_env("MATRIX_ENABLED", settings.channels.matrix_enabled)?;
+        let voice_call_enabled =
+            parse_bool_env("VOICE_CALL_ENABLED", settings.channels.voice_call_enabled)?;
+        let apns_enabled = parse_bool_env("APNS_ENABLED", settings.channels.apns_enabled)?;
+        let browser_push_enabled = parse_bool_env(
+            "BROWSER_PUSH_ENABLED",
+            settings.channels.browser_push_enabled,
+        )?;
 
         Ok(Self {
             cli: CliConfig {
@@ -256,6 +270,12 @@ impl ChannelsConfig {
             http,
             gateway,
             signal,
+            matrix_enabled,
+            voice_call_enabled,
+            voice_call_available: cfg!(feature = "voice"),
+            apns_enabled,
+            browser_push_enabled,
+            browser_push_available: cfg!(feature = "browser"),
             #[cfg(feature = "nostr")]
             nostr: Self::resolve_nostr(settings)?,
             #[cfg(not(feature = "nostr"))]

@@ -27,8 +27,10 @@ For identity and surface behavior, use
 - Code-backed default gateway port: `3000`
 - Local default gateway URL: `http://127.0.0.1:3000`
 - Remote access is opt-in through host/bind settings, not the default
-- Source builds default to the `light` feature set
-- If you need the full production/runtime surface from source, build with `--features full`
+- Prebuilt release binaries are the default install path
+- Source builds are for local patches and developer workflows
+- If you need the full production/runtime surface from source, build with `--features full --bin thinclaw`
+- Small machines should prefer the installer with `--profile edge`
 - Desktop autonomy is a separate privileged operator mode
 - `deploy/setup.sh` rolls back ThinClaw-managed files, services, Docker Compose
   startup, UFW config, Tailscale session changes, and packages it newly
@@ -40,12 +42,14 @@ tunnel support, Docker sandbox, browser automation, and Nostr. For source build
 choices, use [BUILD_PROFILES.md](BUILD_PROFILES.md).
 
 Raspberry Pi OS Lite 64-bit uses the same headless runtime surface with Pi
-specific defaults. Prefer the published `aarch64-unknown-linux-gnu` release
-artifact for native installs, or the multi-arch Docker image for Compose:
+specific defaults. Prefer the published edge `aarch64-unknown-linux-gnu`
+release artifact for native installs, or the multi-arch Docker image for
+Compose:
 
 ```bash
 thinclaw doctor --profile pi-os-lite-64
-cargo build --release --features full
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh -s -- --profile edge
 docker compose pull thinclaw
 ```
 

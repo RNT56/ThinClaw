@@ -1,0 +1,42 @@
+[package]
+name = "thinclaw-agent"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+blake3 = "1"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+cron = "0.13"
+dirs = "6"
+rand = "0.8"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
+rust_decimal_macros = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thinclaw-channels-core = { version = "0.1.0", path = "../thinclaw-channels-core" }
+thinclaw-history = { version = "0.1.0", path = "../thinclaw-history" }
+thinclaw-identity = { version = "0.1.0", path = "../thinclaw-identity" }
+thinclaw-llm = { version = "0.1.0", path = "../thinclaw-llm" }
+thinclaw-llm-core = { version = "0.1.0", path = "../thinclaw-llm-core" }
+thinclaw-platform = { version = "0.1.0", path = "../thinclaw-platform" }
+thinclaw-safety = { version = "0.1.0", path = "../thinclaw-safety" }
+thinclaw-soul = { version = "0.1.0", path = "../thinclaw-soul" }
+thinclaw-tools-core = { version = "0.1.0", path = "../thinclaw-tools-core" }
+thinclaw-types = { version = "0.1.0", path = "../thinclaw-types" }
+thinclaw-workspace = { version = "0.1.0", path = "../thinclaw-workspace" }
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

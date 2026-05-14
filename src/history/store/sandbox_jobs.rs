@@ -1,35 +1,7 @@
 use super::*;
+pub use thinclaw_types::sandbox::{SandboxJobRecord, SandboxJobSummary};
 
 // ==================== Sandbox Jobs ====================
-
-/// Record for a sandbox container job, persisted in the `agent_jobs` table
-/// with `source = 'sandbox'`.
-#[derive(Debug, Clone)]
-pub struct SandboxJobRecord {
-    pub id: Uuid,
-    pub spec: SandboxJobSpec,
-    pub status: String,
-    pub success: Option<bool>,
-    pub failure_reason: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
-    /// Serialized JSON of `Vec<CredentialGrant>` for restart support.
-    pub credential_grants_json: String,
-}
-
-/// Summary of sandbox job counts grouped by status.
-#[derive(Debug, Clone, Default)]
-pub struct SandboxJobSummary {
-    pub total: usize,
-    pub creating: usize,
-    pub running: usize,
-    pub completed: usize,
-    pub failed: usize,
-    pub cancelled: usize,
-    pub interrupted: usize,
-    pub stuck: usize,
-}
 
 #[cfg(feature = "postgres")]
 impl Store {

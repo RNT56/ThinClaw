@@ -208,20 +208,53 @@ Read the deep docs before relying on a surface for sensitive workflows:
 - [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md)
 - [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md)
 
-## Build From Source
+## Install And Source Builds
 
-ThinClaw uses Cargo feature flags to control binary size and capabilities. The default build (`light`) is lean; opt into more with `--features`.
+GitHub Releases are the normal user path. The installer downloads a prebuilt
+binary, verifies its SHA256 checksum, and installs `thinclaw` into
+`~/.local/bin` by default:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh
+```
+
+For Pi, VPS, SD-card, and other small-machine installs, use the edge artifact:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh -s -- --profile edge
+```
+
+Build from source only when you need local code changes. Use `--release` for
+source builds you intend to run or install; plain `cargo build` is a
+development/debug build and keeps large debug and incremental compiler artifacts
+under `target/debug`.
 
 | Profile | Command | What It Adds |
 |---|---|---|
-| **light** (default) | `cargo build` | PostgreSQL, libSQL, local gateway, HTML-to-Markdown, doc extraction, timezones |
-| **full** | `cargo build --release --features full` | ACP, REPL/TUI, tunnel, Docker sandbox, browser, Nostr |
-| **desktop** | `cargo build --features desktop` | libSQL, HTML-to-Markdown, doc extraction, REPL, timezones |
-| **minimal** | `cargo build --no-default-features --features libsql` | Single DB backend, nothing else |
+| **edge** | `cargo build --release --no-default-features --features edge --bin thinclaw` | libSQL-only small-machine runtime |
+| **light** (default) | `cargo build --release --bin thinclaw` | PostgreSQL, libSQL, local gateway, HTML-to-Markdown, doc extraction, timezones |
+| **full** | `cargo build --release --features full --bin thinclaw` | ACP, REPL/TUI, tunnel, Docker sandbox, browser, Nostr |
+| **desktop** | `cargo build --release --features desktop --bin thinclaw` | libSQL, HTML-to-Markdown, doc extraction, REPL, timezones |
+
+A cold `full` source build should have roughly 15-20 GiB free so Cargo has room
+for release dependencies, linker scratch space, and the final binary. The
+installed binary is much smaller than the build tree; after copying or installing
+`target/release/thinclaw`, reclaim build artifacts with `cargo clean --release`.
 
 Additional opt-in flags not included in `full`: `voice`, `bedrock`, `bundled-wasm`.
 
-GitHub Releases are the normal user path. The release workflow publishes the regular `thinclaw` binary with the `full` feature set for supported Linux, macOS, and Windows targets.
+For a low-disk source install, keep Cargo artifacts in a temporary target dir:
+
+```bash
+tmp="$(mktemp -d)"
+cargo install --path . --locked --features full --bin thinclaw --target-dir "$tmp"
+rm -rf "$tmp"
+```
+
+Release artifacts publish the regular `full` binary for supported Linux, macOS,
+and Windows targets, plus Linux `edge` artifacts for small machines.
 
 Full details, custom combinations, and CI matrix: [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md)
 
@@ -230,6 +263,7 @@ Full details, custom combinations, and CI matrix: [docs/BUILD_PROFILES.md](docs/
 | Path | Purpose |
 |---|---|
 | [src/](src/) | Core runtime, CLI, gateway, channels, tools, memory, policy, and platform integration |
+| [crates/](crates/) | Workspace crates that own extracted subsystem traits, DTOs, and runtime helpers |
 | [docs/](docs/) | Canonical user, operator, architecture, security, and deployment docs |
 | [deploy/](deploy/) | Linux, Docker, Raspberry Pi, and service helper assets |
 | [channels-src/](channels-src/) | Source crates for packaged channel integrations |
@@ -252,6 +286,7 @@ Full details, custom combinations, and CI matrix: [docs/BUILD_PROFILES.md](docs/
 | Deep network model | [src/NETWORK_SECURITY.md](src/NETWORK_SECURITY.md) |
 | Extensions, WASM, MCP, and registries | [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md) |
 | Channel architecture | [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md) |
+| Crate ownership and thin-shell boundaries | [docs/CRATE_OWNERSHIP.md](docs/CRATE_OWNERSHIP.md) |
 | Shared surface commands | [docs/SURFACES_AND_COMMANDS.md](docs/SURFACES_AND_COMMANDS.md) |
 | Terminal and WebUI skins | [docs/TERMINAL_SKINS.md](docs/TERMINAL_SKINS.md) |
 | Identity and personality | [docs/IDENTITY_AND_PERSONALITY.md](docs/IDENTITY_AND_PERSONALITY.md) |

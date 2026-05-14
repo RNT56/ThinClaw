@@ -96,6 +96,15 @@ operator still wants to confirm the rest of the AI stack.
 
 Runs only the channel configuration path. This is the supported way to revisit channel setup without re-running the rest of onboarding.
 
+Channel setup can also enable native lifecycle channels for Matrix, voice-call,
+APNs, and browser push. These write the matching settings/env shape
+(`MATRIX_ENABLED`, `VOICE_CALL_ENABLED`, `APNS_ENABLED`, `BROWSER_PUSH_ENABLED`)
+and show up in channel status. Runtime registration also requires provider
+credentials such as `MATRIX_HOMESERVER`/`MATRIX_ACCESS_TOKEN`, APNs signing
+keys plus `APNS_REGISTRATION_SECRET`, or VAPID keys plus
+`BROWSER_PUSH_WEBHOOK_SECRET`. Voice-call needs a build with `--features voice`;
+browser-push needs a build with `--features browser`.
+
 ### `--guide [<topic>]`
 
 Opens the guided Advanced Setup lane directly from CLI or TUI without showing

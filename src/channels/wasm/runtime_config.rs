@@ -142,6 +142,19 @@ fn telegram_webhook_host_status(
 }
 
 impl WasmChannelHostConfig {
+    pub fn as_core(&self) -> thinclaw_channels::wasm::WasmChannelHostConfig {
+        thinclaw_channels::wasm::WasmChannelHostConfig {
+            tunnel_url: self.tunnel_url.clone(),
+            telegram_tunnel_url: self.telegram_tunnel_url.clone(),
+            telegram_owner_id: self.telegram_owner_id,
+            telegram_stream_mode: self.telegram_stream_mode.clone(),
+            telegram_transport_mode: self.telegram_transport_mode.clone(),
+            telegram_host_webhook_capable: self.telegram_host_webhook_capable,
+            telegram_host_transport_reason: self.telegram_host_transport_reason.clone(),
+            discord_stream_mode: self.discord_stream_mode.clone(),
+        }
+    }
+
     pub fn from_config(config: &crate::config::Config) -> Self {
         let telegram_transport_mode = config.channels.telegram_transport_mode.clone();
         let host_status = telegram_webhook_host_status(

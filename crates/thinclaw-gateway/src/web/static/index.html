@@ -1,0 +1,1278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ThinClaw</title>
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+  <script
+    src="https://cdn.jsdelivr.net/npm/marked@17.0.2/lib/marked.umd.min.js"
+    integrity="sha384-pN9zSKOnTZwXRtYZAu0PBPEgR2B7DOC1aeLxQ33oJ0oy5iN1we6gm57xldM2irDG"
+    crossorigin="anonymous"
+    defer
+  ></script>
+</head>
+<body>
+  <!-- Auth Screen -->
+  <div id="auth-screen">
+    <div class="auth-card-login">
+      <div class="auth-brand">
+        <h1>ThinClaw</h1>
+        <p class="auth-tagline">Secure personal agent</p>
+      </div>
+      <div class="auth-form">
+        <label for="token-input">Gateway Token</label>
+        <input type="password" id="token-input" placeholder="Paste your auth token" autofocus>
+        <button onclick="authenticate()">Connect</button>
+      </div>
+      <div id="auth-error"></div>
+      <p class="auth-hint">Enter the GATEWAY_AUTH_TOKEN from your .env configuration.</p>
+    </div>
+  </div>
+
+  <!-- Main App (hidden until authenticated) -->
+  <div id="app">
+      <!-- Tab Bar -->
+      <div class="tab-bar">
+        <div class="shell-header-main">
+          <div class="web-brand-chip" id="web-brand-chip">
+            <span class="web-brand-chip-title">Agent</span>
+            <span class="web-brand-chip-meta" id="web-brand-chip-meta">cockpit · ›</span>
+          </div>
+          <nav class="shell-primary-nav" id="shell-primary-nav" aria-label="Primary navigation"></nav>
+        </div>
+        <div class="shell-header-meta">
+          <button class="shell-mobile-nav-btn" id="shell-mobile-nav-btn" type="button" aria-expanded="false" aria-controls="shell-mobile-sheet" onclick="toggleShellMobileNav()">
+            <span class="shell-mobile-nav-kicker">Section</span>
+            <span class="shell-mobile-nav-label" id="shell-mobile-nav-label">Chat</span>
+          </button>
+          <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            <span id="tee-shield-label">TEE Verified</span>
+            <div class="tee-popover" id="tee-popover"></div>
+          </div>
+          <div class="status" id="gateway-status-trigger">
+            <div class="dot" id="sse-dot"></div>
+            <span id="sse-status">Connected</span>
+            <div class="gateway-popover" id="gateway-popover"></div>
+          </div>
+        </div>
+        <div class="shell-context-bar" id="shell-context-bar" hidden>
+          <div class="shell-context-copy">
+            <span class="shell-context-kicker">Section</span>
+            <span class="shell-context-label" id="shell-context-label">Workspace</span>
+          </div>
+          <nav class="shell-context-nav" id="shell-context-nav" aria-label="Section navigation"></nav>
+        </div>
+      </div>
+      <div class="shell-mobile-sheet" id="shell-mobile-sheet" hidden>
+        <button class="shell-mobile-sheet-backdrop" type="button" aria-label="Close navigation menu" onclick="closeShellMobileNav()"></button>
+        <div class="shell-mobile-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="shell-mobile-sheet-title">
+          <div class="shell-mobile-sheet-header">
+            <div>
+              <div class="shell-mobile-sheet-kicker">Navigate</div>
+              <h2 id="shell-mobile-sheet-title">ThinClaw areas</h2>
+            </div>
+            <button class="shell-mobile-sheet-close" type="button" aria-label="Close navigation menu" onclick="closeShellMobileNav()">&times;</button>
+          </div>
+          <div class="shell-mobile-primary-nav" id="shell-mobile-primary-nav"></div>
+        </div>
+      </div>
+
+    <!-- Chat Tab -->
+    <div class="tab-panel active" id="tab-chat">
+      <div class="thread-sidebar" id="thread-sidebar">
+        <div class="thread-sidebar-header">
+          <span>Threads</span>
+          <button class="thread-new-btn" onclick="createNewThread()" title="New thread (Ctrl/Cmd+N)">+</button>
+          <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" title="Toggle sidebar">&laquo;</button>
+        </div>
+        <div class="assistant-item" id="assistant-thread" onclick="switchToAssistant()">
+          <span class="assistant-label">Agent</span>
+          <span class="assistant-meta" id="assistant-meta"></span>
+        </div>
+        <div class="subsession-tree assistant-subsessions" id="assistant-subsessions"></div>
+        <div class="threads-section-header">
+          <span>Conversations</span>
+        </div>
+        <div class="thread-list" id="thread-list"></div>
+      </div>
+      <div class="chat-container">
+        <div class="chat-workspace">
+          <div class="chat-stage" id="chat-stage">
+            <div class="chat-messages" id="chat-messages"></div>
+            <div class="chat-status" id="chat-status"></div>
+            <button
+              class="chat-jump-latest"
+              id="chat-jump-latest"
+              type="button"
+              title="Jump to latest message"
+              aria-label="Jump to latest messages"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m6 9 6 6 6-6"/>
+              </svg>
+            </button>
+            <div class="chat-input">
+              <div class="chat-prompt-chip" id="chat-prompt-chip">›</div>
+              <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
+              <button id="send-btn" onclick="sendMessage()">Send</button>
+            </div>
+          </div>
+          <aside class="subsession-panel hidden" id="subsession-panel" aria-live="polite">
+            <div class="subsession-panel-empty">
+              <div class="subsession-panel-kicker">Temporal Subsession</div>
+              <h3>Agent transcript</h3>
+              <p>Select a running or completed subagent session to inspect what it worked on without interrupting the main thread.</p>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+
+    <!-- Memory Tab -->
+    <div class="tab-panel" id="tab-memory">
+      <div class="memory-container">
+        <div class="memory-sidebar">
+          <div class="search-box">
+            <input type="text" id="memory-search" placeholder="Search memory...">
+          </div>
+          <div class="memory-tree" id="memory-tree"></div>
+        </div>
+        <div class="memory-content">
+          <div class="memory-breadcrumb" id="memory-breadcrumb">
+            <span id="memory-breadcrumb-path">workspace /</span>
+            <button class="memory-edit-btn" id="memory-edit-btn" style="display:none" onclick="startMemoryEdit()">Edit</button>
+          </div>
+          <div class="memory-viewer" id="memory-viewer">
+            <div class="empty">Select a file to view its contents</div>
+          </div>
+          <div class="memory-editor" id="memory-editor" style="display:none">
+            <textarea id="memory-edit-textarea"></textarea>
+            <div class="memory-editor-actions">
+              <button class="btn-save" onclick="saveMemoryEdit()">Save</button>
+              <button class="btn-cancel-edit" onclick="cancelMemoryEdit()">Cancel</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Jobs Tab -->
+    <div class="tab-panel" id="tab-jobs">
+      <div class="jobs-container ui-dashboard-shell">
+        <div class="jobs-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Jobs</h2>
+            <p class="ui-panel-desc">Inspect sandbox runs, review activity, and jump into job workspaces.</p>
+          </div>
+        </div>
+        <div class="jobs-shell ui-panel-stack">
+          <div class="jobs-summary ui-panel-grid ui-panel-grid--cards" id="jobs-summary"></div>
+          <section class="ui-panel ui-panel-stack jobs-list-panel" id="jobs-list-panel">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Recent Jobs</h3>
+                <p class="ui-panel-desc">Track status, creation time, and quick recovery actions for each run.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap" id="jobs-table-shell">
+              <table class="jobs-table ui-panel-table" id="jobs-table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Title</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="jobs-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="jobs-empty" style="display:none">No jobs found</div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- Logs Tab -->
+    <div class="tab-panel" id="tab-logs">
+      <div class="logs-container">
+        <div class="logs-toolbar">
+          <select id="logs-server-level" onchange="setServerLogLevel(this.value)" title="Server-side log level (changes what the server emits)">
+            <option value="error">Server: ERROR</option>
+            <option value="warn">Server: WARN</option>
+            <option value="info" selected>Server: INFO</option>
+            <option value="debug">Server: DEBUG</option>
+          </select>
+          <select id="logs-level-filter">
+            <option value="all">All Levels</option>
+            <option value="ERROR">Error</option>
+            <option value="WARN">Warn</option>
+            <option value="INFO">Info</option>
+            <option value="DEBUG">Debug</option>
+          </select>
+          <input type="text" id="logs-target-filter" placeholder="Filter by target...">
+          <label class="logs-checkbox"><input type="checkbox" id="logs-autoscroll" checked> Auto-scroll</label>
+          <button id="logs-pause-btn" onclick="toggleLogsPause()">Pause</button>
+          <button onclick="clearLogs()">Clear</button>
+        </div>
+        <div class="logs-output" id="logs-output"></div>
+      </div>
+    </div>
+
+    <!-- Routines Tab -->
+    <div class="tab-panel" id="tab-routines">
+      <div class="routines-container ui-dashboard-shell">
+        <div class="routines-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Routines</h2>
+            <p class="ui-panel-desc">Monitor scheduled automations, inspect recent runs, and trigger routines on demand.</p>
+          </div>
+        </div>
+        <div class="routines-shell ui-panel-stack">
+          <div class="routines-summary ui-panel-grid ui-panel-grid--cards" id="routines-summary"></div>
+          <section class="ui-panel ui-panel-stack routines-list-panel" id="routines-list-panel">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Configured Routines</h3>
+                <p class="ui-panel-desc">Review schedule health, next runs, and direct actions for each routine.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap" id="routines-table-shell">
+              <table class="routines-table ui-panel-table" id="routines-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Trigger</th>
+                    <th>Action</th>
+                    <th>Last Run</th>
+                    <th>Next Run</th>
+                    <th>Runs</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="routines-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="routines-empty" style="display:none">
+              No routines configured. Ask the agent to create one.
+            </div>
+          </section>
+          <div class="routine-detail" id="routine-detail" style="display:none"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" id="tab-autonomy" data-enabled="false">
+      <div class="autonomy-container ui-dashboard-shell">
+        <div class="autonomy-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Autonomy</h2>
+            <p class="ui-panel-desc">Operate reckless desktop autonomy with explicit readiness, rollout, and evidence controls.</p>
+          </div>
+        </div>
+        <div class="autonomy-shell ui-panel-stack">
+          <div class="autonomy-summary ui-panel-grid ui-panel-grid--cards" id="autonomy-summary"></div>
+          <section class="ui-panel ui-panel-stack autonomy-actions-panel">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Operator Controls</h3>
+                <p class="ui-panel-desc">Bootstrap, pause, resume, verify permissions, and roll back without leaving WebUI.</p>
+              </div>
+            </div>
+            <div class="autonomy-action-bar" id="autonomy-action-bar"></div>
+          </section>
+          <div class="ui-panel-grid ui-panel-grid--split autonomy-grid">
+            <section class="ui-panel ui-panel-stack" id="autonomy-readiness-panel"></section>
+            <section class="ui-panel ui-panel-stack" id="autonomy-rollouts-panel"></section>
+          </div>
+          <div class="ui-panel-grid ui-panel-grid--split autonomy-grid">
+            <section class="ui-panel ui-panel-stack" id="autonomy-checks-panel"></section>
+            <section class="ui-panel ui-panel-stack" id="autonomy-evidence-panel"></section>
+          </div>
+          <section class="ui-panel ui-panel-stack" id="autonomy-seeded-panel"></section>
+        </div>
+      </div>
+    </div>
+
+    <!-- Research Tab -->
+    <div class="tab-panel" id="tab-research">
+      <div class="research-container ui-dashboard-shell">
+        <div class="research-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Research</h2>
+            <p class="ui-panel-desc">Optional experiment campaigns for benchmarked model and code iteration, with local runners or outbound lease-based cloud execution.</p>
+          </div>
+        </div>
+        <div class="research-shell ui-panel-stack">
+          <div class="ui-panel ui-panel--note research-note" id="research-disabled-note" style="display:none">
+            Enable <code>experiments.enabled</code> in Settings → Advanced → Experiments to use this workspace.
+          </div>
+          <div class="research-subnav" role="tablist" aria-label="Research sections">
+            <button type="button" data-research-subtab="overview" class="active" aria-selected="true" onclick="switchResearchSubtab('overview')">Overview</button>
+            <button type="button" data-research-subtab="opportunities" aria-selected="false" onclick="switchResearchSubtab('opportunities')">Opportunities</button>
+            <button type="button" data-research-subtab="projects" aria-selected="false" onclick="switchResearchSubtab('projects')">Projects</button>
+            <button type="button" data-research-subtab="runners" aria-selected="false" onclick="switchResearchSubtab('runners')">Runners</button>
+            <button type="button" data-research-subtab="campaigns" aria-selected="false" onclick="switchResearchSubtab('campaigns')">Campaigns</button>
+            <button type="button" data-research-subtab="gpu-clouds" aria-selected="false" onclick="switchResearchSubtab('gpu-clouds')">GPU Clouds</button>
+          </div>
+
+          <div class="research-panes">
+            <div class="research-pane active" data-research-pane="overview">
+              <div class="research-summary ui-panel-grid ui-panel-grid--cards" id="research-overview-summary"></div>
+              <div class="research-overview-grid">
+                <section class="ui-panel ui-panel-stack">
+                  <div class="ui-panel-header ui-panel-header--divider">
+                    <div class="ui-panel-copy">
+                      <h3 class="ui-panel-title">What can be improved next</h3>
+                      <p class="ui-panel-desc">ThinClaw automatically surfaces the next likely improvement surfaces from provider routing, usage telemetry, and experiment history.</p>
+                    </div>
+                  </div>
+                  <div class="research-overview-insights" id="research-overview-insights"></div>
+                </section>
+                <section class="ui-panel ui-panel-stack">
+                  <div class="ui-panel-header ui-panel-header--divider">
+                    <div class="ui-panel-copy">
+                      <h3 class="ui-panel-title">Quick path</h3>
+                      <p class="ui-panel-desc">Hosted-model loops can run on CPU-only hardware. GPU Clouds are only needed for self-hosted or cluster-backed iteration.</p>
+                    </div>
+                  </div>
+                  <div id="research-overview-next"></div>
+                </section>
+              </div>
+            </div>
+
+            <div class="research-pane" data-research-pane="opportunities">
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Opportunities</h3>
+                    <p class="ui-panel-desc">These entries show which hosted or self-hosted surfaces ThinClaw can improve over time. Use them to prefill a project, then run a benchmark campaign.</p>
+                  </div>
+                  <div class="ui-panel-actions">
+                    <button class="btn-restart" onclick="switchTab('providers')">Open Providers</button>
+                  </div>
+                </div>
+                <div class="research-opportunity-banner ui-panel ui-panel--note">
+                  Hosted-model opportunities do not need a GPU. Self-hosted tuning and training opportunities usually do.
+                </div>
+                <div class="research-opportunities-grid" id="research-opportunities-shell">
+                  <div class="research-opportunities-list" id="research-opportunities-list"></div>
+                </div>
+                <div class="empty-state ui-panel-empty" id="research-opportunities-empty" style="display:none">No opportunities available yet.</div>
+              </section>
+            </div>
+
+            <div class="research-pane" data-research-pane="projects">
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Benchmark Project</h3>
+                    <p class="ui-panel-desc">This guided form creates the optional research project ThinClaw will control while leaving benchmark scoring and promotion explicit.</p>
+                  </div>
+                </div>
+                <div class="research-form-grid">
+                  <article class="ui-panel ui-panel--subtle ui-panel-stack research-form-card">
+                    <div class="ui-panel-copy">
+                      <h4 class="ui-panel-title ui-panel-title--section">Project Template</h4>
+                      <p class="ui-panel-desc">Use an opportunity to prefill the benchmark harness, then adjust the details before launch.</p>
+                    </div>
+                    <div class="research-form-grid research-form-grid--compact">
+                      <div>
+                        <label class="research-field-label" for="research-project-name">Name</label>
+                        <input type="text" id="research-project-name" class="research-input" placeholder="NanoGPT overnight search">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-default-runner">Default runner</label>
+                        <select id="research-project-default-runner" class="research-input">
+                          <option value="">Choose a validated runner</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-workspace">Workspace path</label>
+                        <input type="text" id="research-project-workspace" class="research-input" placeholder="/path/to/repo">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-workdir">Workdir</label>
+                        <input type="text" id="research-project-workdir" class="research-input" value=".">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-remote">Git remote</label>
+                        <input type="text" id="research-project-remote" class="research-input" value="origin">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-branch">Base branch</label>
+                        <input type="text" id="research-project-branch" class="research-input" value="main">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-prepare">Prepare command</label>
+                        <input type="text" id="research-project-prepare" class="research-input" placeholder="python prepare.py">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-run">Run command</label>
+                        <input type="text" id="research-project-run" class="research-input" placeholder="python train.py">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-mutable">Mutable paths</label>
+                        <textarea id="research-project-mutable" class="research-textarea" rows="4" placeholder="train.py"></textarea>
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-fixed">Fixed harness paths</label>
+                        <textarea id="research-project-fixed" class="research-textarea" rows="4" placeholder="prepare.py&#10;README.md"></textarea>
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-metric-name">Primary metric name</label>
+                        <input type="text" id="research-project-metric-name" class="research-input" value="bpb">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-metric-comparator">Comparator</label>
+                        <select id="research-project-metric-comparator" class="research-input">
+                          <option value="lower_is_better">lower_is_better</option>
+                          <option value="higher_is_better">higher_is_better</option>
+                          <option value="equal_is_better">equal_is_better</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-metric-regex">Primary metric regex</label>
+                        <input type="text" id="research-project-metric-regex" class="research-input" placeholder="val_bpb:\\s*([0-9.]+)">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-project-metric-json-path">Primary metric JSON path</label>
+                        <input type="text" id="research-project-metric-json-path" class="research-input" placeholder="metrics.val_bpb">
+                      </div>
+                    </div>
+                    <details class="research-advanced">
+                      <summary>Advanced project config</summary>
+                      <div class="research-form-grid research-form-grid--compact">
+                        <div>
+                          <label class="research-field-label" for="research-project-secondary">Secondary metrics (JSON array)</label>
+                          <textarea id="research-project-secondary" class="research-textarea" rows="5" placeholder='[{"name":"loss","regex":"loss:\\s*([0-9.]+)","comparator":"lower_is_better"}]'>[]</textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-project-comparison">Comparison policy (JSON)</label>
+                          <textarea id="research-project-comparison" class="research-textarea" rows="5" placeholder='{"require_success_exit":true,"allow_equal":false}'></textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-project-stop">Stop policy (JSON)</label>
+                          <textarea id="research-project-stop" class="research-textarea" rows="5" placeholder='{"max_trials":8,"infra_failure_pause_threshold":3,"non_improving_pause_threshold":8}'></textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-project-strategy">Strategy prompt</label>
+                          <textarea id="research-project-strategy" class="research-textarea" rows="5" placeholder="Operate only within mutable paths, preserve the fixed harness, and compare every candidate against the current best."></textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-project-autonomy">Autonomy mode</label>
+                          <select id="research-project-autonomy" class="research-input">
+                            <option value="autonomous">autonomous</option>
+                            <option value="manual_candidate">manual_candidate</option>
+                            <option value="suggest_only">suggest_only</option>
+                          </select>
+                        </div>
+                      </div>
+                    </details>
+                    <div class="research-actions">
+                      <button class="btn-restart" onclick="createResearchProject()">Create Project</button>
+                    </div>
+                  </article>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Projects</h3>
+                    <p class="ui-panel-desc">Each project defines the benchmark harness, mutable paths, and canonical scoring policy.</p>
+                  </div>
+                </div>
+                <div class="ui-panel-table-wrap" id="research-projects-shell">
+                  <table class="ui-panel-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Status</th>
+                        <th>Primary metric</th>
+                        <th>Autonomy</th>
+                        <th>Default runner</th>
+                        <th>Workspace</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody id="research-projects-tbody"></tbody>
+                  </table>
+                </div>
+                <div class="empty-state ui-panel-empty" id="research-projects-empty" style="display:none">No research projects yet.</div>
+              </section>
+            </div>
+
+            <div class="research-pane" data-research-pane="runners">
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Runner Profile</h3>
+                    <p class="ui-panel-desc">Backends stay optional. Use <code>local_docker</code> for local execution or any remote backend to issue a lease-scoped runner token.</p>
+                  </div>
+                </div>
+                <div class="research-form-grid">
+                  <article class="ui-panel ui-panel--subtle ui-panel-stack research-form-card">
+                    <div class="research-form-grid research-form-grid--compact">
+                      <div>
+                        <label class="research-field-label" for="research-runner-name">Name</label>
+                        <input type="text" id="research-runner-name" class="research-input" placeholder="RunPod H100 pool">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-runner-backend">Backend</label>
+                        <select id="research-runner-backend" class="research-input">
+                          <option value="local_docker">local_docker</option>
+                          <option value="agent_env">agent_env</option>
+                          <option value="generic_remote_runner">generic_remote_runner</option>
+                          <option value="ssh">ssh</option>
+                          <option value="slurm">slurm</option>
+                          <option value="kubernetes">kubernetes</option>
+                          <option value="runpod">runpod</option>
+                          <option value="vast">vast</option>
+                          <option value="lambda">lambda</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-runner-image">Image or runtime</label>
+                        <input type="text" id="research-runner-image" class="research-input" placeholder="ghcr.io/acme/research-runner:latest">
+                      </div>
+                      <div>
+                        <label class="research-field-label" for="research-runner-secrets">Secret references</label>
+                        <input type="text" id="research-runner-secrets" class="research-input" placeholder="RUNPOD_API_KEY, SSH_PRIVATE_KEY">
+                      </div>
+                    </div>
+                    <details class="research-advanced">
+                      <summary>Advanced runner config</summary>
+                      <div class="research-actions">
+                        <button class="btn-restart" type="button" onclick="applyResearchAgentEnvTemplate('terminal_bench')">Terminal Bench</button>
+                        <button class="btn-restart" type="button" onclick="applyResearchAgentEnvTemplate('skill_bench')">Skill Bench</button>
+                      </div>
+                      <div class="research-form-grid research-form-grid--compact">
+                        <div>
+                          <label class="research-field-label" for="research-runner-backend-config">Backend config (JSON)</label>
+                          <textarea id="research-runner-backend-config" class="research-textarea" rows="5" placeholder='{"host":"gpu.example.com","user":"research"}'>{}</textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-runner-gpu">GPU requirements (JSON)</label>
+                          <textarea id="research-runner-gpu" class="research-textarea" rows="5" placeholder='{"gpu_count":1,"gpu_type":"H100"}'>{}</textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-runner-env">Env grants (JSON)</label>
+                          <textarea id="research-runner-env" class="research-textarea" rows="5" placeholder='{"HF_HOME":"/cache/hf"}'>{}</textarea>
+                        </div>
+                        <div>
+                          <label class="research-field-label" for="research-runner-cache">Cache policy (JSON)</label>
+                          <textarea id="research-runner-cache" class="research-textarea" rows="5" placeholder='{"persist_workspace":false}'>{}</textarea>
+                        </div>
+                      </div>
+                    </details>
+                    <div class="research-actions">
+                      <button class="btn-restart" onclick="createResearchRunner()">Create Runner</button>
+                    </div>
+                  </article>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Runner Profiles</h3>
+                    <p class="ui-panel-desc">Validate backend reachability before attaching a runner to a project or campaign.</p>
+                  </div>
+                </div>
+                <div class="ui-panel-table-wrap" id="research-runners-shell">
+                  <table class="ui-panel-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Backend</th>
+                        <th>Launch mode</th>
+                        <th>Status</th>
+                        <th>Image/runtime</th>
+                        <th>GPU</th>
+                        <th>Provider state</th>
+                        <th>Benchmark</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody id="research-runners-tbody"></tbody>
+                  </table>
+                </div>
+                <div class="empty-state ui-panel-empty" id="research-runners-empty" style="display:none">No runner profiles yet.</div>
+              </section>
+            </div>
+
+            <div class="research-pane" data-research-pane="campaigns">
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Start Campaign</h3>
+                    <p class="ui-panel-desc">Baseline runs first. Local campaigns execute immediately; remote campaigns issue a lease token and stay outbound-only.</p>
+                  </div>
+                </div>
+                <div class="research-start-form">
+                  <select id="research-start-project" class="research-input">
+                    <option value="">Choose a project</option>
+                  </select>
+                  <select id="research-start-runner" class="research-input">
+                    <option value="">Use project default runner</option>
+                  </select>
+                  <input type="number" id="research-start-max-trials" class="research-input" min="1" placeholder="Max trials override">
+                  <button class="btn-restart" onclick="startResearchCampaign()">Start Campaign</button>
+                </div>
+                <div class="research-lease-shell" id="research-lease-shell" style="display:none">
+                  <div class="ui-panel-copy">
+                    <h4 class="ui-panel-title ui-panel-title--section">Remote Lease</h4>
+                    <p class="ui-panel-desc" id="research-lease-description">Use this one-time command from the remote runner host or cluster job.</p>
+                  </div>
+                  <pre class="research-lease-output" id="research-lease-output"></pre>
+                  <div class="research-lease-actions">
+                    <button class="btn-restart" type="button" onclick="reissueResearchLease()">Reissue Lease</button>
+                    <button class="btn-cancel" type="button" onclick="copyResearchLeaseCommand()">Copy Command</button>
+                  </div>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Campaigns</h3>
+                    <p class="ui-panel-desc">Campaigns keep the best commit and pause cleanly between candidate trials so the operator stays in control.</p>
+                  </div>
+                </div>
+                <div class="ui-panel-table-wrap" id="research-campaigns-shell">
+                  <table class="ui-panel-table">
+                    <thead>
+                      <tr>
+                        <th>Project</th>
+                        <th>Runner</th>
+                        <th>Status</th>
+                        <th>Queue</th>
+                        <th>Trials</th>
+                        <th>Best metric</th>
+                        <th>Budget</th>
+                        <th>Provider</th>
+                        <th>Updated</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody id="research-campaigns-tbody"></tbody>
+                  </table>
+                </div>
+                <div class="empty-state ui-panel-empty" id="research-campaigns-empty" style="display:none">No campaigns yet.</div>
+              </section>
+              <section class="ui-panel ui-panel-stack" id="research-detail-panel">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Campaign Detail</h3>
+                    <p class="ui-panel-desc">Inspect the current worktree, recent trials, and uploaded artifacts for the selected campaign.</p>
+                  </div>
+                </div>
+                <div class="research-detail" id="research-detail">Select a campaign to inspect its worktree and trials.</div>
+              </section>
+            </div>
+
+            <div class="research-pane" data-research-pane="gpu-clouds">
+              <section class="ui-panel ui-panel-stack">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">GPU Clouds</h3>
+                    <p class="ui-panel-desc">Quick-launch agent workspaces for external GPU providers. Connect credentials, generate a runner template, and launch a test job from the same place.</p>
+                  </div>
+                  <div class="ui-panel-actions">
+                    <button class="btn-restart" onclick="switchTab('providers')">Open Provider Vault</button>
+                  </div>
+                </div>
+                <div class="research-cloud-grid" id="research-gpu-clouds-shell">
+                  <div class="research-cloud-grid" id="research-gpu-clouds-grid"></div>
+                </div>
+                <div class="empty-state ui-panel-empty" id="research-gpu-clouds-empty" style="display:none">No cloud provider cards available.</div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Learning Tab -->
+    <div class="tab-panel" id="tab-learning">
+      <div class="learning-container ui-dashboard-shell">
+        <div class="learning-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Learning Ledger</h2>
+            <p class="ui-panel-desc">Review recent learning signals, inspect code proposals, and record feedback or rollbacks without leaving the gateway.</p>
+          </div>
+        </div>
+        <div class="learning-shell ui-panel-stack" id="learning-content">
+          <div class="learning-summary ui-panel-grid ui-panel-grid--cards" id="learning-summary"></div>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Provider Health</h3>
+                <p class="ui-panel-desc">See whether the external memory providers are enabled, healthy, and responsive.</p>
+              </div>
+            </div>
+            <div class="ui-panel-grid ui-panel-grid--cards" id="learning-provider-health"></div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Recent History</h3>
+                <p class="ui-panel-desc">Look through recent learning events and evaluations that fed the improvement loop.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap learning-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Source</th>
+                    <th>Class</th>
+                    <th>Risk</th>
+                    <th>Summary</th>
+                    <th>Target</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-history-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-history-empty" style="display:none">No learning events recorded yet.</div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Candidates</h3>
+                <p class="ui-panel-desc">Inspect distilled improvements and their risk tier before they move into broader changes.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap learning-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Type</th>
+                    <th>Risk</th>
+                    <th>Target</th>
+                    <th>Summary</th>
+                    <th>Confidence</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-candidates-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-candidates-empty" style="display:none">No candidates available.</div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Outcomes</h3>
+                <p class="ui-panel-desc">Review deferred reality checks for turns, routines, and durable changes, then confirm or dismiss the verdicts.</p>
+              </div>
+              <div class="ui-panel-actions">
+                <button class="btn-restart" onclick="evaluateLearningOutcomesNow()">Evaluate Now</button>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap learning-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Source</th>
+                    <th>Summary</th>
+                    <th>Verdict</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-outcomes-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-outcomes-empty" style="display:none">No outcome contracts recorded yet.</div>
+            <div class="ui-panel ui-panel--subtle" id="learning-outcome-detail">
+              <div class="empty-state ui-panel-empty">Select an outcome contract to inspect its observations.</div>
+            </div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Code Proposals</h3>
+                <p class="ui-panel-desc">Approve, reject, or inspect approval-gated code changes generated by the learning loop.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap learning-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Status</th>
+                    <th>Title</th>
+                    <th>Files</th>
+                    <th>Confidence</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-proposals-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-proposals-empty" style="display:none">No code proposals available.</div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Feedback</h3>
+                <p class="ui-panel-desc">Record operator feedback against a proposal, event, or artifact to keep the learning loop grounded.</p>
+              </div>
+            </div>
+            <div class="learning-feedback-form">
+              <label class="admin-field">
+                <span class="admin-field-label">Target type</span>
+                <input type="text" id="learning-feedback-target-type" placeholder="code_proposal">
+              </label>
+              <label class="admin-field">
+                <span class="admin-field-label">Target ID</span>
+                <input type="text" id="learning-feedback-target-id" placeholder="proposal-1234">
+              </label>
+              <label class="admin-field">
+                <span class="admin-field-label">Verdict</span>
+                <select id="learning-feedback-verdict">
+                  <option value="helpful">Helpful</option>
+                  <option value="harmful">Harmful</option>
+                  <option value="review">Needs review</option>
+                  <option value="dont_learn">Don't learn</option>
+                </select>
+              </label>
+              <label class="admin-field admin-field--wide">
+                <span class="admin-field-label">Note</span>
+                <input type="text" id="learning-feedback-note" placeholder="Optional operator note">
+              </label>
+              <button class="btn-restart" onclick="submitLearningFeedback()">Submit Feedback</button>
+            </div>
+            <div class="ui-panel-table-wrap learning-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Target</th>
+                    <th>Verdict</th>
+                    <th>Note</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-feedback-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-feedback-empty" style="display:none">No feedback entries yet.</div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Artifact Versions</h3>
+                <p class="ui-panel-desc">Inspect versioned learning artifacts and capture rollback records when a mutation needs to be undone.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap learning-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Artifact</th>
+                    <th>Status</th>
+                    <th>Summary</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-artifacts-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-artifacts-empty" style="display:none">No artifact versions recorded.</div>
+          </section>
+
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Rollbacks</h3>
+                <p class="ui-panel-desc">Review rollback records that were captured for previously learned artifacts.</p>
+              </div>
+            </div>
+            <div class="ui-panel-table-wrap learning-table-wrap">
+              <table class="ui-panel-table learning-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Artifact</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody id="learning-rollbacks-tbody"></tbody>
+              </table>
+            </div>
+            <div class="empty-state ui-panel-empty" id="learning-rollbacks-empty" style="display:none">No rollbacks recorded.</div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- Extensions Tab -->
+    <div class="tab-panel" id="tab-extensions">
+      <div class="extensions-container ui-dashboard-shell">
+        <div class="extensions-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Extensions</h2>
+            <p class="ui-panel-desc">Manage installed extensions, browse registry options, connect MCP servers, and inspect the tool surface they expose.</p>
+          </div>
+        </div>
+        <div class="extensions-shell ui-panel-stack">
+          <div class="extensions-overview ui-panel-grid ui-panel-grid--cards" id="extensions-overview-cards"></div>
+          <div class="extensions-subnav" role="tablist" aria-label="Extension sections">
+            <button type="button" data-extensions-subtab="overview" class="active" aria-selected="true" onclick="switchExtensionsSubtab('overview')">Overview</button>
+            <button type="button" data-extensions-subtab="mcp" aria-selected="false" onclick="switchExtensionsSubtab('mcp')">MCP</button>
+            <button type="button" data-extensions-subtab="tools" aria-selected="false" onclick="switchExtensionsSubtab('tools')">Tool Registry</button>
+          </div>
+          <div class="extensions-panes">
+            <div class="extensions-pane active" data-extensions-pane="overview">
+              <section class="ui-panel ui-panel-stack" data-collapsible-panel="extensions-installed">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Installed Extensions</h3>
+                    <p class="ui-panel-desc">Review active integrations, authentication state, and setup progress for locally available extensions.</p>
+                  </div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="extensions-list">
+                  <div class="empty-state">Loading extensions...</div>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack" id="available-wasm-section" data-collapsible-panel="extensions-discover">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Available WASM Extensions</h3>
+                    <p class="ui-panel-desc">Browse installable channels and tools from the bundled registry, then configure them after install when needed.</p>
+                  </div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="available-wasm-list">
+                  <div class="empty-state">Loading...</div>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack extensions-install-panel" data-collapsible-panel="extensions-manual-install">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Install WASM Extension</h3>
+                    <p class="ui-panel-desc">Install from a bundle URL when you want to add a registry entry manually or test a custom build.</p>
+                  </div>
+                </div>
+                <div class="ext-install-form">
+                  <label class="admin-field">
+                    <span class="admin-field-label">Extension name</span>
+                    <input type="text" id="wasm-install-name" placeholder="thin-search">
+                  </label>
+                  <label class="admin-field admin-field--wide">
+                    <span class="admin-field-label">Bundle URL</span>
+                    <input type="text" id="wasm-install-url" placeholder="https://example.com/extension.tar.gz">
+                  </label>
+                  <button onclick="installWasmExtension()">Install</button>
+                </div>
+              </section>
+            </div>
+            <div class="extensions-pane" data-extensions-pane="mcp">
+              <section class="ui-panel ui-panel-stack" data-collapsible-panel="extensions-mcp-servers">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">MCP Servers</h3>
+                    <p class="ui-panel-desc">Track installed MCP connectors and add custom remote servers for tools that live outside the local gateway.</p>
+                  </div>
+                  <div class="ui-panel-actions">
+                    <button class="btn-ext" type="button" onclick="openMcpConnectionModal()">
+                      <span aria-hidden="true">+</span> Connect MCP
+                    </button>
+                  </div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="mcp-servers-list">
+                  <div class="empty-state">Loading...</div>
+                </div>
+              </section>
+              <section class="ui-panel ui-panel-stack extensions-mcp-browser" data-collapsible-panel="extensions-mcp-browser">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">MCP Browser</h3>
+                    <p class="ui-panel-desc">Inspect server metadata, browse resources and prompts, and answer pending MCP sampling or form requests.</p>
+                  </div>
+                </div>
+                <div class="ext-install-form">
+                  <label class="admin-field admin-field--wide">
+                    <span class="admin-field-label">Active server</span>
+                    <select id="mcp-browser-server" onchange="onMcpBrowserServerChange()">
+                      <option value="">Select an MCP server</option>
+                    </select>
+                  </label>
+                  <button onclick="refreshMcpBrowser()">Refresh</button>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="mcp-interactions-list">
+                  <div class="empty-state">No pending MCP requests</div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="mcp-browser-summary"></div>
+                <div class="extensions-list ui-resource-grid" id="mcp-resources-list">
+                  <div class="empty-state">Select a server to browse resources</div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="mcp-resource-templates-list">
+                  <div class="empty-state">Select a server to browse resource templates</div>
+                </div>
+                <div class="extensions-list ui-resource-grid" id="mcp-prompts-list">
+                  <div class="empty-state">Select a server to browse prompts</div>
+                </div>
+                <div class="ui-panel ui-panel--subtle ui-panel--compact" id="mcp-detail-panel">
+                  <div class="empty-state">Select an MCP resource or prompt to inspect its contents.</div>
+                </div>
+              </section>
+            </div>
+            <div class="extensions-pane" data-extensions-pane="tools">
+              <section class="ui-panel ui-panel-stack extensions-tools-panel" data-collapsible-panel="extensions-tools">
+                <div class="ui-panel-header ui-panel-header--divider">
+                  <div class="ui-panel-copy">
+                    <h3 class="ui-panel-title">Registered Tools</h3>
+                    <p class="ui-panel-desc">Inspect ThinClaw core tools and remote MCP namespaces without re-listing the installed WASM tool cards from the overview pane.</p>
+                  </div>
+                </div>
+                <div class="extensions-tools-groups ui-panel-stack" id="extensions-tools-groups"></div>
+                <div class="empty-state ui-panel-empty" id="tools-empty" style="display:none">No core or MCP tools registered</div>
+              </section>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skills Tab -->
+    <div class="tab-panel" id="tab-skills">
+      <div class="skills-container ui-dashboard-shell">
+        <div class="skills-header ui-page-header ui-panel-header">
+          <div class="ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page">Skills</h2>
+            <p class="ui-panel-desc">Search ClawHub, review installed skills, and add new skills by URL.</p>
+          </div>
+        </div>
+        <div class="skills-shell ui-panel-stack">
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Search ClawHub</h3>
+                <p class="ui-panel-desc">Discover published skills and compare installed matches alongside catalog results.</p>
+              </div>
+            </div>
+            <div class="skill-search-box">
+              <input type="text" id="skill-search-input" placeholder="Search for skills...">
+              <button onclick="searchClawHub()">Search</button>
+            </div>
+            <div class="extensions-list ui-resource-grid" id="skill-search-results"></div>
+          </section>
+          <section class="ui-panel ui-panel-stack">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Installed Skills</h3>
+                <p class="ui-panel-desc">See which skills are already available locally and remove registry-installed entries.</p>
+              </div>
+              <div class="ui-panel-actions">
+                <button class="btn-ext" onclick="reloadAllSkills()" title="Re-read all skill files from disk">↻ Reload All</button>
+              </div>
+            </div>
+            <div class="extensions-list ui-resource-grid" id="skills-list">
+              <div class="empty-state">Loading skills...</div>
+            </div>
+          </section>
+          <section class="ui-panel ui-panel-stack skills-install-panel">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">Install Skill by URL</h3>
+                <p class="ui-panel-desc">Install from a skill slug or provide a direct `SKILL.md` URL when needed.</p>
+              </div>
+            </div>
+            <div class="ext-install-form">
+              <label class="admin-field">
+                <span class="admin-field-label">Skill slug</span>
+                <input type="text" id="skill-install-name" placeholder="Skill name or slug">
+              </label>
+              <label class="admin-field admin-field--wide">
+                <span class="admin-field-label">Skill URL</span>
+                <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)">
+              </label>
+              <button onclick="installSkillFromForm()">Install</button>
+            </div>
+          </section>
+          <section class="ui-panel ui-panel-stack skills-taps-panel">
+            <div class="ui-panel-header ui-panel-header--divider">
+              <div class="ui-panel-copy">
+                <h3 class="ui-panel-title">GitHub Skill Taps</h3>
+                <p class="ui-panel-desc">Manage repositories used for federated skill discovery and publish draft PRs.</p>
+              </div>
+              <div class="ui-panel-actions">
+                <button class="btn-ext" onclick="refreshSkillTaps()">Refresh</button>
+              </div>
+            </div>
+            <div class="ext-install-form">
+              <label class="admin-field">
+                <span class="admin-field-label">Repo</span>
+                <input type="text" id="skill-tap-repo" placeholder="owner/repo">
+              </label>
+              <label class="admin-field">
+                <span class="admin-field-label">Path</span>
+                <input type="text" id="skill-tap-path" placeholder="skills">
+              </label>
+              <label class="admin-field">
+                <span class="admin-field-label">Branch</span>
+                <input type="text" id="skill-tap-branch" placeholder="default">
+              </label>
+              <label class="admin-field">
+                <span class="admin-field-label">Trust</span>
+                <select id="skill-tap-trust">
+                  <option value="community">Community</option>
+                  <option value="trusted">Trusted</option>
+                  <option value="builtin">Builtin</option>
+                </select>
+              </label>
+              <button onclick="addSkillTapFromForm()">Add Tap</button>
+            </div>
+            <div class="extensions-list ui-resource-grid" id="skill-taps-list">
+              <div class="empty-state">Loading taps...</div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- Providers Tab -->
+    <div class="tab-panel" id="tab-providers">
+      <div class="providers-container">
+        <div class="providers-header">
+          <div class="providers-header-copy">
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg> Provider Vault</h2>
+            <p class="providers-desc">Manage API keys for LLM providers. Keys are encrypted at rest and hot-reloaded — no restart needed.</p>
+          </div>
+          <button class="btn-ext providers-research-link" onclick="openResearchGpuClouds()">Open Research GPU Clouds</button>
+        </div>
+        <div class="providers-content" id="providers-content">
+          <div class="settings-loading">Loading providers...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Costs Tab -->
+    <div class="tab-panel" id="tab-costs">
+      <div class="costs-container">
+        <div class="costs-header ui-panel-header">
+          <div class="costs-header-copy ui-panel-copy">
+            <h2 class="ui-panel-title ui-panel-title--page"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><circle cx="12" cy="12" r="10"/><path d="M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8"/><path d="M12 18V6"/></svg> Cost Dashboard</h2>
+            <p class="costs-desc ui-panel-desc">Track spend, token usage, and model mix for the current gateway session history.</p>
+          </div>
+          <div class="costs-header-actions ui-panel-actions">
+            <div class="cost-range-group">
+              <button class="cost-range-btn active" data-range="today" onclick="setCostRange('today')">Today</button>
+              <button class="cost-range-btn" data-range="7d" onclick="setCostRange('7d')">7d</button>
+              <button class="cost-range-btn" data-range="30d" onclick="setCostRange('30d')">30d</button>
+              <button class="cost-range-btn" data-range="all" onclick="setCostRange('all')">All</button>
+            </div>
+            <span class="costs-last-updated" id="costs-last-updated"></span>
+            <button class="btn-ext" onclick="exportCostCsv()" title="Export CSV">Export</button>
+            <button class="btn-ext" onclick="loadCostDashboard()" title="Refresh">Refresh</button>
+            <button class="btn-ext btn-ext--danger" onclick="resetCostData()" title="Clear all cost history">Reset</button>
+          </div>
+        </div>
+        <div class="costs-shell ui-panel-stack">
+          <div class="costs-summary ui-panel-grid ui-panel-grid--cards" id="costs-summary"></div>
+          <div class="costs-grid ui-panel-grid ui-panel-grid--split">
+            <section class="ui-panel costs-panel costs-chart-section">
+              <div class="costs-panel-head ui-panel-header">
+                <div class="ui-panel-copy">
+                  <h3 class="ui-panel-title">Daily Spend</h3>
+                  <p class="ui-panel-desc">Daily spend across the selected time range.</p>
+                </div>
+              </div>
+              <div class="costs-chart" id="costs-chart"></div>
+            </section>
+            <section class="ui-panel costs-panel costs-chart-section">
+              <div class="costs-panel-head ui-panel-header">
+                <div class="ui-panel-copy">
+                  <h3 class="ui-panel-title">Token Usage by Model</h3>
+                  <p class="ui-panel-desc">Compare total volume and relative input/output mix by model.</p>
+                </div>
+              </div>
+              <div class="costs-chart" id="costs-model-chart"></div>
+            </section>
+            <section class="ui-panel costs-panel costs-table-section costs-table-panel">
+              <div class="costs-panel-head ui-panel-header">
+                <div class="ui-panel-copy">
+                  <h3 class="ui-panel-title">Model Breakdown</h3>
+                  <p class="ui-panel-desc">Per-model totals for tokens, spend, requests, and cost share.</p>
+                </div>
+              </div>
+              <div class="costs-table-wrap">
+                <table class="costs-table" id="costs-table">
+                  <thead>
+                    <tr>
+                      <th>Model</th>
+                      <th>Input Tokens</th>
+                      <th>Output Tokens</th>
+                      <th>Total Tokens</th>
+                      <th>Cost</th>
+                      <th>Requests</th>
+                      <th>Share</th>
+                </tr>
+              </thead>
+              <tbody id="costs-tbody"></tbody>
+              <tfoot id="costs-tfoot"></tfoot>
+                </table>
+              </div>
+              <div class="empty-state" id="costs-empty" style="display:none">No usage data yet. Costs will appear here after the first LLM call.</div>
+            </section>
+          </div>
+          <div class="costs-footer ui-panel ui-panel--note">
+            <p>Costs are tracked persistently across restarts. Daily budget and rate limits can be configured in <a href="#" onclick="event.preventDefault(); switchTab('settings')">Settings</a> → Safety. Auto-refreshes every 30s while active.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings Tab -->
+    <div class="tab-panel" id="tab-settings">
+      <div class="settings-container">
+        <div class="settings-header">
+          <h2 style="display:flex;align-items:center;gap:8px;"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: middle;"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg> Settings</h2>
+          <div class="settings-header-actions">
+            <button class="btn-ext" onclick="exportSettings()" title="Export as JSON">Export</button>
+            <label class="btn-ext" style="cursor:pointer">
+              Import
+              <input type="file" accept=".json" onchange="importSettings(event)" style="display:none">
+            </label>
+            <button class="btn-ext" onclick="loadSettings()" title="Reload">Refresh</button>
+          </div>
+        </div>
+
+        <div class="settings-sections" id="settings-sections">
+          <div class="settings-loading">Loading settings...</div>
+        </div>
+
+        <div class="settings-note">
+          <strong>Note:</strong> Some changes require a restart to take effect.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="webchat-branding" class="webchat-branding">Powered by ThinClaw</div>
+  <div id="toasts"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

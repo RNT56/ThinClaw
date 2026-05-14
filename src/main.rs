@@ -3,11 +3,11 @@
 mod main_helpers;
 
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 
 #[cfg(feature = "docker-sandbox")]
 use thinclaw::orchestrator::{
@@ -15,10 +15,19 @@ use thinclaw::orchestrator::{
 };
 use thinclaw::{
     agent::{Agent, AgentDeps},
-    app::{AppBuilder, AppBuilderFlags},
+    app::{
+        AppBuilder, AppBuilderFlags, LocalRuntimeChannel, NativeChannelActivationInput,
+        NativeChannelActivationPlan, PeriodicPersistencePlan, QuietStartupSpinner,
+        RuntimeCommandIntent, RuntimeEntryMode, RuntimeEntrypointPlan, RuntimeShutdownAction,
+        RuntimeShutdownPlan, init_cli_tracing, relaunch_current_process,
+        restart_is_managed_by_service, run_async_entrypoint, should_show_quiet_startup_spinner,
+    },
     channels::{
-        ChannelManager, DiscordChannel, GatewayChannel, HttpChannel, ReplChannel, SignalChannel,
-        TuiChannel, WebhookServer, WebhookServerConfig,
+        ChannelDescriptor, ChannelManager, DiscordChannel, GatewayChannel, HttpChannel,
+        NativeEndpointRegistry, NativeHttpClient, NativeLifecycleChannel,
+        NativeLifecycleChannelConfig, NativeLifecycleWebhookConfig, ReplChannel,
+        ReqwestNativeHttpClient, SignalChannel, TuiChannel, WebhookServer, WebhookServerConfig,
+        native_lifecycle_webhook_routes,
         wasm::{WasmChannelRouter, WasmChannelRuntime},
         web::log_layer::LogBroadcaster,
     },
@@ -34,76 +43,34 @@ use thinclaw::{
 use thinclaw::channels::GmailChannel;
 #[cfg(target_os = "macos")]
 use thinclaw::channels::IMessageChannel;
-use thinclaw::channels::{BlueBubblesChannel, BlueBubblesConfig};
+use thinclaw::channels::{
+    ApnsNativeClient, ApnsNativeConfig, BlueBubblesChannel, BlueBubblesConfig,
+    BrowserPushNativeClient, BrowserPushNativeConfig, DiscordConfig, MatrixNativeClient,
+    MatrixNativeConfig, VoiceCallNativeClient, VoiceCallNativeConfig,
+};
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use thinclaw::setup::{SetupConfig, SetupWizard, UiMode};
 
 use main_helpers::*;
 
-/// Initialize tracing for simple CLI commands (warn level, no fancy layers).
-fn init_cli_tracing(debug: bool) {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            if debug {
-                EnvFilter::new("debug")
-            } else {
-                EnvFilter::new("warn")
-            }
-        }))
-        .init();
-}
-
-fn restart_is_managed_by_service() -> bool {
-    std::env::var_os("INVOCATION_ID").is_some()
-        || std::env::var_os("JOURNAL_STREAM").is_some()
-        || std::env::var_os("SYSTEMD_EXEC_PID").is_some()
-        || std::env::var_os("LAUNCH_JOB_NAME").is_some()
-        || std::env::var_os("THINCLAW_SERVICE_MANAGER").is_some()
-}
-
-fn relaunch_current_process() -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.args(std::env::args_os().skip(1));
-    let child = cmd.spawn()?;
-    eprintln!(
-        "Restarting ThinClaw (spawned PID {} from {})...",
-        child.id(),
-        exe.display()
-    );
-    Ok(())
-}
-
 fn main() -> anyhow::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        return std::thread::Builder::new()
-            .name("thinclaw-main".to_string())
-            .stack_size(8 * 1024 * 1024)
-            .spawn(run_async_main)?
-            .join()
-            .map_err(|_| anyhow::anyhow!("ThinClaw main thread panicked"))?;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        run_async_main()
-    }
+    run_async_entrypoint(async_main())
 }
 
-fn run_async_main() -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(Box::pin(async_main()))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimeEntryMode {
-    Default,
-    Cli,
-    Tui,
+fn runtime_command_intent(command: Option<&Command>) -> RuntimeCommandIntent {
+    match command {
+        None | Some(Command::Run) => RuntimeCommandIntent::AgentRuntime,
+        Some(Command::Tui) => RuntimeCommandIntent::TuiRuntime,
+        Some(Command::Onboard { .. }) => RuntimeCommandIntent::Onboarding,
+        #[cfg(feature = "docker-sandbox")]
+        Some(Command::Worker { .. })
+        | Some(Command::ClaudeBridge { .. })
+        | Some(Command::CodexBridge { .. }) => RuntimeCommandIntent::WorkerRuntime,
+        #[cfg(all(feature = "repl", target_os = "windows"))]
+        Some(Command::WindowsServiceRuntime { .. }) => RuntimeCommandIntent::ServiceRuntime,
+        _ => RuntimeCommandIntent::ImmediateCli,
+    }
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -148,10 +115,8 @@ fn setup_config_for_startup_onboarding(runtime_entry_mode: RuntimeEntryMode) -> 
 
 async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let mut runtime_entry_mode = match cli.command {
-        Some(Command::Tui) => RuntimeEntryMode::Tui,
-        _ => RuntimeEntryMode::Default,
-    };
+    let command_intent = runtime_command_intent(cli.command.as_ref());
+    let mut runtime_entry_mode = command_intent.initial_entry_mode();
 
     // Handle non-agent commands first (they don't need full setup)
     match &cli.command {
@@ -243,6 +208,10 @@ async fn async_main() -> anyhow::Result<()> {
             let _ = dotenvy::dotenv();
             thinclaw::bootstrap::load_thinclaw_env();
             return run_channels_command(ch_cmd.clone()).await;
+        }
+        Some(Command::Comfy(comfy_cmd)) => {
+            init_cli_tracing(cli.debug);
+            return thinclaw::cli::run_comfy_command(comfy_cmd.clone()).await;
         }
         Some(Command::Message(msg_cmd)) => {
             init_cli_tracing(cli.debug);
@@ -430,11 +399,15 @@ async fn async_main() -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    let local_runtime_requested = match runtime_entry_mode {
-        RuntimeEntryMode::Cli => true,
-        RuntimeEntryMode::Tui => false,
-        RuntimeEntryMode::Default => config.channels.cli.enabled,
-    };
+    let entrypoint_plan = RuntimeEntrypointPlan::new(
+        runtime_entry_mode,
+        config.channels.cli.enabled,
+        cli.message.is_some(),
+    );
+    let local_runtime_requested = matches!(
+        entrypoint_plan.local_channel,
+        Some(LocalRuntimeChannel::Repl | LocalRuntimeChannel::SingleMessage)
+    );
 
     #[cfg_attr(not(feature = "repl"), allow(unused_mut))]
     let mut quiet_startup_spinner = if should_show_quiet_startup_spinner(
@@ -665,6 +638,50 @@ async fn async_main() -> anyhow::Result<()> {
 
     let channels = Arc::new(ChannelManager::new());
     let mut channel_names: Vec<String> = Vec::new();
+    for descriptor in native_lifecycle_channel_descriptors(&config) {
+        channels.add_descriptor(descriptor).await;
+    }
+    let channel_plan = NativeChannelActivationPlan::from_input(NativeChannelActivationInput {
+        cli_only: cli.cli_only,
+        signal_configured: config.channels.signal.is_some(),
+        nostr_configured: {
+            #[cfg(feature = "nostr")]
+            {
+                config.channels.nostr.is_some()
+            }
+            #[cfg(not(feature = "nostr"))]
+            {
+                false
+            }
+        },
+        discord_configured: config.channels.discord.is_some(),
+        imessage_configured: {
+            #[cfg(target_os = "macos")]
+            {
+                config.channels.imessage.is_some()
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        },
+        apple_mail_configured: {
+            #[cfg(target_os = "macos")]
+            {
+                config.channels.apple_mail.is_some()
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                false
+            }
+        },
+        bluebubbles_configured: config.channels.bluebubbles.is_some(),
+        gmail_configured: config.channels.gmail.is_some(),
+        http_configured: config.channels.http.is_some(),
+        gateway_configured: config.channels.gateway.is_some(),
+        wasm_channels_enabled: config.channels.wasm_channels_enabled,
+        wasm_channels_dir_exists: config.channels.wasm_channels_dir.exists(),
+    });
     #[cfg(feature = "nostr")]
     let mut nostr_channel: Option<thinclaw::channels::NostrChannel> = None;
     #[cfg(feature = "nostr")]
@@ -672,7 +689,14 @@ async fn async_main() -> anyhow::Result<()> {
 
     #[cfg(feature = "nostr")]
     if let Some(ref nostr_config) = config.channels.nostr {
-        match thinclaw::channels::NostrChannel::new(nostr_config.clone()) {
+        let channel_config = thinclaw::channels::NostrConfig {
+            private_key: nostr_config.private_key.clone(),
+            relays: nostr_config.relays.clone(),
+            owner_pubkey: nostr_config.owner_pubkey.clone(),
+            social_dm_enabled: nostr_config.social_dm_enabled,
+            allow_from: nostr_config.allow_from.clone(),
+        };
+        match thinclaw::channels::NostrChannel::new(channel_config) {
             Ok(channel) => {
                 nostr_runtime = Some(channel.runtime());
                 nostr_channel = Some(channel);
@@ -692,41 +716,41 @@ async fn async_main() -> anyhow::Result<()> {
         std::path::PathBuf,
     )> = None;
 
-    if let Some(ref msg) = cli.message {
-        channels
-            .add(Box::new(ReplChannel::with_message(msg.clone())))
-            .await;
-        tracing::info!("Single message mode");
-    } else {
-        match runtime_entry_mode {
-            RuntimeEntryMode::Tui => {
-                channels.add(Box::new(TuiChannel::new())).await;
-                channel_names.push("tui".to_string());
-                tracing::info!("Full-screen TUI mode enabled");
+    match entrypoint_plan.local_channel {
+        Some(LocalRuntimeChannel::SingleMessage) => {
+            if let Some(ref msg) = cli.message {
+                channels
+                    .add(Box::new(ReplChannel::with_message(msg.clone())))
+                    .await;
+                tracing::info!("Single message mode");
             }
-            RuntimeEntryMode::Cli => {
-                let repl = ReplChannel::new();
-                repl.suppress_banner();
-                channels.add(Box::new(repl)).await;
-                channel_names.push("repl".to_string());
-                tracing::info!("REPL mode enabled");
-            }
-            RuntimeEntryMode::Default if config.channels.cli.enabled => {
-                let repl = ReplChannel::new();
-                repl.suppress_banner();
-                channels.add(Box::new(repl)).await;
-                channel_names.push("repl".to_string());
-                tracing::info!("REPL mode enabled");
-            }
-            RuntimeEntryMode::Default => {}
         }
+        Some(LocalRuntimeChannel::Tui) => {
+            channels.add(Box::new(TuiChannel::new())).await;
+            channel_names.push("tui".to_string());
+            tracing::info!("Full-screen TUI mode enabled");
+        }
+        Some(LocalRuntimeChannel::Repl) => {
+            let repl = ReplChannel::new();
+            repl.suppress_banner();
+            channels.add(Box::new(repl)).await;
+            channel_names.push("repl".to_string());
+            tracing::info!("REPL mode enabled");
+        }
+        None => {}
     }
 
     // Collect webhook route fragments; a single WebhookServer hosts them all.
     let mut webhook_routes: Vec<axum::Router> = Vec::new();
+    if !cli.cli_only {
+        webhook_routes.extend(
+            register_native_lifecycle_channels(&config, Arc::clone(&channels), &mut channel_names)
+                .await,
+        );
+    }
 
     // Load WASM channels and register their webhook routes.
-    if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {
+    if channel_plan.wasm_channels {
         let wasm_result = setup_wasm_channels(
             &config,
             &components.secrets_store,
@@ -754,10 +778,21 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Add Signal channel if configured and not CLI-only mode.
-    if !cli.cli_only
+    if channel_plan.signal
         && let Some(ref signal_config) = config.channels.signal
     {
-        let signal_channel = SignalChannel::new(signal_config.clone())?;
+        let channel_config = thinclaw::channels::SignalConfig {
+            http_url: signal_config.http_url.clone(),
+            account: signal_config.account.clone(),
+            allow_from: signal_config.allow_from.clone(),
+            allow_from_groups: signal_config.allow_from_groups.clone(),
+            dm_policy: signal_config.dm_policy.clone(),
+            group_policy: signal_config.group_policy.clone(),
+            group_allow_from: signal_config.group_allow_from.clone(),
+            ignore_attachments: signal_config.ignore_attachments,
+            ignore_stories: signal_config.ignore_stories,
+        };
+        let signal_channel = SignalChannel::new(channel_config)?;
         channel_names.push("signal".to_string());
         channels.add(Box::new(signal_channel)).await;
         let safe_url = SignalChannel::redact_url(&signal_config.http_url);
@@ -774,7 +809,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Add Nostr channel if configured and not CLI-only mode.
     #[cfg(feature = "nostr")]
-    if !cli.cli_only
+    if channel_plan.nostr
         && let Some(nostr_channel) = nostr_channel.take()
         && let Some(ref nostr_config) = config.channels.nostr
     {
@@ -795,10 +830,16 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Add Discord channel if configured and not CLI-only mode.
-    if !cli.cli_only
+    if channel_plan.discord
         && let Some(ref discord_config) = config.channels.discord
     {
-        match DiscordChannel::new(discord_config.clone().into()) {
+        let channel_config = DiscordConfig {
+            bot_token: discord_config.bot_token.clone(),
+            guild_id: discord_config.guild_id.clone(),
+            allow_from: discord_config.allow_from.clone(),
+            stream_mode: discord_config.stream_mode,
+        };
+        match DiscordChannel::new(channel_config) {
             Ok(discord_channel) => {
                 channel_names.push("discord".to_string());
                 channels.add(Box::new(discord_channel)).await;
@@ -820,7 +861,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Add iMessage channel if configured (macOS only) and not CLI-only mode.
     #[cfg(target_os = "macos")]
-    if !cli.cli_only
+    if channel_plan.imessage
         && let Some(ref imessage_config) = config.channels.imessage
     {
         use thinclaw::channels::IMessageConfig;
@@ -852,7 +893,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Add Apple Mail channel if configured (macOS only) and not CLI-only mode.
     #[cfg(target_os = "macos")]
-    if !cli.cli_only
+    if channel_plan.apple_mail
         && let Some(ref mail_config) = config.channels.apple_mail
     {
         use thinclaw::channels::{AppleMailChannel, AppleMailConfig};
@@ -886,10 +927,18 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Add BlueBubbles iMessage bridge if configured and not CLI-only mode.
     // Cross-platform — works on any OS with a BlueBubbles server on a Mac.
-    if !cli.cli_only
+    if channel_plan.bluebubbles
         && let Some(ref bb_config) = config.channels.bluebubbles
     {
-        let channel_config = BlueBubblesConfig::from(bb_config);
+        let channel_config = BlueBubblesConfig::new(
+            bb_config.server_url.clone(),
+            bb_config.password.clone(),
+            bb_config.webhook_host.clone(),
+            bb_config.webhook_port,
+            bb_config.webhook_path.clone(),
+            bb_config.allow_from.clone(),
+            bb_config.send_read_receipts,
+        );
         match BlueBubblesChannel::init(channel_config).await {
             Ok(bb_channel) => {
                 channel_names.push("bluebubbles".to_string());
@@ -908,7 +957,7 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Add Gmail channel if configured and not CLI-only mode.
-    if !cli.cli_only
+    if channel_plan.gmail
         && let Some(ref gmail_config) = config.channels.gmail
     {
         use thinclaw::channels::gmail_wiring::GmailConfig;
@@ -953,7 +1002,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Add HTTP channel if configured and not CLI-only mode.
     let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
-    if !cli.cli_only
+    if channel_plan.http
         && let Some(ref http_config) = config.channels.http
     {
         let http_channel = HttpChannel::new(http_config.clone());
@@ -1135,7 +1184,9 @@ async fn async_main() -> anyhow::Result<()> {
     > = None;
     let mut gateway_state: Option<std::sync::Arc<thinclaw::channels::web::server::GatewayState>> =
         None;
-    if let Some(ref gw_config) = config.channels.gateway {
+    if channel_plan.gateway
+        && let Some(ref gw_config) = config.channels.gateway
+    {
         let mut gw = GatewayChannel::new(gw_config.clone())
             .with_llm_provider(Arc::clone(&components.llm))
             .with_llm_runtime(Arc::clone(&components.llm_runtime));
@@ -1232,10 +1283,10 @@ async fn async_main() -> anyhow::Result<()> {
     // ── Boot screen ────────────────────────────────────────────────────
 
     #[cfg(feature = "repl")]
-    if local_runtime_requested
-        && runtime_entry_mode != RuntimeEntryMode::Tui
-        && cli.message.is_none()
-    {
+    if matches!(
+        entrypoint_plan.local_channel,
+        Some(LocalRuntimeChannel::Repl)
+    ) {
         if let Some(mut spinner) = quiet_startup_spinner.take() {
             spinner.stop();
         }
@@ -1646,14 +1697,17 @@ async fn async_main() -> anyhow::Result<()> {
         });
 
         // Register sub-agent tools with the executor
+        let subagent_port: std::sync::Arc<
+            dyn thinclaw::tools::builtin::subagent::SubagentToolPort,
+        > = executor.clone();
         components.tools.register_sync(std::sync::Arc::new(
-            thinclaw::tools::builtin::SpawnSubagentTool::new(executor.clone()),
+            thinclaw::tools::builtin::SpawnSubagentTool::new(std::sync::Arc::clone(&subagent_port)),
         ));
         components.tools.register_sync(std::sync::Arc::new(
-            thinclaw::tools::builtin::ListSubagentsTool::new(executor.clone()),
+            thinclaw::tools::builtin::ListSubagentsTool::new(std::sync::Arc::clone(&subagent_port)),
         ));
         components.tools.register_sync(std::sync::Arc::new(
-            thinclaw::tools::builtin::CancelSubagentTool::new(executor.clone()),
+            thinclaw::tools::builtin::CancelSubagentTool::new(subagent_port),
         ));
 
         tracing::info!("Sub-agent system initialized (with routine finalization support)");
@@ -1722,10 +1776,11 @@ async fn async_main() -> anyhow::Result<()> {
     // Flush cost tracker entries to the DB every 60 seconds so cost
     // data survives restarts (fixes the data-loss-on-restart gap).
     if let Some(ref db) = components.db {
+        let persistence_plan = PeriodicPersistencePlan::cost_entries();
         let persist_db = Arc::clone(db);
         let persist_tracker = Arc::clone(&components.cost_tracker);
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(persistence_plan.interval);
             interval.tick().await; // skip the initial immediate tick
             let mut last_count: usize = 0;
             loop {
@@ -1737,7 +1792,7 @@ async fn async_main() -> anyhow::Result<()> {
                 // Only write when new entries have been recorded.
                 if count != last_count {
                     match persist_db
-                        .set_setting("default", "cost_entries", &snapshot)
+                        .set_setting("default", persistence_plan.setting_key, &snapshot)
                         .await
                     {
                         Ok(()) => {
@@ -1806,6 +1861,7 @@ async fn async_main() -> anyhow::Result<()> {
         model_override: Some(model_override),
         restart_requested: Arc::clone(&restart_requested),
         sandbox_children: sandbox_children.clone(),
+        runtime_ports: None,
     };
 
     let agent = Agent::new(
@@ -1855,8 +1911,12 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Final cost flush — captures any entries since the last periodic flush.
     if let Some(ref db) = shutdown_db {
+        let persistence_plan = PeriodicPersistencePlan::cost_entries();
         let snapshot = shutdown_tracker.lock().await.to_json();
-        match db.set_setting("default", "cost_entries", &snapshot).await {
+        match db
+            .set_setting("default", persistence_plan.setting_key, &snapshot)
+            .await
+        {
             Ok(()) => tracing::info!("[cost] Final cost flush on shutdown"),
             Err(e) => tracing::warn!("[cost] Failed to persist cost entries on shutdown: {}", e),
         }
@@ -1887,15 +1947,304 @@ async fn async_main() -> anyhow::Result<()> {
             .restart_requested
             .load(std::sync::atomic::Ordering::SeqCst)
     });
-    if restart_requested.load(Ordering::SeqCst) || gateway_restart_requested {
-        if restart_is_managed_by_service() {
+    let shutdown_plan = RuntimeShutdownPlan::from_restart_signals(
+        restart_requested.load(Ordering::SeqCst),
+        gateway_restart_requested,
+        restart_is_managed_by_service(),
+    );
+    match shutdown_plan.action {
+        RuntimeShutdownAction::Complete => {}
+        RuntimeShutdownAction::ExitForSupervisor(code) => {
             eprintln!("Restarting ThinClaw (exit code 75 for service manager)...");
-            std::process::exit(75);
+            std::process::exit(code);
         }
-        relaunch_current_process()?;
+        RuntimeShutdownAction::Relaunch => {
+            relaunch_current_process()?;
+        }
     }
 
     Ok(())
+}
+
+fn native_lifecycle_channel_descriptors(config: &Config) -> Vec<ChannelDescriptor> {
+    thinclaw::channels::native_lifecycle_channel_descriptors(&NativeLifecycleChannelConfig {
+        matrix_enabled: config.channels.matrix_enabled,
+        voice_call_enabled: config.channels.voice_call_enabled,
+        voice_call_available: config.channels.voice_call_available,
+        apns_enabled: config.channels.apns_enabled,
+        browser_push_enabled: config.channels.browser_push_enabled,
+        browser_push_available: config.channels.browser_push_available,
+    })
+}
+
+async fn register_native_lifecycle_channels(
+    config: &Config,
+    channels: Arc<ChannelManager>,
+    channel_names: &mut Vec<String>,
+) -> Vec<axum::Router> {
+    let http: Arc<dyn NativeHttpClient> = Arc::new(ReqwestNativeHttpClient::new());
+    let mut webhook_config = NativeLifecycleWebhookConfig::default();
+
+    if config.channels.matrix_enabled {
+        match matrix_native_config_from_env() {
+            Ok(Some(matrix_config)) => {
+                let client = Arc::new(MatrixNativeClient::new(matrix_config, Arc::clone(&http)));
+                let channel = NativeLifecycleChannel::matrix(client);
+                webhook_config.matrix = Some(channel.ingress());
+                channels.add(Box::new(channel)).await;
+                channel_names.push("matrix".to_string());
+                tracing::info!("Matrix native lifecycle channel enabled");
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "Matrix native lifecycle is enabled but MATRIX_HOMESERVER or MATRIX_ACCESS_TOKEN is missing"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Matrix native lifecycle configuration is invalid")
+            }
+        }
+    }
+
+    if config.channels.voice_call_enabled {
+        if !config.channels.voice_call_available {
+            tracing::warn!(
+                "Voice-call native lifecycle is enabled but the binary was built without the voice feature"
+            );
+        } else {
+            match voice_call_native_config_from_env() {
+                Ok(Some(voice_config)) => {
+                    webhook_config.voice_call_secret = voice_config.webhook_secret.clone();
+                    let client =
+                        Arc::new(VoiceCallNativeClient::new(voice_config, Arc::clone(&http)));
+                    let channel = NativeLifecycleChannel::voice_call(client);
+                    webhook_config.voice_call = Some(channel.ingress());
+                    channels.add(Box::new(channel)).await;
+                    channel_names.push("voice-call".to_string());
+                    tracing::info!("Voice-call native lifecycle channel enabled");
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        "Voice-call native lifecycle is enabled but VOICE_CALL_RESPONSE_URL is missing"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "Voice-call native lifecycle configuration is invalid")
+                }
+            }
+        }
+    }
+
+    if config.channels.apns_enabled {
+        match apns_native_config_from_env() {
+            Ok(Some(apns_config)) => {
+                match native_endpoint_registry_from_env("apns", "APNS_ENDPOINT_REGISTRY_PATH").await
+                {
+                    Ok(registry) => {
+                        webhook_config.apns_registry = Some(registry.clone());
+                        webhook_config.apns_registration_secret =
+                            env_value("APNS_REGISTRATION_SECRET");
+                        let client = Arc::new(ApnsNativeClient::with_registry(
+                            apns_config,
+                            Arc::clone(&http),
+                            registry,
+                        ));
+                        channels
+                            .add(Box::new(NativeLifecycleChannel::apns(client)))
+                            .await;
+                        channel_names.push("apns".to_string());
+                        tracing::info!("APNs native lifecycle channel enabled");
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "APNs native lifecycle endpoint registry is invalid")
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "APNs native lifecycle is enabled but APNS_TEAM_ID, APNS_KEY_ID, APNS_BUNDLE_ID, or APNS_PRIVATE_KEY is missing"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "APNs native lifecycle configuration is invalid")
+            }
+        }
+    }
+
+    if config.channels.browser_push_enabled {
+        if !config.channels.browser_push_available {
+            tracing::warn!(
+                "Browser-push native lifecycle is enabled but the binary was built without the browser feature"
+            );
+        } else {
+            match browser_push_native_config_from_env() {
+                Ok(Some(push_config)) => {
+                    match native_endpoint_registry_from_env(
+                        "browser-push",
+                        "BROWSER_PUSH_ENDPOINT_REGISTRY_PATH",
+                    )
+                    .await
+                    {
+                        Ok(registry) => {
+                            let client = Arc::new(BrowserPushNativeClient::with_registry(
+                                push_config,
+                                Arc::clone(&http),
+                                registry.clone(),
+                            ));
+                            let channel = NativeLifecycleChannel::browser_push(client);
+                            webhook_config.browser_push = Some(channel.ingress());
+                            webhook_config.browser_push_registry = Some(registry);
+                            webhook_config.browser_push_secret =
+                                env_value("BROWSER_PUSH_WEBHOOK_SECRET");
+                            channels.add(Box::new(channel)).await;
+                            channel_names.push("browser-push".to_string());
+                            tracing::info!("Browser-push native lifecycle channel enabled");
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, "Browser-push native lifecycle endpoint registry is invalid")
+                        }
+                    };
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        "Browser-push native lifecycle is enabled but BROWSER_PUSH_VAPID_PUBLIC_KEY, BROWSER_PUSH_VAPID_PRIVATE_KEY, or BROWSER_PUSH_VAPID_SUBJECT is missing"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "Browser-push native lifecycle configuration is invalid")
+                }
+            }
+        }
+    }
+
+    if webhook_config.matrix.is_some()
+        || webhook_config.voice_call.is_some()
+        || webhook_config.browser_push.is_some()
+        || webhook_config.apns_registry.is_some()
+        || webhook_config.browser_push_registry.is_some()
+    {
+        vec![native_lifecycle_webhook_routes(webhook_config)]
+    } else {
+        Vec::new()
+    }
+}
+
+fn matrix_native_config_from_env() -> Result<Option<MatrixNativeConfig>, String> {
+    let Some(homeserver) = env_value("MATRIX_HOMESERVER") else {
+        return Ok(None);
+    };
+    let Some(access_token) = env_value("MATRIX_ACCESS_TOKEN") else {
+        return Ok(None);
+    };
+    Ok(Some(MatrixNativeConfig {
+        homeserver,
+        access_token,
+    }))
+}
+
+fn voice_call_native_config_from_env() -> Result<Option<VoiceCallNativeConfig>, String> {
+    let Some(response_url) = env_value("VOICE_CALL_RESPONSE_URL") else {
+        return Ok(None);
+    };
+    Ok(Some(VoiceCallNativeConfig {
+        response_url,
+        webhook_secret: env_value("VOICE_CALL_WEBHOOK_SECRET"),
+    }))
+}
+
+fn apns_native_config_from_env() -> Result<Option<ApnsNativeConfig>, String> {
+    let Some(team_id) = env_value("APNS_TEAM_ID") else {
+        return Ok(None);
+    };
+    let Some(key_id) = env_value("APNS_KEY_ID") else {
+        return Ok(None);
+    };
+    let Some(bundle_id) = env_value("APNS_BUNDLE_ID") else {
+        return Ok(None);
+    };
+    let Some(private_key_pem) = env_value_or_file("APNS_PRIVATE_KEY", "APNS_PRIVATE_KEY_PATH")?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ApnsNativeConfig {
+        team_id,
+        key_id,
+        bundle_id,
+        private_key_pem,
+        sandbox: env_bool("APNS_SANDBOX")?.unwrap_or(false),
+    }))
+}
+
+fn browser_push_native_config_from_env() -> Result<Option<BrowserPushNativeConfig>, String> {
+    let Some(vapid_public_key) = env_value("BROWSER_PUSH_VAPID_PUBLIC_KEY") else {
+        return Ok(None);
+    };
+    let Some(vapid_private_key_pem) = env_value_or_file(
+        "BROWSER_PUSH_VAPID_PRIVATE_KEY",
+        "BROWSER_PUSH_VAPID_PRIVATE_KEY_PATH",
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(subject) = env_value("BROWSER_PUSH_VAPID_SUBJECT") else {
+        return Ok(None);
+    };
+    let ttl_seconds = match env_value("BROWSER_PUSH_TTL_SECONDS") {
+        Some(value) => value.parse::<u32>().map_err(|error| {
+            format!("BROWSER_PUSH_TTL_SECONDS must be a positive integer: {error}")
+        })?,
+        None => 60,
+    };
+    Ok(Some(BrowserPushNativeConfig {
+        vapid_public_key,
+        vapid_private_key_pem,
+        subject,
+        ttl_seconds,
+    }))
+}
+
+async fn native_endpoint_registry_from_env(
+    provider: &str,
+    path_env: &str,
+) -> Result<NativeEndpointRegistry, String> {
+    let path = env_value(path_env).map(PathBuf::from).unwrap_or_else(|| {
+        thinclaw_platform::resolve_thinclaw_home()
+            .join("native-endpoints")
+            .join(format!("{provider}.json"))
+    });
+    NativeEndpointRegistry::persistent(path)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn env_value(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_value_or_file(value_key: &str, path_key: &str) -> Result<Option<String>, String> {
+    if let Some(value) = env_value(value_key) {
+        return Ok(Some(value.replace("\\n", "\n")));
+    }
+    let Some(path) = env_value(path_key) else {
+        return Ok(None);
+    };
+    std::fs::read_to_string(&path)
+        .map(|value| Some(value.replace("\\n", "\n")))
+        .map_err(|error| format!("failed to read {path_key}={path}: {error}"))
+}
+
+fn env_bool(key: &str) -> Result<Option<bool>, String> {
+    let Some(value) = env_value(key) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(Some(true)),
+        "0" | "false" | "no" | "off" => Ok(Some(false)),
+        _ => Err(format!("{key} must be true or false")),
+    }
 }
 
 #[cfg(test)]

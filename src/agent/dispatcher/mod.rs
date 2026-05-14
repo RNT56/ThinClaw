@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::personality;
 use crate::agent::prompt_assembly::PromptAssemblyV2;
-use crate::agent::prompt_sanitation::sanitize_project_context;
+use crate::agent::prompt_sanitation::sanitize_project_context_for_channel;
 use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
@@ -31,18 +31,23 @@ use crate::tools::ToolExecutionLane;
 use super::dispatcher_helpers::compact_messages_for_retry;
 // Re-export for external consumers (thread_ops.rs, etc.)
 pub(crate) use super::dispatcher_helpers::{
-    check_auth_required, execute_chat_tool_standalone, parse_auth_result, truncate_preview,
+    ChatToolExecution, check_auth_required_content, execute_chat_tool_standalone_with_artifacts,
+    parse_auth_result_content, truncate_preview,
 };
 
 mod advisor;
-mod agent_loop;
 mod llm_turn;
+mod r#loop;
+mod prompt_context;
 mod tool_execution;
 mod tool_phase;
 mod types;
 
+use prompt_context::*;
 use tool_phase::*;
 pub(crate) use types::*;
 
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;

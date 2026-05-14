@@ -646,7 +646,8 @@ async fn show_server(name: String) -> anyhow::Result<()> {
 }
 
 async fn build_client(server: &McpServerConfig, user_id: &str) -> anyhow::Result<McpClient> {
-    let config_store = Some(McpConfigStore::new(connect_db().await, user_id.to_string()));
+    let config_store =
+        Some(McpConfigStore::new(connect_db().await, user_id.to_string()).into_inner());
     if server.is_stdio() {
         return McpClient::new_stdio_with_store(server, config_store).map_err(Into::into);
     }
@@ -1047,7 +1048,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
     // Create client — use from_config for automatic transport dispatch
     if server.is_stdio() {
-        let config_store = Some(McpConfigStore::new(db.clone(), user_id.clone()));
+        let config_store = Some(McpConfigStore::new(db.clone(), user_id.clone()).into_inner());
         // Stdio: spawn the process directly
         let client = match McpClient::new_stdio_with_store(&server, config_store) {
             Ok(c) => c,
@@ -1077,7 +1078,7 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
         let session_manager = Arc::new(McpSessionManager::new());
         let secrets = get_secrets_store().await?;
         let has_tokens = is_authenticated(&server, &secrets, &user_id).await;
-        let config_store = Some(McpConfigStore::new(db.clone(), user_id.clone()));
+        let config_store = Some(McpConfigStore::new(db.clone(), user_id.clone()).into_inner());
 
         let client = if has_tokens {
             McpClient::new_authenticated_with_store(

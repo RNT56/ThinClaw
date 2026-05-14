@@ -8,7 +8,8 @@ polished host for local use, service mode, and desktop autonomy.
 | Goal | Recommended Path |
 |---|---|
 | Fast local install | Release installer, then `thinclaw onboard` |
-| Fresh Mac Mini setup from source | `scripts/mac-deploy.sh` |
+| Fresh Mac Mini setup | Release installer, then `thinclaw onboard --profile remote` |
+| Source patch workflow | Manual Cargo build |
 | Always-on background runtime | `thinclaw onboard --profile remote`, then launchd service |
 | Host-level desktop automation | Enable the reckless desktop autonomy profile after local setup |
 | Remote Scrappy access | Bind the gateway to a private address or Tailscale |
@@ -81,10 +82,10 @@ thinclaw --debug
 thinclaw --debug tui
 ```
 
-## Fresh Mac Or Mac Mini Source Setup
+## Fresh Mac Or Mac Mini Setup
 
-The one-click macOS script installs prerequisites, clones or locates the repo,
-builds the binary, and offers to launch onboarding.
+The one-click macOS script uses the prebuilt release binary by default and offers
+to launch onboarding.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/RNT56/ThinClaw/main/scripts/mac-deploy.sh | bash
@@ -99,16 +100,20 @@ From a checkout:
 Useful options:
 
 ```bash
-./scripts/mac-deploy.sh --bundled
-./scripts/mac-deploy.sh --install-only
-./scripts/mac-deploy.sh --skip-build
+./scripts/mac-deploy.sh --profile edge
+./scripts/mac-deploy.sh --version v0.13.7
+./scripts/mac-deploy.sh --system
 ./scripts/mac-deploy.sh --no-launch
+./scripts/mac-deploy.sh --from-source
 ```
 
-The script builds with `libsql` by default. Use `--bundled` when you want WASM
-extensions embedded for an air-gapped or mostly offline host.
+The script installs the prebuilt `full` release by default. Use `--profile edge`
+for the small-machine profile. Source-build options such as `--bundled`,
+`--install-only`, and `--skip-build` imply `--from-source`.
 
 ## Build From Source Manually
+
+Build from source only when you need local code changes.
 
 ```bash
 xcode-select --install
@@ -118,12 +123,12 @@ rustup target add wasm32-wasip2
 
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
-cargo build --release --features full
+cargo build --release --features full --bin thinclaw
 ./target/release/thinclaw onboard
 ```
 
-Use `cargo build --release` only when you intentionally want the smaller
-default `light` profile. See [../BUILD_PROFILES.md](../BUILD_PROFILES.md).
+Use `cargo build --release --bin thinclaw` only when you intentionally want the
+smaller default `light` profile. See [../BUILD_PROFILES.md](../BUILD_PROFILES.md).
 
 ## Run As A launchd Service
 

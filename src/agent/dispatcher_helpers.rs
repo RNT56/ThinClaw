@@ -7,16 +7,31 @@
 //! - Message compaction for context-length retries
 //! - String truncation utilities
 
-use crate::agent::session::PendingAuthMode;
 use crate::error::Error;
 use crate::llm::ChatMessage;
-use crate::tools::{ToolExecutionLane, ToolProfile, execution};
+use crate::tools::{ToolArtifact, ToolExecutionLane, ToolProfile, execution};
+
+#[derive(Debug, Clone)]
+pub(crate) struct ChatToolExecution {
+    pub content: String,
+    pub artifacts: Vec<ToolArtifact>,
+}
+
+impl ChatToolExecution {
+    pub(crate) fn text(content: String) -> Self {
+        Self {
+            content,
+            artifacts: Vec::new(),
+        }
+    }
+}
 
 /// Execute a chat tool without requiring `&Agent`.
 ///
 /// This standalone function enables parallel invocation from spawned JoinSet
 /// tasks, which cannot borrow `&self`. It replicates the logic from
 /// `Agent::execute_chat_tool`.
+#[cfg(test)]
 pub(crate) async fn execute_chat_tool_standalone(
     tools: &crate::tools::ToolRegistry,
     safety: &crate::safety::SafetyLayer,
@@ -26,6 +41,28 @@ pub(crate) async fn execute_chat_tool_standalone(
     lane: ToolExecutionLane,
     default_profile: ToolProfile,
 ) -> Result<String, Error> {
+    Ok(execute_chat_tool_standalone_with_artifacts(
+        tools,
+        safety,
+        tool_name,
+        params,
+        job_ctx,
+        lane,
+        default_profile,
+    )
+    .await?
+    .content)
+}
+
+pub(crate) async fn execute_chat_tool_standalone_with_artifacts(
+    tools: &crate::tools::ToolRegistry,
+    safety: &crate::safety::SafetyLayer,
+    tool_name: &str,
+    params: &serde_json::Value,
+    job_ctx: &crate::context::JobContext,
+    lane: ToolExecutionLane,
+    default_profile: ToolProfile,
+) -> Result<ChatToolExecution, Error> {
     let profile_override = job_ctx
         .metadata
         .get("tool_profile")
@@ -56,121 +93,38 @@ pub(crate) async fn execute_chat_tool_standalone(
     };
 
     let output = execution::execute_tool_call(&prepared, safety, job_ctx).await?;
-    Ok(output.sanitized_content)
+    Ok(ChatToolExecution {
+        content: output.sanitized_content,
+        artifacts: output.artifacts,
+    })
 }
 
 /// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
-pub(crate) struct ParsedAuthData {
-    pub(crate) auth_url: Option<String>,
-    pub(crate) setup_url: Option<String>,
-    pub(crate) auth_mode: Option<String>,
-    pub(crate) auth_status: Option<String>,
-    pub(crate) shared_auth_provider: Option<String>,
-    pub(crate) missing_scopes: Vec<String>,
-}
+pub(crate) use thinclaw_agent::dispatcher_helpers::{ParsedAuthData, PendingAuthRequest};
 
-pub(crate) struct PendingAuthRequest {
-    pub(crate) extension_name: String,
-    pub(crate) instructions: String,
-    pub(crate) auth_mode: PendingAuthMode,
-    pub(crate) auth_status: String,
-}
-
-/// Extract auth_url and setup_url from a tool_auth result JSON string.
-pub(crate) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthData {
-    let parsed = result
-        .as_ref()
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
-    ParsedAuthData {
-        auth_url: parsed
-            .as_ref()
-            .and_then(|v| v.get("auth_url"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        setup_url: parsed
-            .as_ref()
-            .and_then(|v| v.get("setup_url"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        auth_mode: parsed
-            .as_ref()
-            .and_then(|v| v.get("auth_mode"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        auth_status: parsed
-            .as_ref()
-            .and_then(|v| v.get("auth_status").or_else(|| v.get("status")))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        shared_auth_provider: parsed
-            .as_ref()
-            .and_then(|v| v.get("shared_auth_provider"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        missing_scopes: parsed
-            .as_ref()
-            .and_then(|v| v.get("missing_scopes"))
-            .and_then(|v| v.as_array())
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default(),
-    }
+pub(crate) fn parse_auth_result_content(result: Option<&str>) -> ParsedAuthData {
+    thinclaw_agent::dispatcher_helpers::parse_auth_result_json(result)
 }
 
 /// Check if a tool auth/activation result indicates authentication is required.
 ///
 /// Returns auth interception details for either manual token entry or external OAuth.
+#[cfg(test)]
 pub(crate) fn check_auth_required(
     tool_name: &str,
     result: &Result<String, Error>,
 ) -> Option<PendingAuthRequest> {
-    if tool_name != "tool_auth" && tool_name != "tool_activate" {
-        return None;
-    }
-    let output = result.as_ref().ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(output).ok()?;
-    let auth_status = parsed
-        .get("auth_status")
-        .or_else(|| parsed.get("status"))
-        .and_then(|v| v.as_str())?;
-    if !matches!(
-        auth_status,
-        "awaiting_token" | "awaiting_authorization" | "needs_reauth" | "insufficient_scope"
-    ) {
-        return None;
-    }
-    let name = parsed.get("name")?.as_str()?.to_string();
-    let auth_mode = parsed.get("auth_mode").and_then(|v| v.as_str()).unwrap_or(
-        if auth_status == "awaiting_token" {
-            "manual_token"
-        } else {
-            "oauth"
-        },
-    );
-    let instructions = parsed
-        .get("instructions")
-        .and_then(|v| v.as_str())
-        .unwrap_or(if auth_mode == "oauth" {
-            "Open the browser authentication flow to continue."
-        } else {
-            "Please provide your API token/key."
-        })
-        .to_string();
-    Some(PendingAuthRequest {
-        extension_name: name,
-        instructions,
-        auth_mode: if auth_mode == "manual_token" && auth_status == "awaiting_token" {
-            PendingAuthMode::ManualToken
-        } else {
-            PendingAuthMode::ExternalOAuth
-        },
-        auth_status: auth_status.to_string(),
-    })
+    thinclaw_agent::dispatcher_helpers::check_auth_required_json(
+        tool_name,
+        result.as_ref().ok().map(String::as_str),
+    )
+}
+
+pub(crate) fn check_auth_required_content(
+    tool_name: &str,
+    result: Option<&str>,
+) -> Option<PendingAuthRequest> {
+    thinclaw_agent::dispatcher_helpers::check_auth_required_json(tool_name, result)
 }
 
 /// Compact messages for retry after a context-length-exceeded error.
@@ -181,69 +135,12 @@ pub(crate) fn check_auth_required(
 /// Truncate a string to `max_chars`, appending "…" if truncated.
 /// Used for tool result previews in UI events.
 pub(crate) fn truncate_preview(s: &str, max_chars: usize) -> String {
-    if s.len() <= max_chars {
-        s.to_string()
-    } else {
-        let mut end = max_chars;
-        while !s.is_char_boundary(end) && end > 0 {
-            end -= 1;
-        }
-        format!("{}…", &s[..end])
-    }
+    thinclaw_agent::dispatcher_helpers::truncate_preview(s, max_chars)
 }
 
 /// inserted so the LLM knows earlier history was dropped.
 pub(crate) fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
-    use crate::llm::Role;
-
-    let mut compacted = Vec::new();
-
-    // Find the last User message index
-    let last_user_idx = messages.iter().rposition(|m| m.role == Role::User);
-
-    if let Some(idx) = last_user_idx {
-        // Keep System messages that appear BEFORE the last User message.
-        // System messages after that point (e.g. nudges) are included in the
-        // slice extension below, avoiding duplication.
-        for msg in &messages[..idx] {
-            if msg.role == Role::System {
-                compacted.push(msg.clone());
-            }
-        }
-
-        // Only add a compaction note if there was earlier history that is being dropped
-        if idx > 0 {
-            compacted.push(ChatMessage::system(
-                "[Note: Earlier conversation history was automatically compacted \
-                 to fit within the context window. The most recent exchange is preserved below.]",
-            ));
-        }
-
-        // Keep the last User message and everything after it
-        compacted.extend_from_slice(&messages[idx..]);
-    } else {
-        // No user messages found (shouldn't happen normally); keep everything,
-        // with system messages first to preserve prompt ordering.
-        for msg in messages {
-            if msg.role == Role::System {
-                compacted.push(msg.clone());
-            }
-        }
-        for msg in messages {
-            if msg.role != Role::System {
-                compacted.push(msg.clone());
-            }
-        }
-    }
-
-    // Defensive sanitize: if the input messages already contained orphaned
-    // tool_result messages (e.g. the hard cap fired just before a
-    // ContextLengthExceeded retry), ensure they are promoted to user messages
-    // before the compacted slice is returned to the caller. This makes the
-    // function correct regardless of the caller's input state.
-    crate::llm::sanitize_tool_messages(&mut compacted);
-
-    compacted
+    thinclaw_agent::dispatcher_helpers::compact_messages_for_retry(messages)
 }
 
 #[cfg(test)]
@@ -332,6 +229,7 @@ mod tests {
                 smart_approval_mode: "off".to_string(),
                 external_scanner_mode: "off".to_string(),
                 external_scanner_path: None,
+                external_scanner_require_verified: false,
             })),
             tools: Arc::new(ToolRegistry::new()),
             workspace: None,
@@ -353,6 +251,7 @@ mod tests {
             model_override: None,
             restart_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sandbox_children: None,
+            runtime_ports: None,
         };
 
         Agent::new(
@@ -614,6 +513,7 @@ mod tests {
             smart_approval_mode: "off".to_string(),
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
+            external_scanner_require_verified: false,
         });
 
         let job_ctx = JobContext::with_user("test", "chat", "test session");
@@ -649,6 +549,7 @@ mod tests {
             smart_approval_mode: "off".to_string(),
             external_scanner_mode: "off".to_string(),
             external_scanner_path: None,
+            external_scanner_require_verified: false,
         });
         let job_ctx = JobContext::with_user("test", "chat", "test session");
 

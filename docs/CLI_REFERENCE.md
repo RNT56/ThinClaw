@@ -42,6 +42,9 @@ These flags can be appended to almost any command:
   - `delete <NAME> [--user <ID>]`: Delete one secret.
   - `rotate-master`: Generate a new OS secure-store master key, re-encrypt active v2 secrets, and advance the local key version.
 - `thinclaw channels`: Manage messaging channel configurations (Telegram, Discord, etc.).
+  - `list [--format table|json]`: Show configured native and WASM channel surfaces.
+  - `info <NAME>`: Show channel-specific setup details.
+  - `validate <NAME>`: Validate a configured native channel or installed WASM channel package. For WASM packages this checks the artifact, capabilities file, and required env-backed setup secrets; Provider Vault validation is available through the WebUI extension validator.
 - `thinclaw gateway`: Manage the built-in web gateway settings.
   - `access [--show-token]`: Print the bind address, WebUI URL, token URL, SSH tunnel command, auth status, health status, and service-safe warnings.
 
@@ -121,6 +124,7 @@ Chromium fallback and host prerequisites, see [EXTERNAL_DEPENDENCIES.md](EXTERNA
   - `--build`: Build from source instead of using a prebuilt artifact.
 - `thinclaw registry install-defaults`: Install the recommended default bundle.
 - `thinclaw registry remove <NAME>`: Remove an installed registry extension.
+- `thinclaw registry validate <NAME|BUNDLE>`: Validate registry manifests and capabilities without installing. This checks that setup secrets declared by channel/tool capabilities are also represented in registry auth metadata.
 
 ## Trajectory Archive
 

@@ -14,11 +14,15 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::context_monitor::{ContextPressure, pressure_message, pressure_transition};
-use crate::agent::dispatcher::{AgenticLoopResult, check_auth_required, parse_auth_result};
+use crate::agent::dispatcher::{
+    AgenticLoopResult, check_auth_required_content, parse_auth_result_content,
+};
 use crate::agent::learning::{ImprovementClass, LearningEvent, LearningOrchestrator, RiskTier};
 use crate::agent::outcomes;
 use crate::agent::session::{
-    PendingApproval, PendingAuthMode, PersistedSubagentState, Session, Thread, ThreadState,
+    PendingApproval, PendingAuthMode, PersistedSubagentState, Session, Thread,
+    ThreadRuntimeStateExt, ThreadState, model_override_to_portable, persisted_subagent_to_portable,
+    thread_runtime_state_from_portable,
 };
 use crate::agent::submission::SubmissionResult;
 use crate::agent::{load_thread_runtime, mutate_thread_runtime};
@@ -38,12 +42,11 @@ use crate::llm::ChatMessage;
 use crate::tools::execution_backend::interactive_chat_runtime_descriptor;
 use crate::tools::{ToolExecutionLane, ToolProfile, execution};
 use crate::workspace::paths;
-
-const DIRECT_THREAD_ROLE_KEY: &str = "direct_thread_role";
-const DIRECT_THREAD_ROLE_MAIN: &str = "main";
-const ORIGIN_CHANNEL_KEY: &str = "origin_channel";
-const LAST_ACTIVE_CHANNEL_KEY: &str = "last_active_channel";
-const SEEN_CHANNELS_KEY: &str = "seen_channels";
+use thinclaw_agent::thread_ops::{
+    DIRECT_THREAD_ROLE_MAIN, ThreadInputAdmission, UndoRedoOutcome,
+    direct_conversation_metadata_updates, direct_thread_role_from_metadata,
+    is_primary_direct_thread_metadata,
+};
 
 fn to_history_conversation_kind(
     kind: crate::identity::ConversationKind,
@@ -55,56 +58,7 @@ fn to_history_conversation_kind(
 }
 
 fn detect_user_correction_signal(role: &str, content: &str) -> u32 {
-    if !role.eq_ignore_ascii_case("user") {
-        return 0;
-    }
-    let normalized = content.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
-        return 0;
-    }
-
-    let correction_prefixes = [
-        "actually",
-        "correction:",
-        "to clarify",
-        "that's incorrect",
-        "that is incorrect",
-        "not quite",
-        "no,",
-        "no.",
-        "use this instead",
-        "please use",
-        "instead:",
-    ];
-    if correction_prefixes
-        .iter()
-        .any(|prefix| normalized.starts_with(prefix))
-    {
-        return 1;
-    }
-
-    let correction_markers = [
-        "you should have",
-        "please do not",
-        "this is wrong",
-        "the correct way is",
-    ];
-    if correction_markers
-        .iter()
-        .any(|marker| normalized.contains(marker))
-    {
-        return 1;
-    }
-
-    0
-}
-
-fn direct_thread_role_from_metadata(metadata: &serde_json::Value) -> Option<&str> {
-    metadata
-        .get(DIRECT_THREAD_ROLE_KEY)
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    thinclaw_agent::thread_ops::detect_user_correction_signal(role, content)
 }
 
 fn merge_post_compaction_facts(
@@ -256,13 +210,15 @@ impl Agent {
     }
 
     async fn update_post_compaction_context(&self, thread_id: Uuid, fragment: Option<String>) {
-        let Some(store) = self.store().map(Arc::clone) else {
+        let Some(store) = self.runtime_ports().threads.as_ref().map(Arc::clone) else {
             return;
         };
 
-        if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
-            runtime.post_compaction_context = fragment.clone();
-        })
+        if let Err(err) = thinclaw_agent::thread_ops::set_post_compaction_context(
+            store.as_ref(),
+            thread_id,
+            fragment,
+        )
         .await
         {
             tracing::debug!(
@@ -274,25 +230,13 @@ impl Agent {
     }
 
     async fn clear_thread_runtime_transients(&self, thread_id: Uuid) {
-        let Some(store) = self.store().map(Arc::clone) else {
+        let Some(store) = self.runtime_ports().threads.as_ref().map(Arc::clone) else {
             return;
         };
 
-        if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
-            runtime.pending_approval = None;
-            runtime.pending_auth = None;
-            runtime.post_compaction_context = None;
-            runtime.frozen_workspace_prompt = None;
-            runtime.frozen_provider_system_prompt = None;
-            runtime.prompt_snapshot_hash = None;
-            runtime.ephemeral_overlay_hash = None;
-            runtime.prompt_segment_order.clear();
-            runtime.provider_context_refs.clear();
-            if runtime.state == ThreadState::AwaitingApproval {
-                runtime.state = ThreadState::Idle;
-            }
-        })
-        .await
+        if let Err(err) =
+            thinclaw_agent::thread_ops::clear_thread_runtime_transients(store.as_ref(), thread_id)
+                .await
         {
             tracing::debug!(
                 thread = %thread_id,
@@ -431,50 +375,11 @@ impl Agent {
             return;
         };
 
-        let mut updates: Vec<(&str, serde_json::Value)> = Vec::new();
-        let current_role = direct_thread_role_from_metadata(&metadata);
-
-        if current_role.is_none() && message.thread_id.is_none() {
-            updates.push((
-                DIRECT_THREAD_ROLE_KEY,
-                serde_json::json!(DIRECT_THREAD_ROLE_MAIN),
-            ));
-        }
-
-        if metadata
-            .get(ORIGIN_CHANNEL_KEY)
-            .is_none_or(|value| value.is_null())
-        {
-            updates.push((
-                ORIGIN_CHANNEL_KEY,
-                serde_json::json!(message.channel.clone()),
-            ));
-        }
-
-        updates.push((
-            LAST_ACTIVE_CHANNEL_KEY,
-            serde_json::json!(message.channel.clone()),
-        ));
-
-        let mut seen_channels: Vec<String> = metadata
-            .get(SEEN_CHANNELS_KEY)
-            .and_then(|value| value.as_array())
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !seen_channels
-            .iter()
-            .any(|channel| channel == &message.channel)
-        {
-            seen_channels.push(message.channel.clone());
-            seen_channels.sort();
-            seen_channels.dedup();
-            updates.push((SEEN_CHANNELS_KEY, serde_json::json!(seen_channels)));
-        }
+        let updates = direct_conversation_metadata_updates(
+            &metadata,
+            &message.channel,
+            message.thread_id.is_some(),
+        );
 
         if updates.is_empty() {
             return;
@@ -572,13 +477,7 @@ impl Agent {
     }
 
     fn compact_text_preview(text: &str) -> String {
-        let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let preview: String = collapsed.chars().take(120).collect();
-        if collapsed.chars().count() > 120 {
-            format!("{}…", preview)
-        } else {
-            preview
-        }
+        thinclaw_agent::thread_ops::compact_text_preview(text)
     }
 
     fn trajectory_learning_metadata(
@@ -586,25 +485,7 @@ impl Agent {
         session_id: Option<Uuid>,
         turn_number: Option<usize>,
     ) -> serde_json::Value {
-        let mut metadata = serde_json::json!({});
-        if let Some(obj) = metadata.as_object_mut() {
-            if let Some(session_id) = session_id {
-                obj.insert(
-                    "session_id".to_string(),
-                    serde_json::json!(session_id.to_string()),
-                );
-            }
-            if let Some(turn_number) = turn_number {
-                obj.insert("turn_number".to_string(), serde_json::json!(turn_number));
-            }
-            if let (Some(session_id), Some(turn_number)) = (session_id, turn_number) {
-                obj.insert(
-                    "trajectory_target_id".to_string(),
-                    serde_json::json!(format!("{}:{}:{}", session_id, thread_id, turn_number)),
-                );
-            }
-        }
-        metadata
+        thinclaw_agent::thread_ops::trajectory_learning_metadata(thread_id, session_id, turn_number)
     }
 
     async fn best_effort_record_learning_event(
@@ -845,33 +726,51 @@ impl Agent {
 
         if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
             let active_subagents = runtime.active_subagents.clone();
-            let preserved_auto_approved = runtime.auto_approved_tools.clone();
-            let prompt_snapshot_hash = runtime.prompt_snapshot_hash.clone();
-            let ephemeral_overlay_hash = runtime.ephemeral_overlay_hash.clone();
-            let prompt_segment_order = runtime.prompt_segment_order.clone();
-            let provider_context_refs = runtime.provider_context_refs.clone();
-            let frozen_workspace_prompt = runtime.frozen_workspace_prompt.clone();
-            let frozen_provider_system_prompt = runtime.frozen_provider_system_prompt.clone();
-            *runtime = thread.runtime_state(
+            let portable_existing = existing_runtime.as_ref().map(|runtime| {
+                thinclaw_agent::ports::ThreadRuntimeSnapshot {
+                    state: runtime.state.into(),
+                    pending_approval: runtime.pending_approval.clone().map(Into::into),
+                    pending_auth: runtime.pending_auth.clone().map(Into::into),
+                    owner_agent_id: runtime.owner_agent_id.clone(),
+                    model_override: runtime
+                        .model_override
+                        .clone()
+                        .map(model_override_to_portable),
+                    auto_approved_tools: runtime.auto_approved_tools.clone(),
+                    active_subagents: runtime
+                        .active_subagents
+                        .iter()
+                        .cloned()
+                        .map(persisted_subagent_to_portable)
+                        .collect(),
+                    last_context_pressure: runtime
+                        .last_context_pressure
+                        .and_then(|pressure| serde_json::to_value(pressure).ok()),
+                    post_compaction_context: runtime.post_compaction_context.clone(),
+                    frozen_workspace_prompt: runtime.frozen_workspace_prompt.clone(),
+                    frozen_provider_system_prompt: runtime.frozen_provider_system_prompt.clone(),
+                    prompt_snapshot_hash: runtime.prompt_snapshot_hash.clone(),
+                    ephemeral_overlay_hash: runtime.ephemeral_overlay_hash.clone(),
+                    prompt_segment_order: runtime.prompt_segment_order.clone(),
+                    provider_context_refs: runtime.provider_context_refs.clone(),
+                }
+            });
+            let snapshot = thinclaw_agent::thread_ops::runtime_snapshot_for_persistence(
+                thread,
                 owner_agent_id.clone(),
-                model_override.clone(),
-                auto_approved_tools
-                    .clone()
-                    .unwrap_or(preserved_auto_approved),
-                active_subagents,
-                existing_runtime
+                model_override.clone().map(model_override_to_portable),
+                auto_approved_tools.clone(),
+                portable_existing
                     .as_ref()
-                    .and_then(|runtime| runtime.last_context_pressure),
+                    .map(|runtime| runtime.active_subagents.clone())
+                    .unwrap_or_default(),
+                portable_existing.as_ref(),
             );
-            runtime.post_compaction_context = existing_runtime
-                .as_ref()
-                .and_then(|saved| saved.post_compaction_context.clone());
-            runtime.frozen_workspace_prompt = frozen_workspace_prompt;
-            runtime.frozen_provider_system_prompt = frozen_provider_system_prompt;
-            runtime.prompt_snapshot_hash = prompt_snapshot_hash;
-            runtime.ephemeral_overlay_hash = ephemeral_overlay_hash;
-            runtime.prompt_segment_order = prompt_segment_order;
-            runtime.provider_context_refs = provider_context_refs;
+            *runtime = thread_runtime_state_from_portable(
+                snapshot,
+                model_override.clone(),
+                active_subagents,
+            );
         })
         .await
         {
@@ -889,20 +788,23 @@ impl Agent {
         usage_percent: f64,
     ) -> Option<ContextPressure> {
         let current_pressure = self.context_monitor.check_pressure(usage_percent as f32);
-        let store = self.store().map(Arc::clone)?;
+        let store = self.runtime_ports().threads.as_ref().map(Arc::clone)?;
 
-        let previous_pressure = match load_thread_runtime(&store, thread_id).await {
-            Ok(Some(runtime)) => runtime.last_context_pressure,
-            Ok(None) => None,
-            Err(err) => {
-                tracing::debug!(
-                    thread = %thread_id,
-                    error = %err,
-                    "Failed to load thread runtime for context pressure tracking"
-                );
-                None
-            }
-        };
+        let previous_pressure =
+            match thinclaw_agent::thread_ops::load_last_context_pressure(store.as_ref(), thread_id)
+                .await
+            {
+                Ok(Some(value)) => serde_json::from_value::<ContextPressure>(value).ok(),
+                Ok(None) => None,
+                Err(err) => {
+                    tracing::debug!(
+                        thread = %thread_id,
+                        error = %err,
+                        "Failed to load thread runtime for context pressure tracking"
+                    );
+                    None
+                }
+            };
 
         if previous_pressure == Some(current_pressure) {
             return Some(current_pressure);
@@ -911,11 +813,13 @@ impl Agent {
         let persisted_pressure = if current_pressure == ContextPressure::None {
             None
         } else {
-            Some(current_pressure)
+            serde_json::to_value(current_pressure).ok()
         };
-        if let Err(err) = mutate_thread_runtime(&store, thread_id, |runtime| {
-            runtime.last_context_pressure = persisted_pressure;
-        })
+        if let Err(err) = thinclaw_agent::thread_ops::set_last_context_pressure(
+            store.as_ref(),
+            thread_id,
+            persisted_pressure,
+        )
         .await
         {
             tracing::debug!(
@@ -935,22 +839,25 @@ impl Agent {
         usage_percent: f64,
     ) {
         let current_pressure = self.context_monitor.check_pressure(usage_percent as f32);
-        let Some(store) = self.store().map(Arc::clone) else {
+        let Some(store) = self.runtime_ports().threads.as_ref().map(Arc::clone) else {
             return;
         };
 
-        let previous_pressure = match load_thread_runtime(&store, thread_id).await {
-            Ok(Some(runtime)) => runtime.last_context_pressure,
-            Ok(None) => None,
-            Err(err) => {
-                tracing::debug!(
-                    thread = %thread_id,
-                    error = %err,
-                    "Failed to load thread runtime for context pressure warning"
-                );
-                None
-            }
-        };
+        let previous_pressure =
+            match thinclaw_agent::thread_ops::load_last_context_pressure(store.as_ref(), thread_id)
+                .await
+            {
+                Ok(Some(value)) => serde_json::from_value::<ContextPressure>(value).ok(),
+                Ok(None) => None,
+                Err(err) => {
+                    tracing::debug!(
+                        thread = %thread_id,
+                        error = %err,
+                        "Failed to load thread runtime for context pressure warning"
+                    );
+                    None
+                }
+            };
 
         let warning_level = pressure_transition(previous_pressure, current_pressure);
         if let Some(level) = warning_level
@@ -1173,10 +1080,10 @@ impl Agent {
         if matches!(
             identity.conversation_kind,
             crate::identity::ConversationKind::Direct
-        ) && conversation_metadata.as_ref().is_some_and(|metadata| {
-            direct_thread_role_from_metadata(metadata) == Some(DIRECT_THREAD_ROLE_MAIN)
-                || metadata.get("thread_type").and_then(|value| value.as_str()) == Some("assistant")
-        }) {
+        ) && conversation_metadata
+            .as_ref()
+            .is_some_and(is_primary_direct_thread_metadata)
+        {
             self.session_manager
                 .register_direct_main_thread_for_scope(
                     register_scope_id,
@@ -1294,26 +1201,9 @@ impl Agent {
             thread.state
         };
 
-        // Check thread state
-        match thread_state {
-            ThreadState::Processing => {
-                return Ok(SubmissionResult::error(
-                    "Turn in progress. Use /interrupt to cancel.",
-                ));
-            }
-            ThreadState::AwaitingApproval => {
-                return Ok(SubmissionResult::error(
-                    "Waiting for approval. Use /interrupt to cancel.",
-                ));
-            }
-            ThreadState::Completed => {
-                return Ok(SubmissionResult::error(
-                    "Thread completed. Use /thread new.",
-                ));
-            }
-            ThreadState::Idle | ThreadState::Interrupted => {
-                // Can proceed
-            }
+        match thinclaw_agent::thread_ops::thread_state_input_admission(thread_state) {
+            ThreadInputAdmission::Accept => {}
+            ThreadInputAdmission::Reject(message) => return Ok(SubmissionResult::error(message)),
         }
 
         // Safety validation for user input
@@ -1448,44 +1338,23 @@ impl Agent {
                 .await;
         }
 
-        // Create checkpoint before turn
+        // Create checkpoint before turn and start the in-memory turn.
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
-        {
-            let sess = session.lock().await;
-            let thread = sess
-                .threads
-                .get(&thread_id)
-                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-
-            let mut mgr = undo_mgr.lock().await;
-            mgr.checkpoint(
-                thread.turn_number(),
-                thread.messages(),
-                format!("Before turn {}", thread.turn_number()),
-            );
-        }
-
-        // Start the turn and get messages
-        let hide_user_input_from_ui = message
-            .metadata
-            .get("hide_user_input_from_webui_chat")
-            .and_then(|value| value.as_bool())
-            .or_else(|| {
-                message
-                    .metadata
-                    .get("hide_from_webui_chat")
-                    .and_then(|value| value.as_bool())
-            })
-            .unwrap_or(false);
         let mut turn_messages = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-            thread.start_turn_with_visibility(content, hide_user_input_from_ui);
-            thread.messages()
+            let mut mgr = undo_mgr.lock().await;
+            thinclaw_agent::thread_ops::start_user_turn(
+                thread,
+                &mut mgr,
+                content,
+                &message.metadata,
+            )
         };
+        self.begin_turn_cancellation(thread_id).await;
 
         // Attach multimodal media to the last user message for LLM processing.
         // The rig adapter converts these to provider-native base64 content blocks.
@@ -1542,6 +1411,7 @@ impl Agent {
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
         if thread.state == ThreadState::Interrupted {
+            self.finish_turn_cancellation(thread_id).await;
             let _ = self
                 .channels
                 .send_status(
@@ -1591,10 +1461,9 @@ impl Agent {
                     }
                 };
 
-                thread.complete_turn(&response);
-                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
-                let thread_snapshot = thread.clone();
-                let turn_number = thread.turn_number();
+                let (turn_number, messages) =
+                    thinclaw_agent::thread_ops::complete_thread_response(thread, &response);
+                let usage_percent = self.context_monitor.usage_percent(&messages);
                 let _ = self
                     .channels
                     .send_status(
@@ -1614,7 +1483,6 @@ impl Agent {
                 )
                 .await;
                 drop(sess);
-                let _ = thread_snapshot;
                 self.sync_context_pressure_warning(message, thread_id, usage_percent)
                     .await;
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
@@ -1634,8 +1502,10 @@ impl Agent {
                     .await;
 
                 if was_streamed {
+                    self.finish_turn_cancellation(thread_id).await;
                     Ok(SubmissionResult::Streamed(response))
                 } else {
+                    self.finish_turn_cancellation(thread_id).await;
                     Ok(SubmissionResult::response(response))
                 }
             }
@@ -1645,9 +1515,8 @@ impl Agent {
                 let tool_name = pending.tool_name.clone();
                 let description = pending.description.clone();
                 let parameters = pending.parameters.clone();
-                thread.await_approval(pending);
-                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
-                let thread_snapshot = thread.clone();
+                let messages = thinclaw_agent::thread_ops::await_thread_approval(thread, pending);
+                let usage_percent = self.context_monitor.usage_percent(&messages);
                 let _ = self
                     .channels
                     .send_status(
@@ -1657,11 +1526,11 @@ impl Agent {
                     )
                     .await;
                 drop(sess);
-                let _ = thread_snapshot;
                 self.sync_context_pressure_warning(message, thread_id, usage_percent)
                     .await;
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
+                self.finish_turn_cancellation(thread_id).await;
                 Ok(SubmissionResult::NeedApproval {
                     request_id,
                     tool_name,
@@ -1670,9 +1539,8 @@ impl Agent {
                 })
             }
             Err(e) => {
-                thread.fail_turn(e.to_string());
-                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
-                let thread_snapshot = thread.clone();
+                let messages = thinclaw_agent::thread_ops::fail_thread_turn(thread, &e.to_string());
+                let usage_percent = self.context_monitor.usage_percent(&messages);
                 // User message already persisted at turn start; nothing else to save
                 // Lifecycle end: error
                 let _ = self
@@ -1687,11 +1555,11 @@ impl Agent {
                     )
                     .await;
                 drop(sess);
-                let _ = thread_snapshot;
                 self.sync_context_pressure_warning(message, thread_id, usage_percent)
                     .await;
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
                     .await;
+                self.finish_turn_cancellation(thread_id).await;
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }
@@ -1839,29 +1707,26 @@ impl Agent {
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-        // Save current state to redo, get previous checkpoint
-        let current_messages = thread.messages();
-        let current_turn = thread.turn_number();
-
-        if let Some(checkpoint) = mgr.undo(current_turn, current_messages) {
-            // Extract values before consuming the reference
-            let turn_number = checkpoint.turn_number;
-            let messages = checkpoint.messages.clone();
-            let undo_count = mgr.undo_count();
-            // Restore thread from checkpoint
-            thread.restore_from_messages(messages);
-            let usage_percent = self.context_monitor.usage_percent(&thread.messages());
-            drop(mgr);
-            drop(sess);
-            self.clear_thread_runtime_transients(thread_id).await;
-            self.record_context_pressure_state(thread_id, usage_percent)
-                .await;
-            Ok(SubmissionResult::ok_with_message(format!(
-                "Undone to turn {}. {} undo(s) remaining.",
-                turn_number, undo_count
-            )))
-        } else {
-            Ok(SubmissionResult::error("Undo failed."))
+        match thinclaw_agent::thread_ops::restore_thread_from_undo(thread, &mut mgr) {
+            UndoRedoOutcome::Restored {
+                turn_number,
+                remaining,
+            } => {
+                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
+                drop(mgr);
+                drop(sess);
+                self.clear_thread_runtime_transients(thread_id).await;
+                self.record_context_pressure_state(thread_id, usage_percent)
+                    .await;
+                Ok(SubmissionResult::ok_with_message(format!(
+                    "Undone to turn {}. {} undo(s) remaining.",
+                    turn_number, remaining
+                )))
+            }
+            UndoRedoOutcome::NothingAvailable => {
+                Ok(SubmissionResult::ok_with_message("Nothing to undo."))
+            }
+            UndoRedoOutcome::Failed => Ok(SubmissionResult::error("Undo failed.")),
         }
     }
 
@@ -1883,23 +1748,23 @@ impl Agent {
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-        let current_messages = thread.messages();
-        let current_turn = thread.turn_number();
-
-        if let Some(checkpoint) = mgr.redo(current_turn, current_messages) {
-            thread.restore_from_messages(checkpoint.messages);
-            let usage_percent = self.context_monitor.usage_percent(&thread.messages());
-            drop(mgr);
-            drop(sess);
-            self.clear_thread_runtime_transients(thread_id).await;
-            self.record_context_pressure_state(thread_id, usage_percent)
-                .await;
-            Ok(SubmissionResult::ok_with_message(format!(
-                "Redone to turn {}.",
-                checkpoint.turn_number
-            )))
-        } else {
-            Ok(SubmissionResult::error("Redo failed."))
+        match thinclaw_agent::thread_ops::restore_thread_from_redo(thread, &mut mgr) {
+            UndoRedoOutcome::Restored { turn_number, .. } => {
+                let usage_percent = self.context_monitor.usage_percent(&thread.messages());
+                drop(mgr);
+                drop(sess);
+                self.clear_thread_runtime_transients(thread_id).await;
+                self.record_context_pressure_state(thread_id, usage_percent)
+                    .await;
+                Ok(SubmissionResult::ok_with_message(format!(
+                    "Redone to turn {}.",
+                    turn_number
+                )))
+            }
+            UndoRedoOutcome::NothingAvailable => {
+                Ok(SubmissionResult::ok_with_message("Nothing to redo."))
+            }
+            UndoRedoOutcome::Failed => Ok(SubmissionResult::error("Redo failed.")),
         }
     }
 
@@ -1915,17 +1780,14 @@ impl Agent {
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-        match thread.state {
-            ThreadState::Processing | ThreadState::AwaitingApproval => {
-                thread.interrupt();
-                let thread_snapshot = thread.clone();
-                drop(sess);
-                let _ = thread_snapshot;
-                self.persist_thread_runtime_snapshot(message, &session, thread_id)
-                    .await;
-                Ok(SubmissionResult::ok_with_message("Interrupted."))
-            }
-            _ => Ok(SubmissionResult::ok_with_message("Nothing to interrupt.")),
+        if thinclaw_agent::thread_ops::interrupt_thread(thread) {
+            self.signal_turn_cancellation(thread_id).await;
+            drop(sess);
+            self.persist_thread_runtime_snapshot(message, &session, thread_id)
+                .await;
+            Ok(SubmissionResult::ok_with_message("Interrupted."))
+        } else {
+            Ok(SubmissionResult::ok_with_message("Nothing to interrupt."))
         }
     }
 
@@ -1971,7 +1833,9 @@ impl Agent {
                     chrono::Utc::now(),
                     Some(chrono::Utc::now()),
                 )
-                .with_runtime_descriptor(Some(&interactive_chat_runtime_descriptor()))
+                .with_runtime_descriptor(Some(&crate::agent::run_artifact::run_runtime_descriptor(
+                    &interactive_chat_runtime_descriptor(),
+                )))
                 .with_metadata(serde_json::json!({
                     "event": "thread_compaction",
                     "thread_id": thread_id,
@@ -2053,10 +1917,7 @@ impl Agent {
             .threads
             .get_mut(&thread_id)
             .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-        thread.turns.clear();
-        thread.state = ThreadState::Idle;
-        thread.pending_approval = None;
-        thread.pending_auth = None;
+        thinclaw_agent::thread_ops::clear_thread(thread);
         let usage_percent = self.context_monitor.usage_percent(&thread.messages());
         let mut session_extract_artifact = crate::agent::AgentRunArtifact::new(
             "thread_clear",
@@ -2064,7 +1925,9 @@ impl Agent {
             chrono::Utc::now(),
             Some(chrono::Utc::now()),
         )
-        .with_runtime_descriptor(Some(&interactive_chat_runtime_descriptor()))
+        .with_runtime_descriptor(Some(&crate::agent::run_artifact::run_runtime_descriptor(
+            &interactive_chat_runtime_descriptor(),
+        )))
         .with_metadata(serde_json::json!({
             "event": "thread_clear",
             "thread_id": thread_id,
@@ -2137,7 +2000,7 @@ impl Agent {
             let thread_snapshot = {
                 let mut sess = session.lock().await;
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.await_approval(pending);
+                    thinclaw_agent::thread_ops::await_thread_approval(thread, pending);
                     Some(thread.clone())
                 } else {
                     None
@@ -2282,9 +2145,7 @@ impl Agent {
             .await
             {
                 Ok(execution::ToolPrepareOutcome::Ready(prepared)) => {
-                    execution::execute_tool_call(&prepared, self.safety(), &job_ctx)
-                        .await
-                        .map(|output| output.sanitized_content)
+                    execution::execute_tool_call(&prepared, self.safety(), &job_ctx).await
                 }
                 Ok(execution::ToolPrepareOutcome::NeedsApproval(_)) => {
                     Err(crate::error::ToolError::AuthRequired {
@@ -2302,17 +2163,19 @@ impl Agent {
                     StatusUpdate::ToolCompleted {
                         name: pending.tool_name.clone(),
                         success: tool_result.is_ok(),
-                        result_preview: tool_result
-                            .as_ref()
-                            .ok()
-                            .map(|s| crate::agent::dispatcher::truncate_preview(s, 500)),
+                        result_preview: tool_result.as_ref().ok().map(|output| {
+                            crate::agent::dispatcher::truncate_preview(
+                                &output.sanitized_content,
+                                500,
+                            )
+                        }),
                     },
                     &message.metadata,
                 )
                 .await;
 
             if let Ok(ref output) = tool_result
-                && !output.is_empty()
+                && !output.sanitized_content.is_empty()
             {
                 let _ = self
                     .channels
@@ -2320,7 +2183,8 @@ impl Agent {
                         &message.channel,
                         StatusUpdate::ToolResult {
                             name: pending.tool_name.clone(),
-                            preview: output.clone(),
+                            preview: output.sanitized_content.clone(),
+                            artifacts: output.artifacts.clone(),
                         },
                         &message.metadata,
                     )
@@ -2347,7 +2211,7 @@ impl Agent {
                 {
                     match &tool_result {
                         Ok(output) => {
-                            turn.record_tool_result(serde_json::json!(output));
+                            turn.record_tool_result(serde_json::json!(output.sanitized_content));
                         }
                         Err(e) => {
                             turn.record_tool_error(e.to_string());
@@ -2358,12 +2222,21 @@ impl Agent {
 
             // If tool auth returned an auth-required state, enter auth mode when needed and
             // return instructions directly (skip agentic loop continuation).
-            if let Some(auth_request) = check_auth_required(&pending.tool_name, &tool_result) {
+            if let Some(auth_request) = check_auth_required_content(
+                &pending.tool_name,
+                tool_result
+                    .as_ref()
+                    .ok()
+                    .map(|output| output.sanitized_content.as_str()),
+            ) {
                 self.handle_auth_intercept(
                     &session,
                     thread_id,
                     message,
-                    &tool_result,
+                    tool_result
+                        .as_ref()
+                        .ok()
+                        .map(|output| output.sanitized_content.as_str()),
                     auth_request.extension_name,
                     auth_request.instructions.clone(),
                     auth_request.auth_mode,
@@ -2377,7 +2250,7 @@ impl Agent {
                 Ok(output) => {
                     let sanitized = self
                         .safety()
-                        .sanitize_tool_output(&pending.tool_name, &output);
+                        .sanitize_tool_output(&pending.tool_name, &output.sanitized_content);
                     self.safety().wrap_for_llm(
                         &pending.tool_name,
                         &sanitized.content,
@@ -2415,7 +2288,8 @@ impl Agent {
             // hooks, approval checks, validation, and rate limits stay
             // aligned with the live dispatcher path.
             let mut preflight_tool_calls: Vec<crate::llm::ToolCall> = Vec::new();
-            let mut immediate_results: Vec<(usize, Result<String, Error>)> = Vec::new();
+            let mut immediate_results: Vec<(usize, Result<execution::ToolExecutionOutput, Error>)> =
+                Vec::new();
             let mut runnable: Vec<(usize, crate::llm::ToolCall, execution::PreparedToolCall)> =
                 Vec::new();
             let mut approval_needed: Option<(
@@ -2473,7 +2347,7 @@ impl Agent {
             }
 
             // === Phase 2: Parallel execution ===
-            let mut exec_results: Vec<Option<Result<String, Error>>> =
+            let mut exec_results: Vec<Option<Result<execution::ToolExecutionOutput, Error>>> =
                 (0..preflight_tool_calls.len()).map(|_| None).collect();
             for (idx, result) in immediate_results {
                 exec_results[idx] = Some(result);
@@ -2498,24 +2372,26 @@ impl Agent {
                         )
                         .await;
 
-                    let result = execution::execute_tool_call(&prepared, self.safety(), &job_ctx)
-                        .await
-                        .map(|output| output.sanitized_content);
+                    let result =
+                        execution::execute_tool_call(&prepared, self.safety(), &job_ctx).await;
 
-                    let _ =
-                        self.channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::ToolCompleted {
-                                    name: tc.name.clone(),
-                                    success: result.is_ok(),
-                                    result_preview: result.as_ref().ok().map(|s| {
-                                        crate::agent::dispatcher::truncate_preview(s, 500)
-                                    }),
-                                },
-                                &message.metadata,
-                            )
-                            .await;
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ToolCompleted {
+                                name: tc.name.clone(),
+                                success: result.is_ok(),
+                                result_preview: result.as_ref().ok().map(|output| {
+                                    crate::agent::dispatcher::truncate_preview(
+                                        &output.sanitized_content,
+                                        500,
+                                    )
+                                }),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
 
                     exec_results[pf_idx] = Some(result);
                 }
@@ -2546,9 +2422,8 @@ impl Agent {
                             )
                             .await;
 
-                        let result = execution::execute_tool_call(&prepared, &safety, &job_ctx)
-                            .await
-                            .map(|output| output.sanitized_content);
+                        let result =
+                            execution::execute_tool_call(&prepared, &safety, &job_ctx).await;
 
                         let _ = channels
                             .send_status(
@@ -2556,8 +2431,11 @@ impl Agent {
                                 StatusUpdate::ToolCompleted {
                                     name: tc.name.clone(),
                                     success: result.is_ok(),
-                                    result_preview: result.as_ref().ok().map(|s| {
-                                        crate::agent::dispatcher::truncate_preview(s, 500)
+                                    result_preview: result.as_ref().ok().map(|output| {
+                                        crate::agent::dispatcher::truncate_preview(
+                                            &output.sanitized_content,
+                                            500,
+                                        )
                                     }),
                                 },
                                 &metadata,
@@ -2568,8 +2446,9 @@ impl Agent {
                     });
                 }
 
-                let mut ordered: Vec<Option<(usize, Result<String, Error>)>> =
-                    (0..runnable_count).map(|_| None).collect();
+                let mut ordered: Vec<
+                    Option<(usize, Result<execution::ToolExecutionOutput, Error>)>,
+                > = (0..runnable_count).map(|_| None).collect();
                 while let Some(join_result) = join_set.join_next().await {
                     match join_result {
                         Ok((spawn_idx, pf_idx, result)) => {
@@ -2619,7 +2498,7 @@ impl Agent {
                 })
             {
                 if let Ok(ref output) = deferred_result
-                    && !output.is_empty()
+                    && !output.sanitized_content.is_empty()
                 {
                     let _ = self
                         .channels
@@ -2627,7 +2506,8 @@ impl Agent {
                             &message.channel,
                             StatusUpdate::ToolResult {
                                 name: tc.name.clone(),
-                                preview: output.clone(),
+                                preview: output.sanitized_content.clone(),
+                                artifacts: output.artifacts.clone(),
                             },
                             &message.metadata,
                         )
@@ -2641,7 +2521,9 @@ impl Agent {
                         && let Some(turn) = thread.last_turn_mut()
                     {
                         match &deferred_result {
-                            Ok(output) => turn.record_tool_result(serde_json::json!(output)),
+                            Ok(output) => {
+                                turn.record_tool_result(serde_json::json!(output.sanitized_content))
+                            }
                             Err(e) => turn.record_tool_error(e.to_string()),
                         }
                     }
@@ -2649,13 +2531,22 @@ impl Agent {
 
                 // Auth detection — defer return until all results are recorded
                 if deferred_auth.is_none()
-                    && let Some(auth_request) = check_auth_required(&tc.name, &deferred_result)
+                    && let Some(auth_request) = check_auth_required_content(
+                        &tc.name,
+                        deferred_result
+                            .as_ref()
+                            .ok()
+                            .map(|output| output.sanitized_content.as_str()),
+                    )
                 {
                     self.handle_auth_intercept(
                         &session,
                         thread_id,
                         message,
-                        &deferred_result,
+                        deferred_result
+                            .as_ref()
+                            .ok()
+                            .map(|output| output.sanitized_content.as_str()),
                         auth_request.extension_name,
                         auth_request.instructions.clone(),
                         auth_request.auth_mode,
@@ -2666,7 +2557,9 @@ impl Agent {
 
                 let deferred_content = match deferred_result {
                     Ok(output) => {
-                        let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
+                        let sanitized = self
+                            .safety()
+                            .sanitize_tool_output(&tc.name, &output.sanitized_content);
                         self.safety().wrap_for_llm(
                             &tc.name,
                             &sanitized.content,
@@ -2704,7 +2597,7 @@ impl Agent {
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.await_approval(new_pending);
+                        thinclaw_agent::thread_ops::await_thread_approval(thread, new_pending);
                     }
                 }
                 self.persist_thread_runtime_snapshot(message, &session, thread_id)
@@ -2744,10 +2637,9 @@ impl Agent {
             match result {
                 Ok(AgenticLoopResult::Response(response))
                 | Ok(AgenticLoopResult::Streamed(response)) => {
-                    thread.complete_turn(&response);
-                    let usage_percent = self.context_monitor.usage_percent(&thread.messages());
-                    let thread_snapshot = thread.clone();
-                    let turn_number = thread.turn_number();
+                    let (turn_number, messages) =
+                        thinclaw_agent::thread_ops::complete_thread_response(thread, &response);
+                    let usage_percent = self.context_monitor.usage_percent(&messages);
                     // User message already persisted at turn start; save assistant response
                     self.persist_assistant_response(
                         thread_id,
@@ -2758,7 +2650,6 @@ impl Agent {
                     )
                     .await;
                     drop(sess);
-                    let _ = thread_snapshot;
                     self.sync_context_pressure_warning(message, thread_id, usage_percent)
                         .await;
                     self.persist_thread_runtime_snapshot(message, &session, thread_id)
@@ -2784,9 +2675,9 @@ impl Agent {
                     let tool_name = new_pending.tool_name.clone();
                     let description = new_pending.description.clone();
                     let parameters = new_pending.parameters.clone();
-                    thread.await_approval(new_pending);
-                    let usage_percent = self.context_monitor.usage_percent(&thread.messages());
-                    let thread_snapshot = thread.clone();
+                    let messages =
+                        thinclaw_agent::thread_ops::await_thread_approval(thread, new_pending);
+                    let usage_percent = self.context_monitor.usage_percent(&messages);
                     let _ = self
                         .channels
                         .send_status(
@@ -2796,7 +2687,6 @@ impl Agent {
                         )
                         .await;
                     drop(sess);
-                    let _ = thread_snapshot;
                     self.sync_context_pressure_warning(message, thread_id, usage_percent)
                         .await;
                     self.persist_thread_runtime_snapshot(message, &session, thread_id)
@@ -2809,12 +2699,11 @@ impl Agent {
                     })
                 }
                 Err(e) => {
-                    thread.fail_turn(e.to_string());
-                    let usage_percent = self.context_monitor.usage_percent(&thread.messages());
-                    let thread_snapshot = thread.clone();
+                    let messages =
+                        thinclaw_agent::thread_ops::fail_thread_turn(thread, &e.to_string());
+                    let usage_percent = self.context_monitor.usage_percent(&messages);
                     // User message already persisted at turn start
                     drop(sess);
-                    let _ = thread_snapshot;
                     self.sync_context_pressure_warning(message, thread_id, usage_percent)
                         .await;
                     self.persist_thread_runtime_snapshot(message, &session, thread_id)
@@ -2833,11 +2722,9 @@ impl Agent {
                 let mut sess = session.lock().await;
                 let session_id = sess.id;
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.clear_pending_approval();
-                    thread.complete_turn(&rejection);
-                    let usage_percent = self.context_monitor.usage_percent(&thread.messages());
-                    let thread_snapshot = thread.clone();
-                    let turn_number = thread.turn_number();
+                    let (turn_number, messages) =
+                        thinclaw_agent::thread_ops::reject_pending_approval(thread, &rejection);
+                    let usage_percent = self.context_monitor.usage_percent(&messages);
                     // User message already persisted at turn start; save rejection response
                     self.persist_assistant_response(
                         thread_id,
@@ -2848,7 +2735,6 @@ impl Agent {
                     )
                     .await;
                     drop(sess);
-                    let _ = thread_snapshot;
                     self.sync_context_pressure_warning(message, thread_id, usage_percent)
                         .await;
                     self.persist_thread_runtime_snapshot(message, &session, thread_id)
@@ -2879,19 +2765,23 @@ impl Agent {
         session: &Arc<Mutex<Session>>,
         thread_id: Uuid,
         message: &IncomingMessage,
-        tool_result: &Result<String, Error>,
+        tool_result_content: Option<&str>,
         ext_name: String,
         instructions: String,
         auth_mode: PendingAuthMode,
     ) {
-        let auth_data = parse_auth_result(tool_result);
+        let auth_data = parse_auth_result_content(tool_result_content);
         let thread_snapshot = {
             let mut sess = session.lock().await;
             let session_id = sess.id;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.enter_auth_mode(ext_name.clone(), auth_mode);
-                thread.complete_turn(&instructions);
-                let turn_number = thread.turn_number();
+                let (turn_number, _) =
+                    thinclaw_agent::thread_ops::enter_auth_mode_and_complete_turn(
+                        thread,
+                        ext_name.clone(),
+                        auth_mode,
+                        &instructions,
+                    );
                 // User message already persisted at turn start; save auth instructions
                 self.persist_assistant_response(
                     thread_id,
@@ -3153,18 +3043,25 @@ impl Agent {
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
 
-        if let Some(checkpoint) = mgr.restore(checkpoint_id) {
+        let description = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-            thread.restore_from_messages(checkpoint.messages);
-            drop(sess);
+            thinclaw_agent::thread_ops::restore_thread_from_checkpoint(
+                thread,
+                &mut mgr,
+                checkpoint_id,
+            )
+        };
+
+        if let Some(description) = description {
+            drop(mgr);
             self.clear_thread_runtime_transients(thread_id).await;
             Ok(SubmissionResult::ok_with_message(format!(
                 "Resumed from checkpoint: {}",
-                checkpoint.description
+                description
             )))
         } else {
             Ok(SubmissionResult::error("Checkpoint not found."))

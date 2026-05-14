@@ -1,0 +1,54 @@
+//! Echo tool for testing.
+
+use async_trait::async_trait;
+
+use thinclaw_tools_core::{Tool, ToolError, ToolMetadata, ToolOutput, require_str};
+use thinclaw_types::JobContext;
+
+/// Simple echo tool for testing.
+pub struct EchoTool;
+
+#[async_trait]
+impl Tool for EchoTool {
+    fn name(&self) -> &str {
+        "echo"
+    }
+
+    fn description(&self) -> &str {
+        "Echo the provided text back unchanged. Use only for tool-plumbing tests or \
+         minimal debugging, not for normal task work."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The message to echo back"
+                }
+            },
+            "required": ["message"]
+        })
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        ToolMetadata::read_only()
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let message = require_str(&params, "message")?;
+
+        Ok(ToolOutput::text(message, start.elapsed()))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false // Internal tool, no external data
+    }
+}

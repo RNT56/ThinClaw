@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+pub use thinclaw_types::sandbox::JobMode;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -16,33 +16,6 @@ use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
 use crate::sandbox::connect_docker;
 use crate::sandbox_jobs::SandboxJobSpec;
-
-/// Which mode a sandbox container runs in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum JobMode {
-    /// Standard ThinClaw worker with proxied LLM calls.
-    Worker,
-    /// Claude Code bridge that spawns the `claude` CLI directly.
-    ClaudeCode,
-    /// Codex bridge that spawns the `codex` CLI directly.
-    CodexCode,
-}
-
-impl JobMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Worker => "worker",
-            Self::ClaudeCode => "claude_code",
-            Self::CodexCode => "codex_code",
-        }
-    }
-}
-
-impl std::fmt::Display for JobMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
 
 /// Configuration for the container job manager.
 #[derive(Debug, Clone)]

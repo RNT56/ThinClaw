@@ -1,0 +1,138 @@
+{
+  "type": "channel",
+  "name": "twitch",
+  "description": "Twitch EventSub/channel chat webhook channel",
+  "formatting_hints": "Twitch chat is fast and short-form. Keep replies brief and plain text.",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "twitch_app_access_token",
+        "prompt": "Enter your Twitch app access token",
+        "optional": false
+      },
+      {
+        "name": "twitch_client_id",
+        "prompt": "Enter your Twitch client ID",
+        "optional": false
+      },
+      {
+        "name": "twitch_webhook_secret",
+        "prompt": "Enter your Twitch EventSub secret",
+        "optional": false
+      }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.twitch.tv",
+          "path_prefix": "/helix/"
+        }
+      ],
+      "credentials": {
+        "twitch_app_access_token": {
+          "secret_name": "twitch_app_access_token",
+          "location": {
+            "type": "bearer"
+          },
+          "host_patterns": [
+            "api.twitch.tv"
+          ]
+        },
+        "twitch_client_id": {
+          "secret_name": "twitch_client_id",
+          "location": {
+            "type": "header",
+            "name": "Client-Id"
+          },
+          "host_patterns": [
+            "api.twitch.tv"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 3000
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "twitch_*"
+      ]
+    },
+    "channel": {
+      "allowed_paths": [
+        "/webhook/twitch"
+      ],
+      "allow_polling": false,
+      "workspace_prefix": "channels/twitch/",
+      "emit_rate_limit": {
+        "messages_per_minute": 60,
+        "messages_per_hour": 3000
+      },
+      "webhook": {
+        "secret_header": "Twitch-Eventsub-Message-Signature",
+        "secret_name": "twitch_webhook_secret",
+        "secret_validation": "twitch_eventsub_hmac_sha256"
+      }
+    }
+  },
+  "config": {
+    "channel_name": "twitch",
+    "display_name": "Twitch",
+    "webhook_path": "/webhook/twitch",
+    "mapping": {
+      "text": [
+        "event.message.text",
+        "event.message.fragments[0].text",
+        "message.text",
+        "text"
+      ],
+      "user_id": [
+        "event.chatter_user_id",
+        "event.user_id",
+        "user.id"
+      ],
+      "user_name": [
+        "event.chatter_user_name",
+        "event.user_name",
+        "user.name"
+      ],
+      "chat_id": [
+        "event.broadcaster_user_id",
+        "event.room_id",
+        "chat_id"
+      ],
+      "chat_type": [
+        "subscription.type",
+        "chat_type"
+      ],
+      "message_id": [
+        "event.message_id",
+        "id"
+      ]
+    },
+    "response": {
+      "url": "https://api.twitch.tv/helix/chat/messages",
+      "method": "POST",
+      "body_format": "json",
+      "body": {
+        "broadcaster_id": "{chat_id}",
+        "sender_id": "{user_id}",
+        "message": "{content}"
+      },
+      "headers": {
+        "Authorization": "Bearer {TWITCH_APP_ACCESS_TOKEN}",
+        "Client-Id": "{TWITCH_CLIENT_ID}"
+      }
+    },
+    "challenge": {
+      "method": "POST",
+      "match_path": "subscription.status",
+      "match_value": "webhook_callback_verification_pending",
+      "response_path": "challenge",
+      "response_format": "text"
+    }
+  }
+}

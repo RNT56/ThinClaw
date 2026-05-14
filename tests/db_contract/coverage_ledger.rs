@@ -15,9 +15,21 @@ pub(crate) struct CoverageEntry {
 }
 
 pub(crate) fn build_ledger() -> Vec<CoverageEntry> {
-    let src = include_str!("../../src/db/mod.rs");
     let mut entries = Vec::new();
 
+    parse_source(
+        include_str!("../../crates/thinclaw-db/src/lib.rs"),
+        &mut entries,
+    );
+    parse_source(
+        include_str!("../../crates/thinclaw-workspace/src/store.rs"),
+        &mut entries,
+    );
+
+    entries
+}
+
+fn parse_source(src: &str, entries: &mut Vec<CoverageEntry>) {
     let mut active_trait: Option<String> = None;
     for line in src.lines() {
         let trimmed = line.trim();
@@ -45,8 +57,6 @@ pub(crate) fn build_ledger() -> Vec<CoverageEntry> {
             });
         }
     }
-
-    entries
 }
 
 fn parse_trait_name(line: &str) -> Option<&str> {

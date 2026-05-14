@@ -45,6 +45,9 @@ use crate::tools::wasm::{
     WasmToolAuthCheck, WasmToolAuthMode, WasmToolAuthStatus, WasmToolAuthorizationRequest,
     WasmToolLoader, WasmToolOAuthFlow, WasmToolRuntime, discover_tools,
 };
+use thinclaw_types::{
+    IntegrationSetupStatus, SetupAction, SetupAuthMode, SetupSecretDescriptor, SetupState,
+};
 
 /// Pending OAuth authorization state.
 struct PendingAuth {
@@ -91,6 +94,7 @@ pub struct ExtensionSetupSchema {
     pub auth_url: Option<String>,
     pub instructions: Option<String>,
     pub setup_url: Option<String>,
+    pub validation_url: Option<String>,
     pub shared_auth_provider: Option<String>,
     pub missing_scopes: Vec<String>,
 }
@@ -107,6 +111,18 @@ fn normalize_callback_base(raw: &str) -> Option<String> {
         return Some(stripped.trim_end_matches('/').to_string());
     }
     Some(trimmed.to_string())
+}
+
+fn setup_auth_mode_from_schema(mode: &str, fallback: SetupAuthMode) -> SetupAuthMode {
+    match mode {
+        "manual_token" | "secrets" | "manual_secrets" => SetupAuthMode::ManualSecrets,
+        "oauth" => SetupAuthMode::OAuth,
+        "shared_oauth" | "external_oauth_sync" => SetupAuthMode::SharedOAuth,
+        "native_plugin" => SetupAuthMode::NativePlugin,
+        "remote_secret_backend" => SetupAuthMode::RemoteSecretBackend,
+        "none" => SetupAuthMode::None,
+        _ => fallback,
+    }
 }
 
 /// Central manager for extension lifecycle operations.
@@ -978,11 +994,7 @@ impl ExtensionManager {
         &self,
     ) -> Result<crate::tools::mcp::config::McpServersFile, crate::tools::mcp::config::ConfigError>
     {
-        if let Some(ref store) = self.store {
-            crate::tools::mcp::config::load_mcp_servers_from_db(store.as_ref(), &self.user_id).await
-        } else {
-            crate::tools::mcp::config::load_mcp_servers().await
-        }
+        self.mcp_config_store().load_servers().await
     }
 
     async fn get_mcp_server(
@@ -1001,13 +1013,7 @@ impl ExtensionManager {
         &self,
         config: McpServerConfig,
     ) -> Result<(), crate::tools::mcp::config::ConfigError> {
-        config.validate()?;
-        if let Some(ref store) = self.store {
-            crate::tools::mcp::config::add_mcp_server_db(store.as_ref(), &self.user_id, config)
-                .await
-        } else {
-            crate::tools::mcp::config::add_mcp_server(config).await
-        }
+        self.mcp_config_store().upsert_server(config).await
     }
 
     pub async fn list_mcp_server_configs(
@@ -1085,7 +1091,7 @@ impl ExtensionManager {
         &self,
         server: &McpServerConfig,
     ) -> Result<Arc<McpClient>, ExtensionError> {
-        let config_store = Some(self.mcp_config_store());
+        let config_store = Some(self.mcp_config_store().into_inner());
         let client = if server.is_stdio() {
             McpClient::new_stdio_with_store(server, config_store)
                 .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?
@@ -1180,12 +1186,7 @@ impl ExtensionManager {
         &self,
         name: &str,
     ) -> Result<(), crate::tools::mcp::config::ConfigError> {
-        if let Some(ref store) = self.store {
-            crate::tools::mcp::config::remove_mcp_server_db(store.as_ref(), &self.user_id, name)
-                .await
-        } else {
-            crate::tools::mcp::config::remove_mcp_server(name).await
-        }
+        self.mcp_config_store().remove_server(name).await
     }
 
     // ── Private helpers ──────────────────────────────────────────────────
@@ -2860,6 +2861,7 @@ impl ExtensionManager {
                         auth_url: None,
                         instructions: None,
                         setup_url: None,
+                        validation_url: None,
                         shared_auth_provider: None,
                         missing_scopes: Vec::new(),
                     });
@@ -2897,7 +2899,8 @@ impl ExtensionManager {
                     fields,
                     auth_url: None,
                     instructions: None,
-                    setup_url: cap_file.setup.validation_endpoint.clone(),
+                    setup_url: None,
+                    validation_url: cap_file.setup.validation_endpoint.clone(),
                     shared_auth_provider: None,
                     missing_scopes: Vec::new(),
                 })
@@ -2905,6 +2908,10 @@ impl ExtensionManager {
             ExtensionKind::WasmTool => {
                 let auth = self.load_wasm_tool_auth(name).await?;
                 let auth_result = self.auth_wasm_tool(name, None, context).await?;
+                let validation_url = auth
+                    .as_ref()
+                    .and_then(|auth| auth.validation_endpoint.as_ref())
+                    .map(|endpoint| endpoint.url.clone());
                 let fields = if auth_result.auth_mode == "manual_token" {
                     auth.map(|auth| {
                         vec![crate::channels::web::types::SecretFieldInfo {
@@ -2931,6 +2938,7 @@ impl ExtensionManager {
                     auth_url: auth_result.auth_url,
                     instructions: auth_result.instructions,
                     setup_url: auth_result.setup_url,
+                    validation_url,
                     shared_auth_provider: auth_result.shared_auth_provider,
                     missing_scopes: auth_result.missing_scopes,
                 })
@@ -2942,9 +2950,166 @@ impl ExtensionManager {
                 auth_url: None,
                 instructions: None,
                 setup_url: None,
+                validation_url: None,
                 shared_auth_provider: None,
                 missing_scopes: Vec::new(),
             }),
+        }
+    }
+
+    /// Build a descriptor-rich setup status for UI/API/onboarding surfaces.
+    ///
+    /// `InstalledExtension::setup_status` is intentionally cheap and based only
+    /// on list metadata. This method enriches it from installed channel/tool
+    /// schemas so surfaces can show the exact missing secrets and validation
+    /// actions without duplicating file parsing.
+    pub async fn integration_setup_status(
+        &self,
+        extension: &InstalledExtension,
+        context: AuthRequestContext,
+    ) -> IntegrationSetupStatus {
+        let mut status = extension.setup_status();
+        if !extension.installed {
+            return status;
+        }
+
+        let Ok(schema) = self.get_setup_schema(&extension.name, context).await else {
+            return status;
+        };
+
+        status.auth_mode = setup_auth_mode_from_schema(&schema.mode, status.auth_mode);
+        status.required_secrets = schema
+            .fields
+            .iter()
+            .map(|field| SetupSecretDescriptor {
+                name: field.name.clone(),
+                prompt: field.prompt.clone(),
+                optional: field.optional,
+                validation_hint: if field.provided {
+                    Some("stored".to_string())
+                } else if field.auto_generate {
+                    Some("auto-generated when left empty".to_string())
+                } else {
+                    None
+                },
+            })
+            .collect();
+        status.setup_url = schema.setup_url;
+        status.validation_url = schema.validation_url;
+
+        if schema.auth_url.is_some()
+            && matches!(
+                status.auth_mode,
+                SetupAuthMode::OAuth | SetupAuthMode::SharedOAuth
+            )
+            && !status.actions.contains(&SetupAction::StartOAuth)
+        {
+            status.actions.push(SetupAction::StartOAuth);
+        }
+        if !status.required_secrets.is_empty()
+            && !status.actions.contains(&SetupAction::ConfigureSecrets)
+        {
+            status.actions.push(SetupAction::ConfigureSecrets);
+        }
+        if !status.actions.contains(&SetupAction::Validate) {
+            status.actions.insert(0, SetupAction::Validate);
+        }
+
+        if status.state == SetupState::NeedsAuth && schema.auth_status == "authenticated" {
+            status.state = if extension.active {
+                SetupState::Ready
+            } else {
+                SetupState::InstalledUnconfigured
+            };
+        }
+        if status.message.is_none() {
+            status.message = schema.instructions.or(Some(schema.auth_status));
+        }
+
+        status
+    }
+
+    /// Validate an installed extension setup without mutating credentials.
+    pub async fn validate_setup(
+        &self,
+        name: &str,
+        context: AuthRequestContext,
+    ) -> Result<String, ExtensionError> {
+        let schema = self.get_setup_schema(name, context).await?;
+        let missing: Vec<String> = schema
+            .fields
+            .iter()
+            .filter(|field| !field.optional && !field.provided)
+            .map(|field| field.name.clone())
+            .collect();
+        if !missing.is_empty() {
+            return Err(ExtensionError::AuthFailed(format!(
+                "Missing required setup secrets for '{}': {}",
+                name,
+                missing.join(", ")
+            )));
+        }
+
+        let Some(mut validation_url) = schema.validation_url.clone() else {
+            return Ok(format!(
+                "Setup metadata for '{}' is complete; no live validation endpoint is declared.",
+                name
+            ));
+        };
+
+        for field in &schema.fields {
+            if !validation_url.contains(&format!("{{{}}}", field.name))
+                && !validation_url.contains(&format!("{{{{{}}}}}", field.name))
+            {
+                continue;
+            }
+            let value = self
+                .secrets
+                .get_for_injection(
+                    &self.user_id,
+                    &field.name,
+                    crate::secrets::SecretAccessContext::new(
+                        "extensions.manager",
+                        "extension_setup_validation",
+                    ),
+                )
+                .await
+                .map_err(|e| {
+                    ExtensionError::AuthFailed(format!(
+                        "Unable to read setup secret '{}': {}",
+                        field.name, e
+                    ))
+                })?;
+            validation_url = validation_url
+                .replace(&format!("{{{}}}", field.name), value.expose())
+                .replace(&format!("{{{{{}}}}}", field.name), value.expose());
+        }
+
+        let parsed = url::Url::parse(&validation_url)
+            .map_err(|e| ExtensionError::Other(format!("Invalid validation URL: {e}")))?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(ExtensionError::Other(
+                "Validation URL must use http or https".to_string(),
+            ));
+        }
+
+        let response = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| ExtensionError::Other(e.to_string()))?
+            .get(parsed)
+            .send()
+            .await
+            .map_err(|e| ExtensionError::Other(format!("Validation request failed: {e}")))?;
+
+        if response.status().is_success() {
+            Ok(format!("Setup validation passed for '{}'.", name))
+        } else {
+            Err(ExtensionError::AuthFailed(format!(
+                "Setup validation failed for '{}': HTTP {}",
+                name,
+                response.status()
+            )))
         }
     }
 

@@ -6,9 +6,6 @@
 //! - A local-first `LearningOrchestrator` that records evaluations,
 //!   creates candidates, applies low-risk mutations, and tracks code proposals.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 #[cfg(test)]
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

@@ -2,95 +2,11 @@
 
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::llm::ChatMessage;
-
-/// A record of an action taken during job execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActionRecord {
-    /// Unique action ID.
-    pub id: Uuid,
-    /// Sequence number within the job.
-    pub sequence: u32,
-    /// Tool that was used.
-    pub tool_name: String,
-    /// Input parameters.
-    pub input: serde_json::Value,
-    /// Raw output (before sanitization).
-    pub output_raw: Option<String>,
-    /// Sanitized output.
-    pub output_sanitized: Option<serde_json::Value>,
-    /// Any sanitization warnings.
-    pub sanitization_warnings: Vec<String>,
-    /// Cost of the action.
-    pub cost: Option<Decimal>,
-    /// Duration of the action.
-    pub duration: Duration,
-    /// Whether the action succeeded.
-    pub success: bool,
-    /// Error message if failed.
-    pub error: Option<String>,
-    /// When the action was executed.
-    pub executed_at: DateTime<Utc>,
-}
-
-impl ActionRecord {
-    /// Create a new action record.
-    pub fn new(sequence: u32, tool_name: impl Into<String>, input: serde_json::Value) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            sequence,
-            tool_name: tool_name.into(),
-            input,
-            output_raw: None,
-            output_sanitized: None,
-            sanitization_warnings: Vec::new(),
-            cost: None,
-            duration: Duration::ZERO,
-            success: false,
-            error: None,
-            executed_at: Utc::now(),
-        }
-    }
-
-    /// Mark the action as successful.
-    pub fn succeed(
-        mut self,
-        output_raw: Option<String>,
-        output_sanitized: serde_json::Value,
-        duration: Duration,
-    ) -> Self {
-        self.success = true;
-        self.output_raw = output_raw;
-        self.output_sanitized = Some(output_sanitized);
-        self.duration = duration;
-        self
-    }
-
-    /// Mark the action as failed.
-    pub fn fail(mut self, error: impl Into<String>, duration: Duration) -> Self {
-        self.success = false;
-        self.error = Some(error.into());
-        self.duration = duration;
-        self
-    }
-
-    /// Add sanitization warnings.
-    pub fn with_warnings(mut self, warnings: Vec<String>) -> Self {
-        self.sanitization_warnings = warnings;
-        self
-    }
-
-    /// Set the cost.
-    pub fn with_cost(mut self, cost: Decimal) -> Self {
-        self.cost = Some(cost);
-        self
-    }
-}
+pub use thinclaw_types::ActionRecord;
 
 /// Conversation history.
 #[derive(Debug, Clone, Default)]

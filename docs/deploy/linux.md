@@ -9,7 +9,8 @@ and development boxes. For Raspberry Pi OS Lite, use
 | Goal | Recommended Path |
 |---|---|
 | Fast local install | Release installer, then `thinclaw onboard` |
-| Generic always-on server | Release binary, `thinclaw onboard --profile remote`, then service install |
+| Generic always-on server | Release installer, `thinclaw onboard --profile remote`, then service install |
+| Small VPS / SD-card host | Release installer with `--profile edge` |
 | Container deployment | [docker.md](docker.md) |
 | Raspberry Pi OS Lite 64-bit | [raspberry-pi-os-lite.md](raspberry-pi-os-lite.md) |
 | Remote Scrappy access | [remote-access.md](remote-access.md) |
@@ -78,6 +79,13 @@ thinclaw onboard
 thinclaw
 ```
 
+Small-machine install:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh -s -- --profile edge
+```
+
 Open the local gateway:
 
 ```text
@@ -107,7 +115,7 @@ thinclaw --debug run --no-onboard
 
 ## Build From Source
 
-Debian or Ubuntu:
+Build from source only when you need local code changes. Debian or Ubuntu:
 
 ```bash
 sudo apt-get update
@@ -118,7 +126,7 @@ rustup target add wasm32-wasip2
 
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
-cargo build --release --features full
+cargo build --release --features full --bin thinclaw
 ./target/release/thinclaw onboard
 ```
 
@@ -132,12 +140,12 @@ rustup target add wasm32-wasip2
 
 git clone https://github.com/RNT56/ThinClaw.git
 cd ThinClaw
-cargo build --release --features full
+cargo build --release --features full --bin thinclaw
 ./target/release/thinclaw onboard
 ```
 
-Use `cargo build --release` only when you intentionally want the smaller
-default `light` profile. See [../BUILD_PROFILES.md](../BUILD_PROFILES.md).
+Use `cargo build --release --bin thinclaw` only when you intentionally want the
+smaller default `light` profile. See [../BUILD_PROFILES.md](../BUILD_PROFILES.md).
 
 ## Run As A systemd User Service
 
@@ -220,7 +228,7 @@ Use [../DESKTOP_AUTONOMY.md](../DESKTOP_AUTONOMY.md) as the canonical guide.
 If the source build runs but integrations are missing, rebuild with:
 
 ```bash
-cargo build --release --features full
+cargo build --release --features full --bin thinclaw
 ```
 
 If the gateway is reachable locally but not from another machine, check:

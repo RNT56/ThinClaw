@@ -80,10 +80,18 @@ This document records closure for the Wave 7 and Wave 8 remediation scope from t
   - `docs/RESEARCH_AND_EXPERIMENTS.md`
 - Security doc updated for keychain cache opt-in:
   - `docs/SECURITY.md`
+- Security doc remote secret backend wording now matches runtime support:
+  - `docs/SECURITY.md`
 - Feature parity matrix aligned to runtime:
   - `FEATURE_PARITY.md`
 - Audit plan module paths cleaned:
   - `docs/CODEBASE_AUDIT_PLAN.md`
+
+3. Release hygiene gates:
+- Package source trees are guarded against tracked Cargo `target/` artifacts:
+  - `tests/repo_hygiene.rs`
+- System status now exposes LLM runtime revision, health, and last error alongside legacy fields:
+  - `src/api/system.rs`
 
 ## Notes
 

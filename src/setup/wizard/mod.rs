@@ -1811,24 +1811,59 @@ impl SetupWizard {
         }
 
         for wasm_channel in &self.settings.channels.wasm_channels {
-            let ready = dirs::home_dir()
-                .map(|home| {
-                    home.join(".thinclaw/channels")
-                        .join(format!("{wasm_channel}.wasm"))
-                })
-                .is_some_and(|path| path.exists());
+            let channel_dir = dirs::home_dir().map(|home| home.join(".thinclaw/channels"));
+            let wasm_path = channel_dir
+                .as_ref()
+                .map(|dir| dir.join(format!("{wasm_channel}.wasm")));
+            let caps_path = channel_dir
+                .as_ref()
+                .map(|dir| dir.join(format!("{wasm_channel}.capabilities.json")));
+            let artifact_ready = wasm_path.as_ref().is_some_and(|path| path.exists());
+            let mut missing_required_secrets = Vec::new();
+            if let Some(caps_path) = caps_path.as_ref()
+                && let Ok(bytes) = tokio::fs::read(caps_path).await
+                && let Ok(cap_file) =
+                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+            {
+                for secret in &cap_file.setup.required_secrets {
+                    if secret.optional {
+                        continue;
+                    }
+                    let present = if let Some(secrets_ctx) = secrets.as_ref() {
+                        secrets_ctx
+                            .get_secret(&secret.name)
+                            .await
+                            .map(|value| !value.expose_secret().trim().is_empty())
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if !present {
+                        missing_required_secrets.push(secret.name.clone());
+                    }
+                }
+            }
+            let ready = artifact_ready && missing_required_secrets.is_empty();
             self.verified_channels.insert(wasm_channel.clone(), ready);
             if ready {
                 print_success(&format!(
-                    "WASM channel '{}' is installed and discoverable.",
+                    "WASM channel '{}' is installed and setup-ready.",
                     wasm_channel
                 ));
             } else {
                 issues += 1;
-                print_warning(&format!(
-                    "WASM channel '{}' is enabled but the wasm artifact is missing.",
-                    wasm_channel
-                ));
+                if artifact_ready {
+                    print_warning(&format!(
+                        "WASM channel '{}' is enabled but required setup secrets are missing: {}.",
+                        wasm_channel,
+                        missing_required_secrets.join(", ")
+                    ));
+                } else {
+                    print_warning(&format!(
+                        "WASM channel '{}' is enabled but the wasm artifact is missing.",
+                        wasm_channel
+                    ));
+                }
             }
         }
 

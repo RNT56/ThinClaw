@@ -70,6 +70,40 @@ const LAMBDA_API_BASE: &str = "https://cloud.lambda.ai/api/v1";
 const DEFAULT_RESEARCH_RUNNER_IMAGE: &str = "ghcr.io/thinclaw/research-runner:latest";
 const REMOTE_ADAPTER_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "benchmark", rename_all = "snake_case")]
+enum AgentEnvRunnerConfig {
+    TerminalBench {
+        #[serde(default)]
+        cases: Vec<crate::agent::env::TerminalBenchCase>,
+    },
+    SkillBench {
+        #[serde(default)]
+        cases: Vec<crate::agent::env::SkillBenchCase>,
+    },
+}
+
+fn validate_agent_env_runner_config(runner: &ExperimentRunnerProfile) -> Result<(), String> {
+    let source = runner
+        .backend_config
+        .get("agent_env")
+        .or_else(|| runner.backend_config.get("benchmark_config"))
+        .unwrap_or(&runner.backend_config);
+    if source.get("benchmark").is_none() {
+        return Ok(());
+    }
+    serde_json::from_value::<AgentEnvRunnerConfig>(source.clone())
+        .map(|config| match config {
+            AgentEnvRunnerConfig::TerminalBench { cases } => {
+                let _ = cases.len();
+            }
+            AgentEnvRunnerConfig::SkillBench { cases } => {
+                let _ = cases.len();
+            }
+        })
+        .map_err(|err| format!("Invalid AgentEnv benchmark config: {err}"))
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct LambdaLaunchTemplateInput {
     #[serde(default)]
@@ -133,12 +167,20 @@ pub async fn validate_runner_profile(
                 }
             }
         }
-        ExperimentRunnerBackend::AgentEnv => RunnerValidationOutcome {
-            valid: true,
-            message: "AgentEnv benchmark runner is available for local EnvRunner campaigns."
-                .to_string(),
-            readiness_class: ExperimentRunnerReadinessClass::LaunchReady,
-            launch_eligible: true,
+        ExperimentRunnerBackend::AgentEnv => match validate_agent_env_runner_config(runner) {
+            Ok(()) => RunnerValidationOutcome {
+                valid: true,
+                message: "AgentEnv benchmark runner is available for local EnvRunner campaigns."
+                    .to_string(),
+                readiness_class: ExperimentRunnerReadinessClass::LaunchReady,
+                launch_eligible: true,
+            },
+            Err(message) => RunnerValidationOutcome {
+                valid: false,
+                message,
+                readiness_class: ExperimentRunnerReadinessClass::ManualOnly,
+                launch_eligible: false,
+            },
         },
         ExperimentRunnerBackend::GenericRemoteRunner => RunnerValidationOutcome {
             valid: true,
@@ -1786,5 +1828,45 @@ mod tests {
             ExperimentRunnerReadinessClass::BootstrapReady
         );
         assert!(!outcome.launch_eligible);
+    }
+
+    #[tokio::test]
+    async fn agent_env_runner_validates_camel_case_webui_template_config() {
+        let settings = Settings::default();
+        let mut runner = runner_profile(ExperimentRunnerBackend::AgentEnv);
+        runner.backend_config = serde_json::json!({
+            "benchmark": "terminal_bench",
+            "cases": [{
+                "name": "smoke",
+                "command": "printf ok",
+                "expectedStdoutContains": ["ok"],
+                "expectedExitCode": 0,
+                "timeoutSecs": 5
+            }]
+        });
+
+        let outcome = validate_runner_profile(&runner, &settings, None).await;
+        assert!(outcome.valid, "{}", outcome.message);
+        assert!(outcome.launch_eligible);
+    }
+
+    #[tokio::test]
+    async fn agent_env_runner_rejects_malformed_benchmark_config() {
+        let settings = Settings::default();
+        let mut runner = runner_profile(ExperimentRunnerBackend::AgentEnv);
+        runner.backend_config = serde_json::json!({
+            "benchmark": "skill_bench",
+            "cases": [{
+                "name": "missing-content"
+            }]
+        });
+
+        let outcome = validate_runner_profile(&runner, &settings, None).await;
+        assert!(!outcome.valid);
+        assert!(
+            outcome
+                .message
+                .contains("Invalid AgentEnv benchmark config")
+        );
     }
 }

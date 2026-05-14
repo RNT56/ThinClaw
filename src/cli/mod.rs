@@ -16,6 +16,7 @@
 pub mod agents;
 mod browser;
 mod channels;
+mod comfy;
 mod completion;
 mod config;
 mod cron;
@@ -47,6 +48,7 @@ mod update;
 pub use agents::{AgentCommand, run_agents_command};
 pub use browser::{BrowserCommand, run_browser_command};
 pub use channels::{ChannelCommand, run_channels_command};
+pub use comfy::{ComfyCommand, run_comfy_command};
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use cron::{CronCommand, run_cron_command};
@@ -196,6 +198,10 @@ pub enum Command {
     /// Manage messaging channels
     #[command(subcommand)]
     Channels(ChannelCommand),
+
+    /// Manage ComfyUI media generation
+    #[command(subcommand)]
+    Comfy(ComfyCommand),
 
     /// Manage WASM tools
     #[command(subcommand)]

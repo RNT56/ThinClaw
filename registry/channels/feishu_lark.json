@@ -1,0 +1,24 @@
+{
+  "name": "feishu_lark",
+  "display_name": "Feishu/Lark",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "Feishu/Lark event callback channel",
+  "keywords": ["messaging", "chat", "feishu", "lark"],
+  "source": {
+    "dir": "channels-src/feishu_lark",
+    "capabilities": "feishu_lark.capabilities.json",
+    "crate_name": "feishu-lark-channel"
+  },
+  "artifacts": {
+    "wasm32-wasip2": { "url": null, "sha256": null }
+  },
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Feishu/Lark",
+    "secrets": ["feishu_lark_app_token", "feishu_lark_verification_token", "feishu_lark_webhook_secret"],
+    "shared_auth": null,
+    "setup_url": "https://open.feishu.cn/"
+  },
+  "tags": ["messaging"]
+}

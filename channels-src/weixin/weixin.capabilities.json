@@ -1,0 +1,121 @@
+{
+  "type": "channel",
+  "name": "weixin",
+  "description": "Weixin/WeChat official account webhook channel",
+  "formatting_hints": "Weixin replies should be short plain text unless richer message types are configured.",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "weixin_access_token",
+        "prompt": "Enter your Weixin access token",
+        "optional": false
+      },
+      {
+        "name": "weixin_webhook_secret",
+        "prompt": "Enter your Weixin webhook secret",
+        "optional": false
+      }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.weixin.qq.com",
+          "path_prefix": "/cgi-bin/"
+        }
+      ],
+      "credentials": {
+        "weixin_access_token": {
+          "secret_name": "weixin_access_token",
+          "location": {
+            "type": "query_param",
+            "name": "access_token"
+          },
+          "host_patterns": [
+            "api.weixin.qq.com"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 2000
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "weixin_*"
+      ]
+    },
+    "channel": {
+      "allowed_paths": [
+        "/webhook/weixin"
+      ],
+      "allow_polling": false,
+      "workspace_prefix": "channels/weixin/",
+      "emit_rate_limit": {
+        "messages_per_minute": 60,
+        "messages_per_hour": 2000
+      },
+      "webhook": {
+        "secret_header": "X-Webhook-Secret",
+        "secret_name": "weixin_webhook_secret",
+        "secret_validation": "equals"
+      }
+    }
+  },
+  "config": {
+    "channel_name": "weixin",
+    "display_name": "Weixin",
+    "webhook_path": "/webhook/weixin",
+    "mapping": {
+      "text": [
+        "Content",
+        "content",
+        "text"
+      ],
+      "user_id": [
+        "FromUserName",
+        "from_user_name"
+      ],
+      "user_name": [
+        "FromUserName",
+        "user.name"
+      ],
+      "chat_id": [
+        "FromUserName",
+        "chat_id"
+      ],
+      "chat_type": [
+        "MsgType",
+        "chat_type"
+      ],
+      "message_id": [
+        "MsgId",
+        "msg_id"
+      ]
+    },
+    "response": {
+      "url": "https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token={WEIXIN_ACCESS_TOKEN}",
+      "method": "POST",
+      "body_format": "json",
+      "body": {
+        "touser": "{chat_id}",
+        "msgtype": "text",
+        "text": {
+          "content": "{content}"
+        }
+      }
+    },
+    "methods": [
+      "GET",
+      "POST"
+    ],
+    "challenge": {
+      "method": "GET",
+      "match_path": "query.signature",
+      "response_path": "query.echostr",
+      "response_format": "text"
+    }
+  }
+}

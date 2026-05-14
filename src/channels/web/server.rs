@@ -5,6 +5,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -24,11 +25,13 @@ use crate::channels::web::log_layer::LogBroadcaster;
 pub(crate) use crate::channels::web::rate_limiter::RateLimiter;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::static_files::*;
+use crate::channels::web::types::SseEvent;
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::sandbox_types::{ContainerJobManager, PendingPrompt};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+use thinclaw_gateway::web::ports::{AgentSubmissionPort, IdentityLookupPort, RouteStatePort};
 
 pub(crate) use crate::channels::web::handlers::chat::build_turns_from_db_messages;
 #[cfg(test)]
@@ -49,6 +52,21 @@ pub type PromptQueue = Arc<
         std::collections::HashMap<uuid::Uuid, std::collections::VecDeque<PendingPrompt>>,
     >,
 >;
+
+struct DatabaseGatewayIdentityStore(Arc<dyn Database>);
+
+#[async_trait]
+impl IdentityLookupPort for DatabaseGatewayIdentityStore {
+    async fn infer_primary_user_id_for_channel(
+        &self,
+        channel: &str,
+    ) -> Result<Option<String>, String> {
+        self.0
+            .infer_primary_user_id_for_channel(channel)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
 
 /// Shared state for all gateway handlers.
 pub struct GatewayState {
@@ -117,6 +135,65 @@ pub struct GatewayState {
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// Channel manager for hot-reloading channel settings (e.g., stream mode).
     pub channel_manager: Option<Arc<crate::channels::ChannelManager>>,
+}
+
+#[async_trait]
+impl AgentSubmissionPort for GatewayState {
+    async fn submit_agent_message(&self, message: IncomingMessage) -> Result<(), String> {
+        let tx_guard = self.msg_tx.read().await;
+        let tx = tx_guard
+            .as_ref()
+            .ok_or_else(|| "Channel not started".to_string())?;
+        tx.send(message)
+            .await
+            .map_err(|_| "Channel closed".to_string())
+    }
+}
+
+#[async_trait]
+impl IdentityLookupPort for GatewayState {
+    async fn infer_primary_user_id_for_channel(
+        &self,
+        channel: &str,
+    ) -> Result<Option<String>, String> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
+        store
+            .infer_primary_user_id_for_channel(channel)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[async_trait]
+impl RouteStatePort for GatewayState {
+    async fn mark_conversation_updated(
+        &self,
+        thread_id: &str,
+        reason: &str,
+        channel: Option<&str>,
+    ) -> Result<(), String> {
+        self.sse.broadcast(SseEvent::ConversationUpdated {
+            thread_id: thread_id.to_string(),
+            reason: reason.to_string(),
+            channel: channel.map(ToOwned::to_owned),
+        });
+        Ok(())
+    }
+
+    async fn mark_conversation_deleted(
+        &self,
+        identity: &crate::channels::web::identity_helpers::GatewayRequestIdentity,
+        thread_id: &str,
+    ) -> Result<(), String> {
+        self.sse.broadcast(SseEvent::ConversationDeleted {
+            thread_id: thread_id.to_string(),
+            principal_id: identity.principal_id.clone(),
+            actor_id: identity.actor_id.clone(),
+        });
+        Ok(())
+    }
 }
 
 /// Start the gateway HTTP server.
@@ -200,7 +277,10 @@ pub async fn start_server(
             trusted_proxy_ips,
             fallback_principal_id: state.user_id.clone(),
             fallback_actor_id: state.actor_id.clone(),
-            store: state.store.clone(),
+            store: state.store.as_ref().map(|store| {
+                Arc::new(DatabaseGatewayIdentityStore(Arc::clone(store)))
+                    as Arc<dyn IdentityLookupPort>
+            }),
         }
     };
     let protected = Router::new()
@@ -263,6 +343,10 @@ pub async fn start_server(
         .route(
             "/api/extensions/{name}/reconnect",
             post(extensions_reconnect_handler),
+        )
+        .route(
+            "/api/extensions/{name}/validate",
+            post(extensions_validate_handler),
         )
         .route(
             "/api/extensions/{name}/remove",
