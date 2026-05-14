@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SetupAuthMode {
+    #[default]
     None,
     ManualSecrets,
     OAuth,
@@ -11,27 +12,16 @@ pub enum SetupAuthMode {
     RemoteSecretBackend,
 }
 
-impl Default for SetupAuthMode {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SetupState {
     NotInstalled,
+    #[default]
     InstalledUnconfigured,
     NeedsAuth,
     Ready,
     Degraded,
     Failed,
-}
-
-impl Default for SetupState {
-    fn default() -> Self {
-        Self::InstalledUnconfigured
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

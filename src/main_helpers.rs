@@ -303,7 +303,12 @@ pub(crate) async fn setup_wasm_channels(
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
     extension_manager: Option<&Arc<thinclaw::extensions::ExtensionManager>>,
 ) -> Option<WasmChannelSetup> {
-    let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
+    #[cfg(feature = "wasm-runtime")]
+    let runtime_config = WasmChannelRuntimeConfig::default();
+    #[cfg(not(feature = "wasm-runtime"))]
+    let runtime_config = WasmChannelRuntimeConfig;
+
+    let runtime = match WasmChannelRuntime::new(runtime_config) {
         Ok(r) => Arc::new(r),
         Err(e) => {
             tracing::warn!("Failed to initialize WASM channel runtime: {}", e);

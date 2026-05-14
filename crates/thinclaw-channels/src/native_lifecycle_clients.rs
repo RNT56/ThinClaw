@@ -528,10 +528,8 @@ impl NativeEndpointRegistry {
             }
             removed
         };
-        if removed {
-            if let Err(error) = self.persist().await {
-                tracing::warn!(error = %error, "failed to persist native endpoint unregistration");
-            }
+        if removed && let Err(error) = self.persist().await {
+            tracing::warn!(error = %error, "failed to persist native endpoint unregistration");
         }
         removed
     }

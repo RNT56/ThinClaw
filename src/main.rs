@@ -464,8 +464,6 @@ async fn async_main() -> anyhow::Result<()> {
 
     #[cfg(feature = "tunnel")]
     let (config, active_tunnel) = start_tunnel(config).await;
-    #[cfg(not(feature = "tunnel"))]
-    let _active_tunnel: Option<Box<dyn std::any::Any>> = None;
 
     // ── Orchestrator / container job manager ────────────────────────────
 

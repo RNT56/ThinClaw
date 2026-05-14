@@ -18,18 +18,13 @@ use url::Url;
 
 const DEFAULT_CLIENT_ID_PREFIX: &str = "thinclaw";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ComfyUiMode {
+    #[default]
     LocalExisting,
     LocalManaged,
     Cloud,
-}
-
-impl Default for ComfyUiMode {
-    fn default() -> Self {
-        Self::LocalExisting
-    }
 }
 
 impl ComfyUiMode {
@@ -80,20 +75,15 @@ pub struct ComfyGenerateRequest {
     pub use_websocket: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ComfyAspectRatio {
+    #[default]
     Square,
     Landscape,
     Portrait,
     Wide,
     Tall,
-}
-
-impl Default for ComfyAspectRatio {
-    fn default() -> Self {
-        Self::Square
-    }
 }
 
 impl ComfyAspectRatio {
@@ -187,7 +177,7 @@ pub enum ComfyError {
     Url(#[from] url::ParseError),
 
     #[error("ComfyUI websocket error: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    WebSocket(#[source] Box<tokio_tungstenite::tungstenite::Error>),
 
     #[error("ComfyUI I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -203,6 +193,12 @@ pub enum ComfyError {
 
     #[error("ComfyUI output rejected: {0}")]
     UnsafeOutput(String),
+}
+
+impl From<tokio_tungstenite::tungstenite::Error> for ComfyError {
+    fn from(error: tokio_tungstenite::tungstenite::Error) -> Self {
+        Self::WebSocket(Box::new(error))
+    }
 }
 
 #[derive(Clone)]
@@ -325,14 +321,16 @@ impl ComfyUiClient {
 
         inject_generation_params(
             &mut workflow,
-            &request.prompt,
-            request.negative_prompt.as_deref(),
-            seed,
-            width,
-            height,
-            request.steps,
-            request.cfg,
-            request.model.as_deref(),
+            GenerationParams {
+                prompt: &request.prompt,
+                negative_prompt: request.negative_prompt.as_deref(),
+                seed,
+                width,
+                height,
+                steps: request.steps,
+                cfg: request.cfg,
+                model: request.model.as_deref(),
+            },
         )?;
 
         let client_id = format!("{DEFAULT_CLIENT_ID_PREFIX}-{}", uuid::Uuid::new_v4());
@@ -458,7 +456,7 @@ impl ComfyUiClient {
                     return self.history(prompt_id).await;
                 }
                 Ok(Some(Ok(_))) => {}
-                Ok(Some(Err(error))) => return Err(ComfyError::WebSocket(error)),
+                Ok(Some(Err(error))) => return Err(ComfyError::from(error)),
                 Err(_) => return Err(ComfyError::Timeout(self.config.request_timeout)),
             }
         }
@@ -690,22 +688,26 @@ fn workflow_nodes(workflow: &Value) -> Result<&Map<String, Value>, ComfyError> {
         .ok_or_else(|| ComfyError::InvalidWorkflow("workflow must be an object".to_string()))
 }
 
-fn inject_generation_params(
-    workflow: &mut Value,
-    prompt: &str,
-    negative_prompt: Option<&str>,
+struct GenerationParams<'a> {
+    prompt: &'a str,
+    negative_prompt: Option<&'a str>,
     seed: i64,
     width: u32,
     height: u32,
     steps: Option<u32>,
     cfg: Option<f64>,
-    model: Option<&str>,
+    model: Option<&'a str>,
+}
+
+fn inject_generation_params(
+    workflow: &mut Value,
+    params: GenerationParams<'_>,
 ) -> Result<(), ComfyError> {
     let nodes = workflow.as_object_mut().ok_or_else(|| {
         ComfyError::InvalidWorkflow("workflow must be a mutable object".to_string())
     })?;
     let mut positive_set = false;
-    let mut negative_set = negative_prompt.is_none();
+    let mut negative_set = params.negative_prompt.is_none();
     let mut dimensions_set = false;
     let mut seed_set = false;
 
@@ -727,12 +729,12 @@ fn inject_generation_params(
                         || lower.contains("low quality")
                         || lower.contains("bad anatomy");
                     if is_negative {
-                        if let Some(negative) = negative_prompt {
+                        if let Some(negative) = params.negative_prompt {
                             inputs.insert("text".to_string(), Value::String(negative.to_string()));
                         }
                         negative_set = true;
                     } else if !positive_set {
-                        inputs.insert("text".to_string(), Value::String(prompt.to_string()));
+                        inputs.insert("text".to_string(), Value::String(params.prompt.to_string()));
                         positive_set = true;
                     }
                 }
@@ -744,27 +746,27 @@ fn inject_generation_params(
                     } else {
                         "noise_seed"
                     };
-                    inputs.insert(key.to_string(), json!(seed));
+                    inputs.insert(key.to_string(), json!(params.seed));
                     seed_set = true;
                 }
-                if let Some(steps) = steps
+                if let Some(steps) = params.steps
                     && inputs.contains_key("steps")
                 {
                     inputs.insert("steps".to_string(), json!(steps));
                 }
-                if let Some(cfg) = cfg
+                if let Some(cfg) = params.cfg
                     && inputs.contains_key("cfg")
                 {
                     inputs.insert("cfg".to_string(), json!(cfg));
                 }
             }
             "EmptyLatentImage" => {
-                inputs.insert("width".to_string(), json!(width));
-                inputs.insert("height".to_string(), json!(height));
+                inputs.insert("width".to_string(), json!(params.width));
+                inputs.insert("height".to_string(), json!(params.height));
                 dimensions_set = true;
             }
             "CheckpointLoaderSimple" => {
-                if let Some(model) = model
+                if let Some(model) = params.model
                     && inputs.contains_key("ckpt_name")
                 {
                     inputs.insert("ckpt_name".to_string(), Value::String(model.to_string()));
@@ -1104,14 +1106,16 @@ mod tests {
         let mut workflow = bundled_workflow("sdxl_txt2img").unwrap();
         inject_generation_params(
             &mut workflow,
-            "a castle",
-            Some("blurry"),
-            42,
-            832,
-            1216,
-            Some(12),
-            Some(5.5),
-            Some("custom.safetensors"),
+            GenerationParams {
+                prompt: "a castle",
+                negative_prompt: Some("blurry"),
+                seed: 42,
+                width: 832,
+                height: 1216,
+                steps: Some(12),
+                cfg: Some(5.5),
+                model: Some("custom.safetensors"),
+            },
         )
         .unwrap();
         assert_eq!(workflow["5"]["inputs"]["text"], "a castle");

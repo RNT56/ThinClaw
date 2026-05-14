@@ -81,19 +81,10 @@ mod stubs {
     use crate::context::JobContext;
     use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     pub struct FuelConfig {
         pub enabled: bool,
         pub fuel_limit: u64,
-    }
-
-    impl Default for FuelConfig {
-        fn default() -> Self {
-            Self {
-                enabled: false,
-                fuel_limit: 0,
-            }
-        }
     }
 
     #[derive(Debug, Clone)]

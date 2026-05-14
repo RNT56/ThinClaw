@@ -108,7 +108,7 @@ jobs:
         with:
           key: windows-release-smoke
       - name: Host runtime smoke
-        run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway -- --nocapture
+        run: cargo test --features full --bin thinclaw --test host_runtime_smoke run_no_onboard_binds_gateway_port_zero -- --nocapture
 
   # Build and packages all the platform-specific things
   build-local-artifacts:
