@@ -1,3 +1,5 @@
+#![cfg(feature = "wasm-runtime")]
+
 //! Integration tests for the WASM channel system.
 //!
 //! These tests verify the full flow of WASM channel operations:
