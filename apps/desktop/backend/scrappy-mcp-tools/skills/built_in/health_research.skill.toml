@@ -1,0 +1,12 @@
+name = "Health Research"
+description = "Searches for medical research papers and summarizes findings."
+version = "1.0.0"
+author = "Scrappy Team"
+tools_used = ["health", "ai_tools"]
+script_file = "health_research.rhai"
+
+[[parameters]]
+name = "query"
+description = "Medical topic to research"
+param_type = "string"
+required = true

@@ -1,0 +1,128 @@
+[package]
+name = "thinclaw-desktop"
+version = "0.1.0"
+description = "ThinClaw desktop companion app"
+authors = ["RNT56"]
+license = "GPL-3.0-only"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[workspace]
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "tauri_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# ---------------------------------------------------------------------------
+# Inference Engine Features — each build targets ONE engine per platform
+# ---------------------------------------------------------------------------
+[features]
+default = ["llamacpp"]
+llamacpp = []     # Bundled llama-server sidecar — all platforms
+mlx = []          # External Python process via uv — macOS Apple Silicon only
+vllm = []         # External Python process via uv — Linux CUDA only
+ollama = []       # Detect existing Ollama daemon — all platforms
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "protocol-asset", "tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+sqlx = { version = "0.7", features = ["runtime-tokio", "tls-native-tls", "sqlite"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = "0.3"
+anyhow = "1"
+thiserror = "2"
+rand = "0.8"
+futures = "0.3.31"
+tauri-specta = { version = "^2.0.0-rc", features = ["derive", "typescript"] }
+specta = { version = "2.0.0-rc", features = ["derive", "serde", "serde_json"] }
+specta-typescript = "0.0.7"
+usearch = "2.23.0"
+pdf-extract = "0.7"
+ort = { version = "=2.0.0-rc.9", features = ["download-binaries"] }
+tokenizers = "0.22.2"
+ndarray = "0.16.1"
+image = { version = "0.25.9", features = ["jpeg", "png", "webp"] }
+base64 = "0.22.1"
+uuid = { version = "1.19.0", features = ["v4", "fast-rng", "macro-diagnostics"] }
+sysinfo = "0.38"
+tempfile = "3.24.0"
+scraper = "0.25.0"
+chrono = "0.4.43"
+cron = "0.13"
+rig-core = "0.7.0"
+html2text = "0.13.5"
+urlencoding = "2"
+eventsource-stream = "0.2.3"
+chromiumoxide = { version = "0.9.1" }
+zip = "0.6"
+tauri-plugin-fs = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
+tokio-stream = "0.1.18"
+sha2 = "0.10"
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+tungstenite = "0.26"
+futures-util = "0.3"
+ed25519-dalek = { version = "2.2.0", features = ["pkcs8", "pem"] }
+pkcs8 = { version = "0.10.2", features = ["std", "pem"] }
+regex = "1.12.3"
+scrappy-mcp-tools = { path = "scrappy-mcp-tools" }
+rhai = { version = "1", features = ["sync", "serde"] }
+async-trait = "0.1"
+clawscan = "1.0.0"
+zeroize = { version = "1", features = ["derive"] }
+secrecy = { version = "0.10", features = ["serde"] }
+
+# Cloud storage (Work Stream A)
+opendal = { version = "0.55", features = ["services-s3", "services-webdav", "services-sftp"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+zstd = "0.13"
+
+# ThinClaw agent engine (root crate, desktop feature = libsql + html-to-markdown)
+ironclaw = { path = "../../..", package = "thinclaw", features = ["desktop"] }
+
+# macOS Keychain — secure encrypted storage for API keys
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+# ---------------------------------------------------------------------------
+# Build Profiles — keep target/ size under control
+# ---------------------------------------------------------------------------
+
+[profile.dev]
+# "line-tables-only" keeps file:line info for backtraces but strips the huge
+# type/variable debug info that accounts for ~60% of target/ size.
+debug = "line-tables-only"
+# On macOS, split debug info into small .o files instead of one giant dSYM
+split-debuginfo = "unpacked"
+incremental = true
+
+[profile.release]
+# Thin LTO across all crates — better codegen without massive compile times
+lto = "thin"
+# Single codegen unit → better optimisation, smaller binary
+codegen-units = 1
+# Strip debug symbols from the final binary
+strip = "symbols"
+
+# Patch libsql to handle sqlite3_config SQLITE_MISUSE gracefully.
+# sqlx-sqlite calls sqlite3_config() first; the stock libsql asserts on the
+# duplicate call. Our patch checks sqlite3_threadsafe() instead of panicking.
+[patch.crates-io]
+libsql = { path = "../patches/libsql-0.6.0" }

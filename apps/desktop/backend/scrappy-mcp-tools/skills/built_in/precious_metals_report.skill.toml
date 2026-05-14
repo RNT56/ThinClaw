@@ -1,0 +1,13 @@
+name = "Precious Metals Report"
+description = "Fetches current gold and silver prices and summarizes recent market news."
+version = "1.0.0"
+author = "Scrappy Team"
+tools_used = ["finance", "web_search"]
+script_file = "precious_metals_report.rhai"
+
+[[parameters]]
+name = "currency"
+description = "Currency to display prices in (default USD)"
+param_type = "string"
+required = false
+default = "USD"

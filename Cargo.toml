@@ -1,6 +1,7 @@
 [workspace]
 members = [".", "crates/*"]
 exclude = [
+    "apps/desktop/backend",
     "channels-src/discord",
     "channels-src/telegram",
     "channels-src/slack",
