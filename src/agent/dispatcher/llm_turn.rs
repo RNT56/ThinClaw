@@ -42,10 +42,11 @@ impl Agent {
         streamed_text: bool,
         text: String,
     ) -> AgenticLoopResult {
+        let payload = thinclaw_agent::submission::AgentResponsePayload::text(text);
         if streamed_text {
-            AgenticLoopResult::Streamed(text)
+            AgenticLoopResult::Streamed(payload)
         } else {
-            AgenticLoopResult::Response(text)
+            AgenticLoopResult::Response(payload)
         }
     }
 
@@ -99,13 +100,17 @@ impl Agent {
                     text_len = text.len(),
                     "Primary finalization produced non-final text; returning fallback response"
                 );
-                Ok(AgenticLoopResult::Response(fallback_response.to_string()))
+                Ok(AgenticLoopResult::Response(
+                    thinclaw_agent::submission::AgentResponsePayload::text(fallback_response),
+                ))
             }
             RespondResult::ToolCalls { .. } => {
                 tracing::warn!(
                     "Primary finalization unexpectedly returned tool calls; returning fallback response"
                 );
-                Ok(AgenticLoopResult::Response(fallback_response.to_string()))
+                Ok(AgenticLoopResult::Response(
+                    thinclaw_agent::submission::AgentResponsePayload::text(fallback_response),
+                ))
             }
         }
     }

@@ -4,6 +4,7 @@
 //! and process as part of the turn-based development loop.
 
 use serde::{Deserialize, Serialize};
+use thinclaw_types::MediaContent;
 use uuid::Uuid;
 
 /// Parses user input into Submission types.
@@ -398,14 +399,14 @@ impl Submission {
 pub enum SubmissionResult {
     /// Turn completed with a response.
     Response {
-        /// The agent's response.
-        content: String,
+        /// The agent's response payload.
+        payload: AgentResponsePayload,
     },
 
     /// Turn completed and response was already streamed to the channel
     /// via progressive edits (sendMessage + editMessageText).
     /// Caller should NOT send it again via respond().
-    Streamed(String),
+    Streamed(AgentResponsePayload),
 
     /// Need approval before continuing.
     NeedApproval {
@@ -435,11 +436,48 @@ pub enum SubmissionResult {
     Interrupted,
 }
 
+/// Final user-facing response plus generated media ready for outbound delivery.
+#[derive(Debug, Clone)]
+pub struct AgentResponsePayload {
+    pub content: String,
+    pub attachments: Vec<MediaContent>,
+}
+
+impl AgentResponsePayload {
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            attachments: Vec::new(),
+        }
+    }
+
+    pub fn with_attachments(content: impl Into<String>, attachments: Vec<MediaContent>) -> Self {
+        Self {
+            content: content.into(),
+            attachments,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.content.is_empty() && self.attachments.is_empty()
+    }
+}
+
 impl SubmissionResult {
     /// Create a response result.
     pub fn response(content: impl Into<String>) -> Self {
         Self::Response {
-            content: content.into(),
+            payload: AgentResponsePayload::text(content),
+        }
+    }
+
+    /// Create a response result with outbound media attachments.
+    pub fn response_with_attachments(
+        content: impl Into<String>,
+        attachments: Vec<MediaContent>,
+    ) -> Self {
+        Self::Response {
+            payload: AgentResponsePayload::with_attachments(content, attachments),
         }
     }
 

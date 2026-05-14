@@ -29,7 +29,9 @@ pub use crate::api::mcp::{
     McpReadResourceQuery, McpReadResourceResponse, McpResourceTemplatesResponse,
     McpResourcesResponse, McpServerInfo, McpServerListResponse, McpToolsResponse,
 };
-pub use thinclaw_gateway::web::types::{ModelInfo, SseEvent, WsClientMessage, WsServerMessage};
+pub use thinclaw_gateway::web::types::{
+    ModelInfo, ResponseAttachment, SseEvent, WsClientMessage, WsServerMessage,
+};
 
 // --- Chat ---
 
@@ -926,6 +928,7 @@ mod tests {
         let sse = SseEvent::Response {
             content: "hello".to_string(),
             thread_id: "t1".to_string(),
+            attachments: Vec::new(),
         };
         let ws = WsServerMessage::from_sse_event(&sse);
         match ws {

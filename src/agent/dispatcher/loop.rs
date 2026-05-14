@@ -28,6 +28,7 @@ impl Agent {
 
         // Build context with messages that we'll mutate during the loop
         let mut context_messages = initial_messages;
+        let mut generated_attachments = Vec::new();
 
         let tool_policies = crate::tools::policy::ToolPolicyManager::load_from_settings();
 
@@ -258,7 +259,10 @@ impl Agent {
                         iteration - 1,
                         parts.join("\n\n")
                     );
-                    return Ok(AgenticLoopResult::Response(partial));
+                    return Ok(AgenticLoopResult::Response(
+                        thinclaw_agent::submission::AgentResponsePayload::text(partial),
+                    )
+                    .with_generated_attachments(&generated_attachments));
                 }
             }
 
@@ -664,7 +668,12 @@ impl Agent {
                                     tracing::warn!(
                                         "Tool-phase synthesis was enabled without a cheap_llm handle; returning primary response"
                                     );
-                                    return Ok(AgenticLoopResult::Response(text));
+                                    return Ok(AgenticLoopResult::Response(
+                                        thinclaw_agent::submission::AgentResponsePayload::text(
+                                            text,
+                                        ),
+                                    )
+                                    .with_generated_attachments(&generated_attachments));
                                 };
 
                                 let cheap_model_name = cheap_llm.active_model_name();
@@ -705,10 +714,12 @@ impl Agent {
                                         if synthesis_finish_reason
                                             == crate::llm::FinishReason::Stop =>
                                     {
-                                        return Ok(self.agentic_result_from_text(
-                                            synthesis_streamed_text,
-                                            synthesized,
-                                        ));
+                                        return Ok(self
+                                            .agentic_result_from_text(
+                                                synthesis_streamed_text,
+                                                synthesized,
+                                            )
+                                            .with_generated_attachments(&generated_attachments));
                                     }
                                     RespondResult::Text(text) => {
                                         tracing::warn!(
@@ -717,26 +728,32 @@ impl Agent {
                                             "Tool-phase synthesis produced non-final text"
                                         );
                                         return Ok(AgenticLoopResult::Response(
-                                            TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE.to_string(),
-                                        ));
+                                            thinclaw_agent::submission::AgentResponsePayload::text(
+                                                TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE,
+                                            ),
+                                        )
+                                        .with_generated_attachments(&generated_attachments));
                                     }
                                     RespondResult::ToolCalls { .. } => {
                                         tracing::warn!(
                                             "Tool-phase synthesis unexpectedly returned tool calls"
                                         );
                                         return Ok(AgenticLoopResult::Response(
-                                            TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE.to_string(),
-                                        ));
+                                            thinclaw_agent::submission::AgentResponsePayload::text(
+                                                TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE,
+                                            ),
+                                        )
+                                        .with_generated_attachments(&generated_attachments));
                                     }
                                 }
                             }
                             ToolPhaseTextOutcome::PrimaryFinalText => {
-                                return Ok(
-                                    self.agentic_result_from_text(phase_one_streamed_text, text)
-                                );
+                                return Ok(self
+                                    .agentic_result_from_text(phase_one_streamed_text, text)
+                                    .with_generated_attachments(&generated_attachments));
                             }
                             ToolPhaseTextOutcome::PrimaryNeedsFinalization => {
-                                return self
+                                return Ok(self
                                     .finalize_primary_text_only(
                                         &mut reasoning,
                                         &mut context_messages,
@@ -748,7 +765,8 @@ impl Agent {
                                         &mut last_applied_model_override,
                                         TOOL_PHASE_FINALIZATION_FAILURE_RESPONSE,
                                     )
-                                    .await;
+                                    .await?
+                                    .with_generated_attachments(&generated_attachments));
                             }
                         }
                     }
@@ -773,7 +791,9 @@ impl Agent {
                         continue;
                     }
 
-                    return Ok(self.agentic_result_from_text(phase_one_streamed_text, text));
+                    return Ok(self
+                        .agentic_result_from_text(phase_one_streamed_text, text)
+                        .with_generated_attachments(&generated_attachments));
                 }
                 RespondResult::ToolCalls {
                     tool_calls,
@@ -827,7 +847,7 @@ impl Agent {
                         // Give the LLM one last chance with a strong nudge and no tools
                         context_messages.push(ChatMessage::system(STUCK_LOOP_FINALIZATION_PROMPT));
 
-                        return self
+                        return Ok(self
                             .finalize_primary_text_only(
                                 &mut reasoning,
                                 &mut context_messages,
@@ -839,7 +859,8 @@ impl Agent {
                                 &mut last_applied_model_override,
                                 STUCK_LOOP_FINALIZATION_FAILURE_RESPONSE,
                             )
-                            .await;
+                            .await?
+                            .with_generated_attachments(&generated_attachments));
                     }
 
                     if consecutive_same_calls == STUCK_WARN_THRESHOLD {
@@ -875,10 +896,11 @@ impl Agent {
                             blocked_signature,
                             &mut last_call_signature,
                             &mut consecutive_same_calls,
+                            &mut generated_attachments,
                         )
                         .await?
                     {
-                        return Ok(result);
+                        return Ok(result.with_generated_attachments(&generated_attachments));
                     }
                 }
             }

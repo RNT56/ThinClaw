@@ -221,6 +221,57 @@ impl DiscordChannel {
         Ok(())
     }
 
+    async fn send_message_payload(
+        client: &Client,
+        bot_token: &str,
+        channel_id: &str,
+        response: &OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        if response.attachments.is_empty() {
+            return Self::send_message(client, bot_token, channel_id, &response.content).await;
+        }
+
+        for attachment in &response.attachments {
+            let filename = attachment
+                .filename
+                .as_deref()
+                .unwrap_or("attachment")
+                .to_string();
+            let part = reqwest::multipart::Part::bytes(attachment.data.clone())
+                .file_name(filename.clone())
+                .mime_str(&attachment.mime_type)
+                .map_err(|e| ChannelError::SendFailed {
+                    name: NAME.to_string(),
+                    reason: format!("Invalid attachment MIME {}: {e}", attachment.mime_type),
+                })?;
+            let payload = serde_json::json!({
+                "content": if response.content.trim().is_empty() { "" } else { response.content.as_str() },
+                "attachments": [{"id": 0, "filename": filename}],
+            });
+            let form = reqwest::multipart::Form::new()
+                .text("payload_json", payload.to_string())
+                .part("files[0]", part);
+            let resp = client
+                .post(format!("{API_BASE}/channels/{channel_id}/messages"))
+                .header("Authorization", format!("Bot {bot_token}"))
+                .multipart(form)
+                .send()
+                .await
+                .map_err(|e| ChannelError::SendFailed {
+                    name: NAME.to_string(),
+                    reason: format!("POST attachment message: {e}"),
+                })?;
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(ChannelError::SendFailed {
+                    name: NAME.to_string(),
+                    reason: format!("Discord attachment API: {body}"),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Send a new message and return its message ID.
     async fn send_message_with_id(
         client: &Client,
@@ -637,7 +688,7 @@ impl Channel for DiscordChannel {
             })?;
 
         let bot_token = self.config.bot_token.expose_secret();
-        Self::send_message(&self.client, bot_token, channel_id, &response.content).await
+        Self::send_message_payload(&self.client, bot_token, channel_id, &response).await
     }
 
     async fn send_status(
@@ -676,7 +727,7 @@ impl Channel for DiscordChannel {
             return Ok(());
         }
         let bot_token = self.config.bot_token.expose_secret();
-        Self::send_message(&self.client, bot_token, user_id, &response.content).await
+        Self::send_message_payload(&self.client, bot_token, user_id, &response).await
     }
 
     async fn send_draft(

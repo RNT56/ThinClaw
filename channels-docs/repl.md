@@ -36,6 +36,8 @@ thinclaw --message "Summarize the project README"
 - No authentication required (local terminal access is the auth boundary)
 - When other channels are active, the REPL runs alongside them
 - The boot screen is displayed when REPL mode is active
+- Generated media replies print attachment filename, MIME type, byte size, and
+  stored path instead of attempting upload.
 - Not available when running as a headless daemon or a build without the CLI surface
 - Primary command vocabulary follows the shared agent-first docs: `/compress` is preferred over `/compact`, and `/personality` is preferred over `/vibe`
 

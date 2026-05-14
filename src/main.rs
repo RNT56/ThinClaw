@@ -1072,7 +1072,7 @@ async fn async_main() -> anyhow::Result<()> {
         }
     };
     components.tools.register_send_message_tool(Some(Arc::new(
-        move |platform, recipient, text, thread_id| {
+        move |platform, recipient, text, thread_id, attachments| {
             let channels = Arc::clone(&send_message_channels);
             let email_channel = email_channel.clone();
             Box::pin(async move {
@@ -1091,7 +1091,7 @@ async fn async_main() -> anyhow::Result<()> {
                             content: text,
                             thread_id,
                             metadata: serde_json::Value::Null,
-                            attachments: Vec::new(),
+                            attachments,
                         },
                     )
                     .await

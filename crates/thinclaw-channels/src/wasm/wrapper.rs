@@ -2939,10 +2939,11 @@ impl Channel for WasmChannel {
 
         // Flush accumulated tool events as a single summary message before the response.
         self.flush_tool_events(&msg.metadata).await;
+        let outbound_content = response_content_for_wasm(&self.name, &response);
 
         // Check if there's a pending synchronous response waiter
         if let Some(tx) = self.pending_responses.write().await.remove(&msg.id) {
-            let _ = tx.send(response.content.clone());
+            let _ = tx.send(outbound_content.clone());
         }
 
         // Send outbound media attachments directly via Telegram API
@@ -2967,7 +2968,7 @@ impl Channel for WasmChannel {
                 .unwrap_or_default();
         self.call_on_respond(
             msg.id,
-            &response.content,
+            &outbound_content,
             response.thread_id.as_deref(),
             &metadata_json,
         )
@@ -3421,18 +3422,19 @@ impl Channel for WasmChannel {
         let metadata_json =
             serde_json::to_string(&merged_response_metadata(&base_metadata, &response))
                 .unwrap_or_default();
+        let outbound_content = response_content_for_wasm(&self.name, &response);
 
         tracing::info!(
             channel = %self.name,
             chat_id = chat_id,
-            content_len = response.content.len(),
+            content_len = outbound_content.len(),
             "WASM broadcast: sending proactive message via on_respond"
         );
 
         let result = self
             .call_on_respond(
                 uuid::Uuid::new_v4(),
-                &response.content,
+                &outbound_content,
                 response.thread_id.as_deref(),
                 &metadata_json,
             )
@@ -4200,6 +4202,39 @@ fn merged_response_metadata(
     }
 
     serde_json::Value::Object(merged)
+}
+
+fn response_content_for_wasm(channel_name: &str, response: &OutgoingResponse) -> String {
+    if response.attachments.is_empty() || wasm_channel_has_media_delivery(channel_name) {
+        return response.content.clone();
+    }
+
+    let mut content = response.content.clone();
+    if !content.is_empty() {
+        content.push_str("\n\n");
+    }
+    content.push_str("Generated media:");
+    for attachment in &response.attachments {
+        let filename = attachment.filename.as_deref().unwrap_or("generated-media");
+        let source = attachment.source_url.as_deref().unwrap_or("stored locally");
+        content.push_str(&format!(
+            "\n- {} ({} bytes, {}): {}",
+            filename,
+            attachment.data.len(),
+            attachment.mime_type,
+            source
+        ));
+    }
+    tracing::info!(
+        channel = %channel_name,
+        attachment_count = response.attachments.len(),
+        "WASM channel using generated media text fallback"
+    );
+    content
+}
+
+fn wasm_channel_has_media_delivery(channel_name: &str) -> bool {
+    matches!(channel_name, "telegram" | "whatsapp" | "slack" | "discord")
 }
 
 impl HttpResponse {
@@ -5581,6 +5616,28 @@ mod tests {
         assert_eq!(merged["response_attachments"][0]["mime_type"], "image/png");
         assert_eq!(merged["response_attachments"][0]["filename"], "reply.png");
         assert_eq!(merged["response_attachments"][0]["data"], "AQID");
+    }
+
+    #[test]
+    fn test_wasm_response_content_falls_back_for_text_only_channels() {
+        let response = thinclaw_channels_core::OutgoingResponse {
+            content: "done".to_string(),
+            thread_id: None,
+            metadata: serde_json::Value::Null,
+            attachments: vec![
+                thinclaw_media::MediaContent::new(vec![1, 2, 3], "image/png")
+                    .with_filename("reply.png")
+                    .with_source_url("/tmp/reply.png"),
+            ],
+        };
+
+        let fallback = response_content_for_wasm("twilio_sms", &response);
+        assert!(fallback.contains("done"));
+        assert!(fallback.contains("Generated media:"));
+        assert!(fallback.contains("reply.png"));
+        assert!(fallback.contains("/tmp/reply.png"));
+
+        assert_eq!(response_content_for_wasm("slack", &response), "done");
     }
 
     /// Verify that WASM HTTP host functions work using a dedicated

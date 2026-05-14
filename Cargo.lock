@@ -7751,6 +7751,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
+ "base64 0.22.1",
  "chrono",
  "futures",
  "serde",
@@ -7957,6 +7958,7 @@ dependencies = [
  "hex",
  "html-to-markdown-rs",
  "libsql",
+ "mime_guess",
  "nostr-sdk",
  "rand 0.8.6",
  "readabilityrs",

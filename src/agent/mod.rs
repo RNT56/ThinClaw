@@ -34,6 +34,7 @@ pub mod job_monitor;
 pub mod learning;
 pub mod learning_outcomes_store;
 pub mod model_override_store;
+pub(crate) mod outbound_media;
 pub mod outcomes;
 pub mod personality;
 pub(crate) mod prompt_assembly;

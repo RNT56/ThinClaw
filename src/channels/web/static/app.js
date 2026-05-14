@@ -841,7 +841,7 @@ function connectSSE() {
     loadThreads();
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
-    upsertAssistantMessage(data.content, { timestamp: new Date().toISOString() });
+    upsertAssistantMessage(data.content, { timestamp: new Date().toISOString(), attachments: data.attachments || [] });
     settleLiveTurnCard();
     setStatus('');
     enableChatInput();
@@ -1784,6 +1784,9 @@ function updateMessageElement(message, content, options) {
     body.textContent = content;
   } else {
     body.innerHTML = renderMarkdown(content);
+    if (options && Array.isArray(options.attachments) && options.attachments.length) {
+      body.insertAdjacentHTML('beforeend', renderResponseAttachments(options.attachments));
+    }
   }
   return message;
 }
@@ -2126,6 +2129,19 @@ function setToolCardOutput(name, preview) {
     const truncated = preview.length > 2000 ? preview.substring(0, 2000) + '\n... (truncated)' : preview;
     output.textContent = truncated;
   }
+}
+
+function renderResponseAttachments(attachments) {
+  const items = (attachments || []).map((attachment) => {
+    if (!attachment || typeof attachment !== 'object' || !attachment.data) return '';
+    const mime = attachment.mime_type || attachment.mimeType || 'application/octet-stream';
+    const name = attachment.filename || 'generated media';
+    if (mime.startsWith('image/')) {
+      return '<img class="activity-tool-artifact-image" alt="' + escapeHtml(name) + '" src="data:' + escapeHtml(mime) + ';base64,' + attachment.data + '">';
+    }
+    return '<div class="activity-tool-artifact-link">' + escapeHtml(name) + '<br><code>' + escapeHtml(mime) + '</code></div>';
+  }).filter(Boolean).join('');
+  return items ? '<div class="activity-tool-artifacts">' + items + '</div>' : '';
 }
 
 function finalizeActivityGroup() {

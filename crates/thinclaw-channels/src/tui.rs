@@ -292,8 +292,10 @@ impl Channel for TuiChannel {
         _msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        self.send_update(TuiUpdate::Response(response.content))
-            .await
+        self.send_update(TuiUpdate::Response(format_response_with_attachments(
+            &response,
+        )))
+        .await
     }
 
     async fn send_status(
@@ -311,8 +313,10 @@ impl Channel for TuiChannel {
     ) -> Result<(), ChannelError> {
         self.send_update(TuiUpdate::Status("Notification received".to_string()))
             .await?;
-        self.send_update(TuiUpdate::Response(response.content))
-            .await
+        self.send_update(TuiUpdate::Response(format_response_with_attachments(
+            &response,
+        )))
+        .await
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
@@ -322,4 +326,27 @@ impl Channel for TuiChannel {
     async fn shutdown(&self) -> Result<(), ChannelError> {
         Ok(())
     }
+}
+
+fn format_response_with_attachments(response: &OutgoingResponse) -> String {
+    if response.attachments.is_empty() {
+        return response.content.clone();
+    }
+    let mut text = response.content.clone();
+    if !text.trim().is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str("Generated media:\n");
+    for attachment in &response.attachments {
+        let name = attachment.filename.as_deref().unwrap_or("attachment");
+        let path = attachment.source_url.as_deref().unwrap_or("");
+        text.push_str(&format!(
+            "- {} ({} bytes, {}) {}\n",
+            name,
+            attachment.size(),
+            attachment.mime_type,
+            path
+        ));
+    }
+    text
 }

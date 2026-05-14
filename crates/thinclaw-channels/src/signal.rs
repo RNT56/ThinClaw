@@ -635,6 +635,17 @@ impl SignalChannel {
         }
     }
 
+    fn add_attachment_params(params: &mut serde_json::Value, paths: &[std::path::PathBuf]) {
+        if !paths.is_empty() {
+            params["attachments"] = serde_json::Value::Array(
+                paths
+                    .iter()
+                    .map(|path| serde_json::Value::String(path.to_string_lossy().to_string()))
+                    .collect(),
+            );
+        }
+    }
+
     /// Build JSON-RPC params for a send/typing call (static version).
     fn build_rpc_params_static(
         _http_url: &str,
@@ -919,8 +930,12 @@ impl Channel for SignalChannel {
         .unwrap_or_else(|| msg.user_id.clone());
 
         let target = Self::parse_recipient_target(&target_str);
-        let params = self.build_rpc_params(&target, Some(&response.content));
-        self.rpc_request("send", params).await?;
+        let temp_paths = write_signal_temp_attachments(&response.attachments).await?;
+        let mut params = self.build_rpc_params(&target, Some(&response.content));
+        Self::add_attachment_params(&mut params, &temp_paths);
+        let result = self.rpc_request("send", params).await;
+        cleanup_signal_temp_attachments(&temp_paths).await;
+        result?;
 
         // Clean up stored target.
         self.reply_targets.write().await.pop(&msg.id);
@@ -1115,8 +1130,12 @@ impl Channel for SignalChannel {
             return Ok(());
         }
         let target = Self::parse_recipient_target(user_id);
-        let params = self.build_rpc_params(&target, Some(&response.content));
-        self.rpc_request("send", params).await?;
+        let temp_paths = write_signal_temp_attachments(&response.attachments).await?;
+        let mut params = self.build_rpc_params(&target, Some(&response.content));
+        Self::add_attachment_params(&mut params, &temp_paths);
+        let result = self.rpc_request("send", params).await;
+        cleanup_signal_temp_attachments(&temp_paths).await;
+        result?;
         Ok(())
     }
 
@@ -1248,6 +1267,32 @@ fn collect_signal_attachments(attachments: &[SignalAttachment]) -> Vec<MediaCont
     }
 
     result
+}
+
+async fn write_signal_temp_attachments(
+    attachments: &[MediaContent],
+) -> Result<Vec<std::path::PathBuf>, ChannelError> {
+    let mut paths = Vec::new();
+    for attachment in attachments {
+        let filename = attachment.filename.as_deref().unwrap_or("attachment");
+        let safe_name = filename.replace(['/', '\\', ':'], "_");
+        let path =
+            std::env::temp_dir().join(format!("thinclaw-signal-{}-{safe_name}", Uuid::new_v4()));
+        tokio::fs::write(&path, &attachment.data)
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: "signal".to_string(),
+                reason: format!("failed to write Signal attachment {}: {e}", path.display()),
+            })?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+async fn cleanup_signal_temp_attachments(paths: &[std::path::PathBuf]) {
+    for path in paths {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 }
 
 /// Resolve the signal-cli attachment directory.

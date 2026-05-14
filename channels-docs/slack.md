@@ -21,12 +21,17 @@ Slack should not be documented as a native host channel in current ThinClaw docs
 - create and install the Slack app
 - configure the required Slack credentials for the channel package
 - route Slack events into the ThinClaw channel runtime
+- grant file upload scopes for generated media delivery:
+  - `files:write`
+  - message send scopes appropriate to the app surface, such as `chat:write`
 
 ## Behavior Highlights
 
 - package-based Slack integration
 - webhook/event-driven runtime shape
 - host-managed formatting and response delivery
+- generated media replies use Slack's external upload flow:
+  `files.getUploadURLExternal` followed by `files.completeUploadExternal`
 
 ## Related Docs
 

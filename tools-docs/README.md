@@ -41,6 +41,10 @@ Do not assume one generic auth flow for every tool.
 - All WASM tools run in the host-managed WASM runtime.
 - Secret values are injected at the host boundary rather than exposed directly to WASM code.
 - MCP servers are a separate extension path with a different trust model.
+- Generated media from `image_generate` and `comfy_run_workflow` is eligible for
+  automatic final-response attachment. The unified `send_message` tool can send
+  generated files explicitly with an `attachments` array containing `file_path`,
+  optional `filename`, and optional `mime_type`.
 
 ## Built-In Runtime Surfaces
 

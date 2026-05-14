@@ -10,11 +10,13 @@
 use crate::error::Error;
 use crate::llm::ChatMessage;
 use crate::tools::{ToolArtifact, ToolExecutionLane, ToolProfile, execution};
+use thinclaw_media::MediaContent;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChatToolExecution {
     pub content: String,
     pub artifacts: Vec<ToolArtifact>,
+    pub outbound_attachments: Vec<MediaContent>,
 }
 
 impl ChatToolExecution {
@@ -22,6 +24,7 @@ impl ChatToolExecution {
         Self {
             content,
             artifacts: Vec::new(),
+            outbound_attachments: Vec::new(),
         }
     }
 }
@@ -93,9 +96,17 @@ pub(crate) async fn execute_chat_tool_standalone_with_artifacts(
     };
 
     let output = execution::execute_tool_call(&prepared, safety, job_ctx).await?;
+    let outbound_attachments = crate::agent::outbound_media::attachments_from_tool_result(
+        tool_name,
+        &output.result_json,
+        &output.artifacts,
+    )
+    .await;
+
     Ok(ChatToolExecution {
         content: output.sanitized_content,
         artifacts: output.artifacts,
+        outbound_attachments,
     })
 }
 

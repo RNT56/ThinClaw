@@ -66,6 +66,8 @@ ThinClaw expects:
 - Outbound support:
   - text replies
   - outbound media upload + send for image/audio/video/document/sticker
+  - generated media auto-attachments through the host `response_attachments`
+    bridge
   - reply threading when `reply_to_message` is enabled
 
 ## Pairing Flow

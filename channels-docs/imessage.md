@@ -51,6 +51,8 @@ Joins `message`, `handle`, and `chat` tables:
 - DM and group chat support
 - Phone number and email sender detection
 - Attachment count metadata
+- Generated media replies use the native attachment send path, subject to
+  Messages.app attachment support and macOS automation permissions
 - Group chat detection (via `display_name` presence)
 - Long message splitting (20,000 char chunks, prefers line boundaries)
 - Text escaping for AppleScript safety

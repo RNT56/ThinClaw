@@ -46,6 +46,8 @@ via `osascript -e 'tell application "Mail" to launch'`.
 
 - **Inbound**: Polls `~/Library/Mail/V*/MailData/Envelope Index` every N seconds
 - **Outbound**: Sends replies via AppleScript → Mail.app → SMTP
+- **Generated media**: Adds generated files as Mail.app attachments when the
+  final agent response includes media
 
 ## Comparison with Gmail Channel
 

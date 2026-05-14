@@ -57,6 +57,8 @@ GMAIL_MAX_MESSAGE_SIZE=10485760
 - Label filtering
 - Body size limits
 - Unread detection
+- Generated media replies are sent as RFC 2822 `multipart/mixed` attachments
+  and require the same Gmail send scope used by the Gmail tool/channel.
 
 ## Headless Auth
 

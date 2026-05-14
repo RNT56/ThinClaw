@@ -784,19 +784,37 @@ impl Channel for BlueBubblesChannel {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        // Send outbound attachments if the response metadata carries them.
-        // The agent pipeline attaches `MediaContent` items to the outgoing
-        // response via the `attachments` metadata key when tool calls
-        // produce files (e.g. image generation, doc export).
-        if let Some(attachments) = msg.metadata.get("response_attachments")
+        let chat_id_for_att = msg
+            .metadata
+            .get("chat_guid")
+            .and_then(|v| v.as_str())
+            .or_else(|| msg.metadata.get("chat_id").and_then(|v| v.as_str()))
+            .unwrap_or(&msg.user_id);
+        if let Some(resolved_att) = self.resolve_chat_guid(chat_id_for_att).await? {
+            for att in &response.attachments {
+                let fname = att.filename.as_deref().unwrap_or("attachment");
+                let is_audio = att.mime_type.starts_with("audio/");
+                if let Err(e) = self
+                    .send_attachment(
+                        &resolved_att,
+                        att.data.clone(),
+                        fname,
+                        &att.mime_type,
+                        None,
+                        is_audio,
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "BlueBubbles: failed to send attachment");
+                }
+            }
+        }
+
+        // Backward-compatible bridge for legacy metadata attachments.
+        if response.attachments.is_empty()
+            && let Some(attachments) = msg.metadata.get("response_attachments")
             && let Some(arr) = attachments.as_array()
         {
-            let chat_id_for_att = msg
-                .metadata
-                .get("chat_guid")
-                .and_then(|v| v.as_str())
-                .or_else(|| msg.metadata.get("chat_id").and_then(|v| v.as_str()))
-                .unwrap_or(&msg.user_id);
             if let Some(resolved_att) = self.resolve_chat_guid(chat_id_for_att).await? {
                 for att in arr {
                     let data_b64 = att.get("data").and_then(|d| d.as_str()).unwrap_or("");
@@ -877,7 +895,26 @@ impl Channel for BlueBubblesChannel {
     ) -> Result<(), ChannelError> {
         // Resolve the user_id to a chat GUID
         match self.resolve_chat_guid(user_id).await? {
-            Some(guid) => self.send_text(&guid, &response.content, None).await,
+            Some(guid) => {
+                for att in &response.attachments {
+                    let fname = att.filename.as_deref().unwrap_or("attachment");
+                    let is_audio = att.mime_type.starts_with("audio/");
+                    if let Err(e) = self
+                        .send_attachment(
+                            &guid,
+                            att.data.clone(),
+                            fname,
+                            &att.mime_type,
+                            None,
+                            is_audio,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, "BlueBubbles: failed to send broadcast attachment");
+                    }
+                }
+                self.send_text(&guid, &response.content, None).await
+            }
             None => {
                 // Try creating a new chat if it looks like a valid address
                 if user_id.contains('@') || user_id.starts_with('+') {

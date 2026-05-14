@@ -34,7 +34,9 @@ rules.
   `comfy_health` and `comfy_check_deps` for diagnostics, and only uses
   `comfy_manage` for explicit lifecycle requests because those actions can
   install Python packages, download models, mutate local state, or spend cloud
-  credits.
+  credits. Generated media from `image_generate` and `comfy_run_workflow` is
+  auto-attached to the final response on channels that support media delivery;
+  text-only channels receive an explicit path/link fallback.
 
 ## Remote Source Adapters
 

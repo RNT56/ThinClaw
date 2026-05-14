@@ -69,6 +69,8 @@ SIGNAL_IGNORE_STORIES=true
 
 - End-to-end encryption (via Signal protocol)
 - DM and group message support
+- Generated media replies are written to temporary files and sent through
+  signal-cli JSON-RPC `attachments`, then cleaned up after dispatch
 - Pairing system for unknown senders
 - Blocklist support (`thinclaw pairing block signal <sender>`)
 - Typing indicators (via JSON-RPC)

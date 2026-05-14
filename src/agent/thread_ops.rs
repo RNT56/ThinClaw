@@ -1438,31 +1438,34 @@ impl Agent {
         // Complete, fail, or request approval
         let was_streamed = matches!(&result, Ok(AgenticLoopResult::Streamed(_)));
         match result {
-            Ok(AgenticLoopResult::Response(response))
-            | Ok(AgenticLoopResult::Streamed(response)) => {
+            Ok(AgenticLoopResult::Response(mut payload))
+            | Ok(AgenticLoopResult::Streamed(mut payload)) => {
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
                 let response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
                         user_id: message.user_id.clone(),
                         thread_id: thread_id.to_string(),
-                        response: response.clone(),
+                        response: payload.content.clone(),
                     };
                     match self.hooks().run(&event).await {
                         Err(crate::hooks::HookError::Rejected { reason }) => {
+                            payload.attachments.clear();
                             format!("[Response filtered: {}]", reason)
                         }
                         Err(err) => {
+                            payload.attachments.clear();
                             format!("[Response blocked by hook policy: {}]", err)
                         }
                         Ok(crate::hooks::HookOutcome::Continue {
                             modified: Some(new_response),
                         }) => new_response,
-                        _ => response, // fail-open: use original
+                        _ => payload.content.clone(), // fail-open: use original
                     }
                 };
+                payload.content = response;
 
                 let (turn_number, messages) =
-                    thinclaw_agent::thread_ops::complete_thread_response(thread, &response);
+                    thinclaw_agent::thread_ops::complete_thread_response(thread, &payload.content);
                 let usage_percent = self.context_monitor.usage_percent(&messages);
                 let _ = self
                     .channels
@@ -1477,7 +1480,7 @@ impl Agent {
                 self.persist_assistant_response(
                     thread_id,
                     message,
-                    &response,
+                    &payload.content,
                     session_id,
                     turn_number,
                 )
@@ -1503,10 +1506,10 @@ impl Agent {
 
                 if was_streamed {
                     self.finish_turn_cancellation(thread_id).await;
-                    Ok(SubmissionResult::Streamed(response))
+                    Ok(SubmissionResult::Streamed(payload))
                 } else {
                     self.finish_turn_cancellation(thread_id).await;
-                    Ok(SubmissionResult::response(response))
+                    Ok(SubmissionResult::Response { payload })
                 }
             }
             Ok(AgenticLoopResult::NeedApproval { pending }) => {
@@ -2635,16 +2638,19 @@ impl Agent {
 
             let was_streamed = matches!(&result, Ok(AgenticLoopResult::Streamed(_)));
             match result {
-                Ok(AgenticLoopResult::Response(response))
-                | Ok(AgenticLoopResult::Streamed(response)) => {
+                Ok(AgenticLoopResult::Response(payload))
+                | Ok(AgenticLoopResult::Streamed(payload)) => {
                     let (turn_number, messages) =
-                        thinclaw_agent::thread_ops::complete_thread_response(thread, &response);
+                        thinclaw_agent::thread_ops::complete_thread_response(
+                            thread,
+                            &payload.content,
+                        );
                     let usage_percent = self.context_monitor.usage_percent(&messages);
                     // User message already persisted at turn start; save assistant response
                     self.persist_assistant_response(
                         thread_id,
                         message,
-                        &response,
+                        &payload.content,
                         session_id,
                         turn_number,
                     )
@@ -2663,9 +2669,9 @@ impl Agent {
                         )
                         .await;
                     if was_streamed {
-                        Ok(SubmissionResult::Streamed(response))
+                        Ok(SubmissionResult::Streamed(payload))
                     } else {
-                        Ok(SubmissionResult::response(response))
+                        Ok(SubmissionResult::Response { payload })
                     }
                 }
                 Ok(AgenticLoopResult::NeedApproval {

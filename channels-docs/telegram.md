@@ -26,6 +26,8 @@ Telegram is not a native Rust channel in the current ThinClaw architecture. If a
 
 - operator-facing messaging through the Telegram Bot API
 - host-managed formatting and streaming behavior
+- generated media replies use the host-side Telegram media helper and require a
+  Bot API token that can send photos/documents to the target chat
 - package-based deployment under the WASM channel runtime
 
 ## Related Docs

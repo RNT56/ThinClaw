@@ -5,7 +5,7 @@
 <h1 align="center">ThinClaw</h1>
 
 <p align="center">
-  <em>A self-hosted personal agent runtime with Rust underneath.</em>
+  <em>A self-hosted AI collaborator for real work: private, durable, and biased toward useful output.</em>
 </p>
 
 <p align="center">
@@ -17,10 +17,11 @@
 </p>
 
 <p align="center">
-  <a href="#quick-start"><img src="https://img.shields.io/badge/Quick_Start-2ea44f?style=flat-square" alt="Quick Start" /></a>&nbsp;
+  <a href="#first-run"><img src="https://img.shields.io/badge/First_Run-2ea44f?style=flat-square" alt="First Run" /></a>&nbsp;
   <a href="#why-thinclaw"><img src="https://img.shields.io/badge/Why_ThinClaw-8250df?style=flat-square" alt="Why ThinClaw" /></a>&nbsp;
-  <a href="#core-capabilities"><img src="https://img.shields.io/badge/Capabilities-0969da?style=flat-square" alt="Capabilities" /></a>&nbsp;
-  <a href="#deployment-modes"><img src="https://img.shields.io/badge/Deployment-f59e0b?style=flat-square" alt="Deployment" /></a>&nbsp;
+  <a href="#personality-that-adapts"><img src="https://img.shields.io/badge/Personality-6f42c1?style=flat-square" alt="Personality" /></a>&nbsp;
+  <a href="#what-you-can-use-it-for"><img src="https://img.shields.io/badge/Use_Cases-0969da?style=flat-square" alt="Use Cases" /></a>&nbsp;
+  <a href="#install-options"><img src="https://img.shields.io/badge/Install-f59e0b?style=flat-square" alt="Install" /></a>&nbsp;
   <a href="#security-and-trust"><img src="https://img.shields.io/badge/Security-c2410c?style=flat-square" alt="Security" /></a>&nbsp;
   <a href="#documentation-map"><img src="https://img.shields.io/badge/Docs-57606a?style=flat-square" alt="Docs" /></a>&nbsp;
   <a href="#development"><img src="https://img.shields.io/badge/Development-24292f?style=flat-square" alt="Development" /></a>
@@ -30,19 +31,39 @@
 
 ## What Is ThinClaw?
 
-ThinClaw is a self-hosted personal agent runtime for people who want durable agent identity, memory, tools, channels, routines, and policy under their own control.
+Your AI assistant should not vanish when the tab closes.
 
-It can run as a local CLI, a full-screen TUI, a long-running service behind a web gateway, or the backend engine embedded inside Scrappy. The core runtime is Rust; extension points use native Rust, sandboxed WASM, and operator-trusted MCP depending on the job.
+ThinClaw is a practical, privacy-respecting AI collaborator for real work. Clear
+head. Steady hands. Useful output. It is warm but not flattering, opinionated
+but not reckless, careful with trust, and biased toward getting things actually
+done.
 
-| ThinClaw Gives You | Why It Matters |
+ThinClaw is self-hosted, so the agent has a place to live. It keeps a durable
+identity, remembers useful context, runs approved tools, connects to channels,
+schedules routines, and stays inside policy you control.
+
+Run it on your laptop, a Mac Mini, a Raspberry Pi, a VPS, or as the local engine
+behind Scrappy. Talk to the same agent from the terminal, full-screen TUI, web
+gateway, chat channels, or background jobs. Same identity. Same memory. Same
+rules.
+
+> ThinClaw is for people who want an agent with a home address, not another
+> disposable chat thread.
+
+Put it on a machine you trust. Connect the services you actually use. Let it
+remember project facts, follow up, watch routine work, and report back through
+the surface you already have open. ThinClaw is not a chatbot you revisit. It is
+an agent you come back to.
+
+| The Need | ThinClaw's Answer |
 |---|---|
-| Durable agent identity | The same named agent can operate across CLI, WebUI, channels, sessions, and background work. |
-| Operator-owned deployment | You choose where it runs, which providers it uses, and which integrations are trusted. |
-| Layered safety boundaries | Secrets, tools, code execution, network access, and external content are treated as separate trust surfaces. |
-| Proactive runtime surfaces | Channels, routines, heartbeat, memory, notifications, background jobs, and subagents are first-class runtime pieces. |
-| Hybrid extensibility | Native Rust handles trusted host work, WASM handles scoped hot-reloadable components, and MCP connects external ecosystems. |
+| Chat that survives the session | Durable identity, memory, workspace context, and continuity commands |
+| Automation that is not scattered | Routines, heartbeat, jobs, channels, notifications, and tools in one runtime |
+| AI that can touch real systems carefully | Explicit trust boundaries for secrets, tools, code, network access, and desktop control |
+| A private agent stack | Local or self-hosted deployment with your providers, your data paths, and your policies |
+| Extensibility without chaos | Native integrations for trusted host work, sandboxed WASM for scoped components, and MCP for external ecosystems |
 
-## Quick Start
+## First Run
 
 ### macOS / Linux
 
@@ -59,6 +80,17 @@ Open the local gateway after startup:
 ```text
 http://127.0.0.1:3000
 ```
+
+Try one useful loop:
+
+```text
+Remember that this machine is my personal ThinClaw node.
+Summarize what you can do from this environment.
+Create a follow-up reminder to review setup tomorrow.
+```
+
+The point is not the prompt. The point is that ThinClaw has somewhere to put the
+memory, a runtime to keep operating, and surfaces you can return to later.
 
 ### Windows PowerShell
 
@@ -102,23 +134,136 @@ sudo bash deploy-setup.sh --mode native --binary ./thinclaw
 
 See [docs/deploy/raspberry-pi-os-lite.md](docs/deploy/raspberry-pi-os-lite.md) for the full helper download and service setup flow.
 
+## What You Can Use It For
+
+| Use Case | What ThinClaw Lets You Do |
+|---|---|
+| Personal operations agent | Keep routines, reminders, logs, service checks, and notifications close to the machine that owns them. |
+| Project memory | Give an agent continuity across repos, docs, sessions, and long investigations without starting from zero every time. |
+| Adaptable working partner | Shift between balanced, professional, creative, research, mentor, minimal, technical, playful, and custom session modes. |
+| Channel-native assistant | Talk to the same agent through the terminal, WebUI, Telegram, Discord, Slack, Gmail, Nostr, and more. |
+| Remote command center | Run ThinClaw on a Mac Mini, Raspberry Pi, VPS, or workstation and reach it through a gateway or chat channel. |
+| Local media lab | Connect ComfyUI for image generation, workflow health checks, dependency checks, and generated-media artifacts. |
+| Controlled desktop autonomy | Opt into host-level UI automation with evidence capture, approval boundaries, rollout, and rollback. |
+
 ## Why ThinClaw
 
-### Operator-Owned Runtime
+### A Useful Character, Not a Novelty
 
-ThinClaw is built for an operator who wants control over deployment, providers, extensions, channels, data paths, secrets, and host privileges. It is a runtime you run, not a remote chat wrapper you decorate.
+ThinClaw is designed to feel like a capable working presence: clear, discreet,
+direct, and protective of your context. It is the collaborator you trust with
+the messy middle of real life and real work: private context, unfinished
+thoughts, half-built projects, ambiguous requests, and the need to actually
+move.
 
-### Identity, Memory, and Surfaces
+That character is not mascot lore or a nicer prompt wrapper. It is how the agent
+makes decisions under ambiguity, how it handles trust, and how it keeps work
+moving without becoming pushy or performative. ThinClaw does not perform
+helpfulness. It helps.
 
-A ThinClaw agent has a durable identity and workspace-backed memory. It can operate through local terminal clients, the gateway UI, native channels, packaged WASM channels, and background work without treating each surface as a separate product.
+### One Agent, Many Doors
 
-### Security as Architecture
+The terminal is not the product. The WebUI is not the product. Telegram is not
+the product. The agent is the product, and ThinClaw gives that agent multiple
+doors into the same identity, memory, tools, and policy.
 
-ThinClaw separates trust zones instead of pretending every integration has the same risk profile. Native integrations run in the trusted host runtime, WASM components are capability-scoped, MCP servers are operator-trusted external processes or services, and privileged desktop autonomy is an explicit opt-in mode.
+### Memory With a Home
 
-### Extensible Without One Extension Model for Everything
+ThinClaw is built around continuity. It can remember workspace context, identity
+details, routines, outcomes, and useful notes in places you control. You decide
+what is configured, what is persisted, and what gets forgotten.
 
-Persistent host integrations, hot-reloadable components, and external tool ecosystems have different safety and lifecycle needs. ThinClaw uses native Rust, WASM, and MCP where each model fits best.
+### Background Work That Keeps Moving
+
+Agents become more useful when they can keep watch, run scheduled work, follow
+up, report status, and hand work between surfaces. ThinClaw treats routines,
+heartbeat, jobs, notifications, and channels as part of the core runtime.
+
+### Control You Can Audit
+
+ThinClaw is not a remote black box. It runs where you put it. Providers,
+extensions, data paths, secret stores, sandbox backends, and desktop autonomy are
+explicit configuration choices.
+
+### Built for Real Tools
+
+Useful agents need more than prompts. ThinClaw supports built-in tools, packaged
+WASM tools and channels, MCP servers, native integrations, ComfyUI workflows,
+subagents, and controlled host automation.
+
+## Personality That Adapts
+
+ThinClaw has a durable character, not a locked costume. Its base identity lives
+in a canonical soul: practical, discreet, candid, warm, and outcome-driven. That
+identity travels across projects and surfaces so the same agent can meet you in
+the terminal, WebUI, chat channels, or background work without becoming a new
+stranger every time.
+
+You can then shape how it shows up.
+
+| Layer | What It Does |
+|---|---|
+| Durable soul | The long-lived core: privacy, trust, helpfulness, continuity, and operating principles |
+| Personality pack | The initial flavor chosen during setup, such as balanced, professional, mentor, or flow state |
+| `/personality` overlay | A temporary session tone or working mode without rewriting the durable identity |
+| Workspace identity files | Project-specific context through `IDENTITY.md`, `USER.md`, `AGENTS.md`, and optional local overlays |
+
+Built-in personality packs include:
+
+| Pack | Best For |
+|---|---|
+| `balanced` | Grounded everyday collaboration |
+| `professional` | Crisp workplace-ready support |
+| `creative_partner` | Lateral thinking, drafts, naming, ideation, and creative direction |
+| `research_assistant` | Evidence-first synthesis, careful uncertainty, and source-driven work |
+| `mentor` | Patient guidance, explanations, and skill-building |
+| `minimal` | Terse answers, low ceremony, and quiet competence |
+| `flow_state` | Composed intensity, momentum, sharper taste, and receipts |
+
+Session overlays let you shift tone on demand:
+
+```text
+/personality concise
+/personality technical
+/personality playful
+/personality eli5
+/personality reset
+```
+
+ThinClaw can also accept a custom session personality in plain language. Ask for
+`/personality skeptical reviewer`, `/personality calm operator`, or a tone that
+fits the moment. The overlay changes voice, density, and collaboration style. It
+does not relax privacy, consent, permissions, or safety boundaries.
+
+That is the point: ThinClaw can feel personal without becoming loose with trust.
+It can be terse in the terminal, careful in research, warm in planning, direct in
+code review, or more imaginative when you need creative force, while still
+remaining the same agent underneath.
+
+## Why Not Just Hosted Chat Or Scripts?
+
+| If You Need | Hosted Chat | Scripts And Cron | ThinClaw |
+|---|---|---|---|
+| One durable agent identity | Product-dependent | Manual | Built in |
+| Memory across surfaces | Limited | Manual | Built in |
+| Local or self-hosted control | No | Yes | Yes |
+| Channels, routines, tools, and jobs together | Limited | Fragmented | Built in |
+| Explicit trust boundaries | Product-dependent | Manual | Built in |
+| A runtime that can grow with you | No | Hard to maintain | Yes |
+
+## Who It Is For
+
+- People who want a personal AI runtime they can run on their own machines.
+- Builders who want memory, tools, routines, channels, and policy in one place.
+- Operators who care where secrets live and which systems an agent can touch.
+- Teams experimenting with self-hosted agent infrastructure instead of another hosted chat wrapper.
+
+## Who It Is Not For
+
+- You only want a zero-configuration hosted chatbot.
+- You do not want to connect providers, secrets, channels, or local services.
+- You do not want to think about trust boundaries for real tools.
+- You need a pure SaaS product with no operator-owned runtime.
 
 ## Run Modes
 
@@ -138,16 +283,15 @@ Persistent host integrations, hot-reloadable components, and external tool ecosy
 
 | Area | Capabilities |
 |---|---|
-| Runtime surfaces | CLI, TUI, web gateway, native channels, WASM channels, and background jobs |
-| Identity | `personality_pack` defaults, `/personality` overlays, durable agent identity, and `/vibe` compatibility |
-| Shared commands | `/compress`, `/personality`, `/skills`, `/heartbeat`, `/summarize`, `/rollback` |
-| Onboarding | Humanist Cockpit CLI/TUI setup with Quick Setup, Advanced Setup, readiness summaries, and saved follow-up notes |
+| Agent identity | Durable soul, `personality_pack` defaults, `/personality` overlays, custom session tones, workspace identity files, and `/vibe` compatibility |
+| Memory and continuity | Workspace-backed memory, search, citations, identity files, `/compress`, and `/summarize` |
+| Surfaces | CLI, TUI, web gateway, native channels, WASM channels, background jobs, and Scrappy embedding |
+| Routines and jobs | Heartbeat, schedules, notifications, job logs, background work, and follow-up surfaces |
 | Channels | Telegram, Signal, Discord, Slack, Matrix, Nostr, Gmail, iMessage, BlueBubbles, Apple Mail, voice-call, APNs/browser-push wake paths, and packaged WASM channels |
-| Memory | Workspace-backed memory, search, citations, identity files, and continuity surfaces |
-| Extensions | Built-in tools, WASM tools, WASM channels, MCP servers, registries, and policy boundaries |
-| Models | Multi-provider routing, failover, provider setup, and cost controls |
+| Tools and extensions | Built-in tools, WASM tools, WASM channels, MCP servers, registries, and policy boundaries |
+| Models | Multi-provider routing, failover, provider setup, model guidance, and cost controls |
 | Gateway | Chat, memory, routines, logs, extensions, providers, projects, skills, and settings |
-| Media generation | ComfyUI-backed `image_generate`, workflow health/dependency checks, and renderable generated-media artifacts |
+| Media generation | ComfyUI-backed `image_generate`, workflow health checks, dependency checks, and renderable generated-media artifacts |
 | Subagents | Detail-level transparency controls and Telegram subagent session routing |
 | Desktop autonomy | Native app adapters, UI automation, evidence capture, managed code autorollout, and rollback |
 
@@ -212,11 +356,11 @@ Read the deep docs before relying on a surface for sensitive workflows:
 - [docs/COMFYUI_MEDIA_GENERATION.md](docs/COMFYUI_MEDIA_GENERATION.md)
 - [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md)
 
-## Install And Source Builds
+## Install Options
 
-GitHub Releases are the normal user path. The installer downloads a prebuilt
-binary, verifies its SHA256 checksum, and installs `thinclaw` into
-`~/.local/bin` by default:
+GitHub Releases are the normal path. The installer downloads a prebuilt binary,
+verifies its SHA256 checksum, and installs `thinclaw` into `~/.local/bin` by
+default:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -230,51 +374,11 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/RNT56/ThinClaw/releases/latest/download/thinclaw-installer.sh | sh -s -- --profile edge
 ```
 
-Build from source only when you need local code changes. Use `--release` for
-source builds you intend to run or install; plain `cargo build` is a
-development/debug build and keeps large debug and incremental compiler artifacts
-under `target/debug`.
-
-| Profile | Command | What It Adds |
-|---|---|---|
-| **edge** | `cargo build --release --no-default-features --features edge --bin thinclaw` | libSQL-only small-machine runtime |
-| **light** (default) | `cargo build --release --bin thinclaw` | PostgreSQL, libSQL, local gateway, HTML-to-Markdown, doc extraction, timezones |
-| **full** | `cargo build --release --features full --bin thinclaw` | ACP, REPL/TUI, tunnel, Docker sandbox, browser, Nostr |
-| **desktop** | `cargo build --release --features desktop --bin thinclaw` | libSQL, HTML-to-Markdown, doc extraction, REPL, timezones |
-
-A cold `full` source build should have roughly 15-20 GiB free so Cargo has room
-for release dependencies, linker scratch space, and the final binary. The
-installed binary is much smaller than the build tree; after copying or installing
-`target/release/thinclaw`, reclaim build artifacts with `cargo clean --release`.
-
-Additional opt-in flags not included in `full`: `voice`, `bedrock`, `bundled-wasm`.
-
-For a low-disk source install, keep Cargo artifacts in a temporary target dir:
-
-```bash
-tmp="$(mktemp -d)"
-cargo install --path . --locked --features full --bin thinclaw --target-dir "$tmp"
-rm -rf "$tmp"
-```
-
 Release artifacts publish the regular `full` binary for supported Linux, macOS,
 and Windows targets, plus Linux `edge` artifacts for small machines.
 
-Full details, custom combinations, and CI matrix: [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md)
-
-## Repository Layout
-
-| Path | Purpose |
-|---|---|
-| [src/](src/) | Core runtime, CLI, gateway, channels, tools, memory, policy, and platform integration |
-| [crates/](crates/) | Workspace crates that own extracted subsystem traits, DTOs, and runtime helpers |
-| [docs/](docs/) | Canonical user, operator, architecture, security, and deployment docs |
-| [deploy/](deploy/) | Linux, Docker, Raspberry Pi, and service helper assets |
-| [channels-src/](channels-src/) | Source crates for packaged channel integrations |
-| [tools-src/](tools-src/) | Source crates for packaged tool integrations |
-| [channels-docs/](channels-docs/) | Channel setup and operation docs |
-| [tools-docs/](tools-docs/) | Tool setup and operation docs |
-| [patches/](patches/) | Vendored or patched dependency material |
+Source builds, feature profiles, and maintainer workflows live in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Documentation Map
 
@@ -285,33 +389,23 @@ Full details, custom combinations, and CI matrix: [docs/BUILD_PROFILES.md](docs/
 | ComfyUI image generation | [docs/COMFYUI_MEDIA_GENERATION.md](docs/COMFYUI_MEDIA_GENERATION.md) |
 | Platform runbooks | [docs/deploy/](docs/deploy/) |
 | CLI command reference | [docs/CLI_REFERENCE.md](docs/CLI_REFERENCE.md) |
-| Build profiles and feature flags | [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md) |
 | LLM provider setup | [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) |
 | Security and trust overview | [docs/SECURITY.md](docs/SECURITY.md) |
 | Deep network model | [src/NETWORK_SECURITY.md](src/NETWORK_SECURITY.md) |
 | Extensions, WASM, MCP, and registries | [docs/EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md) |
 | Channel architecture | [docs/CHANNEL_ARCHITECTURE.md](docs/CHANNEL_ARCHITECTURE.md) |
-| Crate ownership and thin-shell boundaries | [docs/CRATE_OWNERSHIP.md](docs/CRATE_OWNERSHIP.md) |
 | Shared surface commands | [docs/SURFACES_AND_COMMANDS.md](docs/SURFACES_AND_COMMANDS.md) |
 | Terminal and WebUI skins | [docs/TERMINAL_SKINS.md](docs/TERMINAL_SKINS.md) |
 | Identity and personality | [docs/IDENTITY_AND_PERSONALITY.md](docs/IDENTITY_AND_PERSONALITY.md) |
 | Memory and growth surfaces | [docs/MEMORY_AND_GROWTH.md](docs/MEMORY_AND_GROWTH.md) |
 | Research and experiments | [docs/RESEARCH_AND_EXPERIMENTS.md](docs/RESEARCH_AND_EXPERIMENTS.md) |
-| Onboarding and setup behavior | [src/setup/README.md](src/setup/README.md) |
-| Tool implementation guidance | [src/tools/README.md](src/tools/README.md) |
-| Workspace and memory model | [src/workspace/README.md](src/workspace/README.md) |
-| Feature parity tracking | [FEATURE_PARITY.md](FEATURE_PARITY.md) |
-| Contribution guidance | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Contributor workflow | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) |
 
 ## Development
 
-```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-```
-
-When behavior changes, update the relevant canonical docs in the same branch. If the change affects a tracked feature, update [FEATURE_PARITY.md](FEATURE_PARITY.md) too.
+Contributor setup, source builds, local checks, feature profiles, and release
+build details live in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md). Build-profile
+details are tracked in [docs/BUILD_PROFILES.md](docs/BUILD_PROFILES.md).
 
 ## License
 

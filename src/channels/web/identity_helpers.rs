@@ -571,6 +571,7 @@ mod tests {
         let event = SseEvent::Response {
             content: "ok".to_string(),
             thread_id: conversation_id.to_string(),
+            attachments: Vec::new(),
         };
         let allowed = GatewayRequestIdentity::new(
             "user-1",

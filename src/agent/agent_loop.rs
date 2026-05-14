@@ -1044,11 +1044,11 @@ impl Agent {
             // Increment received counter for this channel.
             self.channels.record_received(&message.channel).await;
 
-            match self.handle_message_external(&message).await {
-                Ok(Some(response)) if !response.is_empty() => {
+            match self.handle_message_payload_external(&message).await {
+                Ok(Some(mut response)) if !response.is_empty() => {
                     // Suppress HEARTBEAT_OK responses from heartbeat messages
                     let is_heartbeat = message.channel == "heartbeat";
-                    if is_heartbeat && response.contains("HEARTBEAT_OK") {
+                    if is_heartbeat && response.content.contains("HEARTBEAT_OK") {
                         tracing::debug!("Heartbeat returned HEARTBEAT_OK — suppressing response");
                         continue;
                     }
@@ -1057,7 +1057,7 @@ impl Agent {
                     let event = crate::hooks::HookEvent::Outbound {
                         user_id: message.user_id.clone(),
                         channel: message.channel.clone(),
-                        content: response.clone(),
+                        content: response.content.clone(),
                         thread_id: message.thread_id.clone(),
                     };
                     match self.hooks().run(&event).await {
@@ -1067,9 +1067,14 @@ impl Agent {
                         Ok(crate::hooks::HookOutcome::Continue {
                             modified: Some(new_content),
                         }) => {
+                            response.content = new_content;
                             if let Err(e) = self
                                 .channels
-                                .respond(&message, OutgoingResponse::text(new_content))
+                                .respond(
+                                    &message,
+                                    OutgoingResponse::text(response.content)
+                                        .with_attachments(response.attachments),
+                                )
                                 .await
                             {
                                 tracing::error!(
@@ -1082,7 +1087,11 @@ impl Agent {
                         _ => {
                             if let Err(e) = self
                                 .channels
-                                .respond(&message, OutgoingResponse::text(response))
+                                .respond(
+                                    &message,
+                                    OutgoingResponse::text(response.content)
+                                        .with_attachments(response.attachments),
+                                )
                                 .await
                             {
                                 tracing::error!(
@@ -1099,7 +1108,7 @@ impl Agent {
                     tracing::debug!(
                         channel = %message.channel,
                         user = %message.user_id,
-                        empty_len = empty.len(),
+                        empty_len = empty.content.len(),
                         "Suppressed empty response (not sent to channel)"
                     );
                 }
@@ -1313,7 +1322,10 @@ impl Agent {
             Ok(Some(response)) if !response.is_empty() => {
                 let web_thread_synced = if let Some(target) = gateway_target {
                     self.sync_startup_hook_to_gateway_assistant(
-                        target, hook_name, content, &response,
+                        target,
+                        hook_name,
+                        content,
+                        &response.content,
                     )
                     .await
                 } else {
@@ -1322,14 +1334,17 @@ impl Agent {
 
                 // Send the response to the user's preferred notification channel.
                 let out = match broadcast_thread_id {
-                    Some(thread_id) => OutgoingResponse::text(&response).in_thread(thread_id),
-                    None => OutgoingResponse::text(&response),
+                    Some(thread_id) => OutgoingResponse::text(&response.content)
+                        .with_attachments(response.attachments.clone())
+                        .in_thread(thread_id),
+                    None => OutgoingResponse::text(&response.content)
+                        .with_attachments(response.attachments.clone()),
                 };
                 if target_channel == "web" {
                     if !web_thread_synced {
                         let _ = self
                             .channels
-                            .broadcast("web", notify_user, OutgoingResponse::text(&response))
+                            .broadcast("web", notify_user, out.clone())
                             .await;
                     }
                 } else if let Err(e) = self
@@ -1349,10 +1364,7 @@ impl Agent {
                         }
                     );
                     if !web_thread_synced {
-                        let _ = self
-                            .channels
-                            .broadcast("web", notify_user, OutgoingResponse::text(&response))
-                            .await;
+                        let _ = self.channels.broadcast("web", notify_user, out).await;
                     }
                 } else {
                     tracing::info!("Sent {} hook response to '{}'", hook_name, target_channel,);
@@ -1551,7 +1563,10 @@ impl Agent {
         }
     }
 
-    async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
+    async fn handle_message(
+        &self,
+        message: &IncomingMessage,
+    ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
         // Parse submission type first
         let mut submission = SubmissionParser::parse(&message.content);
 
@@ -1565,10 +1580,20 @@ impl Agent {
             };
             match self.hooks().run(&event).await {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
-                    return Ok(Some(format!("[Message rejected: {}]", reason)));
+                    return Ok(Some(
+                        thinclaw_agent::submission::AgentResponsePayload::text(format!(
+                            "[Message rejected: {}]",
+                            reason
+                        )),
+                    ));
                 }
                 Err(err) => {
-                    return Ok(Some(format!("[Message blocked by hook policy: {}]", err)));
+                    return Ok(Some(
+                        thinclaw_agent::submission::AgentResponsePayload::text(format!(
+                            "[Message blocked by hook policy: {}]",
+                            err
+                        )),
+                    ));
                 }
                 Ok(crate::hooks::HookOutcome::Continue {
                     modified: Some(new_content),
@@ -1640,7 +1665,10 @@ impl Agent {
                 Submission::UserInput { content } => {
                     return self
                         .process_auth_token(message, &pending, content, session, thread_id)
-                        .await;
+                        .await
+                        .map(|result| {
+                            result.map(thinclaw_agent::submission::AgentResponsePayload::text)
+                        });
                 }
                 _ => {
                     // Any control submission (interrupt, undo, etc.) cancels auth mode
@@ -1741,27 +1769,48 @@ impl Agent {
             }
         };
 
-        // Convert SubmissionResult to response string
+        // Convert SubmissionResult to response payload
         match result? {
-            SubmissionResult::Response { content } => {
+            SubmissionResult::Response { payload } => {
                 // Suppress silent replies (e.g. from group chat "nothing to say" responses)
-                if crate::llm::is_silent_reply(&content) {
+                if crate::llm::is_silent_reply(&payload.content) {
                     tracing::debug!("Suppressing silent reply token");
                     Ok(None)
                 } else {
-                    Ok(Some(content))
+                    Ok(Some(payload))
                 }
             }
-            SubmissionResult::Streamed(_content) => {
+            SubmissionResult::Streamed(payload) => {
                 // Response was already sent to the channel via progressive
                 // streaming edits (sendMessage + editMessageText).
-                // Return empty string so the caller skips respond().
+                // Return only attachments so the caller can send media follow-up
+                // without duplicating the streamed text.
                 tracing::debug!("Response already streamed to channel — skipping respond()");
-                Ok(Some(String::new()))
+                if payload.attachments.is_empty() {
+                    Ok(Some(
+                        thinclaw_agent::submission::AgentResponsePayload::text(""),
+                    ))
+                } else {
+                    Ok(Some(
+                        thinclaw_agent::submission::AgentResponsePayload::with_attachments(
+                            "",
+                            payload.attachments,
+                        ),
+                    ))
+                }
             }
-            SubmissionResult::Ok { message } => Ok(message),
-            SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
-            SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
+            SubmissionResult::Ok { message } => {
+                Ok(message.map(thinclaw_agent::submission::AgentResponsePayload::text))
+            }
+            SubmissionResult::Error { message } => Ok(Some(
+                thinclaw_agent::submission::AgentResponsePayload::text(format!(
+                    "Error: {}",
+                    message
+                )),
+            )),
+            SubmissionResult::Interrupted => Ok(Some(
+                thinclaw_agent::submission::AgentResponsePayload::text("Interrupted."),
+            )),
             SubmissionResult::NeedApproval {
                 request_id,
                 tool_name,
@@ -1785,7 +1834,9 @@ impl Agent {
                     .await;
 
                 // Empty string signals the caller to skip respond() (no duplicate text)
-                Ok(Some(String::new()))
+                Ok(Some(
+                    thinclaw_agent::submission::AgentResponsePayload::text(""),
+                ))
             }
         }
     }
@@ -1801,6 +1852,16 @@ impl Agent {
         &self,
         message: &IncomingMessage,
     ) -> Result<Option<String>, Error> {
+        Ok(self
+            .handle_message_payload_external(message)
+            .await?
+            .map(|payload| payload.content))
+    }
+
+    async fn handle_message_payload_external(
+        &self,
+        message: &IncomingMessage,
+    ) -> Result<Option<thinclaw_agent::submission::AgentResponsePayload>, Error> {
         let run_driver = AgentRunDriver::new();
         if let Some(ref external_thread_id) = message.thread_id {
             self.maybe_hydrate_thread(message, external_thread_id).await;

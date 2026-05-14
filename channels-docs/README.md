@@ -33,6 +33,7 @@ For shared identity vocabulary and cross-surface command names, also use:
 | Nostr | relay-based native runtime | [nostr.md](nostr.md) |
 | Gmail | native Gmail channel | [gmail.md](gmail.md) |
 | iMessage | macOS-only local channel | [imessage.md](imessage.md) |
+| BlueBubbles | iMessage-compatible bridge | [bluebubbles.md](bluebubbles.md) |
 | Apple Mail | macOS-only mail channel | [apple-mail.md](apple-mail.md) |
 | Discord Gateway | persistent native Discord path | [discord.md](discord.md) |
 

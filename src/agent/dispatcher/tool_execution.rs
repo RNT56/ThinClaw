@@ -38,6 +38,7 @@ impl Agent {
         blocked_signature: Option<u64>,
         last_call_signature: &mut Option<u64>,
         consecutive_same_calls: &mut u32,
+        generated_attachments: &mut Vec<thinclaw_media::MediaContent>,
     ) -> Result<Option<AgenticLoopResult>, Error> {
         // Add the assistant message with tool_calls to context.
         // OpenAI protocol requires this before tool-result messages.
@@ -451,6 +452,12 @@ impl Agent {
                                 &message.metadata,
                             )
                             .await;
+                    }
+                    if let Ok(ref output) = tool_result {
+                        crate::agent::outbound_media::dedupe_extend(
+                            generated_attachments,
+                            output.outbound_attachments.clone(),
+                        );
                     }
 
                     // ── Canvas tool interception ────────────────────
@@ -964,7 +971,9 @@ impl Agent {
 
         // Return auth response after all results are recorded
         if let Some(instructions) = deferred_auth {
-            return Ok(Some(AgenticLoopResult::Response(instructions)));
+            return Ok(Some(AgenticLoopResult::Response(
+                thinclaw_agent::submission::AgentResponsePayload::text(instructions),
+            )));
         }
 
         // Handle approval if a tool needed it

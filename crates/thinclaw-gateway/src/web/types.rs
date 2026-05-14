@@ -16,7 +16,12 @@ pub struct ModelInfo {
 #[serde(tag = "type")]
 pub enum SseEvent {
     #[serde(rename = "response")]
-    Response { content: String, thread_id: String },
+    Response {
+        content: String,
+        thread_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<ResponseAttachment>,
+    },
     #[serde(rename = "thinking")]
     Thinking {
         message: String,
@@ -309,6 +314,25 @@ pub enum SseEvent {
     /// Frontend should update bootstrapNeeded → false.
     #[serde(rename = "bootstrap_completed")]
     BootstrapCompleted,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseAttachment {
+    pub mime_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    pub data: String,
+}
+
+impl ResponseAttachment {
+    pub fn from_media(content: &thinclaw_types::MediaContent) -> Self {
+        use base64::Engine;
+        Self {
+            mime_type: content.mime_type.clone(),
+            filename: content.filename.clone(),
+            data: base64::engine::general_purpose::STANDARD.encode(&content.data),
+        }
+    }
 }
 
 impl SseEvent {

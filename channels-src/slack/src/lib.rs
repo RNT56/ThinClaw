@@ -117,6 +117,16 @@ struct SlackMessageMetadata {
 
     /// Team ID.
     team_id: Option<String>,
+
+    #[serde(default)]
+    response_attachments: Vec<ResponseAttachmentEnvelope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResponseAttachmentEnvelope {
+    mime_type: String,
+    filename: Option<String>,
+    data: String,
 }
 
 /// Slack API response for chat.postMessage.
@@ -262,6 +272,16 @@ impl Guest for SlackChannel {
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
         let thread_ts = response.thread_id.or(metadata.thread_ts);
+        for attachment in &metadata.response_attachments {
+            if let Err(error) =
+                upload_slack_attachment(&metadata.channel, thread_ts.as_deref(), attachment)
+            {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to upload Slack attachment: {}", error),
+                );
+            }
+        }
 
         // Convert standard Markdown → Slack mrkdwn format
         let mrkdwn_content = markdown_to_slack_mrkdwn(&response.content);
@@ -424,6 +444,7 @@ fn emit_message(
         thread_ts: thread_ts.clone(),
         message_ts: message_ts.clone(),
         team_id,
+        response_attachments: Vec::new(),
     };
 
     let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|e| {
@@ -646,6 +667,94 @@ fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
         }
         Err(e) => Err(format!("HTTP request failed: {}", e)),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct SlackUploadUrlResponse {
+    ok: bool,
+    error: Option<String>,
+    upload_url: Option<String>,
+    file_id: Option<String>,
+}
+
+fn upload_slack_attachment(
+    channel: &str,
+    thread_ts: Option<&str>,
+    attachment: &ResponseAttachmentEnvelope,
+) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&attachment.data)
+        .map_err(|e| format!("invalid base64 attachment: {e}"))?;
+    let filename = attachment
+        .filename
+        .clone()
+        .unwrap_or_else(|| "generated-media".to_string());
+    let headers = serde_json::json!({"Content-Type": "application/json"});
+    let request = serde_json::json!({
+        "filename": filename,
+        "length": bytes.len(),
+    });
+    let response = channel_host::http_request(
+        "POST",
+        "https://slack.com/api/files.getUploadURLExternal",
+        &headers.to_string(),
+        Some(&serde_json::to_vec(&request).map_err(|e| e.to_string())?),
+        None,
+    )
+    .map_err(|e| format!("files.getUploadURLExternal failed: {e}"))?;
+    if response.status != 200 {
+        return Err(format!(
+            "files.getUploadURLExternal returned {}",
+            response.status
+        ));
+    }
+    let upload: SlackUploadUrlResponse = serde_json::from_slice(&response.body)
+        .map_err(|e| format!("parse upload URL response: {e}"))?;
+    if !upload.ok {
+        return Err(upload
+            .error
+            .unwrap_or_else(|| "upload URL request failed".to_string()));
+    }
+    let upload_url = upload.upload_url.ok_or("missing upload_url")?;
+    let file_id = upload.file_id.ok_or("missing file_id")?;
+    let upload_headers = serde_json::json!({"Content-Type": attachment.mime_type});
+    let upload_response = channel_host::http_request(
+        "POST",
+        &upload_url,
+        &upload_headers.to_string(),
+        Some(&bytes),
+        None,
+    )
+    .map_err(|e| format!("Slack file upload failed: {e}"))?;
+    if !(200..300).contains(&upload_response.status) {
+        return Err(format!(
+            "Slack file upload returned {}",
+            upload_response.status
+        ));
+    }
+    let mut complete = serde_json::json!({
+        "channel_id": channel,
+        "files": [{"id": file_id, "title": filename}],
+    });
+    if let Some(thread_ts) = thread_ts {
+        complete["thread_ts"] = serde_json::Value::String(thread_ts.to_string());
+    }
+    let complete_response = channel_host::http_request(
+        "POST",
+        "https://slack.com/api/files.completeUploadExternal",
+        &headers.to_string(),
+        Some(&serde_json::to_vec(&complete).map_err(|e| e.to_string())?),
+        None,
+    )
+    .map_err(|e| format!("files.completeUploadExternal failed: {e}"))?;
+    if complete_response.status != 200 {
+        return Err(format!(
+            "files.completeUploadExternal returned {}",
+            complete_response.status
+        ));
+    }
+    Ok(())
 }
 
 /// Strip leading bot mention from text.

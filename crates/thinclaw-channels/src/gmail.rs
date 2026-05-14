@@ -646,21 +646,26 @@ impl GmailChannel {
         body_text: &str,
         thread_id: Option<&str>,
         in_reply_to: Option<&str>,
+        attachments: &[thinclaw_media::MediaContent],
     ) -> Result<(), ChannelError> {
         let token = self.state.access_token.read().await.clone();
 
         // Build RFC 2822 message.
-        let mut headers = format!(
-            "To: {}\r\nSubject: {}\r\nContent-Type: text/plain; charset=utf-8\r\n",
-            to, subject
-        );
+        let mut headers = format!("To: {}\r\nSubject: {}\r\n", to, subject);
         if let Some(reply_to) = in_reply_to {
             headers.push_str(&format!(
                 "In-Reply-To: {}\r\nReferences: {}\r\n",
                 reply_to, reply_to
             ));
         }
-        let raw_message = format!("{}\r\n{}", headers, body_text);
+        let raw_message = if attachments.is_empty() {
+            format!(
+                "{}Content-Type: text/plain; charset=utf-8\r\n\r\n{}",
+                headers, body_text
+            )
+        } else {
+            build_multipart_message(headers, body_text, attachments)
+        };
 
         // Base64url encode the raw message.
         use base64::Engine;
@@ -1101,6 +1106,7 @@ impl Channel for GmailChannel {
             &response.content,
             thread_id,
             message_id_header,
+            &response.attachments,
         )
         .await?;
 
@@ -1144,6 +1150,7 @@ impl Channel for GmailChannel {
             &response.content,
             None,
             None,
+            &response.attachments,
         )
         .await
     }
@@ -1174,6 +1181,42 @@ impl Channel for GmailChannel {
         tracing::info!("Gmail channel shut down");
         Ok(())
     }
+}
+
+fn build_multipart_message(
+    mut headers: String,
+    body_text: &str,
+    attachments: &[thinclaw_media::MediaContent],
+) -> String {
+    use base64::Engine;
+    let boundary = format!("thinclaw-{}", uuid::Uuid::new_v4());
+    headers.push_str(&format!(
+        "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"{}\"\r\n\r\n",
+        boundary
+    ));
+    let mut raw = headers;
+    raw.push_str(&format!(
+        "--{}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{}\r\n",
+        boundary, body_text
+    ));
+    for attachment in attachments {
+        let filename = attachment.filename.as_deref().unwrap_or("attachment");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&attachment.data);
+        raw.push_str(&format!(
+            "--{}\r\nContent-Type: {}; name=\"{}\"\r\nContent-Disposition: attachment; filename=\"{}\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{}\r\n",
+            boundary,
+            attachment.mime_type,
+            sanitize_header_value(filename),
+            sanitize_header_value(filename),
+            encoded
+        ));
+    }
+    raw.push_str(&format!("--{}--\r\n", boundary));
+    raw
+}
+
+fn sanitize_header_value(value: &str) -> String {
+    value.replace(['\r', '\n', '"'], "_")
 }
 
 #[cfg(test)]

@@ -139,6 +139,47 @@ Channel-specific formatting behavior belongs to the channel layer, not to generi
 
 Today the canonical lookup seam is `ChannelManager::formatting_hints_for()`. If you add or change channel-specific rendering behavior, update the owning native channel implementation or WASM manifest first so every surface sees the same guidance.
 
+## Outbound Generated Media
+
+`OutgoingResponse.attachments` is the canonical transport for generated media
+leaving the agent. The agent loop accumulates media produced in the current turn
+by approved generation tools (`image_generate` and `comfy_run_workflow`) and
+attaches it to the final response. Streamed text responses send the media as a
+media-only follow-up after streaming completes. If an outbound hook rejects or
+blocks the final response, generated attachments are not sent.
+
+Channels should implement delivery in this order:
+
+1. Upload or inline-render `response.attachments` with the platform-native media API.
+2. If the platform is a WASM package, consume the host-provided
+   `response_attachments` metadata bridge.
+3. If the platform cannot upload media, send a short fallback text listing the
+   generated filename, MIME type, size, and stored path or link.
+
+Current capability notes:
+
+| Channel | Generated media behavior |
+|---|---|
+| Gateway/Web | SSE `response` events include attachment metadata and base64 payloads for inline rendering. |
+| TUI/REPL | Prints attachment filename, MIME, size, and stored path. |
+| HTTP webhook | Text fallback in synchronous `wait_for_response` replies. |
+| Discord native | Multipart file upload for replies and broadcasts. |
+| Discord interactions WASM | Multipart webhook followups using `response_attachments`. |
+| Gmail | `multipart/mixed` email attachments. |
+| Apple Mail | Mail.app AppleScript attachments. |
+| iMessage | Native `response.attachments` path. |
+| BlueBubbles | Sends `response.attachments`; legacy metadata fallback remains for compatibility. |
+| Signal | signal-cli JSON-RPC `attachments` with temporary file cleanup. |
+| Telegram WASM | Host-side Telegram media helper. |
+| WhatsApp WASM | Existing `response_attachments` bridge. |
+| Slack WASM | Slack external upload flow. |
+| Nostr, SMS, Twitch, and upload-disabled packages | Explicit text fallback. |
+
+All generated media paths are canonicalized before dispatch and must resolve
+under `~/.thinclaw/media_cache/generated` or an operator-approved generated
+media root. Channels must apply their own platform size limits before upload and
+log fallback or partial-failure outcomes.
+
 ## Unified Event Normalization
 
 New native messaging channels should convert platform payloads into `IncomingEvent` and call `normalize_incoming_event` before sending work to the agent.

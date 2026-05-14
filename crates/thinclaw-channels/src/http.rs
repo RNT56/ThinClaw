@@ -357,7 +357,7 @@ impl Channel for HttpChannel {
     ) -> Result<(), ChannelError> {
         // Check if there's a pending response waiter
         if let Some(tx) = self.state.pending_responses.write().await.remove(&msg.id) {
-            let _ = tx.send(response.content);
+            let _ = tx.send(format_response_with_attachment_fallback(&response));
         }
         Ok(())
     }
@@ -376,6 +376,37 @@ impl Channel for HttpChannel {
         *self.state.tx.write().await = None;
         Ok(())
     }
+}
+
+fn format_response_with_attachment_fallback(response: &OutgoingResponse) -> String {
+    if response.attachments.is_empty() {
+        return response.content.clone();
+    }
+
+    let mut text = response.content.clone();
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str("Generated media:");
+
+    for attachment in &response.attachments {
+        let filename = attachment.filename.as_deref().unwrap_or("generated-media");
+        let source = attachment.source_url.as_deref().unwrap_or("stored locally");
+        text.push_str(&format!(
+            "\n- {} ({} bytes, {}): {}",
+            filename,
+            attachment.data.len(),
+            attachment.mime_type,
+            source
+        ));
+    }
+
+    tracing::info!(
+        attachment_count = response.attachments.len(),
+        "HTTP channel returned generated media as text fallback"
+    );
+
+    text
 }
 
 #[cfg(test)]

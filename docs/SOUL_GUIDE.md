@@ -4,6 +4,7 @@
 
 ## What Belongs In The Canonical Soul
 
+- core profile
 - core truths
 - boundaries
 - vibe
@@ -11,7 +12,7 @@
 - continuity
 - change contract
 
-Keep it behavioral. Keep it sharp. Keep it durable across projects.
+Keep it behavioral. Keep it sharp. Keep it durable across projects. The canonical soul should define what the agent is, what it protects, how it decides, and what good work looks like.
 
 ## What Does Not Belong There
 

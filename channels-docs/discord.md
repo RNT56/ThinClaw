@@ -16,6 +16,7 @@ Characteristics:
 - native Rust channel
 - persistent Gateway connection
 - REST API for outbound responses
+- generated media delivery through Discord multipart file uploads
 - appropriate when long-lived connection state matters
 
 ## Discord Interactions Package
@@ -26,6 +27,7 @@ Characteristics:
 
 - WASM channel package
 - webhook-driven interactions model
+- generated media delivery through multipart webhook followups
 - packaged and managed like other WASM channels
 
 ## Canonical Architecture Reference

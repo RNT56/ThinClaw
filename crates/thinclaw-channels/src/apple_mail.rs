@@ -369,16 +369,24 @@ end tell"#
     }
 
     /// Send a reply email via AppleScript.
-    async fn send_reply(to: &str, subject: &str, body: &str) -> Result<(), ChannelError> {
+    async fn send_reply(
+        to: &str,
+        subject: &str,
+        body: &str,
+        attachments: &[thinclaw_media::MediaContent],
+    ) -> Result<(), ChannelError> {
         let escaped_to = escape_applescript(to);
         let escaped_subject = escape_applescript(subject);
         let escaped_body = escape_applescript(body);
+        let temp_files = write_temp_attachments(attachments).await?;
+        let attachment_script = applescript_attachment_lines(&temp_files);
 
         let script = format!(
             r#"tell application "Mail"
     set newMessage to make new outgoing message with properties {{subject:"Re: {escaped_subject}", content:"{escaped_body}", visible:false}}
     tell newMessage
         make new to recipient at end of to recipients with properties {{address:"{escaped_to}"}}
+{attachment_script}
     end tell
     send newMessage
 end tell"#
@@ -393,6 +401,8 @@ end tell"#
                 name: NAME.to_string(),
                 reason: format!("osascript failed: {e}"),
             })?;
+
+        cleanup_temp_attachments(&temp_files).await;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -406,16 +416,24 @@ end tell"#
     }
 
     /// Send a new (non-reply) email via AppleScript.
-    async fn send_new_email(to: &str, subject: &str, body: &str) -> Result<(), ChannelError> {
+    async fn send_new_email(
+        to: &str,
+        subject: &str,
+        body: &str,
+        attachments: &[thinclaw_media::MediaContent],
+    ) -> Result<(), ChannelError> {
         let escaped_to = escape_applescript(to);
         let escaped_subject = escape_applescript(subject);
         let escaped_body = escape_applescript(body);
+        let temp_files = write_temp_attachments(attachments).await?;
+        let attachment_script = applescript_attachment_lines(&temp_files);
 
         let script = format!(
             r#"tell application "Mail"
     set newMessage to make new outgoing message with properties {{subject:"{escaped_subject}", content:"{escaped_body}", visible:false}}
     tell newMessage
         make new to recipient at end of to recipients with properties {{address:"{escaped_to}"}}
+{attachment_script}
     end tell
     send newMessage
 end tell"#
@@ -430,6 +448,8 @@ end tell"#
                 name: NAME.to_string(),
                 reason: format!("osascript failed: {e}"),
             })?;
+
+        cleanup_temp_attachments(&temp_files).await;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -581,7 +601,13 @@ impl Channel for AppleMailChannel {
             .and_then(|v| v.as_str())
             .unwrap_or("(no subject)");
 
-        Self::send_reply(sender_email, subject, &response.content).await
+        Self::send_reply(
+            sender_email,
+            subject,
+            &response.content,
+            &response.attachments,
+        )
+        .await
     }
 
     async fn send_status(
@@ -606,7 +632,13 @@ impl Channel for AppleMailChannel {
             );
             return Ok(());
         }
-        Self::send_new_email(user_id, "ThinClaw Agent Notification", &response.content).await
+        Self::send_new_email(
+            user_id,
+            "ThinClaw Agent Notification",
+            &response.content,
+            &response.attachments,
+        )
+        .await
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
@@ -657,6 +689,44 @@ fn find_envelope_index() -> Result<PathBuf, ChannelError> {
 /// Escape text for safe inclusion in AppleScript strings.
 fn escape_applescript(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+async fn write_temp_attachments(
+    attachments: &[thinclaw_media::MediaContent],
+) -> Result<Vec<std::path::PathBuf>, ChannelError> {
+    let mut paths = Vec::new();
+    for attachment in attachments {
+        let filename = attachment.filename.as_deref().unwrap_or("attachment");
+        let safe_name = filename.replace(['/', '\\', ':'], "_");
+        let path =
+            std::env::temp_dir().join(format!("thinclaw-{}-{safe_name}", uuid::Uuid::new_v4()));
+        tokio::fs::write(&path, &attachment.data)
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: NAME.to_string(),
+                reason: format!("failed to write temp attachment {}: {e}", path.display()),
+            })?;
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn applescript_attachment_lines(paths: &[std::path::PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| {
+            format!(
+                "        make new attachment with properties {{file name:POSIX file \"{}\"}} at after last paragraph\n",
+                escape_applescript(&path.to_string_lossy())
+            )
+        })
+        .collect::<String>()
+}
+
+async fn cleanup_temp_attachments(paths: &[std::path::PathBuf]) {
+    for path in paths {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 }
 
 /// Ensure a macOS application is running. If it's not running, launch it

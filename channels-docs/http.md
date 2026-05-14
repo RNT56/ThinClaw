@@ -36,3 +36,6 @@ curl -X POST http://localhost:8080/webhook \
 - `HTTP_WEBHOOK_SECRET` is mandatory; the channel will refuse to start without it
 - Default bind address is `0.0.0.0` — restrict with `HTTP_HOST=127.0.0.1` if needed
 - Responses are delivered asynchronously (the agent processes and responds via the channel)
+- HTTP is a text/JSON webhook surface; generated media is returned as explicit
+  fallback text with filename, MIME type, size, and stored path when synchronous
+  `wait_for_response` is used.

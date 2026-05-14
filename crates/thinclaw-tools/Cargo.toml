@@ -21,6 +21,7 @@ futures = "0.3"
 flate2 = "1"
 hex = "0.4"
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication"] }
+mime_guess = "2.0.5"
 nostr-sdk = { version = "0.44.1", default-features = false, features = ["nip04", "nip59"], optional = true }
 rand = "0.8"
 regex = "1"

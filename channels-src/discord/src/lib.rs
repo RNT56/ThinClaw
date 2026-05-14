@@ -23,6 +23,7 @@ wit_bindgen::generate!({
     path: "../../wit/channel.wit",
 });
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use exports::near::agent::channel::{
@@ -122,6 +123,13 @@ struct DiscordMessageMetadata {
 
     /// Thread ID (for forum threads)
     thread_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponseAttachmentEnvelope {
+    mime_type: String,
+    filename: Option<String>,
+    data: String,
 }
 
 /// Workspace path for persisting owner_id across WASM callbacks.
@@ -257,6 +265,13 @@ impl Guest for DiscordChannel {
     fn on_respond(response: AgentResponse) -> Result<(), String> {
         let metadata: DiscordMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
+        let metadata_json = serde_json::from_str::<serde_json::Value>(&response.metadata_json)
+            .unwrap_or_else(|_| serde_json::Value::Null);
+        let attachments = metadata_json
+            .get("response_attachments")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Vec<ResponseAttachmentEnvelope>>(value).ok())
+            .unwrap_or_default();
 
         // Use webhook endpoint for followup
         let url = format!(
@@ -266,6 +281,23 @@ impl Guest for DiscordChannel {
 
         // Split content into chunks that fit Discord's 2000 char limit
         let chunks = split_message(&response.content, DISCORD_MAX_MESSAGE_LENGTH);
+
+        if !attachments.is_empty() {
+            for (idx, attachment) in attachments.iter().enumerate() {
+                let content = if idx == 0 {
+                    chunks.first().map(String::as_str)
+                } else {
+                    None
+                };
+                post_discord_attachment(&url, attachment, content)?;
+            }
+
+            for chunk in chunks.iter().skip(1) {
+                post_discord_json(&url, serde_json::json!({ "content": chunk }))?;
+            }
+
+            return Ok(());
+        }
 
         for (i, chunk) in chunks.iter().enumerate() {
             let mut payload = serde_json::json!({
@@ -283,42 +315,15 @@ impl Guest for DiscordChannel {
                 }
             }
 
-            let payload_bytes =
-                serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
-
-            let headers = serde_json::json!({
-                "Content-Type": "application/json"
-            });
-
-            let result = channel_host::http_request(
-                "POST",
-                &url,
-                &headers.to_string(),
-                Some(&payload_bytes),
-                None,
+            post_discord_json(&url, payload)?;
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!(
+                    "Posted followup chunk {}/{} to Discord",
+                    i + 1,
+                    chunks.len()
+                ),
             );
-
-            match result {
-                Ok(http_response) => {
-                    if http_response.status >= 200 && http_response.status < 300 {
-                        channel_host::log(
-                            channel_host::LogLevel::Debug,
-                            &format!(
-                                "Posted followup chunk {}/{} to Discord",
-                                i + 1,
-                                chunks.len()
-                            ),
-                        );
-                    } else {
-                        let body_str = String::from_utf8_lossy(&http_response.body);
-                        return Err(format!(
-                            "Discord API error: {} - {}",
-                            http_response.status, body_str
-                        ));
-                    }
-                }
-                Err(e) => return Err(format!("HTTP request failed: {}", e)),
-            }
         }
 
         Ok(())
@@ -610,6 +615,86 @@ fn send_pairing_reply(ctx: &PairingReplyCtx, code: &str) -> Result<(), String> {
             ))
         }
         Err(e) => Err(format!("HTTP request failed: {}", e)),
+    }
+}
+
+fn post_discord_json(url: &str, payload: serde_json::Value) -> Result<(), String> {
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
+    let headers = serde_json::json!({"Content-Type": "application/json"});
+    let result = channel_host::http_request(
+        "POST",
+        url,
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    );
+    match result {
+        Ok(response) if response.status >= 200 && response.status < 300 => Ok(()),
+        Ok(response) => {
+            let body_str = String::from_utf8_lossy(&response.body);
+            Err(format!(
+                "Discord API error: {} - {}",
+                response.status, body_str
+            ))
+        }
+        Err(e) => Err(format!("HTTP request failed: {}", e)),
+    }
+}
+
+fn post_discord_attachment(
+    url: &str,
+    attachment: &ResponseAttachmentEnvelope,
+    content: Option<&str>,
+) -> Result<(), String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&attachment.data)
+        .map_err(|e| format!("Invalid response attachment data: {e}"))?;
+    let filename = attachment
+        .filename
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("generated-media");
+    let boundary = "----thinclaw-discord-media-boundary";
+    let payload = serde_json::json!({
+        "content": content.unwrap_or(""),
+        "attachments": [{
+            "id": 0,
+            "filename": filename
+        }]
+    });
+    let payload_json =
+        serde_json::to_string(&payload).map_err(|e| format!("Failed to serialize: {e}"))?;
+
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"payload_json\"\r\n");
+    body.extend_from_slice(b"Content-Type: application/json\r\n\r\n");
+    body.extend_from_slice(payload_json.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"files[0]\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", attachment.mime_type).as_bytes());
+    body.extend_from_slice(&bytes);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+    let headers =
+        serde_json::json!({"Content-Type": format!("multipart/form-data; boundary={boundary}")});
+    let result = channel_host::http_request("POST", url, &headers.to_string(), Some(&body), None);
+    match result {
+        Ok(response) if response.status >= 200 && response.status < 300 => Ok(()),
+        Ok(response) => {
+            let body_str = String::from_utf8_lossy(&response.body);
+            Err(format!(
+                "Discord media upload error: {} - {}",
+                response.status, body_str
+            ))
+        }
+        Err(e) => Err(format!("Discord media upload HTTP request failed: {}", e)),
     }
 }
 

@@ -841,7 +841,7 @@ function connectSSE() {
     loadThreads();
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
-    upsertAssistantMessage(data.content, { timestamp: new Date().toISOString() });
+    upsertAssistantMessage(data.content, { timestamp: new Date().toISOString(), attachments: data.attachments || [] });
     settleLiveTurnCard();
     setStatus('');
     enableChatInput();
@@ -1784,6 +1784,9 @@ function updateMessageElement(message, content, options) {
     body.textContent = content;
   } else {
     body.innerHTML = renderMarkdown(content);
+    if (options && Array.isArray(options.attachments) && options.attachments.length) {
+      body.insertAdjacentHTML('beforeend', renderResponseAttachments(options.attachments));
+    }
   }
   return message;
 }
@@ -2145,6 +2148,22 @@ function renderToolArtifacts(artifacts) {
     return '';
   }).filter(Boolean).join('');
   return items ? '<div class="activity-tool-artifacts">' + items + '</div>' : '';
+}
+
+function renderResponseAttachments(attachments) {
+  const artifacts = (attachments || []).map((attachment) => {
+    if (!attachment || typeof attachment !== 'object') return null;
+    const mime = attachment.mime_type || attachment.mimeType || 'application/octet-stream';
+    return {
+      type: mime.startsWith('image/') ? 'image' : 'resource_link',
+      data: attachment.data,
+      mime_type: mime,
+      title: attachment.filename || 'generated media',
+      name: attachment.filename || 'generated media',
+      uri: attachment.filename || 'generated media',
+    };
+  }).filter(Boolean);
+  return renderToolArtifacts(artifacts);
 }
 
 function finalizeActivityGroup() {

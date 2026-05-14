@@ -183,6 +183,7 @@ pub fn status_update_to_sse_event(status: StatusUpdate, thread_id: Option<String
             SseEvent::Response {
                 content: format!("{}{}", prefix, content),
                 thread_id: thread_id.unwrap_or_default(),
+                attachments: Vec::new(),
             }
         }
         StatusUpdate::LifecycleStart { run_id } => SseEvent::Status {

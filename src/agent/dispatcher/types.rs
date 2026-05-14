@@ -2,16 +2,34 @@ use super::*;
 /// Result of the agentic loop execution.
 pub(crate) enum AgenticLoopResult {
     /// Completed with a response (needs to be sent to channel by caller).
-    Response(String),
+    Response(thinclaw_agent::submission::AgentResponsePayload),
     /// Completed and response was already streamed to the channel via
     /// progressive edits (sendMessage + editMessageText).  Caller should
     /// NOT send it again — only persist and update thread state.
-    Streamed(String),
+    Streamed(thinclaw_agent::submission::AgentResponsePayload),
     /// A tool requires approval before continuing.
     NeedApproval {
         /// The pending approval request to store.
         pending: PendingApproval,
     },
+}
+
+impl AgenticLoopResult {
+    pub(crate) fn with_generated_attachments(
+        mut self,
+        attachments: &[thinclaw_media::MediaContent],
+    ) -> Self {
+        match &mut self {
+            Self::Response(payload) | Self::Streamed(payload) => {
+                crate::agent::outbound_media::dedupe_extend(
+                    &mut payload.attachments,
+                    attachments.to_vec(),
+                );
+            }
+            Self::NeedApproval { .. } => {}
+        }
+        self
+    }
 }
 
 #[derive(Clone)]

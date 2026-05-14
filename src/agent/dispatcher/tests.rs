@@ -239,7 +239,9 @@ async fn tool_phase_runs_cheap_synthesis_only_after_explicit_no_tools_signal() {
         .expect("agentic loop should succeed");
 
     match result {
-        super::AgenticLoopResult::Streamed(text) => assert_eq!(text, "Cheap final answer"),
+        super::AgenticLoopResult::Streamed(payload) => {
+            assert_eq!(payload.content, "Cheap final answer")
+        }
         other => panic!(
             "expected streamed result, got {:?}",
             std::mem::discriminant(&other)
@@ -343,7 +345,9 @@ async fn tool_phase_direct_primary_text_skips_cheap_follow_up() {
         .expect("agentic loop should succeed");
 
     match result {
-        super::AgenticLoopResult::Response(text) => assert_eq!(text, "Primary final answer"),
+        super::AgenticLoopResult::Response(payload) => {
+            assert_eq!(payload.content, "Primary final answer")
+        }
         other => panic!(
             "expected response result, got {:?}",
             std::mem::discriminant(&other)
@@ -413,8 +417,8 @@ async fn truncated_planner_text_runs_primary_finalization_without_cheap() {
         .expect("agentic loop should succeed");
 
     match result {
-        super::AgenticLoopResult::Response(text) => {
-            assert_eq!(text, "Primary finalized answer")
+        super::AgenticLoopResult::Response(payload) => {
+            assert_eq!(payload.content, "Primary finalized answer")
         }
         other => panic!(
             "expected response result, got {:?}",
@@ -480,7 +484,9 @@ async fn force_text_iteration_does_not_run_tool_phase_synthesis() {
         .expect("agentic loop should succeed");
 
     match result {
-        super::AgenticLoopResult::Response(text) => assert_eq!(text, "Forced final answer"),
+        super::AgenticLoopResult::Response(payload) => {
+            assert_eq!(payload.content, "Forced final answer")
+        }
         other => panic!(
             "expected response result, got {:?}",
             std::mem::discriminant(&other)
@@ -551,7 +557,9 @@ async fn stuck_loop_recovery_uses_primary_finalization_only() {
         .expect("agentic loop should succeed");
 
     match result {
-        super::AgenticLoopResult::Response(text) => assert_eq!(text, "Recovered on primary"),
+        super::AgenticLoopResult::Response(payload) => {
+            assert_eq!(payload.content, "Recovered on primary")
+        }
         other => panic!(
             "expected response result, got {:?}",
             std::mem::discriminant(&other)
@@ -692,7 +700,7 @@ async fn advisor_interception_runs_in_parallel_path_and_enforces_budget() {
         .expect("agentic loop should succeed");
 
     match result {
-        super::AgenticLoopResult::Response(text) => assert_eq!(text, "Final answer"),
+        super::AgenticLoopResult::Response(payload) => assert_eq!(payload.content, "Final answer"),
         other => panic!(
             "expected response result, got {:?}",
             std::mem::discriminant(&other)
@@ -808,7 +816,9 @@ async fn run_agentic_loop_uses_channel_formatting_hints_from_channel_manager() {
         .expect("agentic loop should succeed");
 
     match result {
-        super::AgenticLoopResult::Response(text) => assert_eq!(text, "Plain text response"),
+        super::AgenticLoopResult::Response(payload) => {
+            assert_eq!(payload.content, "Plain text response")
+        }
         other => panic!(
             "expected text response, got {:?}",
             std::mem::discriminant(&other)

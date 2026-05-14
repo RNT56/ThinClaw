@@ -630,7 +630,8 @@ impl Channel for ReplChannel {
 
         // Render markdown
         let skin = make_skin(&self.current_skin());
-        let text = termimad::FmtText::from(&skin, &response.content, Some(width));
+        let rendered = format_response_with_attachments(&response);
+        let text = termimad::FmtText::from(&skin, &rendered, Some(width));
 
         print!("{text}");
         println!();
@@ -922,7 +923,8 @@ impl Channel for ReplChannel {
             "{}",
             TerminalBranding::from_skin(current_skin).accent("\u{25CF} notification")
         );
-        let text = termimad::FmtText::from(&skin, &response.content, Some(width));
+        let rendered = format_response_with_attachments(&response);
+        let text = termimad::FmtText::from(&skin, &rendered, Some(width));
         eprint!("{text}");
         eprintln!();
         Ok(())
@@ -935,6 +937,29 @@ impl Channel for ReplChannel {
     async fn shutdown(&self) -> Result<(), ChannelError> {
         Ok(())
     }
+}
+
+fn format_response_with_attachments(response: &OutgoingResponse) -> String {
+    if response.attachments.is_empty() {
+        return response.content.clone();
+    }
+    let mut text = response.content.clone();
+    if !text.trim().is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str("Generated media:\n");
+    for attachment in &response.attachments {
+        let name = attachment.filename.as_deref().unwrap_or("attachment");
+        let path = attachment.source_url.as_deref().unwrap_or("");
+        text.push_str(&format!(
+            "- {} ({} bytes, {}) {}\n",
+            name,
+            attachment.size(),
+            attachment.mime_type,
+            path
+        ));
+    }
+    text
 }
 
 #[cfg(test)]

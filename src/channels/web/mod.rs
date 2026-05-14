@@ -52,7 +52,7 @@ use self::log_layer::{LogBroadcaster, LogLevelHandle};
 
 use self::server::GatewayState;
 use self::sse::SseManager;
-use self::types::SseEvent;
+use self::types::{ResponseAttachment, SseEvent};
 
 /// Web gateway channel implementing the Channel trait.
 pub struct GatewayChannel {
@@ -396,6 +396,11 @@ impl Channel for GatewayChannel {
         self.state.sse.broadcast(SseEvent::Response {
             content: response.content,
             thread_id,
+            attachments: response
+                .attachments
+                .iter()
+                .map(ResponseAttachment::from_media)
+                .collect(),
         });
 
         Ok(())
@@ -424,6 +429,11 @@ impl Channel for GatewayChannel {
         self.state.sse.broadcast(SseEvent::Response {
             content: response.content,
             thread_id: response.thread_id.unwrap_or_default(),
+            attachments: response
+                .attachments
+                .iter()
+                .map(ResponseAttachment::from_media)
+                .collect(),
         });
         Ok(())
     }
@@ -608,7 +618,9 @@ mod tests {
             .expect("broadcast should succeed");
 
         match events.next().await.expect("expected SSE event") {
-            SseEvent::Response { content, thread_id } => {
+            SseEvent::Response {
+                content, thread_id, ..
+            } => {
                 assert_eq!(content, "boot reply");
                 assert_eq!(thread_id, "thread-123");
             }

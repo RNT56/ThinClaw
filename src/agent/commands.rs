@@ -952,7 +952,7 @@ impl Agent {
             .handle_system_command(message, thread_id, command, args)
             .await?
         {
-            SubmissionResult::Response { content } => Ok(Some(content)),
+            SubmissionResult::Response { payload } => Ok(Some(payload.content)),
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             _ => Ok(None),

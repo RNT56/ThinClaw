@@ -172,7 +172,11 @@ impl Channel for NostrChannel {
             .and_then(NostrDmProtocol::parse);
 
         self.runtime
-            .send_reply(&recipient_pubkey, &response.content, protocol)
+            .send_reply(
+                &recipient_pubkey,
+                &format_response_with_attachment_fallback(&response),
+                protocol,
+            )
             .await?;
         Ok(())
     }
@@ -204,7 +208,11 @@ impl Channel for NostrChannel {
         })?;
 
         self.runtime
-            .send_dm(&recipient, &response.content, None)
+            .send_dm(
+                &recipient,
+                &format_response_with_attachment_fallback(&response),
+                None,
+            )
             .await?;
         Ok(())
     }
@@ -236,6 +244,37 @@ impl Channel for NostrChannel {
         tracing::info!("Nostr channel shut down");
         Ok(())
     }
+}
+
+fn format_response_with_attachment_fallback(response: &OutgoingResponse) -> String {
+    if response.attachments.is_empty() {
+        return response.content.clone();
+    }
+
+    let mut text = response.content.clone();
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str("Generated media:");
+
+    for attachment in &response.attachments {
+        let filename = attachment.filename.as_deref().unwrap_or("generated-media");
+        let source = attachment.source_url.as_deref().unwrap_or("stored locally");
+        text.push_str(&format!(
+            "\n- {} ({} bytes, {}): {}",
+            filename,
+            attachment.data.len(),
+            attachment.mime_type,
+            source
+        ));
+    }
+
+    tracing::info!(
+        attachment_count = response.attachments.len(),
+        "Nostr channel sent generated media fallback text"
+    );
+
+    text
 }
 
 #[cfg(test)]

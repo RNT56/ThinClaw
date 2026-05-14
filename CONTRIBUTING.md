@@ -1,5 +1,8 @@
 # Contributing to ThinClaw
 
+Contributor setup, source-build profiles, and maintainer workflow notes live in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
 ## Local Checks
 
 Run the Rust checks before opening a PR:

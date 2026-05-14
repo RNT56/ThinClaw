@@ -53,6 +53,19 @@ inpaint, upscale, and ComfyUI troubleshooting requests. It prefers
 diagnosis, and reserves `comfy_manage` for explicit host-level lifecycle
 requests.
 
+## Output Delivery
+
+`image_generate` and `comfy_run_workflow` save files under the generated media
+cache and return both JSON metadata and renderable tool artifacts. During an
+agent turn, successful generated media is also attached to the final response
+automatically when the active channel supports outbound media.
+
+The same generated files can be sent proactively through `send_message` by
+passing `attachments` with `file_path`, optional `filename`, and optional
+`mime_type`. Paths must resolve under the generated media cache or an
+operator-approved generated-media root. Text-only channels receive an explicit
+fallback listing the stored file path instead of silently dropping media.
+
 ## Trust Boundary
 
 ComfyUI is an operator-trusted local or cloud sidecar, not a ThinClaw WASM
