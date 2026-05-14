@@ -675,12 +675,12 @@ jobs:
           fi
 
           # Make release publication idempotent so reruns don't fail when the tag already exists.
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG already exists; updating metadata and replacing artifacts."
-            gh release upload "$TAG" "${artifacts[@]}" --clobber
-            gh release edit "$TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt"
+            gh release upload "$TAG" "${artifacts[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt"
           else
-            gh release create "$TAG" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" "${artifacts[@]}"
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" "${artifacts[@]}"
           fi
 
   build-edge-artifacts:
@@ -764,7 +764,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release upload "${{ needs.plan.outputs.tag }}" target/edge-artifacts/thinclaw-edge-${{ matrix.target }}.tar.gz --clobber
+          gh release upload "${{ needs.plan.outputs.tag }}" target/edge-artifacts/thinclaw-edge-${{ matrix.target }}.tar.gz --repo "$GITHUB_REPOSITORY" --clobber
       - name: Upload edge checksum artifact
         uses: actions/upload-artifact@v4
         with:
@@ -791,7 +791,7 @@ jobs:
         run: |
           set -euo pipefail
           sort -k2 target/edge-checksums/checksums-edge.txt > checksums-edge.txt
-          gh release upload "${{ needs.plan.outputs.tag }}" checksums-edge.txt --clobber
+          gh release upload "${{ needs.plan.outputs.tag }}" checksums-edge.txt --repo "$GITHUB_REPOSITORY" --clobber
 
   # Prepare patched manifest SHA256 checksums as an artifact for follow-up PRs
   # so release jobs don't fail on protected default branches.
