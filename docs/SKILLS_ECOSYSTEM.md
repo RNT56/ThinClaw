@@ -22,6 +22,20 @@ Skills are discovered in deterministic precedence order:
 
 Earlier layers win on name collisions.
 
+## Bundled Runtime Skills
+
+ThinClaw can ship trusted runtime skills with the binary. These are source-tier
+`builtin` skills and still follow the normal skill-selection and tool-profile
+rules.
+
+- `creative-comfyui`: activates for image generation, img2img, inpaint,
+  upscale, video-generation, and ComfyUI troubleshooting requests. It prefers
+  the built-in `image_generate` tool for simple prompt-to-image work, uses
+  `comfy_health` and `comfy_check_deps` for diagnostics, and only uses
+  `comfy_manage` for explicit lifecycle requests because those actions can
+  install Python packages, download models, mutate local state, or spend cloud
+  credits.
+
 ## Remote Source Adapters
 
 Remote marketplace search is aggregated by `RemoteSkillHub`.

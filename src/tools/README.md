@@ -29,6 +29,19 @@ Add a built-in Rust tool when the capability belongs inside the core runtime.
 4. Register it in the tool registry
 5. Add tests
 
+ComfyUI media generation is a built-in Rust tool family, not a packaged WASM
+tool. `image_generate`, `comfy_health`, `comfy_check_deps`, and
+`comfy_run_workflow` are registered with the standard runtime tool profile;
+`comfy_manage` is registered only when lifecycle management is enabled. These
+tools use the trusted host runtime and talk to a local or cloud ComfyUI sidecar
+over REST/WebSocket APIs.
+
+When changing ComfyUI tool schemas or behavior, update:
+
+- [../../docs/COMFYUI_MEDIA_GENERATION.md](../../docs/COMFYUI_MEDIA_GENERATION.md)
+- [../../tools-docs/comfyui.md](../../tools-docs/comfyui.md)
+- [../../skills/creative-comfyui/SKILL.md](../../skills/creative-comfyui/SKILL.md)
+
 ## WASM Tools
 
 WASM tools are the preferred extension path when you want:

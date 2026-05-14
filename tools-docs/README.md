@@ -34,6 +34,7 @@ Do not assume one generic auth flow for every tool.
 | Telegram | workspace files + in-tool login flow | `telegram/api_id`, `telegram/api_hash`, `telegram/session.json` | [telegram.md](telegram.md) |
 | Okta | `thinclaw tool auth okta` + workspace domain | `okta_oauth_token`, `okta/domain` | [okta.md](okta.md) |
 | Brave Search | `thinclaw tool auth brave-search` | `brave_search_api_key` | [../tools-src/brave-search/README.md](../tools-src/brave-search/README.md) |
+| ComfyUI media generation | built-in runtime tools + optional `comfy-cli` lifecycle | `comfy_cloud_api_key` for cloud mode | [comfyui.md](comfyui.md) |
 
 ## Notes
 
@@ -48,3 +49,4 @@ Not every operator-facing capability is a packaged WASM tool. For first-party ru
 - [../docs/MEMORY_AND_GROWTH.md](../docs/MEMORY_AND_GROWTH.md) for memory, recall, learning, and prompt mutation flows
 - [../docs/SURFACES_AND_COMMANDS.md](../docs/SURFACES_AND_COMMANDS.md) for the shared `/personality`, `/compress`, `/skills`, and continuity command vocabulary
 - [../docs/IDENTITY_AND_PERSONALITY.md](../docs/IDENTITY_AND_PERSONALITY.md) for base identity packs, overlays, and cross-surface naming
+- [comfyui.md](comfyui.md) for the built-in ComfyUI `image_generate` tool family
