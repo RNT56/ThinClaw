@@ -57,6 +57,7 @@ export interface LocalRuntimeSnapshot {
   readiness: RuntimeReadiness;
   endpoint?: LocalRuntimeEndpoint | null;
   capabilities: RuntimeCapability[];
+  supportedCapabilities: RuntimeCapability[];
   exposurePolicy: RuntimeExposurePolicy;
   unavailableReason?: string | null;
 }

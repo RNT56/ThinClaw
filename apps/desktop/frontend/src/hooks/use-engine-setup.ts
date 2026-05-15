@@ -7,14 +7,10 @@
  * Used by both OnboardingWizard and EngineSetupBanner.
  */
 import { useState, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-
-interface EngineSetupStatus {
-    needs_setup: boolean;
-    setup_in_progress: boolean;
-    message: string;
-}
+import { EngineSetupStatus } from "../lib/bindings";
+import { directCommands } from "../lib/generated/direct-commands";
+import { unwrap } from "../lib/utils";
 
 interface SetupProgress {
     stage: string; // "creating_venv" | "installing" | "complete" | "error"
@@ -42,11 +38,15 @@ export function useEngineSetup(): EngineSetupState {
     const [setupError, setSetupError] = useState<string | null>(null);
 
     // Check setup status on mount
-    useEffect(() => {
-        invoke<EngineSetupStatus>("direct_runtime_get_engine_setup_status")
+    const refreshStatus = useCallback(async () => {
+        directCommands.directRuntimeGetEngineSetupStatus()
             .then(setStatus)
             .catch((err) => console.warn("Failed to check engine setup:", err));
     }, []);
+
+    useEffect(() => {
+        refreshStatus();
+    }, [refreshStatus]);
 
     // Listen for setup progress events
     useEffect(() => {
@@ -58,16 +58,18 @@ export function useEngineSetup(): EngineSetupState {
             if (stage === "complete") {
                 setIsSettingUp(false);
                 setSetupComplete(true);
+                refreshStatus();
             } else if (stage === "error") {
                 setIsSettingUp(false);
                 setSetupError(message);
+                refreshStatus();
             }
         });
 
         return () => {
             unlisten.then((fn) => fn());
         };
-    }, []);
+    }, [refreshStatus]);
 
     const triggerSetup = useCallback(async () => {
         setIsSettingUp(true);
@@ -76,14 +78,16 @@ export function useEngineSetup(): EngineSetupState {
         setSetupMessage("Starting setup...");
 
         try {
-            await invoke("direct_runtime_setup_engine");
-            // Events will handle state transitions
+            unwrap(await directCommands.directRuntimeSetupEngine());
+            setSetupComplete(true);
+            setIsSettingUp(false);
+            await refreshStatus();
         } catch (err: any) {
             const msg = typeof err === "string" ? err : "Setup failed";
             setIsSettingUp(false);
             setSetupError(msg);
         }
-    }, []);
+    }, [refreshStatus]);
 
     const needsSetup = !!(status?.needs_setup && !setupComplete);
 

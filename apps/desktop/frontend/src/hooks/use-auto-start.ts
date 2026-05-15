@@ -16,6 +16,7 @@ export function useAutoStart() {
         models,
         modelsDir,
         engineInfo,
+        refreshRuntimeSnapshot,
     } = useModelContext();
     const cleanPath = modelPath.trim();
     const cleanEmbeddingPath = embeddingPath.trim();
@@ -77,6 +78,7 @@ export function useAutoStart() {
                     if (result.status === "error") {
                         throw new Error(result.error);
                     }
+                    await refreshRuntimeSnapshot();
 
                     // Track so we don't restart unnecessarily
                     lastStartedPath.current = cleanPath;
@@ -153,6 +155,7 @@ export function useAutoStart() {
                 }
 
                 await directCommands.directRuntimeStartChatServer(cleanPath, maxContext, template, mmprojPath, false, false, false);
+                await refreshRuntimeSnapshot();
 
                 // Track successful start
                 lastStartedPath.current = cleanPath;
@@ -176,5 +179,5 @@ export function useAutoStart() {
 
         const timer = setTimeout(init, 500);
         return () => { clearTimeout(timer); };
-    }, [cleanPath, cleanEmbeddingPath, template, maxContext, models, modelsDir, config?.selected_chat_provider, engineInfo]);
+    }, [cleanPath, cleanEmbeddingPath, template, maxContext, models, modelsDir, config?.selected_chat_provider, engineInfo, refreshRuntimeSnapshot]);
 }

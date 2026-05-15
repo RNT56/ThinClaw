@@ -40,6 +40,9 @@ Runtime model:
 - Local inference is provided by one compile-time engine family:
   `llamacpp`, `mlx`, `vllm`, `ollama`, or no local engine for cloud-only builds.
 - Engines expose OpenAI-compatible HTTP endpoints to the desktop backend.
+- Runtime readiness is reported through `LocalRuntimeSnapshot`. The public
+  Tauri command redacts local API keys; backend-only consumers may use the
+  private snapshot when they need to call the local endpoint.
 - Cloud chat/media providers are selected through Desktop config and keychain
   state, not through ThinClaw agent routing.
 - RAG/search/media tools are controlled by direct UI toggles such as web search,
@@ -83,7 +86,7 @@ Primary backend ownership:
 
 - `backend/src/thinclaw/*`
 - `backend/src/setup/commands.rs` entries prefixed `thinclaw_*`
-- root `thinclaw` crate imported as `ironclaw` by the Tauri backend
+- root `thinclaw` crate imported as `thinclaw_core` by the Tauri backend
 - root ThinClaw APIs under `src/api/*`
 - root gateway and channel APIs for remote mode
 
@@ -123,7 +126,7 @@ These pieces may be shared, but only through explicit adapters:
 | Tauri shell | Hosts both systems and dispatches commands. |
 | React app shell | Provides navigation, settings, theming, windows, and layout. |
 | Keychain / `SecretStore` | Stores provider credentials. Agent access still requires ThinClaw grants. |
-| Local inference engines | May serve direct chat and may be exposed to ThinClaw only through explicit provider config or local-LLM sync commands. |
+| Local inference engines | Report readiness through `LocalRuntimeSnapshot`; `exposurePolicy=shared_when_enabled` means Direct may use the endpoint immediately and ThinClaw may use it only when the local inference toggle is enabled. |
 | Cloud provider catalog | May provide model discovery to both systems if the contract is provider/model metadata only. |
 | Runtime contracts | `crates/thinclaw-runtime-contracts` is the Desktop-first DTO source for future WebUI/iOS adoption. |
 | Generated bindings | Direct Workbench uses `direct_*` command wrappers. Agent Cockpit uses `thinclaw_*` wrappers and `thinclaw-event`. |
@@ -218,8 +221,13 @@ work continues:
 - The names `startThinClawGateway` and `thinclaw_start_gateway` are legacy
   compatibility names. In local mode they start the embedded agent runtime, not
   necessarily an HTTP gateway.
-- Local inference can be useful to both systems, but direct sidecar state must
-  not become an implicit ThinClaw provider without an explicit sync/config path.
+- llama.cpp startup still lives in `SidecarManager` because it depends on Tauri
+  sidecar process handling. It is intentionally bridged into the shared runtime
+  snapshot instead of being hidden behind a fake `EngineManager` process.
+- ThinClaw local-provider config sync uses the shared runtime snapshot and a
+  narrow legacy adapter for the old `(port, token, context, family)` config
+  shape. New runtime selection code should consume `LocalRuntimeSnapshot`
+  directly instead of adding more sidecar probes.
 - The remote gateway route matrix covers ThinClaw Agent Cockpit behavior only.
   It is not a contract for Direct AI Workbench remote use.
 

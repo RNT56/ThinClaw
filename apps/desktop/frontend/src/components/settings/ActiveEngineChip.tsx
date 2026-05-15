@@ -4,16 +4,9 @@
  * Uses the app's design-token system (--primary, --muted, etc.) with per-engine
  * accent colours that harmonise with the active app theme.
  */
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { Cpu, Zap } from "lucide-react";
 import { cn } from "../../lib/utils";
-
-interface EngineInfo {
-    id: string;
-    display_name: string;
-    hf_tag: string;
-}
+import { useModelContext } from "../model-context";
 
 /**
  * Engine colour map — uses opacity modifiers on the design-token colours so
@@ -23,6 +16,12 @@ interface EngineInfo {
  * Others get distinctive but non-jarring tinted variants.
  */
 const ENGINE_STYLES: Record<string, { text: string; bg: string; border: string; ring: string }> = {
+    llama_cpp: {
+        text: "text-primary",
+        bg: "bg-primary/5",
+        border: "border-primary/15",
+        ring: "ring-primary/10",
+    },
     llamacpp: {
         text: "text-primary",
         bg: "bg-primary/5",
@@ -57,19 +56,14 @@ const FALLBACK_STYLE = {
 };
 
 export function ActiveEngineChip() {
-    const [engineInfo, setEngineInfo] = useState<EngineInfo | null>(null);
+    const { engineInfo, runtimeSnapshot } = useModelContext();
 
-    useEffect(() => {
-        invoke<EngineInfo>("direct_runtime_get_active_engine_info")
-            .then(setEngineInfo)
-            .catch(() => {
-                /* silently fail — chip just won't show */
-            });
-    }, []);
+    if (!engineInfo && !runtimeSnapshot) return null;
 
-    if (!engineInfo) return null;
-
-    const s = ENGINE_STYLES[engineInfo.id] ?? FALLBACK_STYLE;
+    const engineId = runtimeSnapshot?.kind ?? engineInfo?.id ?? "none";
+    const displayName = runtimeSnapshot?.displayName ?? engineInfo?.display_name ?? "Local runtime";
+    const readiness = runtimeSnapshot?.readiness ?? "unavailable";
+    const s = ENGINE_STYLES[engineId] ?? FALLBACK_STYLE;
 
     return (
         <div
@@ -82,14 +76,14 @@ export function ActiveEngineChip() {
                 s.border,
                 s.ring
             )}
-            title={`Inference engine: ${engineInfo.display_name}`}
+            title={`Inference engine: ${displayName} (${readiness})`}
         >
-            {engineInfo.id === "llamacpp" || engineInfo.id === "ollama" ? (
+            {engineId === "llama_cpp" || engineId === "llamacpp" || engineId === "ollama" ? (
                 <Cpu className="w-3 h-3" />
             ) : (
                 <Zap className="w-3 h-3" />
             )}
-            {engineInfo.display_name}
+            {displayName}
         </div>
     );
 }

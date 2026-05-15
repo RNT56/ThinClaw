@@ -121,6 +121,10 @@ impl InferenceEngine for OllamaEngine {
         Some(format!("http://127.0.0.1:{}/v1", self.get_port()))
     }
 
+    fn model_id(&self) -> Option<String> {
+        self.model.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     fn display_name(&self) -> &'static str {
         "Ollama"
     }

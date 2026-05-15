@@ -8,18 +8,12 @@
  * Design: follows the app's card pattern (border-border/50, rounded-xl,
  * bg-card, shadow-sm) and uses design-token colours for all states.
  */
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useEffect } from "react";
 import { Loader2, Wrench, CheckCircle2, AlertTriangle, Zap } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { toast } from "sonner";
 import { useEngineSetup } from "../../hooks/use-engine-setup";
-
-interface EngineInfo {
-    id: string;
-    display_name: string;
-    hf_tag: string;
-}
+import { useModelContext } from "../model-context";
 
 export function EngineSetupBanner() {
     const {
@@ -31,26 +25,20 @@ export function EngineSetupBanner() {
         setupError,
         triggerSetup,
     } = useEngineSetup();
-
-    const [engineInfo, setEngineInfo] = useState<EngineInfo | null>(null);
-
-    useEffect(() => {
-        invoke<EngineInfo>("direct_runtime_get_active_engine_info")
-            .then(setEngineInfo)
-            .catch((err) => console.warn("Failed to get engine info:", err));
-    }, []);
+    const { engineInfo, runtimeSnapshot } = useModelContext();
+    const displayName = runtimeSnapshot?.displayName ?? engineInfo?.display_name ?? "Engine";
 
     // Toast on complete/error (hook doesn't do toasts — UI concern)
     useEffect(() => {
-        if (setupComplete) toast.success(`${engineInfo?.display_name ?? "Engine"} setup complete!`);
-    }, [setupComplete, engineInfo]);
+        if (setupComplete) toast.success(`${displayName} setup complete!`);
+    }, [setupComplete, displayName]);
 
     useEffect(() => {
         if (setupError) toast.error(setupError);
     }, [setupError]);
 
     // Don't render if no setup needed
-    if (!status || (!status.needs_setup && !setupComplete) || !engineInfo) {
+    if (!status || (!status.needs_setup && !setupComplete) || (!engineInfo && !runtimeSnapshot)) {
         return null;
     }
 
@@ -60,7 +48,7 @@ export function EngineSetupBanner() {
             <div className="flex items-center gap-3 p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-sm shadow-sm">
                 <CheckCircle2 className="w-5 h-5 shrink-0" />
                 <div>
-                    <span className="font-semibold">{engineInfo.display_name}</span> is ready! You
+                    <span className="font-semibold">{displayName}</span> is ready! You
                     can now discover and load models.
                 </div>
             </div>
@@ -91,17 +79,17 @@ export function EngineSetupBanner() {
                     <div className="flex-1 min-w-0">
                         <h3 className="font-semibold text-sm text-foreground">
                             {isSettingUp
-                                ? `Setting up ${engineInfo.display_name}...`
+                                ? `Setting up ${displayName}...`
                                 : setupError
                                     ? "Setup Failed"
-                                    : `${engineInfo.display_name} Setup Required`}
+                                    : `${displayName} Setup Required`}
                         </h3>
                         <p className="text-xs text-muted-foreground mt-1">
                             {isSettingUp
                                 ? setupMessage
                                 : setupError
                                     ? setupError
-                                    : `${engineInfo.display_name} needs a one-time Python environment setup. This downloads and configures the inference runtime (~200MB).`}
+                                    : `${displayName} needs a one-time Python environment setup. This downloads and configures the inference runtime (~200MB).`}
                         </p>
                     </div>
                 </div>

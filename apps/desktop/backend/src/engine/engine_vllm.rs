@@ -24,6 +24,7 @@ pub struct VllmEngine {
     port: Mutex<Option<u16>>,
     process: Mutex<Option<tokio::process::Child>>,
     venv_path: Mutex<Option<PathBuf>>,
+    loaded_model: Mutex<Option<String>>,
     /// Path to the bundled `uv` sidecar binary
     uv_path: Mutex<Option<PathBuf>>,
 }
@@ -34,6 +35,7 @@ impl VllmEngine {
             port: Mutex::new(None),
             process: Mutex::new(None),
             venv_path: Mutex::new(None),
+            loaded_model: Mutex::new(None),
             uv_path: Mutex::new(None),
         }
     }
@@ -205,6 +207,8 @@ impl InferenceEngine for VllmEngine {
 
         *self.port.lock().unwrap_or_else(|e| e.into_inner()) = Some(port);
         *self.process.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
+        *self.loaded_model.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(model_path.to_string());
 
         // Poll for readiness (up to 120 seconds — vLLM model loading can be slow)
         let client = reqwest::Client::new();
@@ -260,6 +264,7 @@ impl InferenceEngine for VllmEngine {
             println!("[vllm] Server stopped.");
         }
         *self.port.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *self.loaded_model.lock().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
 
@@ -283,6 +288,13 @@ impl InferenceEngine for VllmEngine {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .map(|p| format!("http://127.0.0.1:{}/v1", p))
+    }
+
+    fn model_id(&self) -> Option<String> {
+        self.loaded_model
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn display_name(&self) -> &'static str {

@@ -285,6 +285,7 @@ pub async fn thinclaw_get_status(
 pub async fn thinclaw_sync_local_llm(
     state: State<'_, ThinClawManager>,
     sidecar: State<'_, crate::sidecar::SidecarManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
 ) -> Result<(), String> {
     let cfg = if let Some(c) = state.get_config().await {
         c
@@ -292,13 +293,21 @@ pub async fn thinclaw_sync_local_llm(
         state.init_config().await?
     };
 
-    let local_llm = sidecar.get_chat_config();
+    let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
+    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot);
     if local_llm.is_none() {
-        return Err("Local LLM (llama-server) is not running".into());
+        return Err(format!(
+            "Local LLM runtime is not running: {}",
+            snapshot
+                .unavailable_reason
+                .as_deref()
+                .unwrap_or("runtime endpoint unavailable")
+        ));
     }
 
     info!(
-        "[thinclaw] Syncing Local LLM config: {:?}",
+        "[thinclaw] Syncing Local LLM config from {:?}: {:?}",
+        snapshot.kind,
         local_llm.as_ref().map(|(p, _, _, _)| *p)
     );
 
@@ -428,16 +437,8 @@ pub async fn thinclaw_start_gateway(
         .unwrap_or(false);
 
     if local_inference {
-        let has_sidecar = sidecar.get_chat_config().is_some();
-        let has_engine = {
-            let guard = engine_manager.engine.lock().await;
-            guard
-                .as_ref()
-                .map(|e| e.base_url().is_some())
-                .unwrap_or(false)
-        };
-
-        if !has_sidecar && !has_engine {
+        let initial_snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
+        if initial_snapshot.endpoint.is_none() {
             info!(
                 "[thinclaw-runtime] Local inference selected but server not ready — \
                  waiting for engine to come online (up to 30s)..."
@@ -447,24 +448,14 @@ pub async fn thinclaw_start_gateway(
             for attempt in 1..=60 {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-                // Check sidecar first (used by llamacpp builds)
-                if sidecar.get_chat_config().is_some() {
+                let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
+                if snapshot.endpoint.is_some() {
                     info!(
-                        "[thinclaw-runtime] Sidecar detected after {}ms",
+                        "[thinclaw-runtime] Local runtime snapshot ready after {}ms",
                         attempt * 500
                     );
                     ready = true;
                     break;
-                }
-
-                // Check engine manager (MLX/vLLM/Ollama)
-                let guard = engine_manager.engine.lock().await;
-                if let Some(engine) = guard.as_ref() {
-                    if engine.is_ready().await {
-                        info!("[thinclaw-runtime] Engine ready after {}ms", attempt * 500);
-                        ready = true;
-                        break;
-                    }
                 }
             }
 

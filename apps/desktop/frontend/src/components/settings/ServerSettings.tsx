@@ -9,7 +9,7 @@ import {
     Box
 } from 'lucide-react';
 import * as thinclaw from '../../lib/thinclaw';
-import { commands, GGUFMetadata, Result, SidecarStatus } from '../../lib/bindings';
+import { commands, GGUFMetadata, Result } from '../../lib/bindings';
 import { directCommands } from '../../lib/generated/direct-commands';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -19,7 +19,6 @@ import { CustomSelect } from './CustomSelect';
 import { analyzeMemoryConstraints, GB } from './memory-analysis';
 
 export function ServerSettings() {
-    const [status, setStatus] = useState<SidecarStatus | null>(null);
     const {
         currentModelPath: modelPath,
         maxContext,
@@ -27,17 +26,17 @@ export function ServerSettings() {
         localModels,
         systemSpecs,
         currentModelTemplate,
-        engineInfo
+        engineInfo,
+        runtimeSnapshot,
+        refreshRuntimeSnapshot,
     } = useModelContext();
     const [loading, setLoading] = useState(false);
     const [metadata, setMetadata] = useState<GGUFMetadata | undefined>();
     const [config, setConfig] = useState<any>(null);
-    const [engineReady, setEngineReady] = useState(false);
 
-    // Determine if we should use the EngineManager health check (MLX/vLLM/Ollama)
-    // vs the SidecarManager chat_process (llamacpp)
-    const isLlamaCpp = !engineInfo || engineInfo.id === 'llamacpp';
-    const isCloudOnly = engineInfo?.id === 'none';
+    const runtimeKind = runtimeSnapshot?.kind;
+    const isLlamaCpp = runtimeKind ? runtimeKind === 'llama_cpp' : (!engineInfo || engineInfo.id === 'llamacpp');
+    const isCloudOnly = runtimeKind ? runtimeKind === 'none' : engineInfo?.id === 'none';
 
     useEffect(() => {
         commands.getUserConfig().then(setConfig);
@@ -56,20 +55,9 @@ export function ServerSettings() {
 
     const checkStatus = async () => {
         try {
-            const s = await directCommands.directRuntimeGetSidecarStatus();
-            setStatus(s);
+            await refreshRuntimeSnapshot();
         } catch (e) {
             console.error("Failed to get status", e);
-        }
-
-        // For non-llamacpp engines, also poll the EngineManager health endpoint
-        if (!isLlamaCpp && !isCloudOnly) {
-            try {
-                const res = await directCommands.directRuntimeIsEngineReady();
-                if (res.status === 'ok') setEngineReady(res.data);
-            } catch {
-                setEngineReady(false);
-            }
         }
     };
 
@@ -80,11 +68,7 @@ export function ServerSettings() {
     }, [isLlamaCpp, isCloudOnly]);
 
     // Unified "is the inference server running?" across all engines
-    const isServerRunning = isCloudOnly
-        ? false
-        : isLlamaCpp
-            ? (status?.chat_running ?? false)
-            : engineReady;
+    const isServerRunning = runtimeSnapshot?.readiness === 'ready' && !!runtimeSnapshot.endpoint;
 
     const engineDisplayName = engineInfo?.display_name ?? 'Local AI';
 
@@ -102,7 +86,7 @@ export function ServerSettings() {
                 const startRes = await directCommands.directRuntimeStartEngine(modelPath, maxContext);
                 if (startRes.status === 'error') throw new Error(startRes.error);
             }
-            await checkStatus();
+            const snapshot = await refreshRuntimeSnapshot();
 
             // Attempt dynamic config update for ThinClaw
             try {
@@ -110,18 +94,16 @@ export function ServerSettings() {
                 if (gatewayStatus.status === "ok" && gatewayStatus.data.engine_running) {
                     toast.loading("Syncing Agent Configuration...", { id: toastId });
 
-                    // Fetch the actual running config of the chat server
-                    const chatConfig = await directCommands.directRuntimeGetChatServerConfig();
-
-                    const localPort = chatConfig ? chatConfig.port : 53755;
-                    const usedContext = chatConfig ? chatConfig.context_size : maxContext;
+                    const endpoint = snapshot?.endpoint;
+                    const localBaseUrl = endpoint?.baseUrl?.replace(/\/v1\/?$/, "") ?? "http://127.0.0.1:53755";
+                    const usedContext = endpoint?.contextSize ?? maxContext;
 
 
                     const configPatch = {
                         models: {
                             providers: {
                                 local: {
-                                    baseUrl: `http://127.0.0.1:${localPort}`,
+                                    baseUrl: localBaseUrl,
                                     api: "openai-completions",
                                     models: [
                                         {

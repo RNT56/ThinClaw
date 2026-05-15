@@ -560,13 +560,10 @@ pub fn run() {
                     if let Some(ref cfg) = oc_config {
                         if cfg.local_inference_enabled {
                             let sidecar_mgr = ironclaw_handle.state::<sidecar::SidecarManager>();
-                            let has_sidecar = sidecar_mgr.get_chat_config().is_some();
-                            let has_engine = {
-                                let engine_mgr = ironclaw_handle.state::<engine::EngineManager>();
-                                let guard = engine_mgr.engine.lock().await;
-                                guard.as_ref().and_then(|e| e.base_url()).is_some()
-                            };
-                            !has_sidecar && !has_engine
+                            let engine_mgr = ironclaw_handle.state::<engine::EngineManager>();
+                            let snapshot =
+                                engine::local_runtime_snapshot(&sidecar_mgr, &engine_mgr).await;
+                            snapshot.endpoint.is_none()
                         } else {
                             false
                         }
@@ -582,26 +579,17 @@ pub fn run() {
                     for attempt in 1..=90 {
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-                        // Check sidecar (llamacpp builds)
                         let sidecar_mgr = ironclaw_handle.state::<sidecar::SidecarManager>();
-                        if sidecar_mgr.get_chat_config().is_some() {
+                        let engine_mgr = ironclaw_handle.state::<engine::EngineManager>();
+                        let snapshot =
+                            engine::local_runtime_snapshot(&sidecar_mgr, &engine_mgr).await;
+                        if snapshot.endpoint.is_some() {
                             println!(
-                                "[main] ThinClaw: sidecar detected after {}ms",
+                                "[main] ThinClaw: local runtime snapshot ready after {}ms",
                                 attempt * 500
                             );
                             engine_ready = true;
                             break;
-                        }
-
-                        // Check engine manager (MLX/vLLM/Ollama)
-                        let engine_mgr = ironclaw_handle.state::<engine::EngineManager>();
-                        let guard = engine_mgr.engine.lock().await;
-                        if let Some(eng) = guard.as_ref() {
-                            if eng.is_ready().await {
-                                println!("[main] ThinClaw: engine ready after {}ms", attempt * 500);
-                                engine_ready = true;
-                                break;
-                            }
                         }
                     }
 

@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { appDataDir } from "@tauri-apps/api/path";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
-import { ModelFile, SystemSpecs, commands, StandardAsset } from "../lib/bindings";
+import { ModelFile, SystemSpecs, commands, StandardAsset, EngineInfo, LocalRuntimeSnapshot } from "../lib/bindings";
+import { directCommands } from "../lib/generated/direct-commands";
 import { getMigratedLocalStorageItem, isOnboardingInProgress, setMigratedLocalStorageItem } from "../lib/local-storage-migration";
 
 import { MODEL_LIBRARY, ExtendedModelDefinition as ModelDefinition, ModelVariant } from "../lib/model-library";
@@ -21,16 +22,6 @@ interface DownloadEvent {
     total: number;
     downloaded: number;
     percentage: number;
-}
-
-interface EngineInfo {
-    id: string;
-    display_name: string;
-    available: boolean;
-    requires_setup: boolean;
-    description: string;
-    hf_tag: string;
-    single_file_model: boolean;
 }
 
 // Persistent discovery state — survives tab switches
@@ -106,6 +97,9 @@ interface ModelContextType {
     downloadHfFiles: (repoId: string, files: string[], destSubdir?: string | null, category?: string) => Promise<void>;
     /** Active inference engine info (null while loading) */
     engineInfo: EngineInfo | null;
+    /** Public local runtime snapshot; endpoint secrets are redacted by the backend. */
+    runtimeSnapshot: LocalRuntimeSnapshot | null;
+    refreshRuntimeSnapshot: () => Promise<LocalRuntimeSnapshot | null>;
     /** Persistent HF discovery state (survives tab switches) */
     discoveryState: DiscoveryState;
     setDiscoveryState: React.Dispatch<React.SetStateAction<DiscoveryState>>;
@@ -145,6 +139,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
     const [standardAssets, setStandardAssets] = useState<StandardAsset[]>([]);
     const [models, setModels] = useState<ModelDefinition[]>(MODEL_LIBRARY);
     const [engineInfo, setEngineInfo] = useState<EngineInfo | null>(null);
+    const [runtimeSnapshot, setRuntimeSnapshot] = useState<LocalRuntimeSnapshot | null>(null);
 
     // Persistent discovery state — lifted from HFDiscovery so it survives tab switches
     const [discoveryState, setDiscoveryState] = useState<DiscoveryState>({
@@ -156,12 +151,47 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         repoProgress: {},
     });
 
-    // Load engine info on mount
+    const refreshRuntimeSnapshot = useCallback(async (): Promise<LocalRuntimeSnapshot | null> => {
+        try {
+            const result = await directCommands.directRuntimeSnapshot();
+            if (result.status === "ok") {
+                setRuntimeSnapshot(result.data);
+                return result.data;
+            }
+            console.warn("Failed to get runtime snapshot:", result.error);
+        } catch (err) {
+            console.warn("Failed to get runtime snapshot:", err);
+        }
+        setRuntimeSnapshot(null);
+        return null;
+    }, []);
+
+    // Load engine info and public runtime snapshot on mount, then refresh when
+    // local runtime lifecycle events can change readiness or capabilities.
     useEffect(() => {
-        invoke<EngineInfo>("direct_runtime_get_active_engine_info")
+        directCommands.directRuntimeGetActiveEngineInfo()
             .then(setEngineInfo)
             .catch(err => console.warn("Failed to get engine info:", err));
-    }, []);
+        refreshRuntimeSnapshot();
+
+        const onFocus = () => { refreshRuntimeSnapshot(); };
+        window.addEventListener("focus", onFocus);
+
+        const unlistenSidecar = listen("sidecar_event", () => {
+            refreshRuntimeSnapshot();
+        });
+        const unlistenSetup = listen<{ stage: string }>("engine_setup_progress", (event) => {
+            if (event.payload.stage === "complete" || event.payload.stage === "error") {
+                refreshRuntimeSnapshot();
+            }
+        });
+
+        return () => {
+            window.removeEventListener("focus", onFocus);
+            unlistenSidecar.then(fn => fn());
+            unlistenSetup.then(fn => fn());
+        };
+    }, [refreshRuntimeSnapshot]);
 
     const syncRemoteCatalog = useCallback(async () => {
         try {
@@ -723,6 +753,8 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         setIsRestarting,
         downloadHfFiles,
         engineInfo,
+        runtimeSnapshot,
+        refreshRuntimeSnapshot,
     }), [
         models, localModels, currentModelPath,
         currentEmbeddingModelPath, currentVisionModelPath, currentSttModelPath,
@@ -732,6 +764,7 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         downloadSpeed, selectModel, activeCategory, cancelDownload, deleteModel,
         isRefreshing, modelsDir, systemSpecs, standardAssets, checkStandardAssets,
         downloadStandardAsset, maxContext, isRestarting, downloadHfFiles, engineInfo,
+        runtimeSnapshot, refreshRuntimeSnapshot,
     ]);
 
     const progressValue = useMemo<ModelProgressContextType>(() => ({

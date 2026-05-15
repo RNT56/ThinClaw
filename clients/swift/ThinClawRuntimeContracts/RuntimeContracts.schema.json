@@ -462,6 +462,7 @@
         "properties": {
           "capabilities": {
             "default": [],
+            "description": "Capabilities that are active and ready in the current runtime snapshot.",
             "items": {
               "$ref": "#/definitions/RuntimeCapability"
             },
@@ -489,6 +490,14 @@
           },
           "readiness": {
             "$ref": "#/definitions/RuntimeReadiness"
+          },
+          "supportedCapabilities": {
+            "default": [],
+            "description": "Capabilities this runtime family can support when the relevant local services are configured and running.",
+            "items": {
+              "$ref": "#/definitions/RuntimeCapability"
+            },
+            "type": "array"
           },
           "unavailableReason": {
             "default": null,

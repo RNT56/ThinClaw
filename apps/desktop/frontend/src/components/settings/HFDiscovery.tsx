@@ -39,20 +39,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { useModelContext } from "../model-context";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { EngineInfo } from "../../lib/bindings";
+import { directCommands } from "../../lib/generated/direct-commands";
 
 // ---------------------------------------------------------------------------
 // Types (match backend via specta)
 // ---------------------------------------------------------------------------
-
-interface EngineInfo {
-    id: string;
-    display_name: string;
-    available: boolean;
-    requires_setup: boolean;
-    description: string;
-    hf_tag: string;
-    single_file_model: boolean;
-}
 
 interface HfModelCard {
     id: string;
@@ -242,12 +234,12 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
     );
 
     // Fallback engine info load if context doesn't have it yet
-    useEffect(() => {
-        if (!contextEngineInfo) {
-            invoke<EngineInfo>("direct_runtime_get_active_engine_info")
-                .then(setLocalEngineInfo)
-                .catch((err) => console.error("Failed to get engine info:", err));
-        }
+	    useEffect(() => {
+	        if (!contextEngineInfo) {
+	            directCommands.directRuntimeGetActiveEngineInfo()
+	                .then(setLocalEngineInfo)
+	                .catch((err) => console.error("Failed to get engine info:", err));
+	        }
     }, [contextEngineInfo]);
 
     // -----------------------------------------------------------------------

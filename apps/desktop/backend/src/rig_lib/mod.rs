@@ -34,11 +34,31 @@ pub async fn rig_check_web_search(query: String) -> Result<String, String> {
 #[specta::specta]
 pub async fn agent_chat(
     state: tauri::State<'_, crate::sidecar::SidecarManager>,
+    engine_manager: tauri::State<'_, crate::engine::EngineManager>,
     request: String,
 ) -> Result<String, String> {
-    let (port, _token, _, model_family) =
-        state.get_chat_config().ok_or("Chat server not running")?;
-    let base_url = format!("http://127.0.0.1:{}/v1", port);
+    let snapshot = crate::engine::local_runtime_snapshot(&state, &engine_manager).await;
+    let endpoint = snapshot.endpoint.as_ref().ok_or_else(|| {
+        format!(
+            "Chat runtime not running: {}",
+            snapshot
+                .unavailable_reason
+                .as_deref()
+                .unwrap_or("runtime endpoint unavailable")
+        )
+    })?;
+    let base_url = endpoint.base_url.clone();
+    let api_key = endpoint
+        .api_key
+        .clone()
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(|| "sk-no-key-required".to_string());
+    let model_id = endpoint
+        .model_id
+        .clone()
+        .unwrap_or_else(|| "default".to_string());
+    let context_size = endpoint.context_size.unwrap_or(8192) as usize;
+    let model_family = endpoint.model_family.clone();
 
     // Check for summarizer
     let summarizer_provider = if let Some((sum_port, _sum_token)) = state.get_summarizer_config() {
@@ -48,7 +68,7 @@ pub async fn agent_chat(
             &sum_url,
             "sk-no-key-required",
             "default",
-            Some(model_family.clone()),
+            model_family.clone(),
         ))
     } else {
         None
@@ -60,15 +80,15 @@ pub async fn agent_chat(
     let manager = RigManager::new(
         crate::rig_lib::unified_provider::ProviderKind::Local,
         base_url,
-        "default".to_string(),
+        model_id,
         None,
-        None,
-        8192,
+        Some(api_key),
+        context_size,
         summarizer_provider,
         false,
         None,
         None,
-        Some(model_family),
+        model_family,
     );
 
     manager.chat(&request).await

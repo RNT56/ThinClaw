@@ -71,8 +71,13 @@ pub struct LocalRuntimeSnapshot {
     pub readiness: RuntimeReadiness,
     #[serde(default)]
     pub endpoint: Option<LocalRuntimeEndpoint>,
+    /// Capabilities that are active and ready in the current runtime snapshot.
     #[serde(default)]
     pub capabilities: Vec<RuntimeCapability>,
+    /// Capabilities this runtime family can support when the relevant local
+    /// services are configured and running.
+    #[serde(default)]
+    pub supported_capabilities: Vec<RuntimeCapability>,
     pub exposure_policy: RuntimeExposurePolicy,
     #[serde(default)]
     pub unavailable_reason: Option<String>,
@@ -90,9 +95,17 @@ impl LocalRuntimeSnapshot {
             readiness: RuntimeReadiness::Unavailable,
             endpoint: None,
             capabilities: Vec::new(),
+            supported_capabilities: Vec::new(),
             exposure_policy: RuntimeExposurePolicy::DirectOnly,
             unavailable_reason: Some(reason.into()),
         }
+    }
+
+    pub fn redacted_for_public_clients(mut self) -> Self {
+        if let Some(endpoint) = self.endpoint.as_mut() {
+            endpoint.api_key = None;
+        }
+        self
     }
 }
 

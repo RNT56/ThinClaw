@@ -246,7 +246,9 @@ pub async fn direct_runtime_snapshot(
     sidecar: tauri::State<'_, crate::sidecar::SidecarManager>,
     engine_manager: tauri::State<'_, EngineManager>,
 ) -> Result<LocalRuntimeSnapshot, String> {
-    Ok(local_runtime_snapshot(&sidecar, &engine_manager).await)
+    Ok(local_runtime_snapshot(&sidecar, &engine_manager)
+        .await
+        .redacted_for_public_clients())
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +279,85 @@ fn runtime_kind_from_engine_id(engine_id: &str) -> LocalRuntimeKind {
     }
 }
 
+fn push_capability(capabilities: &mut Vec<RuntimeCapability>, capability: RuntimeCapability) {
+    if !capabilities.contains(&capability) {
+        capabilities.push(capability);
+    }
+}
+
+fn sidecar_active_capabilities(sidecar: &crate::sidecar::SidecarManager) -> Vec<RuntimeCapability> {
+    let mut capabilities = Vec::new();
+    if sidecar.get_embedding_config().is_some() {
+        push_capability(&mut capabilities, RuntimeCapability::Embedding);
+    }
+    if sidecar.is_stt_active() {
+        push_capability(&mut capabilities, RuntimeCapability::Stt);
+    }
+    if sidecar.is_tts_active() {
+        push_capability(&mut capabilities, RuntimeCapability::Tts);
+    }
+    if sidecar.is_image_active() {
+        push_capability(&mut capabilities, RuntimeCapability::Diffusion);
+    }
+    capabilities
+}
+
+fn active_capabilities_for_runtime(
+    engine_id: &str,
+    sidecar: &crate::sidecar::SidecarManager,
+) -> Vec<RuntimeCapability> {
+    let mut capabilities = vec![RuntimeCapability::Chat];
+    for capability in sidecar_active_capabilities(sidecar) {
+        push_capability(&mut capabilities, capability);
+    }
+
+    // MLX auxiliary services are launched through SidecarManager, so their
+    // active state is represented above. vLLM and Ollama expose chat only.
+    match engine_id {
+        "llamacpp" | "mlx" | "vllm" | "ollama" => capabilities,
+        _ => Vec::new(),
+    }
+}
+
+fn supported_capabilities_for_runtime(engine_id: &str) -> Vec<RuntimeCapability> {
+    match engine_id {
+        "llamacpp" => vec![
+            RuntimeCapability::Chat,
+            RuntimeCapability::Embedding,
+            RuntimeCapability::Stt,
+            RuntimeCapability::Tts,
+            RuntimeCapability::Diffusion,
+        ],
+        "mlx" => vec![
+            RuntimeCapability::Chat,
+            RuntimeCapability::Embedding,
+            RuntimeCapability::Stt,
+            RuntimeCapability::Diffusion,
+        ],
+        "vllm" | "ollama" => vec![RuntimeCapability::Chat],
+        _ => Vec::new(),
+    }
+}
+
+#[allow(unused_variables)]
+fn engine_needs_setup(info: &EngineInfo, engine_manager: &EngineManager) -> bool {
+    match info.id.as_str() {
+        #[cfg(feature = "mlx")]
+        "mlx" => {
+            let engine = engine_mlx::MlxEngine::new();
+            engine.set_app_data_dir(engine_manager.app_data_dir.clone());
+            !engine.is_bootstrapped()
+        }
+        #[cfg(feature = "vllm")]
+        "vllm" => {
+            let engine = engine_vllm::VllmEngine::new();
+            engine.set_app_data_dir(engine_manager.app_data_dir.clone());
+            !engine.is_bootstrapped()
+        }
+        _ => false,
+    }
+}
+
 /// Build the shared local runtime snapshot consumed by Direct Workbench and
 /// the ThinClaw runtime bridge.
 pub async fn local_runtime_snapshot(
@@ -287,20 +368,6 @@ pub async fn local_runtime_snapshot(
     let kind = runtime_kind_from_engine_id(&info.id);
 
     if let Some((port, token, context_size, model_family)) = sidecar.get_chat_config() {
-        let mut capabilities = vec![RuntimeCapability::Chat];
-        if sidecar.get_embedding_config().is_some() {
-            capabilities.push(RuntimeCapability::Embedding);
-        }
-        if sidecar.is_stt_active() {
-            capabilities.push(RuntimeCapability::Stt);
-        }
-        if sidecar.is_tts_active() {
-            capabilities.push(RuntimeCapability::Tts);
-        }
-        if sidecar.is_image_active() {
-            capabilities.push(RuntimeCapability::Diffusion);
-        }
-
         return LocalRuntimeSnapshot {
             kind,
             display_name: info.display_name,
@@ -312,46 +379,103 @@ pub async fn local_runtime_snapshot(
                 context_size: Some(context_size),
                 model_family: Some(model_family),
             }),
-            capabilities,
-            exposure_policy: RuntimeExposurePolicy::DirectOnly,
+            capabilities: active_capabilities_for_runtime(&info.id, sidecar),
+            supported_capabilities: supported_capabilities_for_runtime(&info.id),
+            exposure_policy: RuntimeExposurePolicy::SharedWhenEnabled,
             unavailable_reason: None,
         };
     }
 
     let guard = engine_manager.engine.lock().await;
     if let Some(engine) = guard.as_ref() {
-        if let Some(base_url) = engine.base_url() {
+        if engine.is_ready().await {
+            if let Some(base_url) = engine.base_url() {
+                let engine_id = engine.engine_id();
+                return LocalRuntimeSnapshot {
+                    kind: runtime_kind_from_engine_id(engine_id),
+                    display_name: engine.display_name().to_string(),
+                    readiness: RuntimeReadiness::Ready,
+                    endpoint: Some(LocalRuntimeEndpoint {
+                        base_url,
+                        api_key: None,
+                        model_id: engine.model_id(),
+                        context_size: engine.max_context(),
+                        model_family: None,
+                    }),
+                    capabilities: active_capabilities_for_runtime(engine_id, sidecar),
+                    supported_capabilities: supported_capabilities_for_runtime(engine_id),
+                    exposure_policy: RuntimeExposurePolicy::SharedWhenEnabled,
+                    unavailable_reason: None,
+                };
+            }
+        } else if let Some(base_url) = engine.base_url() {
+            let engine_id = engine.engine_id();
+            let readiness = if engine_id == "ollama" {
+                RuntimeReadiness::Unavailable
+            } else {
+                RuntimeReadiness::Starting
+            };
             return LocalRuntimeSnapshot {
-                kind: runtime_kind_from_engine_id(engine.engine_id()),
+                kind: runtime_kind_from_engine_id(engine_id),
                 display_name: engine.display_name().to_string(),
-                readiness: RuntimeReadiness::Ready,
-                endpoint: Some(LocalRuntimeEndpoint {
-                    base_url,
-                    api_key: None,
-                    model_id: engine.model_id(),
-                    context_size: engine.max_context(),
-                    model_family: None,
+                readiness,
+                endpoint: None,
+                capabilities: Vec::new(),
+                supported_capabilities: supported_capabilities_for_runtime(engine_id),
+                exposure_policy: RuntimeExposurePolicy::SharedWhenEnabled,
+                unavailable_reason: Some(if engine_id == "ollama" {
+                    "Ollama daemon is not running. Start it with `ollama serve`.".to_string()
+                } else {
+                    format!("Local runtime endpoint {base_url} is not ready yet")
                 }),
-                capabilities: vec![RuntimeCapability::Chat],
-                exposure_policy: RuntimeExposurePolicy::DirectOnly,
-                unavailable_reason: None,
             };
         }
     }
+    drop(guard);
+
+    let setup_required = engine_needs_setup(&info, engine_manager);
 
     LocalRuntimeSnapshot {
         kind,
         display_name: info.display_name,
-        readiness: if info.requires_setup {
+        readiness: if setup_required {
             RuntimeReadiness::SetupRequired
         } else {
             RuntimeReadiness::Unavailable
         },
         endpoint: None,
         capabilities: Vec::new(),
-        exposure_policy: RuntimeExposurePolicy::DirectOnly,
-        unavailable_reason: Some("No local chat runtime endpoint is running".to_string()),
+        supported_capabilities: supported_capabilities_for_runtime(&info.id),
+        exposure_policy: RuntimeExposurePolicy::SharedWhenEnabled,
+        unavailable_reason: Some(if setup_required {
+            "Local inference runtime requires first-launch setup".to_string()
+        } else {
+            "No local chat runtime endpoint is running".to_string()
+        }),
     }
+}
+
+/// Convert a runtime snapshot into the legacy local LLM tuple consumed by
+/// ThinClaw Desktop's config writer.
+///
+/// The tuple shape predates `LocalRuntimeSnapshot` and stores only
+/// `(port, api_key, context_size, model_family)`. Keep this adapter at the
+/// boundary so newer runtime selection still flows through the shared snapshot.
+pub fn local_runtime_snapshot_to_local_llm(
+    snapshot: &LocalRuntimeSnapshot,
+) -> Option<(u16, String, u32, String)> {
+    let endpoint = snapshot.endpoint.as_ref()?;
+    let parsed = reqwest::Url::parse(&endpoint.base_url).ok()?;
+    let port = parsed.port_or_known_default()?;
+    Some((
+        port,
+        endpoint.api_key.clone().unwrap_or_default(),
+        endpoint.context_size.unwrap_or(16_384),
+        endpoint
+            .model_family
+            .clone()
+            .unwrap_or_else(|| "chatml".to_string()),
+    ))
 }
 
 impl EngineManager {
@@ -512,28 +636,7 @@ pub fn direct_runtime_get_engine_setup_status(
     #[allow(unused_variables)] engine_manager: tauri::State<'_, EngineManager>,
 ) -> EngineSetupStatus {
     let info = direct_runtime_get_active_engine_info();
-
-    // Only MLX and vLLM need bootstrap
-    let needs_setup = match info.id.as_str() {
-        #[cfg(feature = "mlx")]
-        "mlx" => {
-            // Check if mlx-env exists
-            !engine_manager
-                .app_data_dir
-                .join("mlx-env")
-                .join("bin")
-                .join("python3")
-                .exists()
-        }
-        #[cfg(feature = "vllm")]
-        "vllm" => !engine_manager
-            .app_data_dir
-            .join("vllm-env")
-            .join("bin")
-            .join("python3")
-            .exists(),
-        _ => false,
-    };
+    let needs_setup = engine_needs_setup(&info, &engine_manager);
 
     EngineSetupStatus {
         needs_setup,
@@ -586,6 +689,9 @@ pub async fn direct_runtime_setup_engine(
             // Create a temporary engine for bootstrap (the managed one is behind tokio::Mutex)
             let engine = engine_mlx::MlxEngine::new();
             engine.set_app_data_dir(_engine_manager.app_data_dir.clone());
+            if let Some(path) = EngineManager::resolve_uv_path() {
+                engine.set_uv_path(path);
+            }
 
             emit(
                 "installing",
@@ -602,6 +708,9 @@ pub async fn direct_runtime_setup_engine(
 
             let engine = engine_vllm::VllmEngine::new();
             engine.set_app_data_dir(_engine_manager.app_data_dir.clone());
+            if let Some(path) = EngineManager::resolve_uv_path() {
+                engine.set_uv_path(path);
+            }
 
             emit(
                 "installing",
@@ -663,14 +772,13 @@ pub async fn direct_runtime_stop_engine(
 #[tauri::command]
 #[specta::specta]
 pub async fn direct_runtime_is_engine_ready(
+    sidecar: tauri::State<'_, crate::sidecar::SidecarManager>,
     engine_manager: tauri::State<'_, EngineManager>,
 ) -> Result<bool, String> {
-    let guard = engine_manager.engine.lock().await;
-    if let Some(engine) = guard.as_ref() {
-        Ok(engine.is_ready().await)
-    } else {
-        Ok(false)
-    }
+    Ok(local_runtime_snapshot(&sidecar, &engine_manager)
+        .await
+        .endpoint
+        .is_some())
 }
 
 // ---------------------------------------------------------------------------
@@ -713,6 +821,81 @@ mod tests {
         let info = direct_runtime_get_active_engine_info();
         let json = serde_json::to_string(&info).expect("EngineInfo should serialize");
         assert!(json.contains(&info.id));
+    }
+
+    #[test]
+    fn runtime_kind_mapping_matches_contract_wire_variants() {
+        assert_eq!(
+            runtime_kind_from_engine_id("llamacpp"),
+            LocalRuntimeKind::LlamaCpp
+        );
+        assert_eq!(runtime_kind_from_engine_id("mlx"), LocalRuntimeKind::Mlx);
+        assert_eq!(runtime_kind_from_engine_id("vllm"), LocalRuntimeKind::Vllm);
+        assert_eq!(
+            runtime_kind_from_engine_id("ollama"),
+            LocalRuntimeKind::Ollama
+        );
+        assert_eq!(
+            runtime_kind_from_engine_id("unsupported"),
+            LocalRuntimeKind::None
+        );
+    }
+
+    #[test]
+    fn supported_capabilities_are_stable_per_runtime_family() {
+        assert_eq!(
+            supported_capabilities_for_runtime("llamacpp"),
+            vec![
+                RuntimeCapability::Chat,
+                RuntimeCapability::Embedding,
+                RuntimeCapability::Stt,
+                RuntimeCapability::Tts,
+                RuntimeCapability::Diffusion,
+            ]
+        );
+        assert_eq!(
+            supported_capabilities_for_runtime("mlx"),
+            vec![
+                RuntimeCapability::Chat,
+                RuntimeCapability::Embedding,
+                RuntimeCapability::Stt,
+                RuntimeCapability::Diffusion,
+            ]
+        );
+        assert_eq!(
+            supported_capabilities_for_runtime("vllm"),
+            vec![RuntimeCapability::Chat]
+        );
+        assert_eq!(
+            supported_capabilities_for_runtime("ollama"),
+            vec![RuntimeCapability::Chat]
+        );
+        assert!(supported_capabilities_for_runtime("none").is_empty());
+    }
+
+    #[test]
+    fn runtime_snapshot_converts_to_legacy_local_llm_config() {
+        let snapshot = LocalRuntimeSnapshot {
+            kind: LocalRuntimeKind::Mlx,
+            display_name: "MLX".into(),
+            readiness: RuntimeReadiness::Ready,
+            endpoint: Some(LocalRuntimeEndpoint {
+                base_url: "http://127.0.0.1:8765/v1".into(),
+                api_key: Some("token".into()),
+                model_id: Some("mlx-model".into()),
+                context_size: Some(65_536),
+                model_family: None,
+            }),
+            capabilities: vec![RuntimeCapability::Chat],
+            supported_capabilities: vec![RuntimeCapability::Chat],
+            exposure_policy: RuntimeExposurePolicy::SharedWhenEnabled,
+            unavailable_reason: None,
+        };
+
+        assert_eq!(
+            local_runtime_snapshot_to_local_llm(&snapshot),
+            Some((8765, "token".into(), 65_536, "chatml".into()))
+        );
     }
 
     #[test]

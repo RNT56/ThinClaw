@@ -900,6 +900,7 @@ pub async fn thinclaw_toggle_custom_secret(
 pub async fn thinclaw_toggle_local_tools(
     state: State<'_, ThinClawManager>,
     sidecar: State<'_, SidecarManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
     enabled: bool,
 ) -> Result<(), String> {
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -918,7 +919,8 @@ pub async fn thinclaw_toggle_local_tools(
 
     // Regenerate config to reflect the change
     let existing_thinclaw_engine = cfg.load_config().ok();
-    let local_llm = sidecar.get_chat_config();
+    let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
+    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot);
     let thinclaw_engine = cfg.generate_config(
         existing_thinclaw_engine
             .as_ref()
@@ -946,6 +948,7 @@ pub async fn thinclaw_toggle_local_tools(
 pub async fn thinclaw_set_workspace_mode(
     state: State<'_, ThinClawManager>,
     sidecar: State<'_, SidecarManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
     mode: String,
     root: Option<String>,
 ) -> Result<String, String> {
@@ -1007,7 +1010,8 @@ pub async fn thinclaw_set_workspace_mode(
 
     // Regenerate config to reflect the change
     let existing_thinclaw_engine = cfg.load_config().ok();
-    let local_llm = sidecar.get_chat_config();
+    let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
+    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot);
     let thinclaw_engine = cfg.generate_config(
         existing_thinclaw_engine
             .as_ref()
@@ -1039,6 +1043,7 @@ pub async fn thinclaw_set_workspace_mode(
 pub async fn thinclaw_toggle_local_inference(
     state: State<'_, ThinClawManager>,
     sidecar: State<'_, SidecarManager>,
+    engine_manager: State<'_, crate::engine::EngineManager>,
     enabled: bool,
 ) -> Result<(), String> {
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -1057,7 +1062,8 @@ pub async fn thinclaw_toggle_local_inference(
 
     // Regenerate config to reflect priority change
     let existing_thinclaw_engine = cfg.load_config().ok();
-    let local_llm = sidecar.get_chat_config();
+    let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
+    let local_llm = crate::engine::local_runtime_snapshot_to_local_llm(&snapshot);
     let thinclaw_engine = cfg.generate_config(
         existing_thinclaw_engine
             .as_ref()

@@ -3507,7 +3507,16 @@ export type LatencyEntry = { provider: string; avg_latency_ms: number }
 export type LifecycleEventItem = { timestamp: string; plugin_id: string; event_type: string; details: string | null }
 export type LocalRuntimeEndpoint = { baseUrl: string; apiKey?: string | null; modelId?: string | null; contextSize?: number | null; modelFamily?: string | null }
 export type LocalRuntimeKind = "llama_cpp" | "mlx" | "vllm" | "ollama" | "none"
-export type LocalRuntimeSnapshot = { kind: LocalRuntimeKind; displayName: string; readiness: RuntimeReadiness; endpoint?: LocalRuntimeEndpoint | null; capabilities?: RuntimeCapability[]; exposurePolicy: RuntimeExposurePolicy; unavailableReason?: string | null }
+export type LocalRuntimeSnapshot = { kind: LocalRuntimeKind; displayName: string; readiness: RuntimeReadiness; endpoint?: LocalRuntimeEndpoint | null;
+/**
+ * Capabilities that are active and ready in the current runtime snapshot.
+ */
+capabilities?: RuntimeCapability[];
+/**
+ * Capabilities this runtime family can support when the relevant local
+ * services are configured and running.
+ */
+supportedCapabilities?: RuntimeCapability[]; exposurePolicy: RuntimeExposurePolicy; unavailableReason?: string | null }
 /**
  * Manifest validation response
  */

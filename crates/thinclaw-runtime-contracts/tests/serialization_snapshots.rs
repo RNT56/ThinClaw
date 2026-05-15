@@ -158,7 +158,12 @@ fn runtime_contract_snapshot_is_stable() {
             model_family: Some("qwen".into()),
         }),
         capabilities: vec![RuntimeCapability::Chat, RuntimeCapability::Embedding],
-        exposure_policy: RuntimeExposurePolicy::DirectOnly,
+        supported_capabilities: vec![
+            RuntimeCapability::Chat,
+            RuntimeCapability::Embedding,
+            RuntimeCapability::Stt,
+        ],
+        exposure_policy: RuntimeExposurePolicy::SharedWhenEnabled,
         unavailable_reason: None,
     };
 
@@ -176,9 +181,34 @@ fn runtime_contract_snapshot_is_stable() {
                 "modelFamily": "qwen"
             },
             "capabilities": ["chat", "embedding"],
-            "exposurePolicy": "direct_only",
+            "supportedCapabilities": ["chat", "embedding", "stt"],
+            "exposurePolicy": "shared_when_enabled",
             "unavailableReason": null
         })
+    );
+
+    let redacted = LocalRuntimeSnapshot {
+        kind: LocalRuntimeKind::LlamaCpp,
+        display_name: "llama.cpp".into(),
+        readiness: RuntimeReadiness::Ready,
+        endpoint: Some(LocalRuntimeEndpoint {
+            base_url: "http://127.0.0.1:8080/v1".into(),
+            api_key: Some("token".into()),
+            model_id: Some("qwen2.5.gguf".into()),
+            context_size: Some(32_768),
+            model_family: Some("qwen".into()),
+        }),
+        capabilities: vec![RuntimeCapability::Chat],
+        supported_capabilities: vec![RuntimeCapability::Chat],
+        exposure_policy: RuntimeExposurePolicy::SharedWhenEnabled,
+        unavailable_reason: None,
+    }
+    .redacted_for_public_clients();
+
+    assert_eq!(
+        redacted.endpoint.and_then(|endpoint| endpoint.api_key),
+        None,
+        "public runtime snapshots must not expose local runtime API tokens"
     );
 }
 

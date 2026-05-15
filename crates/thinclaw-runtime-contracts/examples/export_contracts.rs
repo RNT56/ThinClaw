@@ -186,6 +186,7 @@ export interface LocalRuntimeSnapshot {
   readiness: RuntimeReadiness;
   endpoint?: LocalRuntimeEndpoint | null;
   capabilities: RuntimeCapability[];
+  supportedCapabilities: RuntimeCapability[];
   exposurePolicy: RuntimeExposurePolicy;
   unavailableReason?: string | null;
 }
@@ -517,6 +518,7 @@ public struct LocalRuntimeSnapshot: Codable, Sendable {
     public let readiness: RuntimeReadiness
     public let endpoint: LocalRuntimeEndpoint?
     public let capabilities: [RuntimeCapability]
+    public let supportedCapabilities: [RuntimeCapability]
     public let exposurePolicy: RuntimeExposurePolicy
     public let unavailableReason: String?
 }

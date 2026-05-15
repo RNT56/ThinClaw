@@ -86,8 +86,10 @@ export function ChatView() {
 
     // Only llamacpp builds use the llama-server sidecar; MLX/vLLM manage their
     // own server. We hide the manual "Start Server" button for those engines.
-    const { engineInfo } = useModelContext();
-    const isLlamaCppEngine = !engineInfo || engineInfo.single_file_model;
+    const { engineInfo, runtimeSnapshot } = useModelContext();
+    const isLlamaCppEngine = runtimeSnapshot
+        ? runtimeSnapshot.kind === "llama_cpp"
+        : (!engineInfo || engineInfo.single_file_model);
 
     return (
         <div {...getRootProps()} className="flex-1 flex flex-col h-full overflow-hidden">
