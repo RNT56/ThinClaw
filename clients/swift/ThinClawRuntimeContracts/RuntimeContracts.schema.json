@@ -1,0 +1,914 @@
+{
+  "components": {
+    "schemas": {
+      "AssetRecord": {
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "height": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "kind": {
+            "$ref": "#/definitions/AssetKind"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "mimeType": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "$ref": "#/definitions/AssetOrigin"
+          },
+          "path": {
+            "type": "string"
+          },
+          "prompt": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reference": {
+            "$ref": "#/definitions/AssetRef"
+          },
+          "sha256": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sizeBytes": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/definitions/AssetStatus"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "visibility": {
+            "$ref": "#/definitions/AssetVisibility"
+          },
+          "width": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "createdAt",
+          "kind",
+          "origin",
+          "path",
+          "reference",
+          "status",
+          "updatedAt",
+          "visibility"
+        ],
+        "title": "AssetRecord",
+        "type": "object"
+      },
+      "AssetRef": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "namespace": {
+            "$ref": "#/definitions/AssetNamespace"
+          }
+        },
+        "required": [
+          "id",
+          "namespace"
+        ],
+        "title": "AssetRef",
+        "type": "object"
+      },
+      "DirectAttachedDocument": {
+        "properties": {
+          "assetRef": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/AssetRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "DirectAttachedDocument",
+        "type": "object"
+      },
+      "DirectChatMessage": {
+        "properties": {
+          "assets": {
+            "default": null,
+            "items": {
+              "$ref": "#/definitions/AssetRef"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "attachedDocs": {
+            "default": null,
+            "items": {
+              "$ref": "#/definitions/DirectAttachedDocument"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "images": {
+            "default": null,
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "isSummary": {
+            "default": null,
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "originalMessages": {
+            "default": null,
+            "items": {
+              "$ref": "#/definitions/DirectChatMessage"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "role": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content",
+          "role"
+        ],
+        "title": "DirectChatMessage",
+        "type": "object"
+      },
+      "DirectChatPayload": {
+        "properties": {
+          "autoMode": {
+            "default": false,
+            "type": "boolean"
+          },
+          "conversationId": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/definitions/DirectChatMessage"
+            },
+            "type": "array"
+          },
+          "model": {
+            "type": "string"
+          },
+          "projectId": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "temperature": {
+            "format": "float",
+            "type": "number"
+          },
+          "topP": {
+            "format": "float",
+            "type": "number"
+          },
+          "webSearchEnabled": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "messages",
+          "model",
+          "temperature",
+          "topP"
+        ],
+        "title": "DirectChatPayload",
+        "type": "object"
+      },
+      "DirectConversation": {
+        "properties": {
+          "createdAt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "createdAt",
+          "id",
+          "title",
+          "updatedAt"
+        ],
+        "title": "DirectConversation",
+        "type": "object"
+      },
+      "DirectDocumentIngestResponse": {
+        "properties": {
+          "asset": {
+            "$ref": "#/definitions/AssetRecord"
+          },
+          "documentId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset",
+          "documentId"
+        ],
+        "title": "DirectDocumentIngestResponse",
+        "type": "object"
+      },
+      "DirectDocumentUploadResponse": {
+        "properties": {
+          "asset": {
+            "$ref": "#/definitions/AssetRecord"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset",
+          "path"
+        ],
+        "title": "DirectDocumentUploadResponse",
+        "type": "object"
+      },
+      "DirectStreamChunk": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "contextUpdate": {
+            "default": null,
+            "items": {
+              "$ref": "#/definitions/DirectChatMessage"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "done": {
+            "type": "boolean"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/DirectTokenUsage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "content",
+          "done"
+        ],
+        "title": "DirectStreamChunk",
+        "type": "object"
+      },
+      "DirectSttResponse": {
+        "properties": {
+          "asset": {
+            "$ref": "#/definitions/AssetRecord"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset",
+          "text"
+        ],
+        "title": "DirectSttResponse",
+        "type": "object"
+      },
+      "DirectTokenUsage": {
+        "properties": {
+          "completionTokens": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "promptTokens": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "totalTokens": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "completionTokens",
+          "promptTokens",
+          "totalTokens"
+        ],
+        "title": "DirectTokenUsage",
+        "type": "object"
+      },
+      "DirectTtsResponse": {
+        "properties": {
+          "asset": {
+            "$ref": "#/definitions/AssetRecord"
+          },
+          "audioBytes": {
+            "description": "Base64-encoded audio bytes for existing web audio playback flows.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset",
+          "audioBytes"
+        ],
+        "title": "DirectTtsResponse",
+        "type": "object"
+      },
+      "LocalRuntimeEndpoint": {
+        "properties": {
+          "apiKey": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "baseUrl": {
+            "type": "string"
+          },
+          "contextSize": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "modelFamily": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modelId": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "baseUrl"
+        ],
+        "title": "LocalRuntimeEndpoint",
+        "type": "object"
+      },
+      "LocalRuntimeSnapshot": {
+        "properties": {
+          "capabilities": {
+            "default": [],
+            "description": "Capabilities that are active and ready in the current runtime snapshot.",
+            "items": {
+              "$ref": "#/definitions/RuntimeCapability"
+            },
+            "type": "array"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "endpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/LocalRuntimeEndpoint"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "exposurePolicy": {
+            "$ref": "#/definitions/RuntimeExposurePolicy"
+          },
+          "kind": {
+            "$ref": "#/definitions/LocalRuntimeKind"
+          },
+          "readiness": {
+            "$ref": "#/definitions/RuntimeReadiness"
+          },
+          "supportedCapabilities": {
+            "default": [],
+            "description": "Capabilities this runtime family can support when the relevant local services are configured and running.",
+            "items": {
+              "$ref": "#/definitions/RuntimeCapability"
+            },
+            "type": "array"
+          },
+          "unavailableReason": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "displayName",
+          "exposurePolicy",
+          "kind",
+          "readiness"
+        ],
+        "title": "LocalRuntimeSnapshot",
+        "type": "object"
+      },
+      "ModelCapabilitySet": {
+        "properties": {
+          "jsonMode": {
+            "type": "boolean"
+          },
+          "streaming": {
+            "type": "boolean"
+          },
+          "systemPrompt": {
+            "type": "boolean"
+          },
+          "thinking": {
+            "type": "boolean"
+          },
+          "tools": {
+            "type": "boolean"
+          },
+          "vision": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "jsonMode",
+          "streaming",
+          "systemPrompt",
+          "thinking",
+          "tools",
+          "vision"
+        ],
+        "title": "ModelCapabilitySet",
+        "type": "object"
+      },
+      "ModelDescriptor": {
+        "properties": {
+          "capabilities": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/ModelCapabilitySet"
+              }
+            ],
+            "default": {
+              "jsonMode": false,
+              "streaming": false,
+              "systemPrompt": false,
+              "thinking": false,
+              "tools": false,
+              "vision": false
+            }
+          },
+          "category": {
+            "$ref": "#/definitions/ModelCategory"
+          },
+          "contextWindow": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "deprecated": {
+            "default": false,
+            "type": "boolean"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "embeddingDimensions": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "maxOutputTokens": {
+            "default": null,
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "pricing": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ModelPricing"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "provider": {
+            "type": "string"
+          },
+          "providerName": {
+            "type": "string"
+          },
+          "supportsStreaming": {
+            "default": false,
+            "type": "boolean"
+          },
+          "supportsTools": {
+            "default": false,
+            "type": "boolean"
+          },
+          "supportsVision": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "category",
+          "displayName",
+          "id",
+          "provider",
+          "providerName"
+        ],
+        "title": "ModelDescriptor",
+        "type": "object"
+      },
+      "ModelDiscoveryResult": {
+        "properties": {
+          "errors": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/definitions/ProviderDiscoveryResult"
+            },
+            "type": "array"
+          },
+          "totalModels": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "providers",
+          "totalModels"
+        ],
+        "title": "ModelDiscoveryResult",
+        "type": "object"
+      },
+      "ModelPricing": {
+        "properties": {
+          "inputPerMillion": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "outputPerMillion": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "per1kChars": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "perImage": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "perMinute": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "title": "ModelPricing",
+        "type": "object"
+      },
+      "ProviderCredentialDescriptor": {
+        "description": "Provider credential metadata safe to expose to clients.",
+        "properties": {
+          "credentialReady": {
+            "default": false,
+            "type": "boolean"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "envKeyName": {
+            "type": "string"
+          },
+          "providerSlug": {
+            "type": "string"
+          },
+          "secretName": {
+            "type": "string"
+          },
+          "setupUrl": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "displayName",
+          "envKeyName",
+          "providerSlug",
+          "secretName"
+        ],
+        "title": "ProviderCredentialDescriptor",
+        "type": "object"
+      },
+      "ProviderDiscoveryResult": {
+        "properties": {
+          "error": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fromCache": {
+            "type": "boolean"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/definitions/ModelDescriptor"
+            },
+            "type": "array"
+          },
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "fromCache",
+          "models",
+          "provider"
+        ],
+        "title": "ProviderDiscoveryResult",
+        "type": "object"
+      },
+      "ProviderEndpoint": {
+        "description": "Endpoint configuration for a cloud provider.",
+        "properties": {
+          "api_style": {
+            "$ref": "#/definitions/ApiStyle"
+          },
+          "base_url": {
+            "type": "string"
+          },
+          "default_context_size": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "default_model": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "env_key_name": {
+            "type": "string"
+          },
+          "id": {
+            "description": "Provider slug, serialized as `id` in the registry.",
+            "type": "string"
+          },
+          "notes": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secret_name": {
+            "type": "string"
+          },
+          "setup_url": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "suggested_cheap_model": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "supports_streaming": {
+            "type": "boolean"
+          },
+          "tier": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "api_style",
+          "base_url",
+          "default_context_size",
+          "default_model",
+          "display_name",
+          "env_key_name",
+          "id",
+          "secret_name",
+          "supports_streaming"
+        ],
+        "title": "ProviderEndpoint",
+        "type": "object"
+      },
+      "SecretDescriptor": {
+        "description": "Canonical secret identity plus compatibility aliases.",
+        "properties": {
+          "allowedConsumers": {
+            "default": [],
+            "items": {
+              "$ref": "#/definitions/SecretConsumer"
+            },
+            "type": "array"
+          },
+          "canonicalName": {
+            "type": "string"
+          },
+          "envKeyName": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "legacyAliases": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "providerSlug": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "canonicalName"
+        ],
+        "title": "SecretDescriptor",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "ThinClaw Runtime Contracts",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0"
+}

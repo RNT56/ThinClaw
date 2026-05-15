@@ -79,7 +79,7 @@ ThinClaw supports managed tunnel integrations when the relevant feature/profile 
 ### Tailscale
 
 **What it does:** Encrypted WireGuard mesh VPN. ThinClaw uses it for:
-1. **Secure remote access** — Connect Scrappy to ThinClaw over an encrypted tunnel without exposing ports to the internet
+1. **Secure remote access** — Connect ThinClaw Desktop to ThinClaw over an encrypted tunnel without exposing ports to the internet
 2. **Tailscale Serve** — Expose the gateway to your tailnet (private)
 3. **Tailscale Funnel** — Expose the gateway to the public internet (for webhooks)
 
@@ -569,7 +569,7 @@ These can also be configured in the WebUI under **Settings → Features**.
 **What it does:** ThinClaw uses a Whisper-compatible HTTP endpoint for:
 1. **Audio transcription** — Transcribe voice messages and audio attachments
 2. **Talk mode** — Continuous voice conversation (STT → LLM → TTS pipeline)
-3. **Push-to-talk** — Voice input from the Scrappy desktop app
+3. **Push-to-talk** — Voice input from ThinClaw Desktop
 
 **Options:**
 
@@ -577,7 +577,7 @@ These can also be configured in the WebUI under **Settings → Features**.
 |--------|------|-------|------|
 | OpenAI Whisper API | Cloud | Paid ($0.006/min) | [platform.openai.com](https://platform.openai.com/docs/guides/speech-to-text) |
 | whisper.cpp server | Local | ✅ Free (OSS) | [github.com/ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp) |
-| Scrappy sidecar | Local (desktop) | ✅ Free | Built into Scrappy desktop app |
+| ThinClaw Desktop sidecar | Local (desktop) | ✅ Free | Built into ThinClaw Desktop |
 
 **Quick start with whisper.cpp (local):**
 

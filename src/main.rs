@@ -1223,6 +1223,8 @@ async fn async_main() -> anyhow::Result<()> {
         }
         gw = gw.with_cost_guard(Arc::clone(&components.cost_guard));
         gw = gw.with_cost_tracker(Arc::clone(&components.cost_tracker));
+        gw = gw.with_response_cache(Arc::clone(&components.response_cache));
+        gw = gw.with_hooks(Arc::clone(&components.hooks));
         if let Some(ref ss) = components.secrets_store {
             gw = gw.with_secrets_store(Arc::clone(ss));
         }

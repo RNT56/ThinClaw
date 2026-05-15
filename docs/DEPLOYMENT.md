@@ -20,7 +20,7 @@ For identity and surface behavior, use
 | Docker Compose or container deployment | [deploy/docker.md](deploy/docker.md) |
 | Remote gateway, Tailscale, or webhook tunnels | [deploy/remote-access.md](deploy/remote-access.md) |
 | Reckless desktop autonomy | [DESKTOP_AUTONOMY.md](DESKTOP_AUTONOMY.md) |
-| Scrappy connected to a local or remote ThinClaw runtime | Platform runbook plus [deploy/remote-access.md](deploy/remote-access.md) |
+| ThinClaw Desktop connected to a local or remote ThinClaw runtime | Platform runbook plus [deploy/remote-access.md](deploy/remote-access.md) |
 
 ## Defaults And Important Truths
 
@@ -29,7 +29,9 @@ For identity and surface behavior, use
 - Remote access is opt-in through host/bind settings, not the default
 - Prebuilt release binaries are the default install path
 - Source builds are for local patches and developer workflows
-- If you need the full production/runtime surface from source, build with `--features full --bin thinclaw`
+- If you need the full production/runtime surface from source, run
+  `cargo build --release --features full`; CI and single-binary builds usually
+  add `--bin thinclaw`.
 - Small machines should prefer the installer with `--profile edge`
 - Desktop autonomy is a separate privileged operator mode
 - `deploy/setup.sh` rolls back ThinClaw-managed files, services, Docker Compose

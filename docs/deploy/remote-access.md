@@ -1,7 +1,7 @@
 # ThinClaw Remote Access
 
 Use this path when ThinClaw runs on one machine and you want to reach it from
-another device, Scrappy, or a webhook-capable channel.
+another device, ThinClaw Desktop, or a webhook-capable channel.
 
 Remote access is a deployment choice, not a default. The first-class setup path is:
 
@@ -146,7 +146,7 @@ runtime. Service install blocks explicitly configured remote gateways that lack
 
 ## Tailscale For Private Access
 
-Private access from Scrappy or another device is usually simplest through
+Private access from ThinClaw Desktop or another device is usually simplest through
 Tailscale.
 
 Linux or Pi installer path:

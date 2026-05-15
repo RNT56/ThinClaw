@@ -188,6 +188,25 @@ pub(crate) async fn memory_write_handler(
     }))
 }
 
+pub(crate) async fn memory_delete_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(req): Json<MemoryDeleteRequest>,
+) -> Result<Json<MemoryDeleteResponse>, (StatusCode, String)> {
+    let workspace = state.workspace.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Workspace not available".to_string(),
+    ))?;
+
+    crate::api::memory::delete_file(workspace, &req.path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(MemoryDeleteResponse {
+        path: req.path,
+        status: "deleted",
+    }))
+}
+
 pub(crate) async fn memory_search_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<MemorySearchRequest>,

@@ -68,3 +68,14 @@ cobertura.xml
 # Codex-specific build directories
 target-codex-analyze/
 target-codex-check/
+
+# Desktop app local build/download artifacts
+apps/desktop/frontend/node_modules/
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/frontend/dist/
+apps/desktop/frontend/.vite/
+apps/desktop/backend/bin/
+apps/desktop/backend/gen/
+apps/desktop/backend/resources/chromium/
+apps/desktop/backend/tauri.override.json

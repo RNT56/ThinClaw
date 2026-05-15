@@ -121,6 +121,35 @@ pub struct ApprovalRequest {
     pub actor_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ThreadCommandRequest {
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreadCommandResponse {
+    pub message_id: Uuid,
+    pub status: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ThreadExportQuery {
+    pub format: Option<String>,
+    pub user_id: Option<String>,
+    pub actor_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreadExportResponse {
+    pub thread_id: Uuid,
+    pub format: String,
+    pub content: String,
+}
+
 // --- Autonomy ---
 
 #[derive(Debug, Deserialize, Default)]
@@ -214,6 +243,17 @@ pub struct MemoryWriteRequest {
 
 #[derive(Debug, Serialize)]
 pub struct MemoryWriteResponse {
+    pub path: String,
+    pub status: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MemoryDeleteRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryDeleteResponse {
     pub path: String,
     pub status: &'static str,
 }
@@ -534,6 +574,8 @@ pub struct RegistrySearchQuery {
 pub struct PairingListResponse {
     pub channel: String,
     pub requests: Vec<PairingRequestInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approved: Vec<PairingApprovedInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -543,6 +585,11 @@ pub struct PairingRequestInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
     pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PairingApprovedInfo {
+    pub sender_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -690,6 +737,21 @@ pub struct RoutineInfo {
 #[derive(Debug, Serialize)]
 pub struct RoutineListResponse {
     pub routines: Vec<RoutineInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoutineCreateRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub schedule: String,
+    pub task: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoutineClearRunsRequest {
+    #[serde(default)]
+    pub routine_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]

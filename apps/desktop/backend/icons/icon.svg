@@ -1,0 +1,86 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <!-- Production V3: "Quantum Glass" Premium Icon -->
+
+    <!-- Deepest Space Backdrop -->
+    <rect width="1024" height="1024" rx="230" fill="#020202"/>
+
+    <!-- Atmospheric Depth (Nebula Glows) -->
+    <defs>
+        <radialGradient id="cyan_beam" cx="300" cy="300" r="600" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#22D3EE" stop-opacity="0.25"/>
+            <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+        </radialGradient>
+        <radialGradient id="pink_beam" cx="724" cy="724" r="600" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#E879F9" stop-opacity="0.25"/>
+            <stop offset="1" stop-color="#E879F9" stop-opacity="0"/>
+        </radialGradient>
+        <filter id="ultra_blur" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="40" />
+        </filter>
+        <filter id="caustic_refraction">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="3" />
+        </filter>
+        <filter id="subsurface_glow">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="12" />
+        </filter>
+    </defs>
+
+    <circle cx="300" cy="300" r="400" fill="url(#cyan_beam)" filter="url(#ultra_blur)"/>
+    <circle cx="724" cy="724" r="400" fill="url(#pink_beam)" filter="url(#ultra_blur)"/>
+
+    <!-- Subtle Beveled Rim -->
+    <rect x="5" y="5" width="1014" height="1014" rx="225" stroke="url(#rim_grad)" stroke-width="8" stroke-opacity="0.6"/>
+    <linearGradient id="rim_grad" x1="512" y1="0" x2="512" y2="1024" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="white" stop-opacity="0.8"/>
+        <stop offset="0.2" stop-color="white" stop-opacity="0.1"/>
+        <stop offset="0.8" stop-color="white" stop-opacity="0.05"/>
+        <stop offset="1" stop-color="white" stop-opacity="0.3"/>
+    </linearGradient>
+
+    <!-- Main Shadow -->
+    <path d="M600 340H400C355.8 340 320 375.81 320 420C320 464.19 355.8 500 400 500H540C584.19 500 620 535.81 620 580C620 624.19 584.19 660 540 660H300"
+          stroke="black" stroke-width="130" stroke-linecap="round" opacity="0.8" filter="url(#ultra_blur)" transform="translate(0, 30)"/>
+
+    <!-- Quantum Neural Filaments (Core Light) -->
+    <g filter="url(#subsurface_glow)">
+        <path d="M600 340H400C355.817 340 320 375.817 320 420C320 464.183 355.817 500 400 500H540" stroke="#22D3EE" stroke-width="12" stroke-linecap="round" opacity="0.8"/>
+        <path d="M400 660H540C584.183 660 620 624.183 620 580C620 535.817 584.183 500 540 500H400" stroke="#E879F9" stroke-width="12" stroke-linecap="round" opacity="0.8"/>
+    </g>
+
+    <!-- The S Shell (Cyan) -->
+    <path d="M600 340H400C355.817 340 320 375.817 320 420C320 464.183 355.817 500 400 500H520"
+          stroke="url(#glass_cyan)" stroke-width="120" stroke-linecap="round"/>
+
+    <!-- The S Shell (Pink) -->
+    <path d="M400 660H540C584.183 660 620 624.183 620 580C620 535.817 584.183 500 540 500H480"
+          stroke="url(#glass_pink)" stroke-width="120" stroke-linecap="round"/>
+
+    <!-- Caustic Light Crescents (Internal Refractions) -->
+    <path d="M360 420C360 397.91 377.91 380 400 380H500" stroke="white" stroke-width="4" stroke-linecap="round" opacity="0.4" filter="url(#caustic_refraction)"/>
+    <path d="M580 580C580 602.09 562.09 620 540 620H440" stroke="white" stroke-width="4" stroke-linecap="round" opacity="0.4" filter="url(#caustic_refraction)"/>
+
+    <!-- Top Surface Gloss -->
+    <path d="M600 340H400C355.817 340 320 375.817 320 420C320 464.183 355.817 500 400 500H520"
+          stroke="url(#surface_shine)" stroke-width="120" stroke-linecap="round" opacity="0.5" style="mix-blend-mode: screen;"/>
+    <path d="M400 660H540C584.183 660 620 624.183 620 580C620 535.817 584.183 500 540 500H480"
+          stroke="url(#surface_shine)" stroke-width="120" stroke-linecap="round" opacity="0.5" style="mix-blend-mode: screen;"/>
+
+    <defs>
+        <linearGradient id="glass_cyan" x1="320" y1="340" x2="600" y2="500" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#164E63"/> <!-- Darker Base -->
+            <stop offset="0.5" stop-color="#22D3EE"/> <!-- Vibrant Mid -->
+            <stop offset="1" stop-color="#0E7490"/> <!-- Inner Depth -->
+        </linearGradient>
+        <linearGradient id="glass_pink" x1="620" y1="660" x2="400" y2="500" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#701A75"/>
+            <stop offset="0.5" stop-color="#E879F9"/>
+            <stop offset="1" stop-color="#A21CAF"/>
+        </linearGradient>
+        <linearGradient id="surface_shine" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0" stop-color="white" stop-opacity="0.9"/>
+            <stop offset="0.3" stop-color="white" stop-opacity="0"/>
+            <stop offset="0.7" stop-color="white" stop-opacity="0.1"/>
+            <stop offset="1" stop-color="white" stop-opacity="0.4"/>
+        </linearGradient>
+    </defs>
+</svg>

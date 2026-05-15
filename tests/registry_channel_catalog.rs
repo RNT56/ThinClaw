@@ -83,11 +83,13 @@ fn wave6_channel_packages_are_in_real_registry_catalog() {
             "null-artifact channel packages should resolve to buildable sources"
         );
 
-        let flat_wasm = root_channel_dir(name).join(format!("{name}.wasm"));
+        let artifact = manifest
+            .artifacts
+            .get("wasm32-wasip2")
+            .expect("channel manifest should include wasm32-wasip2 metadata");
         assert!(
-            flat_wasm.exists(),
-            "bundled channel {name} should include a flat packaged wasm artifact at {}",
-            flat_wasm.display()
+            artifact.url.as_deref().is_none(),
+            "buildable source channel packages should not require prebuilt wasm URLs"
         );
     }
 }
@@ -237,12 +239,6 @@ fn provider_channel_inbound_hardening_is_declared() {
             "{name} should declare its platform challenge handshake"
         );
     }
-}
-
-fn root_channel_dir(name: &str) -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("channels-src")
-        .join(name)
 }
 
 fn load_caps(root: &Path, name: &str) -> Value {

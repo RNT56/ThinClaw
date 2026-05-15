@@ -1,0 +1,80 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ThinClaw Desktop",
+  "version": "0.1.0",
+  "identifier": "com.thinclaw.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "ThinClaw Desktop",
+        "width": 800,
+        "height": 600,
+        "minWidth": 800,
+        "minHeight": 600
+      },
+      {
+        "label": "spotlight",
+        "title": "Spotlight Chat",
+        "width": 600,
+        "height": 150,
+        "minWidth": 600,
+        "minHeight": 150,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "center": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' blob: data: asset: http://asset.localhost https://asset.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": {
+          "allow": [
+            "$APP_DATA/images/**",
+            "$HOME/Library/Application Support/com.thinclaw.desktop/images/**",
+            "$HOME/Library/Application Support/com.schack.scrappy/images/**"
+          ]
+        }
+      }
+    },
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": [],
+    "resources": [
+      "../../../deploy/**/*"
+    ],
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZFQjU5NUIyN0QwMTVGQzgKUldUSVh3RjlzcFcxYmhLTTB4eFFZTnpWbWY4aHJEVW1KdUppUVhtUWk4ZVBZQkwvUURHc3FxaWUK",
+      "endpoints": [
+        "https://github.com/RNT56/ThinClaw/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

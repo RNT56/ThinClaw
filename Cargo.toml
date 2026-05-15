@@ -1,6 +1,7 @@
 [workspace]
 members = [".", "crates/*"]
 exclude = [
+    "apps/desktop/backend",
     "channels-src/discord",
     "channels-src/telegram",
     "channels-src/slack",
@@ -56,6 +57,7 @@ thinclaw-llm = { version = "0.1.0", path = "crates/thinclaw-llm" }
 thinclaw-llm-core = { version = "0.1.0", path = "crates/thinclaw-llm-core" }
 thinclaw-media = { version = "0.1.0", path = "crates/thinclaw-media" }
 thinclaw-platform = { version = "0.1.0", path = "crates/thinclaw-platform" }
+thinclaw-runtime-contracts = { version = "0.1.0", path = "crates/thinclaw-runtime-contracts" }
 thinclaw-safety = { version = "0.1.0", path = "crates/thinclaw-safety" }
 thinclaw-secrets = { version = "0.1.0", path = "crates/thinclaw-secrets", default-features = false }
 thinclaw-settings = { version = "0.1.0", path = "crates/thinclaw-settings" }
@@ -262,7 +264,7 @@ light = [
     "document-extraction",
     "timezones",
 ]
-# Desktop embedding (Tauri/Scrappy) — minimal footprint
+# Desktop embedding (ThinClaw Desktop/Tauri) — minimal footprint
 desktop = ["libsql", "html-to-markdown", "document-extraction", "repl", "timezones"]
 # Individual runtime modules (can be combined with light)
 web-gateway = []
@@ -325,7 +327,7 @@ document-extraction = ["thinclaw-media/document-extraction", "thinclaw-tools/doc
 # Increases binary size by ~6-13 MB but requires no network access.
 bundled-wasm = ["wasm-runtime"]
 # Voice wake word detection — adds cpal for audio capture.
-# Only enable for headless/remote mode; in desktop mode Scrappy owns the mic.
+# Only enable for headless/remote mode; in desktop mode ThinClaw Desktop owns the mic.
 voice = ["dep:cpal"]
 # AWS Bedrock embeddings — adds aws-config + aws-sdk-bedrockruntime.
 bedrock = [
@@ -436,7 +438,7 @@ doc_lazy_continuation      = "allow"
 unused_imports = "warn"
 
 # Patch libsql to handle sqlite3_config SQLITE_MISUSE gracefully.
-# sqlx-sqlite (used by Scrappy) calls sqlite3_config() first; the stock libsql
+# sqlx-sqlite (used by ThinClaw Desktop) calls sqlite3_config() first; the stock libsql
 # asserts on the duplicate call. Our patch checks sqlite3_threadsafe() instead.
 [patch.crates-io]
 libsql = { path = "patches/libsql-0.6.0" }

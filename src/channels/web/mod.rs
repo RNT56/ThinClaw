@@ -111,11 +111,13 @@ impl GatewayChannel {
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
+            response_cache: None,
             routine_engine: None,
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
             channel_manager: None,
+            hooks: None,
         });
 
         Self {
@@ -156,11 +158,13 @@ impl GatewayChannel {
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             cost_tracker: self.state.cost_tracker.clone(),
+            response_cache: self.state.response_cache.clone(),
             routine_engine: self.state.routine_engine.clone(),
             startup_time: self.state.startup_time,
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: self.state.secrets_store.clone(),
             channel_manager: self.state.channel_manager.clone(),
+            hooks: self.state.hooks.clone(),
         };
         if let Ok(existing_scheduler) = self.state.scheduler.try_read()
             && let Ok(mut next_scheduler) = new_state.scheduler.try_write()
@@ -301,6 +305,15 @@ impl GatewayChannel {
         self
     }
 
+    /// Inject the response cache for remote cache stats.
+    pub fn with_response_cache(
+        mut self,
+        cache: Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>,
+    ) -> Self {
+        self.rebuild_state(|s| s.response_cache = Some(cache));
+        self
+    }
+
     /// Inject the routine engine for webhook-triggered routine execution.
     pub fn with_routine_engine(
         mut self,
@@ -322,6 +335,12 @@ impl GatewayChannel {
     /// Inject the channel manager for runtime channel setting changes.
     pub fn with_channel_manager(mut self, cm: Arc<crate::channels::ChannelManager>) -> Self {
         self.rebuild_state(|s| s.channel_manager = Some(cm));
+        self
+    }
+
+    /// Inject the lifecycle hook registry for hook management APIs.
+    pub fn with_hooks(mut self, hooks: Arc<crate::hooks::HookRegistry>) -> Self {
+        self.rebuild_state(|s| s.hooks = Some(hooks));
         self
     }
 

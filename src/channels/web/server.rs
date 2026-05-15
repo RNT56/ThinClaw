@@ -125,6 +125,9 @@ pub struct GatewayState {
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
     /// Shared cost tracker — richer historical data (daily/monthly/per-agent).
     pub cost_tracker: Option<Arc<tokio::sync::Mutex<crate::llm::cost_tracker::CostTracker>>>,
+    /// Shared response cache for remote dashboard cache stats.
+    pub response_cache:
+        Option<Arc<tokio::sync::RwLock<crate::llm::response_cache_ext::CachedResponseStore>>>,
     /// Routine engine for webhook-triggered routine execution.
     pub routine_engine: Option<Arc<crate::agent::routine_engine::RoutineEngine>>,
     /// Server startup time for uptime calculation.
@@ -135,6 +138,8 @@ pub struct GatewayState {
     pub secrets_store: Option<Arc<dyn crate::secrets::SecretsStore + Send + Sync>>,
     /// Channel manager for hot-reloading channel settings (e.g., stream mode).
     pub channel_manager: Option<Arc<crate::channels::ChannelManager>>,
+    /// Lifecycle hook registry for hook management APIs.
+    pub hooks: Option<Arc<crate::hooks::HookRegistry>>,
 }
 
 #[async_trait]
@@ -286,6 +291,7 @@ pub async fn start_server(
     let protected = Router::new()
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
+        .route("/api/chat/abort", post(chat_abort_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
         .route("/api/chat/auth-token", post(chat_auth_token_handler))
         .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
@@ -294,6 +300,18 @@ pub async fn start_server(
         .route("/api/chat/history", get(chat_history_handler))
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
+        .route(
+            "/api/chat/thread/{id}/reset",
+            post(chat_thread_reset_handler),
+        )
+        .route(
+            "/api/chat/thread/{id}/compact",
+            post(chat_thread_compact_handler),
+        )
+        .route(
+            "/api/chat/thread/{id}/export",
+            get(chat_thread_export_handler),
+        )
         .route("/api/chat/thread/{id}", delete(chat_delete_thread_handler))
         // Autonomy
         .route("/api/autonomy/status", get(autonomy_status_handler))
@@ -313,6 +331,7 @@ pub async fn start_server(
         .route("/api/memory/list", get(memory_list_handler))
         .route("/api/memory/read", get(memory_read_handler))
         .route("/api/memory/write", post(memory_write_handler))
+        .route("/api/memory/delete", post(memory_delete_handler))
         .route("/api/memory/search", post(memory_search_handler))
         // Jobs
         .route("/api/jobs", get(jobs_list_handler))
@@ -326,6 +345,7 @@ pub async fn start_server(
         .route("/api/jobs/{id}/files/read", get(job_files_read_handler))
         // Logs
         .route("/api/logs/events", get(logs_events_handler))
+        .route("/api/logs/recent", get(logs_recent_handler))
         .route("/api/logs/level", get(logs_level_get_handler))
         .route(
             "/api/logs/level",
@@ -398,6 +418,12 @@ pub async fn start_server(
         )
         // Gateway management
         .route("/api/gateway/restart", post(gateway_restart_handler))
+        // Hooks
+        .route(
+            "/api/hooks",
+            get(hooks_list_handler).post(hooks_register_handler),
+        )
+        .route("/api/hooks/{name}", delete(hooks_unregister_handler))
         // Pairing
         .route("/api/pairing/{channel}", get(pairing_list_handler))
         .route(
@@ -405,9 +431,16 @@ pub async fn start_server(
             post(pairing_approve_handler),
         )
         // Routines
-        .route("/api/routines", get(routines_list_handler))
+        .route(
+            "/api/routines",
+            get(routines_list_handler).post(routines_create_handler),
+        )
         .route("/api/routines/summary", get(routines_summary_handler))
         .route("/api/routines/events", get(routines_events_handler))
+        .route(
+            "/api/routines/runs",
+            axum::routing::delete(routines_clear_runs_handler),
+        )
         .route("/api/routines/{id}", get(routines_detail_handler))
         .route("/api/routines/{id}/trigger", post(routines_trigger_handler))
         .route("/api/routines/{id}/toggle", post(routines_toggle_handler))
@@ -678,6 +711,7 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
+        .route("/api/cache/stats", get(cache_stats_handler))
         // Cost dashboard (rich historical data from CostTracker)
         .route("/api/costs/summary", get(costs_summary_handler))
         .route("/api/costs/export", get(costs_export_handler))
@@ -1497,11 +1531,13 @@ mod tests {
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
+            response_cache: None,
             routine_engine: None,
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
             channel_manager: None,
+            hooks: None,
         }
     }
 
@@ -1597,11 +1633,13 @@ mod tests {
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
+            response_cache: None,
             routine_engine: None,
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
             channel_manager: None,
+            hooks: None,
         };
 
         assert_eq!(
