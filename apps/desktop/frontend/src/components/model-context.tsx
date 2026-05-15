@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { ModelFile, SystemSpecs, commands, StandardAsset, EngineInfo, LocalRuntimeSnapshot } from "../lib/bindings";
 import { directCommands } from "../lib/generated/direct-commands";
+import { unwrapResult } from "../lib/guards";
 import { getMigratedLocalStorageItem, isOnboardingInProgress, setMigratedLocalStorageItem } from "../lib/local-storage-migration";
 
 import { MODEL_LIBRARY, ExtendedModelDefinition as ModelDefinition, ModelVariant } from "../lib/model-library";
@@ -676,12 +677,15 @@ export function ModelProvider({ children }: { children: React.ReactNode }) {
         setDownloading(prev => ({ ...prev, [trackKey]: 0 }));
 
         try {
-            await invoke("download_hf_model_files", {
-                repoId,
-                filesToDownload: files,
-                destSubdir: destSubdir ?? null,
-                category: category ?? null,
-            });
+            unwrapResult(
+                await directCommands.directRuntimeDownloadHfModelFiles(
+                    repoId,
+                    files,
+                    destSubdir ?? null,
+                    category ?? null
+                ),
+                "HuggingFace model download"
+            );
             toast.success(`Downloaded: ${files.length === 1 ? files[0] : repoId}`);
             refreshModels();
         } catch (e: any) {

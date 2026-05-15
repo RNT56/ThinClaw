@@ -150,11 +150,11 @@ scanBoundary(agentCockpitRoots, [
 
 scanBoundary(sourceRoots, [
   {
-    pattern: /["'`](?:chat_stream|start_chat_server|get_inference_backends|upload_image|imagine_generate)["'`]/g,
+    pattern: /["'`](?:chat_stream|start_chat_server|get_inference_backends|upload_image|imagine_generate|discover_hf_models|get_model_files|download_hf_model_files|discover_embedding_dimension)["'`]/g,
     reason: 'old unprefixed Direct command name',
   },
   {
-    pattern: /\b(?:chatStream|startChatServer|getInferenceBackends|uploadImage|imagineGenerate)\b/g,
+    pattern: /\b(?:chatStream|startChatServer|getInferenceBackends|uploadImage|imagineGenerate|discoverHfModels|getModelFiles|downloadHfModelFiles|discoverEmbeddingDimension)\b/g,
     reason: 'old generated Direct command binding name',
   },
 ]);

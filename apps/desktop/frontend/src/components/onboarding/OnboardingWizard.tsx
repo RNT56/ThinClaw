@@ -14,10 +14,11 @@ import { toast } from 'sonner';
 import { useModelContext } from '../model-context';
 import { openPath } from '../../lib/thinclaw';
 import { commands } from '../../lib/bindings';
-import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useEngineSetup } from '../../hooks/use-engine-setup';
 import { clearOnboardingProgress, startOnboardingProgress } from '../../lib/local-storage-migration';
+import { directCommands } from '../../lib/generated/direct-commands';
+import { unwrapResult } from '../../lib/guards';
 
 // ---------------------------------------------------------------------------
 // HF Hub types (match backend via specta)
@@ -210,7 +211,10 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
     const loadHfFileInfo = useCallback(async (repoId: string) => {
         if (hfFileInfoCache[repoId] || !engineInfo) return;
         try {
-            const info = await invoke<ModelDownloadInfo>('get_model_files', { repoId, engine: engineInfo.id });
+            const info = unwrapResult(
+                await directCommands.directRuntimeGetModelFiles(repoId, engineInfo.id),
+                'HuggingFace model files'
+            );
             setHfFileInfoCache(prev => ({ ...prev, [repoId]: info }));
         } catch (err) { console.error('Failed to load file info:', err); }
     }, [engineInfo, hfFileInfoCache]);
@@ -243,10 +247,10 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         if (!engineInfo || categoryTopModels[cat]?.length > 0) return;
         const filter = ONBOARDING_PIPELINE_FILTERS[cat];
         try {
-            const models = await invoke<HfModelCard[]>('discover_hf_models', {
-                query: '', engine: engineInfo.id, limit: 5,
-                pipelineTags: filter.tags,
-            });
+            const models = unwrapResult(
+                await directCommands.directRuntimeDiscoverHfModels('', engineInfo.id, 5, filter.tags),
+                `HuggingFace ${cat} models`
+            );
             setCategoryTopModels(prev => ({ ...prev, [cat]: models }));
             // Auto-select first model if nothing selected yet
             if (models.length > 0 && !categorySelectedModel[cat]) {
@@ -278,15 +282,16 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             setCategorySearching(prev => ({ ...prev, [cat]: true }));
             try {
                 const filter = ONBOARDING_PIPELINE_FILTERS[cat];
-                const results = await invoke<HfModelCard[]>('discover_hf_models', {
-                    query, engine: engineInfo.id, limit: 10,
-                    pipelineTags: filter.tags,
-                });
+                const results = unwrapResult(
+                    await directCommands.directRuntimeDiscoverHfModels(query, engineInfo.id, 10, filter.tags),
+                    `HuggingFace ${cat} search`
+                );
                 setCategorySearchResults(prev => ({ ...prev, [cat]: results }));
                 // Pre-fetch file info
                 for (const model of results) {
                     if (!hfFileInfoCache[model.id]) {
-                        invoke<ModelDownloadInfo>('get_model_files', { repoId: model.id, engine: engineInfo.id })
+                        directCommands.directRuntimeGetModelFiles(model.id, engineInfo.id)
+                            .then(result => unwrapResult(result, 'HuggingFace model files'))
                             .then(info => setHfFileInfoCache(prev => ({ ...prev, [model.id]: info })))
                             .catch(() => { /* silent */ });
                     }
@@ -433,9 +438,10 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 const embeddingEntry = categoriesToDownload.find(e => e.cat === 'embedding');
                 if (embeddingEntry) {
                     try {
-                        const dim = await invoke<number | null>('discover_embedding_dimension', {
-                            repoId: embeddingEntry.repoId,
-                        });
+                        const dim = unwrapResult(
+                            await directCommands.directRuntimeDiscoverEmbeddingDimension(embeddingEntry.repoId),
+                            'HuggingFace embedding dimension'
+                        );
                         if (dim && dim > 0) {
                             const userConfig = await commands.getUserConfig();
                             if (userConfig.vector_dimensions !== dim) {
@@ -463,9 +469,10 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                         let fileInfo = hfFileInfoCache[repoId];
                         if (!fileInfo && engineInfo) {
                             try {
-                                fileInfo = await invoke<ModelDownloadInfo>('get_model_files', {
-                                    repoId, engine: engineInfo.id,
-                                });
+                                fileInfo = unwrapResult(
+                                    await directCommands.directRuntimeGetModelFiles(repoId, engineInfo.id),
+                                    'HuggingFace model files'
+                                );
                             } catch { /* silent */ }
                         }
                         if (fileInfo) {

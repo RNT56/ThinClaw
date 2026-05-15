@@ -41,6 +41,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { EngineInfo } from "../../lib/bindings";
 import { directCommands } from "../../lib/generated/direct-commands";
+import { unwrapResult } from "../../lib/guards";
 
 // ---------------------------------------------------------------------------
 // Types (match backend via specta)
@@ -249,10 +250,10 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
         async (repoId: string) => {
             if (!engineInfo) return;
             try {
-                const info = await invoke<ModelDownloadInfo>("get_model_files", {
-                    repoId,
-                    engine: engineInfo.id,
-                });
+                const info = unwrapResult(
+                    await directCommands.directRuntimeGetModelFiles(repoId, engineInfo.id),
+                    "HuggingFace model files"
+                );
                 setFileInfoCache((prev) => ({ ...prev, [repoId]: info }));
             } catch (err: any) {
                 console.error("Failed to load file tree:", err);
@@ -331,12 +332,15 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
                     const defaultQueryMap = activeFilterDef.defaultQuery || {};
                     const defaultQ = defaultQueryMap[engineInfo.id] ?? defaultQueryMap['*'] ?? '';
 
-                    const models = await invoke<HfModelCard[]>("discover_hf_models", {
-                        query: defaultQ,
-                        engine: engineInfo.id,
-                        limit: 15,
-                        pipelineTags,
-                    });
+                    const models = unwrapResult(
+                        await directCommands.directRuntimeDiscoverHfModels(
+                            defaultQ,
+                            engineInfo.id,
+                            15,
+                            pipelineTags
+                        ),
+                        "HuggingFace trending models"
+                    );
                     setResults(models);
                     setHasSearched(true);
                     // Cache the results for this filter
@@ -362,12 +366,15 @@ export function HFDiscovery({ isVisible = true }: { isVisible?: boolean }) {
             setIsSearching(true);
             setHasSearched(true);
             try {
-                const models = await invoke<HfModelCard[]>("discover_hf_models", {
-                    query: debouncedQuery,
-                    engine: engineInfo.id,
-                    limit: 20,
-                    pipelineTags,
-                });
+                const models = unwrapResult(
+                    await directCommands.directRuntimeDiscoverHfModels(
+                        debouncedQuery,
+                        engineInfo.id,
+                        20,
+                        pipelineTags
+                    ),
+                    "HuggingFace model search"
+                );
                 setResults(models);
             } catch (err: any) {
                 console.error("HF search failed:", err);

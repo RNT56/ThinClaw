@@ -1,9 +1,9 @@
 //! HuggingFace Hub dynamic model discovery and download.
 //!
-//! Provides three Tauri commands:
-//! - `discover_hf_models` — search HF Hub by engine-specific tag
-//! - `get_model_files` — fetch file tree + parse GGUF quantizations
-//! - `download_hf_model_files` — multi-file download reusing existing streaming infra
+//! Provides Direct Workbench Tauri commands:
+//! - `direct_runtime_discover_hf_models` — search HF Hub by engine-specific tag
+//! - `direct_runtime_get_model_files` — fetch file tree + parse GGUF quantizations
+//! - `direct_runtime_download_hf_model_files` — multi-file download reusing existing streaming infra
 
 use serde::Serialize;
 use specta::Type;
@@ -161,6 +161,16 @@ async fn fetch_hf_models(
         );
     }
 
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "HuggingFace model search failed with HTTP {}: {}",
+            status,
+            body.chars().take(240).collect::<String>()
+        ));
+    }
+
     let body: Vec<serde_json::Value> = response
         .json()
         .await
@@ -189,7 +199,7 @@ async fn fetch_hf_models(
 /// results are merged, deduplicated by repo ID, and re-sorted by downloads.
 #[tauri::command]
 #[specta::specta]
-pub async fn discover_hf_models(
+pub async fn direct_runtime_discover_hf_models(
     app: AppHandle,
     query: String,
     engine: String,
@@ -224,6 +234,7 @@ pub async fn discover_hf_models(
         all_cards = fetch_hf_models(&client, &url, tag).await?;
     } else {
         // One request per pipeline tag, then merge & deduplicate
+        let mut failures: Vec<String> = Vec::new();
         for pt in &tags_to_query {
             let url = format!(
                 "https://huggingface.co/api/models?search={}&filter={}&sort=downloads&direction=-1&limit={}&pipeline_tag={}",
@@ -236,8 +247,16 @@ pub async fn discover_hf_models(
                 Ok(cards) => all_cards.extend(cards),
                 Err(e) => {
                     eprintln!("[hf_hub] Search for pipeline_tag='{}' failed: {}", pt, e);
+                    failures.push(format!("{}: {}", pt, e));
                 }
             }
+        }
+
+        if all_cards.is_empty() && !failures.is_empty() {
+            return Err(format!(
+                "HuggingFace search failed for all requested filters: {}",
+                failures.join("; ")
+            ));
         }
 
         // Deduplicate by model ID
@@ -267,7 +286,7 @@ pub async fn discover_hf_models(
 /// for a directory download.
 #[tauri::command]
 #[specta::specta]
-pub async fn get_model_files(
+pub async fn direct_runtime_get_model_files(
     app: AppHandle,
     repo_id: String,
     engine: String,
@@ -402,7 +421,7 @@ pub async fn get_model_files(
 /// (`LLM`, `Embedding`, `Diffusion`, `STT`, etc.). Defaults to `"LLM"`.
 #[tauri::command]
 #[specta::specta]
-pub async fn download_hf_model_files(
+pub async fn direct_runtime_download_hf_model_files(
     app: AppHandle,
     repo_id: String,
     files_to_download: Vec<String>,
@@ -619,7 +638,7 @@ pub async fn download_hf_model_files(
 /// create-then-destroy cycle on first boot.
 #[tauri::command]
 #[specta::specta]
-pub async fn discover_embedding_dimension(
+pub async fn direct_runtime_discover_embedding_dimension(
     app: AppHandle,
     repo_id: String,
 ) -> Result<Option<u32>, String> {

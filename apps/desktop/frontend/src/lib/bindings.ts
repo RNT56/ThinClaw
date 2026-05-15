@@ -2908,9 +2908,9 @@ async directRuntimeIsEngineReady() : Promise<Result<boolean, string>> {
  * both text-only and multimodal LLMs.  One API request is made per tag,
  * results are merged, deduplicated by repo ID, and re-sorted by downloads.
  */
-async discoverHfModels(query: string, engine: string, limit: number | null, pipelineTags: string[] | null) : Promise<Result<HfModelCard[], string>> {
+async directRuntimeDiscoverHfModels(query: string, engine: string, limit: number | null, pipelineTags: string[] | null) : Promise<Result<HfModelCard[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("discover_hf_models", { query, engine, limit, pipelineTags }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_discover_hf_models", { query, engine, limit, pipelineTags }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2925,9 +2925,9 @@ async discoverHfModels(query: string, engine: string, limit: number | null, pipe
  * For MLX/vLLM repos: lists all model files (skipping README, images, etc.)
  * for a directory download.
  */
-async getModelFiles(repoId: string, engine: string) : Promise<Result<ModelDownloadInfo, string>> {
+async directRuntimeGetModelFiles(repoId: string, engine: string) : Promise<Result<ModelDownloadInfo, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_model_files", { repoId, engine }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_get_model_files", { repoId, engine }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2943,9 +2943,9 @@ async getModelFiles(repoId: string, engine: string) : Promise<Result<ModelDownlo
  * `category` controls which subdirectory the model is saved under
  * (`LLM`, `Embedding`, `Diffusion`, `STT`, etc.). Defaults to `"LLM"`.
  */
-async downloadHfModelFiles(repoId: string, filesToDownload: string[], destSubdir: string | null, category: string | null) : Promise<Result<string, string>> {
+async directRuntimeDownloadHfModelFiles(repoId: string, filesToDownload: string[], destSubdir: string | null, category: string | null) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("download_hf_model_files", { repoId, filesToDownload, destSubdir, category }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_download_hf_model_files", { repoId, filesToDownload, destSubdir, category }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2961,9 +2961,9 @@ async downloadHfModelFiles(repoId: string, filesToDownload: string[], destSubdir
  * dimension *before* the embedding server starts, avoiding a wasteful
  * create-then-destroy cycle on first boot.
  */
-async discoverEmbeddingDimension(repoId: string) : Promise<Result<number | null, string>> {
+async directRuntimeDiscoverEmbeddingDimension(repoId: string) : Promise<Result<number | null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("discover_embedding_dimension", { repoId }) };
+    return { status: "ok", data: await TAURI_INVOKE("direct_runtime_discover_embedding_dimension", { repoId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

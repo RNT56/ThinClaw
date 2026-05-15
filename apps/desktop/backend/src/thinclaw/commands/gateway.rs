@@ -437,7 +437,8 @@ pub async fn thinclaw_start_gateway(
         .unwrap_or(false);
 
     if local_inference {
-        let initial_snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
+        let initial_snapshot =
+            crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
         if initial_snapshot.endpoint.is_none() {
             info!(
                 "[thinclaw-runtime] Local inference selected but server not ready — \
@@ -448,7 +449,8 @@ pub async fn thinclaw_start_gateway(
             for attempt in 1..=60 {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-                let snapshot = crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
+                let snapshot =
+                    crate::engine::local_runtime_snapshot(&sidecar, &engine_manager).await;
                 if snapshot.endpoint.is_some() {
                     info!(
                         "[thinclaw-runtime] Local runtime snapshot ready after {}ms",

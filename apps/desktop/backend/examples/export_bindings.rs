@@ -1,6 +1,6 @@
 fn main() {
-    let output_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../frontend/src/lib/bindings.ts");
+    let output_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../frontend/src/lib/bindings.ts");
     let builder = tauri_app_lib::setup::commands::specta_builder();
     builder
         .export(

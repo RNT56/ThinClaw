@@ -72,15 +72,20 @@ pub async fn resolve_provider(
                         canonical_name: endpoint.secret_name.clone(),
                         provider_slug: Some(provider_id.to_string()),
                         env_key_name: Some(endpoint.env_key_name.clone()),
-                        legacy_aliases: vec![provider_id.to_string(), endpoint.env_key_name.clone()],
+                        legacy_aliases: vec![
+                            provider_id.to_string(),
+                            endpoint.env_key_name.clone(),
+                        ],
                         allowed_consumers: vec![
                             thinclaw_runtime_contracts::SecretConsumer::DirectWorkbench,
                         ],
                     });
-            let key = secret_store.get_descriptor_secret(&descriptor).ok_or(format!(
-                "{} API key required. Please set it in Settings > Secrets.",
-                endpoint.display_name
-            ))?;
+            let key = secret_store
+                .get_descriptor_secret(&descriptor)
+                .ok_or(format!(
+                    "{} API key required. Please set it in Settings > Secrets.",
+                    endpoint.display_name
+                ))?;
 
             // Model name: prefer UserConfig.inference_models["chat"], then endpoint default
             let model_name = user_config
@@ -707,7 +712,9 @@ pub async fn direct_chat_count_tokens(
 
         let base_url = endpoint.base_url.trim_end_matches('/').to_string();
         let token = endpoint.api_key.unwrap_or_default();
-        let model_family = endpoint.model_family.unwrap_or_else(|| "unknown".to_string());
+        let model_family = endpoint
+            .model_family
+            .unwrap_or_else(|| "unknown".to_string());
         let provider = crate::rig_lib::llama_provider::LlamaProvider::new(
             &base_url,
             &token,

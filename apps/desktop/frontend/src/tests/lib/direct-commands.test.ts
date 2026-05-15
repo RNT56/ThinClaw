@@ -14,8 +14,12 @@ describe('directCommands', () => {
 
         expect(commandNames).toContain('directRuntimeSnapshot');
         expect(commandNames).toContain('directRuntimeStartEngine');
+        expect(commandNames).toContain('directRuntimeDiscoverHfModels');
+        expect(commandNames).toContain('directRuntimeGetModelFiles');
+        expect(commandNames).toContain('directRuntimeDownloadHfModelFiles');
         expect(commandNames).not.toContain('thinclawGetStatus');
         expect(commandNames).not.toContain(['chat', 'Stream'].join(''));
+        expect(commandNames).not.toContain(['discover', 'HfModels'].join(''));
         expect(commandNames.every((name) => name.startsWith('direct'))).toBe(true);
     });
 
@@ -44,6 +48,39 @@ describe('directCommands', () => {
         if (result.status === 'ok') {
             expect(result.data.supportedCapabilities).toEqual(['chat', 'embedding']);
             expect(result.data.endpoint?.apiKey).toBeNull();
+        }
+    });
+
+    it('routes Hugging Face discovery through direct_runtime_discover_hf_models', async () => {
+        mockInvoke.mockResolvedValueOnce([
+            {
+                id: 'bartowski/Qwen3-GGUF',
+                author: 'bartowski',
+                name: 'Qwen3-GGUF',
+                downloads: 1000,
+                likes: 12,
+                tags: ['gguf', 'text-generation'],
+                last_modified: '2026-01-01T00:00:00.000Z',
+                gated: false,
+            },
+        ]);
+
+        const result = await directCommands.directRuntimeDiscoverHfModels(
+            '',
+            'llamacpp',
+            5,
+            ['text-generation'],
+        );
+
+        expect(mockInvoke).toHaveBeenCalledWith('direct_runtime_discover_hf_models', {
+            query: '',
+            engine: 'llamacpp',
+            limit: 5,
+            pipelineTags: ['text-generation'],
+        });
+        expect(result.status).toBe('ok');
+        if (result.status === 'ok') {
+            expect(result.data[0].tags).toContain('gguf');
         }
     });
 });

@@ -147,8 +147,7 @@ pub fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
         }
     }
 
-    if source.contains("export type DirectChatMessage")
-        && !source.contains("export type Message =")
+    if source.contains("export type DirectChatMessage") && !source.contains("export type Message =")
     {
         source.push_str(
             r#"

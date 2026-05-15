@@ -207,8 +207,7 @@ impl InferenceEngine for VllmEngine {
 
         *self.port.lock().unwrap_or_else(|e| e.into_inner()) = Some(port);
         *self.process.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
-        *self.loaded_model.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some(model_path.to_string());
+        *self.loaded_model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model_path.to_string());
 
         // Poll for readiness (up to 120 seconds — vLLM model loading can be slow)
         let client = reqwest::Client::new();
