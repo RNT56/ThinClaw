@@ -16,7 +16,8 @@ set -euo pipefail
 
 ENGINE="${1:-llamacpp}"
 STRICT_SIDECARS="${STRICT_SIDECARS:-1}"
-INCLUDE_CHROMIUM="${INCLUDE_CHROMIUM:-0}"
+INCLUDE_CHROMIUM="${INCLUDE_CHROMIUM:-auto}"
+DISABLE_UPDATER_ARTIFACTS="${DISABLE_UPDATER_ARTIFACTS:-0}"
 TARGET_TRIPLE="${TAURI_TARGET_TRIPLE:-${TARGET:-}}"
 
 detect_target_triple() {
@@ -68,11 +69,32 @@ add_optional_sidecar() {
 add_resource_if_present() {
   local pattern="$1"
   local matches=()
-  shopt -s nullglob
-  matches=(backend/$pattern)
-  shopt -u nullglob
+  if [[ "$pattern" == *['*''?''[']* ]]; then
+    shopt -s nullglob
+    matches=(backend/$pattern)
+    shopt -u nullglob
+  elif [[ -e "backend/$pattern" ]]; then
+    matches=("backend/$pattern")
+  fi
   if (( ${#matches[@]} > 0 )) || [[ "$STRICT_SIDECARS" == "1" ]]; then
     RESOURCES+=("$pattern")
+  fi
+}
+
+add_optional_resource() {
+  local pattern="$1"
+  local matches=()
+  if [[ "$pattern" == *['*''?''[']* ]]; then
+    shopt -s nullglob
+    matches=(backend/$pattern)
+    shopt -u nullglob
+  elif [[ -e "backend/$pattern" ]]; then
+    matches=("backend/$pattern")
+  fi
+  if (( ${#matches[@]} > 0 )); then
+    RESOURCES+=("$pattern")
+  else
+    echo "Skipping optional resource not present: $pattern"
   fi
 }
 
@@ -105,16 +127,32 @@ write_override() {
       [[ "$i" != "0" ]] && printf ','
       printf '\n      "%s"' "${RESOURCES[$i]}"
     done
-    printf '\n    ]\n  }\n}\n'
+    printf '\n    ]'
+    if [[ "$DISABLE_UPDATER_ARTIFACTS" == "1" || "$DISABLE_UPDATER_ARTIFACTS" == "true" || "$DISABLE_UPDATER_ARTIFACTS" == "yes" ]]; then
+      printf ',\n    "createUpdaterArtifacts": false'
+    fi
+    printf '\n  }\n}\n'
   } > backend/tauri.override.json
 }
 
 echo "Generating Tauri config override for engine: $ENGINE target: ${TARGET_TRIPLE:-unknown}"
 
 RESOURCES+=("../../../deploy/**/*")
-if [[ "$INCLUDE_CHROMIUM" == "1" ]]; then
-  add_resource_if_present "resources/chromium"
-fi
+case "$INCLUDE_CHROMIUM" in
+  1|true|yes)
+    add_resource_if_present "resources/chromium"
+    ;;
+  auto)
+    add_optional_resource "resources/chromium"
+    ;;
+  0|false|no)
+    ;;
+  *)
+    echo "Unknown INCLUDE_CHROMIUM value: $INCLUDE_CHROMIUM"
+    echo "Valid values: auto, 1, 0"
+    exit 1
+    ;;
+esac
 
 case "$ENGINE" in
   llamacpp)

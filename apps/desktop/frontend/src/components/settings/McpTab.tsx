@@ -21,6 +21,7 @@ import {
     Link,
 } from 'lucide-react';
 import { commands } from '../../lib/bindings';
+import * as openclaw from '../../lib/openclaw';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 
@@ -241,6 +242,19 @@ export function McpTab() {
         message: 'Not tested',
     });
     const [discoveredTools, setDiscoveredTools] = useState<string[]>([]);
+    const [servers, setServers] = useState<any[]>([]);
+    const [selectedServer, setSelectedServer] = useState<string | null>(null);
+    const [mcpLoading, setMcpLoading] = useState(false);
+    const [serverTools, setServerTools] = useState<any[]>([]);
+    const [serverResources, setServerResources] = useState<any[]>([]);
+    const [resourceTemplates, setResourceTemplates] = useState<any[]>([]);
+    const [serverPrompts, setServerPrompts] = useState<any[]>([]);
+    const [mcpInteractions, setMcpInteractions] = useState<any[]>([]);
+    const [resourceUri, setResourceUri] = useState('');
+    const [resourceResult, setResourceResult] = useState<any>(null);
+    const [promptArgs, setPromptArgs] = useState('{}');
+    const [promptResult, setPromptResult] = useState<any>(null);
+    const [oauthResult, setOauthResult] = useState<any>(null);
 
     // ── Load config ──
     useEffect(() => {
@@ -256,6 +270,95 @@ export function McpTab() {
             setLoading(false);
         });
     }, []);
+
+    const refreshMcpServers = useCallback(async () => {
+        setMcpLoading(true);
+        try {
+            const result = await openclaw.listMcpServers();
+            const nextServers = result.servers || [];
+            setServers(nextServers);
+            setSelectedServer(current => current || nextServers[0]?.name || null);
+        } catch (e) {
+            toast.error('Failed to load MCP servers', { description: String(e) });
+        } finally {
+            setMcpLoading(false);
+        }
+    }, []);
+
+    const refreshMcpDetails = useCallback(async (name: string | null) => {
+        if (!name) return;
+        setMcpLoading(true);
+        try {
+            const [tools, resources, templates, prompts, interactions] = await Promise.all([
+                openclaw.listMcpServerTools(name).catch(() => ({ tools: [] })),
+                openclaw.listMcpServerResources(name).catch(() => ({ resources: [] })),
+                openclaw.listMcpResourceTemplates(name).catch(() => ({ resource_templates: [] })),
+                openclaw.listMcpServerPrompts(name).catch(() => ({ prompts: [] })),
+                openclaw.listMcpInteractions().catch(() => ({ interactions: [] })),
+            ]);
+            setServerTools(tools.tools || []);
+            setServerResources(resources.resources || []);
+            setResourceTemplates(templates.resource_templates || []);
+            setServerPrompts(prompts.prompts || []);
+            setMcpInteractions(interactions.interactions || []);
+        } finally {
+            setMcpLoading(false);
+        }
+    }, []);
+
+    useEffect(() => { refreshMcpServers(); }, [refreshMcpServers]);
+    useEffect(() => { refreshMcpDetails(selectedServer); }, [selectedServer, refreshMcpDetails]);
+
+    const selectedServerInfo = servers.find(s => s.name === selectedServer);
+
+    const handleReadResource = async () => {
+        if (!selectedServer || !resourceUri.trim()) return;
+        try {
+            setResourceResult(await openclaw.readMcpResource(selectedServer, resourceUri.trim()));
+        } catch (e) {
+            toast.error('Resource read failed', { description: String(e) });
+        }
+    };
+
+    const handlePrompt = async (promptName: string) => {
+        if (!selectedServer) return;
+        try {
+            const args = promptArgs.trim() ? JSON.parse(promptArgs) : {};
+            setPromptResult(await openclaw.getMcpPrompt(selectedServer, promptName, args));
+        } catch (e) {
+            toast.error('Prompt request failed', { description: String(e) });
+        }
+    };
+
+    const handleOauth = async () => {
+        if (!selectedServer) return;
+        try {
+            setOauthResult(await openclaw.discoverMcpOauth(selectedServer));
+        } catch (e) {
+            toast.error('OAuth discovery failed', { description: String(e) });
+        }
+    };
+
+    const handleLogLevel = async (level: string) => {
+        if (!selectedServer) return;
+        try {
+            const resp = await openclaw.setMcpLogLevel(selectedServer, level);
+            resp.ok ? toast.success(resp.message || 'MCP log level updated') : toast.error(resp.message || 'MCP log level update failed');
+            refreshMcpServers();
+        } catch (e) {
+            toast.error('MCP log level update failed', { description: String(e) });
+        }
+    };
+
+    const handleInteraction = async (interactionId: string, action: string) => {
+        try {
+            const resp = await openclaw.respondMcpInteraction(interactionId, action);
+            resp.ok ? toast.success(resp.message || 'Interaction updated') : toast.error(resp.message || 'Interaction update failed');
+            refreshMcpDetails(selectedServer);
+        } catch (e) {
+            toast.error('Interaction response failed', { description: String(e) });
+        }
+    };
 
     // ── Persist helpers ──
     const persist = useCallback(async (patch: object) => {
@@ -380,6 +483,150 @@ export function McpTab() {
                     </motion.div>
                 )}
             </AnimatePresence>
+
+            <SectionCard title="ThinClaw MCP Servers" icon={Plug} iconColor="text-emerald-400" iconBg="bg-emerald-500/10">
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between gap-4">
+                        <div className="flex flex-wrap gap-2">
+                            {servers.length === 0 ? (
+                                <span className="text-xs text-muted-foreground">No MCP servers configured.</span>
+                            ) : servers.map(server => (
+                                <button
+                                    key={server.name}
+                                    onClick={() => setSelectedServer(server.name)}
+                                    className={cn(
+                                        'px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors',
+                                        selectedServer === server.name
+                                            ? 'bg-primary/15 border-primary/30 text-primary'
+                                            : 'bg-white/[0.03] border-border/40 text-muted-foreground hover:text-foreground'
+                                    )}
+                                >
+                                    {server.display_name || server.name}
+                                </button>
+                            ))}
+                        </div>
+                        <button
+                            onClick={() => {
+                                refreshMcpServers();
+                                refreshMcpDetails(selectedServer);
+                            }}
+                            className="p-2 rounded-lg bg-white/[0.04] border border-border/40 hover:bg-white/[0.07]"
+                        >
+                            <RefreshCw className={cn('w-4 h-4', mcpLoading && 'animate-spin')} />
+                        </button>
+                    </div>
+
+                    {selectedServerInfo && (
+                        <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-4">
+                            <div className="p-4 rounded-xl bg-white/[0.03] border border-white/5 space-y-3">
+                                <div>
+                                    <h4 className="font-semibold text-sm">{selectedServerInfo.display_name || selectedServerInfo.name}</h4>
+                                    <p className="text-xs text-muted-foreground mt-1">{selectedServerInfo.description || selectedServerInfo.transport}</p>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 text-xs">
+                                    {[
+                                        ['Transport', selectedServerInfo.transport],
+                                        ['Active', selectedServerInfo.active ? 'yes' : 'no'],
+                                        ['Auth', selectedServerInfo.authenticated ? 'ok' : selectedServerInfo.requires_auth ? 'required' : 'none'],
+                                        ['Namespace', selectedServerInfo.tool_namespace],
+                                    ].map(([label, value]) => (
+                                        <div key={label} className="p-2 rounded-lg bg-background/50 border border-border/30">
+                                            <p className="text-[10px] text-muted-foreground uppercase">{label}</p>
+                                            <p className="font-mono truncate">{value}</p>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <select
+                                        value={selectedServerInfo.logging_level || 'info'}
+                                        onChange={(e) => handleLogLevel(e.target.value)}
+                                        className="flex-1 px-2 py-1.5 rounded-lg bg-background border border-border/40 text-xs"
+                                    >
+                                        <option value="debug">Debug</option>
+                                        <option value="info">Info</option>
+                                        <option value="warn">Warn</option>
+                                        <option value="error">Error</option>
+                                    </select>
+                                    <button onClick={handleOauth} className="px-2 py-1.5 rounded-lg bg-white/[0.04] border border-border/40 text-xs hover:bg-white/[0.07]">
+                                        OAuth
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="space-y-4">
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <h4 className="text-xs font-semibold uppercase text-muted-foreground">Tools</h4>
+                                            <span className="text-[10px] text-muted-foreground">{serverTools.length}</span>
+                                        </div>
+                                        <div className="flex flex-wrap gap-1.5 max-h-40 overflow-auto">
+                                            {serverTools.map((tool: any) => <ToolChip key={tool.name || tool.id} name={tool.name || tool.id || 'tool'} />)}
+                                        </div>
+                                    </div>
+                                    <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5">
+                                        <div className="flex items-center justify-between mb-2">
+                                            <h4 className="text-xs font-semibold uppercase text-muted-foreground">Prompts</h4>
+                                            <span className="text-[10px] text-muted-foreground">{serverPrompts.length}</span>
+                                        </div>
+                                        <textarea
+                                            value={promptArgs}
+                                            onChange={(e) => setPromptArgs(e.target.value)}
+                                            className="w-full h-16 px-2 py-1.5 rounded-lg bg-background border border-border/40 text-xs font-mono mb-2"
+                                        />
+                                        <div className="flex flex-wrap gap-1.5 max-h-28 overflow-auto">
+                                            {serverPrompts.map((prompt: any) => (
+                                                <button key={prompt.name} onClick={() => handlePrompt(prompt.name)} className="px-2 py-1 rounded-lg bg-primary/10 text-primary text-[10px] border border-primary/20">
+                                                    {prompt.name}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="p-3 rounded-xl bg-white/[0.03] border border-white/5 space-y-3">
+                                    <div className="flex items-center justify-between">
+                                        <h4 className="text-xs font-semibold uppercase text-muted-foreground">Resources</h4>
+                                        <span className="text-[10px] text-muted-foreground">{serverResources.length} resources · {resourceTemplates.length} templates</span>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <input value={resourceUri} onChange={(e) => setResourceUri(e.target.value)} placeholder="resource://uri" className="flex-1 px-3 py-2 rounded-lg bg-background border border-border/40 text-xs font-mono" />
+                                        <button onClick={handleReadResource} className="px-3 py-2 rounded-lg bg-primary/15 text-primary text-xs border border-primary/20">Read</button>
+                                    </div>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {serverResources.slice(0, 10).map((resource: any) => (
+                                            <button key={resource.uri || resource.name} onClick={() => setResourceUri(resource.uri || '')} className="px-2 py-1 rounded-lg bg-white/[0.04] text-[10px] border border-border/30">
+                                                {resource.name || resource.uri}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {mcpInteractions.length > 0 && (
+                                    <div className="p-3 rounded-xl bg-amber-500/5 border border-amber-500/20 space-y-2">
+                                        <h4 className="text-xs font-semibold uppercase text-amber-400">Pending Interactions</h4>
+                                        {mcpInteractions.map((interaction: any) => (
+                                            <div key={interaction.id || interaction.interaction_id} className="flex items-center justify-between gap-3 p-2 rounded-lg bg-background/50 border border-border/30">
+                                                <span className="text-xs truncate">{interaction.prompt || interaction.message || interaction.id || interaction.interaction_id}</span>
+                                                <div className="flex gap-1">
+                                                    <button onClick={() => handleInteraction(interaction.id || interaction.interaction_id, 'approve')} className="px-2 py-1 rounded bg-emerald-500/15 text-emerald-400 text-[10px]">Approve</button>
+                                                    <button onClick={() => handleInteraction(interaction.id || interaction.interaction_id, 'deny')} className="px-2 py-1 rounded bg-rose-500/15 text-rose-400 text-[10px]">Deny</button>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {(resourceResult || promptResult || oauthResult) && (
+                                    <pre className="p-3 rounded-xl bg-background/70 border border-border/40 overflow-auto max-h-72 text-xs font-mono whitespace-pre-wrap">
+                                        {JSON.stringify({ resource: resourceResult, prompt: promptResult, oauth: oauthResult }, null, 2)}
+                                    </pre>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </SectionCard>
 
             {/* ── Server URL ── */}
             <SectionCard title="Server Connection" icon={Globe} iconColor="text-blue-400" iconBg="bg-blue-500/10">

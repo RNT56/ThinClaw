@@ -375,6 +375,12 @@ pub fn open_config_file(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 #[specta::specta]
 pub async fn get_hf_token(app: AppHandle) -> Result<Option<String>, String> {
+    if let Some(ironclaw) = app.try_state::<crate::openclaw::ironclaw_bridge::IronClawState>() {
+        if ironclaw.remote_proxy().await.is_some() {
+            return Ok(None);
+        }
+    }
+
     // Read from the app-level SecretStore (NOT OpenClawConfig)
     if let Some(store) = app.try_state::<crate::secret_store::SecretStore>() {
         if let Some(token) = store.huggingface_token() {

@@ -18,6 +18,7 @@ import {
     Download,
     Clock,
     FileCheck2,
+    RotateCw,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
@@ -40,11 +41,17 @@ const STATUS_STYLES: Record<string, { color: string; label: string; icon: React.
 function ExtensionCard({
     ext,
     onActivate,
+    onReconnect,
+    onSetup,
+    onValidate,
     onRemove,
     channelHealth,
 }: {
     ext: openclaw.ExtensionInfoItem;
     onActivate: (name: string) => void;
+    onReconnect: (name: string) => void;
+    onSetup: (name: string) => void;
+    onValidate: (name: string) => void;
     onRemove: (name: string) => void;
     channelHealth?: openclaw.ChannelStatusEntry;
 }) {
@@ -185,6 +192,29 @@ function ExtensionCard({
                         </button>
                     )}
                     <button
+                        onClick={() => onSetup(ext.name)}
+                        className="p-2 rounded-lg hover:bg-blue-500/10 text-muted-foreground hover:text-blue-400 transition-colors"
+                        title="Setup"
+                    >
+                        <Wrench className="w-4 h-4" />
+                    </button>
+                    {ext.reconnect_supported && (
+                        <button
+                            onClick={() => onReconnect(ext.name)}
+                            className="p-2 rounded-lg hover:bg-primary/10 text-muted-foreground hover:text-primary transition-colors"
+                            title="Reconnect"
+                        >
+                            <RotateCw className="w-4 h-4" />
+                        </button>
+                    )}
+                    <button
+                        onClick={() => onValidate(ext.name)}
+                        className="p-2 rounded-lg hover:bg-white/5 text-muted-foreground hover:text-foreground transition-colors"
+                        title="Validate setup"
+                    >
+                        <FileCheck2 className="w-4 h-4" />
+                    </button>
+                    <button
                         onClick={handleRemove}
                         disabled={removing}
                         className="p-2 rounded-lg hover:bg-red-500/10 text-muted-foreground hover:text-red-400 transition-colors"
@@ -222,6 +252,7 @@ function ExtensionCard({
                                     )}>
                                         {ext.authenticated ? 'Authenticated' : 'Not Authenticated'}
                                     </p>
+                                    <p className="text-[10px] text-muted-foreground mt-1">{ext.auth_mode} · {ext.auth_status}</p>
                                 </div>
                                 <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
                                     <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1 flex items-center gap-1">
@@ -234,6 +265,9 @@ function ExtensionCard({
                                     )}>
                                         {ext.needs_setup ? 'Needs Setup' : 'Ready'}
                                     </p>
+                                    {ext.shared_auth_provider && (
+                                        <p className="text-[10px] text-muted-foreground mt-1">{ext.shared_auth_provider}</p>
+                                    )}
                                 </div>
                                 <div className="p-3 rounded-lg bg-white/[0.03] border border-white/5">
                                     <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-1 flex items-center gap-1">
@@ -245,6 +279,25 @@ function ExtensionCard({
                                     </p>
                                 </div>
                             </div>
+                            {ext.url && (
+                                <div className="mt-3 text-[10px] text-muted-foreground font-mono truncate">
+                                    {ext.url}
+                                </div>
+                            )}
+                            {ext.missing_scopes.length > 0 && (
+                                <div className="mt-3 flex flex-wrap gap-1">
+                                    {ext.missing_scopes.map(scope => (
+                                        <span key={scope} className="px-2 py-0.5 rounded-md text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                            {scope}
+                                        </span>
+                                    ))}
+                                </div>
+                            )}
+                            {ext.channel_diagnostics && (
+                                <pre className="mt-3 p-3 rounded-lg bg-white/[0.03] border border-white/5 text-[10px] text-muted-foreground overflow-auto max-h-32">
+                                    {JSON.stringify(ext.channel_diagnostics, null, 2)}
+                                </pre>
+                            )}
                             {ext.tools.length > 5 && (
                                 <div className="mt-3">
                                     <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground/60 mb-2">All Tools</div>
@@ -288,6 +341,14 @@ export function OpenClawPlugins() {
 
     // Channel health
     const [channelStatuses, setChannelStatuses] = useState<openclaw.ChannelStatusEntry[]>([]);
+    const [setupTarget, setSetupTarget] = useState<string | null>(null);
+    const [setupSchema, setSetupSchema] = useState<any>(null);
+    const [setupSecrets, setSetupSecrets] = useState<Record<string, string>>({});
+    const [registryQuery, setRegistryQuery] = useState('');
+    const [registryResults, setRegistryResults] = useState<any[]>([]);
+    const [manualName, setManualName] = useState('');
+    const [manualUrl, setManualUrl] = useState('');
+    const [manualKind, setManualKind] = useState('mcp_server');
 
     const fetchChannelHealth = useCallback(async () => {
         try {
@@ -342,6 +403,52 @@ export function OpenClawPlugins() {
         }
     };
 
+    const handleReconnect = async (name: string) => {
+        try {
+            const resp = await openclaw.reconnectExtension(name);
+            resp.ok ? toast.success(resp.message || `Reconnected ${name}`) : toast.error(resp.message || `Reconnect failed for ${name}`);
+            fetchExtensions();
+            fetchChannelHealth();
+        } catch (e) {
+            toast.error(`Reconnect error: ${e}`);
+        }
+    };
+
+    const handleValidateSetup = async (name: string) => {
+        try {
+            const resp = await openclaw.validateExtensionSetup(name);
+            resp.ok ? toast.success(resp.message || `${name} is valid`) : toast.error(resp.message || `Validation failed for ${name}`);
+            if (resp.auth_url) window.open(resp.auth_url, '_blank');
+            fetchExtensions();
+        } catch (e) {
+            toast.error(`Validation error: ${e}`);
+        }
+    };
+
+    const handleOpenSetup = async (name: string) => {
+        setSetupTarget(name);
+        setSetupSchema(null);
+        setSetupSecrets({});
+        try {
+            const schema = await openclaw.getExtensionSetup(name);
+            setSetupSchema(schema);
+        } catch (e) {
+            toast.error(`Setup unavailable: ${e}`);
+        }
+    };
+
+    const handleSubmitSetup = async () => {
+        if (!setupTarget) return;
+        try {
+            const resp = await openclaw.submitExtensionSetup(setupTarget, setupSecrets);
+            resp.ok ? toast.success(resp.message || `Saved ${setupTarget}`) : toast.error(resp.message || `Setup failed for ${setupTarget}`);
+            setSetupTarget(null);
+            fetchExtensions();
+        } catch (e) {
+            toast.error(`Setup failed: ${e}`);
+        }
+    };
+
     const handleSearchClawHub = async () => {
         if (!hubQuery.trim()) return;
         setHubSearching(true);
@@ -360,6 +467,26 @@ export function OpenClawPlugins() {
             await openclaw.installFromClawHub(pluginId);
             toast.success(`Installed ${pluginId}`);
             fetchExtensions();
+        } catch (e) {
+            toast.error(`Install failed: ${e}`);
+        }
+    };
+
+    const handleRegistrySearch = async () => {
+        try {
+            const result = await openclaw.searchExtensionRegistry(registryQuery);
+            setRegistryResults(result.entries || []);
+        } catch (e) {
+            toast.error(`Registry search failed: ${e}`);
+        }
+    };
+
+    const handleInstallExtension = async (name: string, url?: string | null, kind?: string | null) => {
+        try {
+            const resp = await openclaw.installExtension(name, url ?? null, kind ?? null);
+            resp.ok ? toast.success(resp.message || `Installed ${name}`) : toast.error(resp.message || `Install failed for ${name}`);
+            fetchExtensions();
+            handleRegistrySearch();
         } catch (e) {
             toast.error(`Install failed: ${e}`);
         }
@@ -506,6 +633,9 @@ export function OpenClawPlugins() {
                                                 <ExtensionCard
                                                     ext={ext}
                                                     onActivate={handleActivate}
+                                                    onReconnect={handleReconnect}
+                                                    onSetup={handleOpenSetup}
+                                                    onValidate={handleValidateSetup}
                                                     onRemove={handleRemove}
                                                     channelHealth={health}
                                                 />
@@ -587,6 +717,73 @@ export function OpenClawPlugins() {
                     {/* ═══ ClawHub Browser Tab ═══ */}
                     {activeTab === 'clawhub' && (
                         <div className="space-y-4">
+                            <div className="p-4 rounded-2xl border border-border/40 bg-card/30 space-y-4">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <h3 className="text-sm font-semibold">Extension Registry</h3>
+                                        <p className="text-xs text-muted-foreground">Install known WASM tools, channels, and MCP servers.</p>
+                                    </div>
+                                    <button onClick={handleRegistrySearch} className="px-3 py-1.5 rounded-lg bg-primary/15 text-primary text-xs font-medium border border-primary/20 hover:bg-primary/20">
+                                        Browse
+                                    </button>
+                                </div>
+                                <div className="flex gap-2">
+                                    <input
+                                        value={registryQuery}
+                                        onChange={(e) => setRegistryQuery(e.target.value)}
+                                        onKeyDown={(e) => e.key === 'Enter' && handleRegistrySearch()}
+                                        placeholder="Search registry..."
+                                        className="flex-1 px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30"
+                                    />
+                                    <button onClick={handleRegistrySearch} className="px-4 py-2 rounded-xl bg-white/[0.04] border border-border/40 text-xs font-medium hover:bg-white/[0.07]">
+                                        Search
+                                    </button>
+                                </div>
+                                {registryResults.length > 0 && (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                        {registryResults.slice(0, 8).map(entry => (
+                                            <div key={`${entry.name}-${entry.kind}`} className="p-3 rounded-xl bg-white/[0.03] border border-white/5 flex items-start gap-3">
+                                                <Plug className="w-4 h-4 text-primary mt-0.5 shrink-0" />
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2">
+                                                        <p className="text-sm font-semibold truncate">{entry.display_name || entry.name}</p>
+                                                        <span className="text-[10px] text-muted-foreground">{entry.kind}</span>
+                                                    </div>
+                                                    <p className="text-xs text-muted-foreground line-clamp-2 mt-1">{entry.description}</p>
+                                                </div>
+                                                <button
+                                                    onClick={() => handleInstallExtension(entry.name, null, entry.kind)}
+                                                    disabled={entry.installed}
+                                                    className="px-2 py-1 rounded-lg bg-primary/15 text-primary text-[10px] font-medium border border-primary/20 hover:bg-primary/20 disabled:opacity-40"
+                                                >
+                                                    {entry.installed ? 'Installed' : 'Install'}
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="p-4 rounded-2xl border border-border/40 bg-card/30 space-y-3">
+                                <h3 className="text-sm font-semibold">Direct Install</h3>
+                                <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_150px_auto] gap-2">
+                                    <input value={manualName} onChange={(e) => setManualName(e.target.value)} placeholder="name" className="px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30" />
+                                    <input value={manualUrl} onChange={(e) => setManualUrl(e.target.value)} placeholder="https://..." className="px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30" />
+                                    <select value={manualKind} onChange={(e) => setManualKind(e.target.value)} className="px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none">
+                                        <option value="mcp_server">MCP Server</option>
+                                        <option value="wasm_tool">WASM Tool</option>
+                                        <option value="wasm_channel">WASM Channel</option>
+                                    </select>
+                                    <button
+                                        onClick={() => handleInstallExtension(manualName, manualUrl || null, manualKind)}
+                                        disabled={!manualName.trim()}
+                                        className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold disabled:opacity-50"
+                                    >
+                                        Install
+                                    </button>
+                                </div>
+                            </div>
+
                             <div className="flex items-center gap-2">
                                 <div className="flex-1 relative">
                                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -737,6 +934,63 @@ export function OpenClawPlugins() {
                             </div>
                         </div>
                     )}
+
+                    <AnimatePresence>
+                        {setupTarget && (
+                            <motion.div
+                                initial={{ opacity: 0 }}
+                                animate={{ opacity: 1 }}
+                                exit={{ opacity: 0 }}
+                                className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6"
+                                onClick={() => setSetupTarget(null)}
+                            >
+                                <div className="w-full max-w-2xl max-h-[80vh] overflow-hidden rounded-2xl border border-border bg-background shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                                    <div className="p-4 border-b border-border flex items-center justify-between">
+                                        <div>
+                                            <h3 className="font-semibold">Setup {setupTarget}</h3>
+                                            <p className="text-xs text-muted-foreground">{setupSchema?.mode || 'Loading'} · {setupSchema?.auth_status || 'pending'}</p>
+                                        </div>
+                                        <button className="text-xs text-muted-foreground hover:text-foreground" onClick={() => setSetupTarget(null)}>Close</button>
+                                    </div>
+                                    <div className="p-4 space-y-4 overflow-auto max-h-[65vh]">
+                                        {!setupSchema ? (
+                                            <div className="py-10 flex justify-center"><RefreshCw className="w-5 h-5 animate-spin text-muted-foreground" /></div>
+                                        ) : (
+                                            <>
+                                                {setupSchema.instructions && <p className="text-sm text-muted-foreground">{setupSchema.instructions}</p>}
+                                                {(setupSchema.auth_url || setupSchema.setup_url) && (
+                                                    <div className="flex gap-2">
+                                                        {setupSchema.auth_url && <button onClick={() => window.open(setupSchema.auth_url, '_blank')} className="px-3 py-2 rounded-lg bg-primary/15 text-primary text-xs font-medium border border-primary/20">Open Auth</button>}
+                                                        {setupSchema.setup_url && <button onClick={() => window.open(setupSchema.setup_url, '_blank')} className="px-3 py-2 rounded-lg bg-white/[0.04] text-xs font-medium border border-border/40">Open Setup</button>}
+                                                    </div>
+                                                )}
+                                                {(setupSchema.fields || []).map((field: any) => (
+                                                    <label key={field.name} className="block space-y-1">
+                                                        <span className="text-xs font-medium">{field.prompt || field.name}{field.optional ? '' : ' *'}</span>
+                                                        <input
+                                                            type="password"
+                                                            value={setupSecrets[field.name] || ''}
+                                                            onChange={(e) => setSetupSecrets(prev => ({ ...prev, [field.name]: e.target.value }))}
+                                                            placeholder={field.provided ? 'Already saved' : field.auto_generate ? 'Auto-generated if empty' : field.name}
+                                                            className="w-full px-3 py-2 rounded-xl bg-white/[0.03] border border-border/40 text-sm outline-none focus:ring-1 focus:ring-primary/30"
+                                                        />
+                                                    </label>
+                                                ))}
+                                                {setupSchema.missing_scopes?.length > 0 && (
+                                                    <div className="flex flex-wrap gap-1">
+                                                        {setupSchema.missing_scopes.map((scope: string) => <span key={scope} className="px-2 py-0.5 rounded-md text-[10px] bg-amber-500/10 text-amber-400 border border-amber-500/20">{scope}</span>)}
+                                                    </div>
+                                                )}
+                                                <button onClick={handleSubmitSetup} className="px-4 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-bold">
+                                                    Save Setup
+                                                </button>
+                                            </>
+                                        )}
+                                    </div>
+                                </div>
+                            </motion.div>
+                        )}
+                    </AnimatePresence>
                 </div>
             </div>
         </motion.div>

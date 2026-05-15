@@ -10,6 +10,7 @@ import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
 import { toast } from 'sonner';
 import { listen } from '@tauri-apps/api/event';
+import { OpenClawModeBadge, useOpenClawStatusSnapshot } from './OpenClawModeBadge';
 
 // ── Channel icon mapping ────────────────────────────────────────
 const CHANNEL_ICONS: Record<string, any> = {
@@ -189,6 +190,7 @@ export function OpenClawChannelStatus() {
     const [isLoading, setIsLoading] = useState(true);
     const [expandedChannel, setExpandedChannel] = useState<string | null>(null);
     const [sortBy, setSortBy] = useState<'name' | 'state'>('name');
+    const { status: runtimeStatus } = useOpenClawStatusSnapshot(15000);
 
     const fetchData = useCallback(async () => {
         try {
@@ -289,6 +291,7 @@ export function OpenClawChannelStatus() {
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
+                    <OpenClawModeBadge status={runtimeStatus} />
                     <button
                         onClick={() => setSortBy(s => s === 'name' ? 'state' : 'name')}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 transition-all"

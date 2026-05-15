@@ -158,6 +158,8 @@ pub(crate) async fn sse_event_visible_to_identity(
         | SseEvent::ToolResult { thread_id, .. }
         | SseEvent::StreamChunk { thread_id, .. }
         | SseEvent::Status { thread_id, .. }
+        | SseEvent::PlanUpdate { thread_id, .. }
+        | SseEvent::UsageUpdate { thread_id, .. }
         | SseEvent::SubagentSpawned { thread_id, .. }
         | SseEvent::SubagentProgress { thread_id, .. }
         | SseEvent::SubagentCompleted { thread_id, .. }

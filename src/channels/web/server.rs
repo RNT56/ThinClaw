@@ -405,9 +405,16 @@ pub async fn start_server(
             post(pairing_approve_handler),
         )
         // Routines
-        .route("/api/routines", get(routines_list_handler))
+        .route(
+            "/api/routines",
+            get(routines_list_handler).post(routines_create_handler),
+        )
         .route("/api/routines/summary", get(routines_summary_handler))
         .route("/api/routines/events", get(routines_events_handler))
+        .route(
+            "/api/routines/runs",
+            axum::routing::delete(routines_clear_runs_handler),
+        )
         .route("/api/routines/{id}", get(routines_detail_handler))
         .route("/api/routines/{id}/trigger", post(routines_trigger_handler))
         .route("/api/routines/{id}/toggle", post(routines_toggle_handler))

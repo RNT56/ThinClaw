@@ -30,6 +30,11 @@ pub async fn openclaw_get_status(
     let config = state.get_config().await;
 
     let engine_running = ironclaw.is_initialized() || ironclaw.is_remote_mode().await;
+    let remote_mode = ironclaw.is_remote_mode().await
+        || config
+            .as_ref()
+            .map(|c| c.gateway_mode == "remote")
+            .unwrap_or(false);
 
     Ok(OpenClawStatus {
         gateway_mode: config
@@ -37,7 +42,11 @@ pub async fn openclaw_get_status(
             .map(|c| c.gateway_mode.clone())
             .unwrap_or_else(|| "local".to_string()),
         remote_url: config.as_ref().and_then(|c| c.remote_url.clone()),
-        remote_token: config.as_ref().and_then(|c| c.remote_token.clone()),
+        remote_token: if remote_mode {
+            None
+        } else {
+            config.as_ref().and_then(|c| c.remote_token.clone())
+        },
         port: config.as_ref().map(|c| c.port).unwrap_or(18789),
         device_id: config
             .as_ref()
@@ -155,7 +164,11 @@ pub async fn openclaw_get_status(
             .map(|cfg| cfg.bootstrap_completed)
             .unwrap_or(false),
         custom_llm_url: config.as_ref().and_then(|cfg| cfg.custom_llm_url.clone()),
-        custom_llm_key: config.as_ref().and_then(|cfg| cfg.custom_llm_key.clone()),
+        custom_llm_key: if remote_mode {
+            None
+        } else {
+            config.as_ref().and_then(|cfg| cfg.custom_llm_key.clone())
+        },
         custom_llm_model: config.as_ref().and_then(|cfg| cfg.custom_llm_model.clone()),
         custom_llm_enabled: config
             .as_ref()

@@ -381,38 +381,98 @@ pub async fn openclaw_get_history(
     // ── Remote mode ──────────────────────────────────────────────────────
     if let Some(proxy) = ironclaw.remote_proxy().await {
         let raw = proxy.get_history(&session_key, limit).await?;
-        // Remote gateway returns { messages: [{id, role, content, ts_ms, ...}] }
-        let messages: Vec<OpenClawMessage> = raw
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| {
-                        let id = m.get("id")?.as_str()?.to_string();
-                        let role = m.get("role")?.as_str()?.to_string();
-                        let text = m
-                            .get("content")
-                            .or_else(|| m.get("text"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let ts_ms = m.get("ts_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let source = m
-                            .get("source")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
-                        Some(OpenClawMessage {
-                            id,
-                            role,
-                            ts_ms,
-                            text,
-                            source,
+        // Remote gateway returns root HistoryResponse:
+        // { thread_id, turns: [{ user_input, response, started_at, completed_at, tool_calls }], ... }
+        let mut messages: Vec<OpenClawMessage> = Vec::new();
+        if let Some(turns) = raw.get("turns").and_then(|v| v.as_array()) {
+            for (idx, turn) in turns.iter().enumerate() {
+                let started_ms = turn
+                    .get("started_at")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.timestamp_millis() as f64)
+                    .unwrap_or(idx as f64);
+                if let Some(user_input) = turn.get("user_input").and_then(|v| v.as_str()) {
+                    if !turn
+                        .get("hide_user_input")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        messages.push(OpenClawMessage {
+                            id: format!("remote-turn-{}-user", idx),
+                            role: "user".to_string(),
+                            ts_ms: started_ms,
+                            text: user_input.to_string(),
+                            source: Some("remote".to_string()),
                             metadata: None,
+                        });
+                    }
+                }
+                if let Some(tool_calls) = turn.get("tool_calls").and_then(|v| v.as_array()) {
+                    for (tool_idx, tool) in tool_calls.iter().enumerate() {
+                        let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("tool");
+                        messages.push(OpenClawMessage {
+                            id: format!("remote-turn-{}-tool-{}", idx, tool_idx),
+                            role: "tool".to_string(),
+                            ts_ms: started_ms + 0.1 + tool_idx as f64 / 100.0,
+                            text: format!("[Tool Call: {}]", name),
+                            source: Some("remote".to_string()),
+                            metadata: Some(tool.clone()),
+                        });
+                    }
+                }
+                if let Some(response) = turn.get("response").and_then(|v| v.as_str()) {
+                    let completed_ms = turn
+                        .get("completed_at")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.timestamp_millis() as f64)
+                        .unwrap_or(started_ms + 1.0);
+                    messages.push(OpenClawMessage {
+                        id: format!("remote-turn-{}-assistant", idx),
+                        role: "assistant".to_string(),
+                        ts_ms: completed_ms,
+                        text: response.to_string(),
+                        source: Some("remote".to_string()),
+                        metadata: None,
+                    });
+                }
+            }
+        }
+
+        if messages.is_empty() {
+            messages = raw
+                .get("messages")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            let id = m.get("id")?.as_str()?.to_string();
+                            let role = m.get("role")?.as_str()?.to_string();
+                            let text = m
+                                .get("content")
+                                .or_else(|| m.get("text"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let ts_ms = m.get("ts_ms").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let source = m
+                                .get("source")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            Some(OpenClawMessage {
+                                id,
+                                role,
+                                ts_ms,
+                                text,
+                                source,
+                                metadata: None,
+                            })
                         })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
 
         let has_more = raw
             .get("has_more")

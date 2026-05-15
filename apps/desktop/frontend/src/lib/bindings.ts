@@ -1216,6 +1216,70 @@ async openclawSkillsToggle(key: string, enabled: boolean) : Promise<Result<JsonV
     else return { status: "error", error: e  as any };
 }
 },
+async openclawSkillsSearch(query: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_search", { query }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawSkillInstall(name: string, url: string | null, content: string | null, force: boolean | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_install", { name, url, content, force }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawSkillRemove(name: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_remove", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawSkillTrust(name: string, trust: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_trust", { name, trust }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawSkillReload(name: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_reload", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawSkillsReloadAll() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_reload_all") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawSkillInspect(name: string, includeContent: boolean | null, includeFiles: boolean | null, audit: boolean | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_inspect", { name, includeContent, includeFiles, audit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawSkillPublish(name: string, targetRepo: string, dryRun: boolean | null, remoteWrite: boolean | null, confirmRemoteWrite: boolean | null, approveRisky: boolean | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_publish", { name, targetRepo, dryRun, remoteWrite, confirmRemoteWrite, approveRisky }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async openclawInstallSkillRepo(repoUrl: string) : Promise<Result<string, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("openclaw_install_skill_repo", { repoUrl }) };
@@ -1474,6 +1538,158 @@ async openclawTriggerBootstrap() : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async openclawJobsList() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_jobs_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawJobsSummary() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_jobs_summary") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawJobDetail(jobId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_detail", { jobId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawJobCancel(jobId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_cancel", { jobId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawJobRestart(jobId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_restart", { jobId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawJobPrompt(jobId: string, content: string | null, done: boolean | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_prompt", { jobId, content, done }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawJobEvents(jobId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_events", { jobId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawJobFilesList(jobId: string, path: string | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_files_list", { jobId, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawJobFileRead(jobId: string, path: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_file_read", { jobId, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawAutonomyStatus() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawAutonomyBootstrap() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_bootstrap") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawAutonomyPause(reason: string | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_pause", { reason }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawAutonomyResume() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_resume") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawAutonomyPermissions() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_permissions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawDesktopPermissionStatus() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_desktop_permission_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawAutonomyRollback() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_rollback") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawAutonomyRollouts() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_rollouts") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawAutonomyChecks() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_checks") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawAutonomyEvidence() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_evidence") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Save HuggingFace token
  */
@@ -1487,7 +1703,8 @@ async openclawSetHfToken(token: string) : Promise<Result<null, string>> {
 },
 /**
  * Save an implicit cloud provider API key (generic)
- * Supports: xai, venice, together, moonshot, minimax, nvidia, qianfan, mistral, xiaomi
+ * Supports: xai, venice, together, moonshot, minimax, nvidia, qianfan, mistral,
+ * xiaomi, cohere, voyage, deepgram, elevenlabs, stability, fal.
  */
 async openclawSaveImplicitProviderKey(provider: string, key: string) : Promise<Result<null, string>> {
     try {
@@ -1804,6 +2021,17 @@ async openclawExtensionsList() : Promise<Result<ExtensionsListResponse, string>>
 }
 },
 /**
+ * Install an extension by registry name or direct URL.
+ */
+async openclawExtensionInstall(name: string, url: string | null, kind: string | null) : Promise<Result<ExtensionActionResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_install", { name, url, kind }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Activate an extension by name.
  */
 async openclawExtensionActivate(name: string) : Promise<Result<ExtensionActionResponse, string>> {
@@ -1815,11 +2043,198 @@ async openclawExtensionActivate(name: string) : Promise<Result<ExtensionActionRe
 }
 },
 /**
+ * Reconnect an installed channel extension when the gateway supports it.
+ */
+async openclawExtensionReconnect(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_reconnect", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Fetch an extension setup schema.
+ */
+async openclawExtensionSetupGet(name: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_setup_get", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Submit extension setup secrets.
+ */
+async openclawExtensionSetupSubmit(name: string, secrets: { [key in string]: string }) : Promise<Result<ExtensionActionResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_setup_submit", { name, secrets }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Validate extension setup and manifest/auth readiness.
+ */
+async openclawExtensionValidateSetup(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_validate_setup", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Remove an extension by name.
  */
 async openclawExtensionRemove(name: string) : Promise<Result<ExtensionActionResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_remove", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Search the bundled extension registry.
+ */
+async openclawExtensionRegistrySearch(query: string | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_registry_search", { query }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List configured MCP servers.
+ */
+async openclawMcpServers() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_servers") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Fetch one MCP server's status/config.
+ */
+async openclawMcpServer(name: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_server", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List tools exposed by an MCP server.
+ */
+async openclawMcpServerTools(name: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_server_tools", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List resources exposed by an MCP server.
+ */
+async openclawMcpServerResources(name: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_server_resources", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Read one MCP resource by URI.
+ */
+async openclawMcpReadResource(name: string, uri: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_read_resource", { name, uri }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List resource templates exposed by an MCP server.
+ */
+async openclawMcpResourceTemplates(name: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_resource_templates", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List prompts exposed by an MCP server.
+ */
+async openclawMcpServerPrompts(name: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_server_prompts", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Render one MCP prompt.
+ */
+async openclawMcpGetPrompt(serverName: string, promptName: string, promptArgs: JsonValue | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_get_prompt", { serverName, promptName, promptArgs }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Discover OAuth metadata for an HTTP MCP server.
+ */
+async openclawMcpOauth(name: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_oauth", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Set MCP server log level.
+ */
+async openclawMcpSetLogLevel(name: string, level: string) : Promise<Result<ExtensionActionResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_set_log_level", { name, level }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * List pending MCP interaction/auth requests.
+ */
+async openclawMcpInteractions() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_interactions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Respond to a pending MCP interaction/auth request.
+ */
+async openclawMcpInteractionRespond(interactionId: string, action: string, response: JsonValue | null, message: string | null) : Promise<Result<ExtensionActionResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_interaction_respond", { interactionId, action, response, message }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2124,6 +2539,17 @@ async openclawRoutingStatus() : Promise<Result<RoutingStatusResponse, string>> {
 }
 },
 /**
+ * Simulate ThinClaw's route decision for a draft prompt.
+ */
+async openclawRoutingSimulate(request: RouteSimulationRequest) : Promise<Result<RouteSimulationResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_simulate", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Start the Gmail OAuth PKCE flow via IronClaw.
  *
  * This opens the user's browser for Google consent, waits for the
@@ -2144,6 +2570,206 @@ async openclawGmailOauthStart() : Promise<Result<GmailOAuthResult, string>> {
 async openclawGmailStatus() : Promise<Result<GmailStatusResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("openclaw_gmail_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningStatus(limit: number | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_status", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningHistory(limit: number | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_history", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningCandidates(limit: number | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_candidates", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningArtifactVersions(limit: number | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_artifact_versions", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningProviderHealth() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_provider_health") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningCodeProposals(status: string | null, limit: number | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_code_proposals", { status, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningOutcomes(status: string | null, limit: number | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_outcomes", { status, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningRollbacks(limit: number | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_rollbacks", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningReviewCodeProposal(proposalId: string, decision: string, note: string | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_review_code_proposal", { proposalId, decision, note }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningReviewOutcome(outcomeId: string, decision: string, verdict: string | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_review_outcome", { outcomeId, decision, verdict }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningRecordRollback(artifactType: string, artifactName: string, artifactVersionId: string | null, reason: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_record_rollback", { artifactType, artifactName, artifactVersionId, reason }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawLearningEvaluateOutcomes() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_evaluate_outcomes") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsProjects() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_projects") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsCampaigns() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_campaigns") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsRunners() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_runners") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsTargets() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_targets") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsTrials(campaignId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_trials", { campaignId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsTrialArtifacts(trialId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_trial_artifacts", { trialId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsModelUsage(limit: number | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_model_usage", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsOpportunities(limit: number | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_opportunities", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsGpuClouds() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_gpu_clouds") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsValidateRunner(runnerId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_validate_runner", { runnerId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsCampaignAction(campaignId: string, action: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_campaign_action", { campaignId, action }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsGpuValidate(provider: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_gpu_validate", { provider }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async openclawExperimentsGpuLaunchTest(provider: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_gpu_launch_test", { provider }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2835,11 +3461,11 @@ export type EngineStartResult = { port: number; token: string }
 /**
  * Extension action response (install, activate, remove)
  */
-export type ExtensionActionResponse = { ok: boolean; message: string | null }
+export type ExtensionActionResponse = { ok: boolean; message: string | null; auth_url: string | null; setup_url: string | null; auth_mode: string | null; auth_status: string | null; awaiting_token: boolean | null; instructions: string | null; shared_auth_provider: string | null; missing_scopes: string[]; activated: boolean | null; needs_restart: boolean | null }
 /**
  * Extension (plugin) information for UI display
  */
-export type ExtensionInfoItem = { name: string; kind: string; description: string | null; active: boolean; authenticated: boolean; tools: string[]; needs_setup: boolean; activation_status: string | null; activation_error: string | null }
+export type ExtensionInfoItem = { name: string; kind: string; description: string | null; url: string | null; active: boolean; authenticated: boolean; auth_mode: string; auth_status: string; tools: string[]; needs_setup: boolean; shared_auth_provider: string | null; missing_scopes: string[]; activation_status: string | null; activation_error: string | null; channel_diagnostics: JsonValue | null; reconnect_supported: boolean; setup: JsonValue }
 /**
  * Extensions list response
  */
@@ -3083,6 +3709,18 @@ fromCache: boolean;
 error: string | null }
 export type RemoteModelEntry = { id: string; name: string; metadata: JsonValue; local_version: string | null; remote_version: string | null; last_checked_at: number | null; status: string | null }
 /**
+ * Request payload for provider route simulation.
+ */
+export type RouteSimulationRequest = { prompt: string; has_vision: boolean; has_tools: boolean; requires_streaming: boolean }
+/**
+ * Result from ThinClaw route simulation.
+ */
+export type RouteSimulationResponse = { target: string; reason: string; fallback_chain: string[]; candidate_list: string[]; rejections: string[]; score_breakdown: RouteSimulationScore[]; diagnostics: string[] }
+/**
+ * Per-candidate score returned by ThinClaw's route planner.
+ */
+export type RouteSimulationScore = { target: string; telemetry_key: string | null; quality: number; cost: number; latency: number; health: number; policy_bias: number; composite: number }
+/**
  * Routine audit log entry
  */
 export type RoutineAuditEntry = { routine_key: string; started_at: string; completed_at: string | null; outcome: string; duration_ms: number | null; error: string | null }
@@ -3138,7 +3776,7 @@ export type RoutingRulesResponse = { rules: RoutingRule[]; smart_routing_enabled
 /**
  * Full routing policy status for the routing UI dashboard.
  */
-export type RoutingStatusResponse = { enabled: boolean; default_provider: string; rule_count: number; rules: RoutingRuleSummary[]; latency_data: LatencyEntry[] }
+export type RoutingStatusResponse = { enabled: boolean; default_provider: string; routing_mode: string; primary_model: string | null; preferred_cheap_provider: string | null; cheap_model: string | null; primary_pool_order: string[]; cheap_pool_order: string[]; fallback_chain: string[]; advisor_ready: boolean; advisor_disabled_reason: string | null; executor_target: string | null; advisor_target: string | null; diagnostics: string[]; runtime_revision: number | null; llm_select_state: string; rule_count: number; rules: RoutingRuleSummary[]; latency_data: LatencyEntry[] }
 /**
  * S3 provider configuration input from the frontend.
  */
@@ -3261,6 +3899,10 @@ export type UiEvent =
  */
 { kind: "RunStatus"; session_key: string; run_id: string | null; status: string; error: string | null } |
 /**
+ * Explicit run lifecycle transition.
+ */
+{ kind: "LifecycleUpdate"; session_key: string; run_id: string; phase: string; status: string } |
+/**
  * Structured plan/progress update from the ThinClaw agent loop.
  */
 { kind: "PlanUpdate"; session_key: string; run_id: string | null; message_id: string; entries: JsonValue[] } |
@@ -3283,7 +3925,7 @@ export type UiEvent =
 /**
  * Web login event (QR code, status)
  */
-{ kind: "WebLogin"; provider: string; qr_code: string | null; status: string } |
+{ kind: "WebLogin"; session_key: string | null; run_id: string | null; provider: string; qr_code: string | null; status: string } |
 /**
  * Canvas update
  */
@@ -3296,6 +3938,10 @@ export type UiEvent =
  * in the parent session's chat view.
  */
 { kind: "SubAgentUpdate"; parent_session: string; child_session: string; task: string; status: string; progress: number | null; result_preview: string | null } |
+/**
+ * Sandbox/job lifecycle update.
+ */
+{ kind: "JobUpdate"; session_key: string | null; run_id: string | null; job_id: string; title: string | null; status: string; url: string | null; payload: JsonValue } |
 /**
  * Mid-loop agent message — rendered as a persistent chat bubble.
  *
@@ -3313,6 +3959,16 @@ export type UiEvent =
  * The frontend Automations panel and Console can display these as live status.
  */
 { kind: "RoutineLifecycle"; routine_name: string; event: string; run_id: string | null; result_summary: string | null } |
+/**
+ * Cost/budget event from the gateway/runtime.
+ */
+{ kind: "CostAlert"; alert_type: string; current_cost_usd: number; limit_usd: number; message: string | null } |
+/**
+ * Typed catch-all for ThinClaw gateway events that do not yet have a
+ * dedicated desktop rendering surface. Keeping these on `openclaw-event`
+ * prevents silent drops while frontend surfaces catch up.
+ */
+{ kind: "GatewayEvent"; event_type: string; session_key: string | null; run_id: string | null; payload: JsonValue } |
 /**
  * Real-time log entry push from the internal tracing subscriber.
  * Sent for every DEBUG+ event so the UI Logs tab updates live without polling.

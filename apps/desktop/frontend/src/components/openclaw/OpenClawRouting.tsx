@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence, Reorder } from 'framer-motion';
 import {
-    GitBranch, RefreshCw, Zap, Info, Cpu, Layers,
-    ArrowRight, CheckCircle2, Plus, Trash2, GripVertical,
+    GitBranch, RefreshCw, Zap, Info, Layers,
+    CheckCircle2, Plus, Trash2, GripVertical,
     Save, ChevronDown, ChevronUp, Tag, Hash, Globe,
-    Sparkles, AlertCircle, PenLine
+    Sparkles, AlertCircle, PenLine, FlaskConical, Play, ShieldCheck
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
@@ -260,10 +260,29 @@ export function OpenClawRouting() {
     const [saving, setSaving] = useState(false);
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [hasUnsaved, setHasUnsaved] = useState(false);
+    const [routingStatus, setRoutingStatus] = useState<openclaw.RoutingStatusResponse | null>(null);
+    const [simulationPrompt, setSimulationPrompt] = useState('Summarize this project, inspect the code paths, and suggest a low-cost implementation plan.');
+    const [simulationOptions, setSimulationOptions] = useState({
+        has_vision: false,
+        has_tools: true,
+        requires_streaming: true,
+    });
+    const [simulationResult, setSimulationResult] = useState<openclaw.RouteSimulationResponse | null>(null);
+    const [simulationLoading, setSimulationLoading] = useState(false);
     const originalRef = useRef<string>('');
+
+    const loadRoutingStatus = useCallback(async () => {
+        try {
+            const status = await openclaw.getRoutingStatus();
+            setRoutingStatus(status);
+        } catch (e) {
+            console.warn('[OpenClawRouting] Failed to load routing status:', e);
+        }
+    }, []);
 
     // Load rules on mount
     useEffect(() => {
+        loadRoutingStatus();
         openclaw.getRoutingRules()
             .then(resp => {
                 setSmartRoutingEnabled(resp.smart_routing_enabled);
@@ -277,7 +296,7 @@ export function OpenClawRouting() {
                     .catch(() => { });
             })
             .finally(() => setIsLoading(false));
-    }, []);
+    }, [loadRoutingStatus]);
 
     // Track unsaved changes
     useEffect(() => {
@@ -290,6 +309,7 @@ export function OpenClawRouting() {
         setSmartRoutingEnabled(next);
         try {
             await openclaw.setRoutingConfig(next);
+            await loadRoutingStatus();
             toast.success(next ? '🧠 Smart Routing enabled' : 'Smart Routing disabled');
         } catch (e) {
             setSmartRoutingEnabled(!next);
@@ -308,6 +328,7 @@ export function OpenClawRouting() {
             setRules(reindexed);
             originalRef.current = JSON.stringify(reindexed);
             setHasUnsaved(false);
+            await loadRoutingStatus();
             toast.success(`Saved ${reindexed.length} routing rule${reindexed.length !== 1 ? 's' : ''}`);
         } catch (e) {
             toast.error(`Failed to save rules: ${e}`);
@@ -339,7 +360,30 @@ export function OpenClawRouting() {
         setRules(newOrder);
     };
 
+    const handleSimulateRoute = async () => {
+        setSimulationLoading(true);
+        try {
+            const result = await openclaw.simulateRouting({
+                prompt: simulationPrompt,
+                ...simulationOptions,
+            });
+            setSimulationResult(result);
+            if (result.target === 'unavailable') {
+                toast.info(result.reason);
+            }
+        } catch (e) {
+            toast.error(`Route simulation failed: ${e}`);
+        } finally {
+            setSimulationLoading(false);
+        }
+    };
+
     const enabledCount = rules.filter(r => r.enabled).length;
+    const advisorReady = routingStatus?.advisor_ready ?? false;
+    const primaryTarget = [
+        routingStatus?.default_provider,
+        routingStatus?.primary_model,
+    ].filter(Boolean).join(' / ');
 
     return (
         <motion.div
@@ -446,54 +490,122 @@ export function OpenClawRouting() {
                 </div>
             </motion.div>
 
-            {/* How It Works */}
+            {/* Runtime status and simulation */}
             <motion.div
                 initial={{ opacity: 0, y: 5 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: 0.1 }}
-                className="rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md p-6 space-y-4"
+                className="grid grid-cols-1 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] gap-4"
             >
-                <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground/60 flex items-center gap-2">
-                    <Cpu className="w-3.5 h-3.5" />
-                    How Smart Routing Works
-                </h3>
+                <div className="rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md p-5 space-y-4">
+                    <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground/60 flex items-center gap-2">
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        Runtime
+                    </h3>
+                    <div className="grid grid-cols-2 gap-3">
+                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3">
+                            <div className="text-[10px] uppercase font-bold text-muted-foreground/60">Mode</div>
+                            <div className="mt-1 text-sm font-medium">{routingStatus?.routing_mode ?? 'unknown'}</div>
+                        </div>
+                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3">
+                            <div className="text-[10px] uppercase font-bold text-muted-foreground/60">Advisor</div>
+                            <div className={cn("mt-1 text-sm font-medium", advisorReady ? "text-emerald-400" : "text-muted-foreground")}>
+                                {advisorReady ? 'Ready' : 'Unavailable'}
+                            </div>
+                        </div>
+                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 col-span-2">
+                            <div className="text-[10px] uppercase font-bold text-muted-foreground/60">Primary</div>
+                            <div className="mt-1 text-sm font-mono truncate">{primaryTarget || 'not configured'}</div>
+                        </div>
+                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 col-span-2">
+                            <div className="text-[10px] uppercase font-bold text-muted-foreground/60">Cheap Lane</div>
+                            <div className="mt-1 text-sm font-mono truncate">
+                                {routingStatus?.cheap_model || routingStatus?.preferred_cheap_provider || 'not configured'}
+                            </div>
+                        </div>
+                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 col-span-2">
+                            <div className="text-[10px] uppercase font-bold text-muted-foreground/60">llm_select</div>
+                            <div className="mt-1 text-xs text-muted-foreground">{routingStatus?.llm_select_state ?? 'unknown'}</div>
+                        </div>
+                    </div>
+                    {routingStatus?.advisor_disabled_reason && (
+                        <div className="flex items-start gap-2 rounded-lg bg-amber-500/5 border border-amber-500/10 px-3 py-2 text-xs text-muted-foreground">
+                            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                            {routingStatus.advisor_disabled_reason}
+                        </div>
+                    )}
+                </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    {[
-                        {
-                            title: 'Analyze',
-                            description: 'Each request is analyzed for complexity, context length, and required capabilities.',
-                            icon: Layers,
-                            color: 'text-blue-400 bg-blue-500/10 border-blue-500/20',
-                        },
-                        {
-                            title: 'Route',
-                            description: 'The routing engine selects the optimal model based on cost, speed, and quality tradeoffs.',
-                            icon: GitBranch,
-                            color: 'text-primary bg-violet-500/10 border-violet-500/20',
-                        },
-                        {
-                            title: 'Execute',
-                            description: 'The request is sent to the selected model with automatic fallback if the primary provider fails.',
-                            icon: Zap,
-                            color: 'text-primary bg-emerald-500/10 border-emerald-500/20',
-                        },
-                    ].map((step, i) => (
-                        <div key={step.title} className="relative">
-                            <div className="p-4 rounded-xl border border-white/5 bg-white/[0.02] space-y-3">
-                                <div className={cn("p-2 rounded-lg border w-fit", step.color)}>
-                                    <step.icon className="w-4 h-4" />
-                                </div>
+                <div className="rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md p-5 space-y-4">
+                    <div className="flex items-center justify-between gap-3">
+                        <h3 className="text-sm font-bold uppercase tracking-widest text-muted-foreground/60 flex items-center gap-2">
+                            <FlaskConical className="w-3.5 h-3.5" />
+                            Route Simulation
+                        </h3>
+                        <button
+                            onClick={handleSimulateRoute}
+                            disabled={simulationLoading || simulationPrompt.trim().length === 0}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-500/10 text-primary hover:bg-violet-500/20 border border-violet-500/20 transition-colors disabled:opacity-50"
+                        >
+                            {simulationLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                            Simulate
+                        </button>
+                    </div>
+
+                    <textarea
+                        value={simulationPrompt}
+                        onChange={e => setSimulationPrompt(e.target.value)}
+                        rows={4}
+                        className="w-full min-h-[96px] px-3 py-2 rounded-xl bg-white/5 border border-border/40 text-sm focus:outline-none focus:ring-1 focus:ring-violet-500/50 resize-y placeholder:text-muted-foreground/40"
+                    />
+
+                    <div className="flex flex-wrap gap-2">
+                        {[
+                            ['has_tools', 'Tools'],
+                            ['has_vision', 'Vision'],
+                            ['requires_streaming', 'Streaming'],
+                        ].map(([key, label]) => (
+                            <label key={key} className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-white/5 bg-white/[0.02] text-xs text-muted-foreground cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={simulationOptions[key as keyof typeof simulationOptions]}
+                                    onChange={e => setSimulationOptions(prev => ({ ...prev, [key]: e.target.checked }))}
+                                    className="accent-violet-500"
+                                />
+                                {label}
+                            </label>
+                        ))}
+                    </div>
+
+                    {simulationResult && (
+                        <div className="rounded-xl border border-white/5 bg-white/[0.02] p-3 space-y-3">
+                            <div className="flex items-center justify-between gap-3">
                                 <div>
-                                    <h4 className="text-sm font-semibold">{step.title}</h4>
-                                    <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{step.description}</p>
+                                    <div className="text-[10px] uppercase font-bold text-muted-foreground/60">Selected Target</div>
+                                    <div className="text-sm font-mono mt-1">{simulationResult.target}</div>
+                                </div>
+                                <div className="text-[10px] text-muted-foreground">
+                                    {simulationResult.candidate_list.length} candidates
                                 </div>
                             </div>
-                            {i < 2 && (
-                                <ArrowRight className="hidden md:block absolute -right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground/30 z-10" />
+                            <div className="text-xs text-muted-foreground leading-relaxed">{simulationResult.reason}</div>
+                            {simulationResult.fallback_chain.length > 0 && (
+                                <div className="text-xs text-muted-foreground">
+                                    <span className="text-foreground/70">Fallback:</span> {simulationResult.fallback_chain.join(' -> ')}
+                                </div>
+                            )}
+                            {simulationResult.score_breakdown.length > 0 && (
+                                <div className="space-y-1">
+                                    {simulationResult.score_breakdown.slice(0, 4).map(score => (
+                                        <div key={score.target} className="grid grid-cols-[minmax(0,1fr)_72px] gap-3 text-[11px]">
+                                            <span className="truncate font-mono text-muted-foreground">{score.target}</span>
+                                            <span className="text-right text-foreground/80">{score.composite.toFixed(2)}</span>
+                                        </div>
+                                    ))}
+                                </div>
                             )}
                         </div>
-                    ))}
+                    )}
                 </div>
             </motion.div>
 

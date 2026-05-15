@@ -70,6 +70,23 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
+    #[serde(rename = "plan_update")]
+    PlanUpdate {
+        entries: Vec<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
+    #[serde(rename = "usage_update")]
+    UsageUpdate {
+        input_tokens: u32,
+        output_tokens: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "conversation_updated")]
     ConversationUpdated {
         thread_id: String,
@@ -346,6 +363,8 @@ impl SseEvent {
             SseEvent::ToolResult { .. } => "tool_result",
             SseEvent::StreamChunk { .. } => "stream_chunk",
             SseEvent::Status { .. } => "status",
+            SseEvent::PlanUpdate { .. } => "plan_update",
+            SseEvent::UsageUpdate { .. } => "usage_update",
             SseEvent::ConversationUpdated { .. } => "conversation_updated",
             SseEvent::ConversationDeleted { .. } => "conversation_deleted",
             SseEvent::SubagentSpawned { .. } => "subagent_spawned",

@@ -2,10 +2,13 @@ import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import {
     RefreshCw, CheckCircle, XCircle, Clock,
-    FileText, Trash2
+    FileText, Trash2, Play, ToggleLeft, ToggleRight
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
+import { toast } from 'sonner';
+import { listen } from '@tauri-apps/api/event';
+import { OpenClawModeBadge, useOpenClawStatusSnapshot } from './OpenClawModeBadge';
 
 function OutcomeBadge({ outcome }: { outcome: string }) {
     const styles: Record<string, { icon: any; cls: string }> = {
@@ -40,6 +43,7 @@ export function OpenClawRoutineAudit({ routineKey }: Props) {
     const [selectedKey, setSelectedKey] = useState(routineKey || '');
     const [cronJobs, setCronJobs] = useState<openclaw.CronJob[]>([]);
     const [confirmClear, setConfirmClear] = useState(false);
+    const { status: runtimeStatus } = useOpenClawStatusSnapshot(15000);
 
     const fetchJobs = useCallback(async () => {
         try {
@@ -68,6 +72,46 @@ export function OpenClawRoutineAudit({ routineKey }: Props) {
     useEffect(() => { fetchJobs(); }, [fetchJobs]);
     useEffect(() => { fetchAudit(); }, [fetchAudit]);
 
+    useEffect(() => {
+        const unlistenPromise = listen<any>('openclaw-event', (event) => {
+            const payload = event.payload;
+            if (payload?.kind === 'RoutineLifecycle') {
+                const routineName = payload.routine_name;
+                const selectedJob = cronJobs.find(job => job.key === selectedKey || job.name === selectedKey);
+                if (!selectedKey || routineName === selectedKey || routineName === selectedJob?.name) {
+                    fetchAudit();
+                    fetchJobs();
+                }
+            }
+        });
+        return () => { unlistenPromise.then(fn => fn()).catch(() => { }); };
+    }, [cronJobs, selectedKey, fetchAudit, fetchJobs]);
+
+    const selectedJob = cronJobs.find(job => job.key === selectedKey || job.name === selectedKey);
+
+    const handleRunSelected = async () => {
+        if (!selectedKey) return;
+        try {
+            await openclaw.runOpenClawCron(selectedKey);
+            toast.success('Routine triggered');
+            fetchAudit();
+        } catch (e) {
+            toast.error(`Failed to run routine: ${String(e)}`);
+        }
+    };
+
+    const handleToggleSelected = async () => {
+        if (!selectedJob) return;
+        const enabled = !(selectedJob.enabled !== false);
+        try {
+            await openclaw.toggleRoutine(selectedJob.key, enabled);
+            setCronJobs(prev => prev.map(job => job.key === selectedJob.key ? { ...job, enabled } : job));
+            toast.success(`Routine ${enabled ? 'enabled' : 'disabled'}`);
+        } catch (e) {
+            toast.error(`Failed to update routine: ${String(e)}`);
+        }
+    };
+
     return (
         <motion.div
             className="flex-1 overflow-y-auto p-8 space-y-6"
@@ -88,6 +132,26 @@ export function OpenClawRoutineAudit({ routineKey }: Props) {
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
+                    <OpenClawModeBadge status={runtimeStatus} />
+                    {selectedJob && (
+                        <>
+                            <button
+                                onClick={handleRunSelected}
+                                disabled={selectedJob.enabled === false}
+                                className="flex items-center gap-1.5 rounded-lg border border-primary/20 bg-primary/10 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-primary transition-all hover:bg-primary/20 disabled:opacity-40 disabled:pointer-events-none"
+                            >
+                                <Play className="h-3.5 w-3.5 fill-current" />
+                                Run
+                            </button>
+                            <button
+                                onClick={handleToggleSelected}
+                                className="flex items-center gap-1.5 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground transition-all hover:text-foreground"
+                            >
+                                {selectedJob.enabled === false ? <ToggleLeft className="h-3.5 w-3.5" /> : <ToggleRight className="h-3.5 w-3.5 text-emerald-400" />}
+                                {selectedJob.enabled === false ? 'Enable' : 'Disable'}
+                            </button>
+                        </>
+                    )}
                     {confirmClear ? (
                         <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-red-500/10 border border-red-500/20">
                             <span className="text-[10px] text-red-400 font-medium">Clear {selectedKey ? 'this' : 'all'} history?</span>

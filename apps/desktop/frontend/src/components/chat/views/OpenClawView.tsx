@@ -6,6 +6,8 @@ import { OpenClawChannels } from '../../openclaw/OpenClawChannels';
 import { OpenClawChannelStatus } from '../../openclaw/OpenClawChannelStatus';
 import { OpenClawPresence } from '../../openclaw/OpenClawPresence';
 import { OpenClawAutomations } from '../../openclaw/OpenClawAutomations';
+import { OpenClawJobs } from '../../openclaw/OpenClawJobs';
+import { OpenClawAutonomy } from '../../openclaw/OpenClawAutonomy';
 import { OpenClawRoutineAudit } from '../../openclaw/OpenClawRoutineAudit';
 import { OpenClawSkills } from '../../openclaw/OpenClawSkills';
 import { OpenClawHooks } from '../../openclaw/OpenClawHooks';
@@ -22,6 +24,8 @@ import { FleetCommandCenter } from '../../openclaw/fleet/FleetCommandCenter';
 import { OpenClawCostDashboard } from '../../openclaw/OpenClawCostDashboard';
 import { OpenClawCacheStats } from '../../openclaw/OpenClawCacheStats';
 import { OpenClawRouting } from '../../openclaw/OpenClawRouting';
+import { OpenClawExperiments } from '../../openclaw/OpenClawExperiments';
+import { OpenClawLearning } from '../../openclaw/OpenClawLearning';
 import * as openclaw from '../../../lib/openclaw';
 
 export function OpenClawView() {
@@ -70,6 +74,8 @@ export function OpenClawView() {
             case 'channel-status': return <OpenClawChannelStatus />;
             case 'presence': return <OpenClawPresence />;
             case 'automations': return <OpenClawAutomations />;
+            case 'jobs': return <OpenClawJobs />;
+            case 'autonomy': return <OpenClawAutonomy />;
             case 'routine-audit': return <OpenClawRoutineAudit />;
             case 'skills': return <OpenClawSkills />;
             case 'hooks': return <OpenClawHooks />;
@@ -85,6 +91,8 @@ export function OpenClawView() {
             case 'cost-dashboard': return <OpenClawCostDashboard />;
             case 'cache-stats': return <OpenClawCacheStats />;
             case 'routing': return <OpenClawRouting />;
+            case 'experiments': return <OpenClawExperiments />;
+            case 'learning': return <OpenClawLearning />;
             default: return (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground">
                     Select a page from the sidebar.

@@ -85,6 +85,14 @@ pub enum UiEvent {
         error: Option<String>,
     },
 
+    /// Explicit run lifecycle transition.
+    LifecycleUpdate {
+        session_key: String,
+        run_id: String,
+        phase: String, // start|end
+        status: String,
+    },
+
     /// Structured plan/progress update from the ThinClaw agent loop.
     PlanUpdate {
         session_key: String,
@@ -127,6 +135,8 @@ pub enum UiEvent {
 
     /// Web login event (QR code, status)
     WebLogin {
+        session_key: Option<String>,
+        run_id: Option<String>,
         provider: String,
         qr_code: Option<String>,
         status: String,
@@ -155,6 +165,17 @@ pub enum UiEvent {
         result_preview: Option<String>,
     },
 
+    /// Sandbox/job lifecycle update.
+    JobUpdate {
+        session_key: Option<String>,
+        run_id: Option<String>,
+        job_id: String,
+        title: Option<String>,
+        status: String,
+        url: Option<String>,
+        payload: Value,
+    },
+
     /// Mid-loop agent message — rendered as a persistent chat bubble.
     ///
     /// Emitted by the `emit_user_message` tool. The agent is still working
@@ -178,6 +199,24 @@ pub enum UiEvent {
         event: String, // "started" | "completed" | "failed"
         run_id: Option<String>,
         result_summary: Option<String>,
+    },
+
+    /// Cost/budget event from the gateway/runtime.
+    CostAlert {
+        alert_type: String,
+        current_cost_usd: f64,
+        limit_usd: f64,
+        message: Option<String>,
+    },
+
+    /// Typed catch-all for ThinClaw gateway events that do not yet have a
+    /// dedicated desktop rendering surface. Keeping these on `openclaw-event`
+    /// prevents silent drops while frontend surfaces catch up.
+    GatewayEvent {
+        event_type: String,
+        session_key: Option<String>,
+        run_id: Option<String>,
+        payload: Value,
     },
 
     /// Real-time log entry push from the internal tracing subscriber.

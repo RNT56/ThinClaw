@@ -72,6 +72,8 @@ pub const PROVIDERS: &[&str] = &[
     "stability",
     "fal",
     // Bedrock stores three separate fields
+    "bedrock_api_key",
+    "bedrock_proxy_api_key",
     "bedrock_access_key_id",
     "bedrock_secret_access_key",
     "bedrock_region",
@@ -98,6 +100,32 @@ fn key_cache() -> &'static Mutex<HashMap<String, String>> {
 fn cache_loaded() -> &'static Mutex<bool> {
     static LOADED: OnceLock<Mutex<bool>> = OnceLock::new();
     LOADED.get_or_init(|| Mutex::new(false))
+}
+
+/// Current ThinClaw secret identifiers used for new writes.
+///
+/// The shorter Scrappy/OpenClaw-era provider slugs remain readable as fallback
+/// aliases so existing users do not lose credentials during the rename.
+pub(crate) fn canonical_key_name(key: &str) -> &str {
+    match key {
+        "anthropic" | "ANTHROPIC_API_KEY" => "llm_anthropic_api_key",
+        "openai" | "OPENAI_API_KEY" => "llm_openai_api_key",
+        "openrouter" | "openai_compatible" | "LLM_API_KEY" => "llm_compatible_api_key",
+        "brave" | "BRAVE_SEARCH_API_KEY" => "search_brave_api_key",
+        "huggingface" | "HUGGINGFACE_TOKEN" | "HF_TOKEN" => "hf_token",
+        other => other,
+    }
+}
+
+fn legacy_aliases_for(canonical: &str) -> &'static [&'static str] {
+    match canonical {
+        "llm_anthropic_api_key" => &["anthropic", "ANTHROPIC_API_KEY"],
+        "llm_openai_api_key" => &["openai", "OPENAI_API_KEY"],
+        "llm_compatible_api_key" => &["openrouter", "openai_compatible", "LLM_API_KEY"],
+        "search_brave_api_key" => &["brave", "BRAVE_SEARCH_API_KEY"],
+        "hf_token" => &["huggingface", "HUGGINGFACE_TOKEN", "HF_TOKEN"],
+        _ => &[],
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -203,15 +231,25 @@ pub fn set_key(key: &str, value: Option<&str>) -> Result<(), String> {
     ensure_loaded();
 
     let mut cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
+    let canonical_key = canonical_key_name(key);
 
     match value {
         Some(v) if !v.is_empty() => {
-            cache.insert(key.to_string(), v.to_string());
-            info!("[keychain] stored '{}'", key);
+            cache.insert(canonical_key.to_string(), v.to_string());
+            for alias in legacy_aliases_for(canonical_key) {
+                if *alias != canonical_key {
+                    cache.remove(*alias);
+                }
+            }
+            info!("[keychain] stored '{}'", canonical_key);
         }
         _ => {
+            cache.remove(canonical_key);
             cache.remove(key);
-            info!("[keychain] removed '{}'", key);
+            for alias in legacy_aliases_for(canonical_key) {
+                cache.remove(*alias);
+            }
+            info!("[keychain] removed '{}'", canonical_key);
         }
     }
 
@@ -226,7 +264,16 @@ pub fn get_key(key: &str) -> Option<String> {
     ensure_loaded();
 
     let cache = key_cache().lock().unwrap_or_else(|e| e.into_inner());
-    cache.get(key).cloned()
+    let canonical_key = canonical_key_name(key);
+    cache
+        .get(canonical_key)
+        .or_else(|| cache.get(key))
+        .or_else(|| {
+            legacy_aliases_for(canonical_key)
+                .iter()
+                .find_map(|alias| cache.get(*alias))
+        })
+        .cloned()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -249,8 +296,9 @@ pub fn migrate_from_identity(identity: &mut LegacyKeys) -> bool {
         ($field:expr, $key:expr) => {
             if let Some(ref val) = $field {
                 if !val.is_empty() {
-                    cache.insert($key.to_string(), val.clone());
-                    info!("[keychain] migrated '{}' from identity.json", $key);
+                    let canonical = canonical_key_name($key);
+                    cache.insert(canonical.to_string(), val.clone());
+                    info!("[keychain] migrated '{}' from identity.json", canonical);
                     $field = None;
                     migrated = true;
                 }

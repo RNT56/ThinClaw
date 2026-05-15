@@ -18,6 +18,11 @@ use crate::openclaw::ironclaw_bridge::IronClawState;
 pub async fn openclaw_cron_list(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let routines = proxy.list_routines().await?;
+        return Ok(serde_json::json!(remote_routines_to_cron_jobs(&routines)));
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
@@ -79,6 +84,19 @@ pub async fn openclaw_cron_run(
     ironclaw: State<'_, IronClawState>,
     key: String,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let routine_id = remote_resolve_routine_id(&proxy, &key).await?;
+        let mut response = proxy.trigger_routine(&routine_id).await?;
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert("ok".to_string(), serde_json::Value::Bool(true));
+            obj.insert(
+                "routine_id".to_string(),
+                serde_json::Value::String(routine_id),
+            );
+        }
+        return Ok(response);
+    }
+
     // Parse UUID from the routine key
     let routine_id: uuid::Uuid = key
         .parse()
@@ -114,6 +132,12 @@ pub async fn openclaw_cron_history(
     key: String,
     limit: u32,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let routine_id = remote_resolve_routine_id(&proxy, &key).await?;
+        let runs = proxy.get_routine_history(&routine_id, limit).await?;
+        return Ok(serde_json::json!(remote_runs_to_cron_history(&runs)));
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
@@ -171,6 +195,14 @@ pub async fn openclaw_clear_routine_runs(
     ironclaw: State<'_, IronClawState>,
     key: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let routine_id = match key.as_deref() {
+            Some(key) => Some(remote_resolve_routine_id(&proxy, key).await?),
+            None => None,
+        };
+        return proxy.clear_routine_runs(routine_id.as_deref()).await;
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
@@ -217,6 +249,18 @@ pub async fn openclaw_clear_routine_runs(
 pub async fn openclaw_channels_list(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let status = proxy.get_status().await?;
+        let channels = remote_channels_from_gateway_status(&status);
+        if channels.is_empty() {
+            return Err(
+                "unavailable: remote ThinClaw gateway did not include channel setup status"
+                    .to_string(),
+            );
+        }
+        return Ok(serde_json::json!({ "channels": channels }));
+    }
+
     let agent = ironclaw.agent().await?;
     let channel_mgr = agent.channels();
     let channel_names = channel_mgr.channel_names().await;
@@ -250,6 +294,12 @@ pub async fn openclaw_routine_create(
     schedule: String,
     task: String,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy
+            .create_routine(&name, &description, &schedule, &task)
+            .await;
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
@@ -367,6 +417,11 @@ pub async fn openclaw_routine_delete(
     ironclaw: State<'_, IronClawState>,
     routine_id: String,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let id = remote_resolve_routine_id(&proxy, &routine_id).await?;
+        return proxy.delete_routine(&id).await;
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
@@ -403,6 +458,16 @@ pub async fn openclaw_routine_toggle(
     routine_id: String,
     enabled: bool,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let id = remote_resolve_routine_id(&proxy, &routine_id).await?;
+        let response = proxy.toggle_routine(&id, enabled).await?;
+        return Ok(serde_json::json!({
+            "ok": response.get("status").and_then(|v| v.as_str()).is_some(),
+            "id": id,
+            "enabled": enabled,
+        }));
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
@@ -452,6 +517,18 @@ pub async fn openclaw_routine_audit_list(
     limit: Option<u32>,
     outcome: Option<String>,
 ) -> Result<Vec<super::types::RoutineAuditEntry>, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let routine_id = remote_resolve_routine_id(&proxy, &routine_key).await?;
+        let runs = proxy
+            .get_routine_history(&routine_id, limit.unwrap_or(50))
+            .await?;
+        return Ok(remote_runs_to_audit_entries(
+            &routine_key,
+            &runs,
+            outcome.as_deref(),
+        ));
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
@@ -514,4 +591,187 @@ pub async fn openclaw_routine_audit_list(
         .collect();
 
     Ok(entries)
+}
+
+fn remote_routines_array(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    value
+        .get("routines")
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().collect())
+        .unwrap_or_default()
+}
+
+fn remote_routines_to_cron_jobs(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    remote_routines_array(value)
+        .into_iter()
+        .map(|routine| {
+            let id = json_str(routine, "id");
+            let trigger_summary = json_str(routine, "trigger_summary");
+            let schedule = trigger_summary
+                .strip_prefix("cron: ")
+                .or_else(|| trigger_summary.strip_prefix("schedule: "))
+                .unwrap_or(trigger_summary)
+                .to_string();
+            serde_json::json!({
+                "key": id,
+                "name": json_str(routine, "name"),
+                "description": json_str(routine, "description"),
+                "schedule": schedule,
+                "nextRun": routine.get("next_fire_at").cloned().unwrap_or(serde_json::Value::Null),
+                "lastRun": routine.get("last_run_at").cloned().unwrap_or(serde_json::Value::Null),
+                "lastStatus": remote_status_to_desktop(json_str(routine, "status")),
+                "enabled": routine.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                "run_count": routine.get("run_count").and_then(|v| v.as_u64()).unwrap_or(0),
+                "action_type": json_str(routine, "action_type"),
+                "trigger_type": json_str(routine, "trigger_type"),
+            })
+        })
+        .collect()
+}
+
+async fn remote_resolve_routine_id(
+    proxy: &crate::openclaw::remote_proxy::RemoteGatewayProxy,
+    key: &str,
+) -> Result<String, String> {
+    if uuid::Uuid::parse_str(key).is_ok() {
+        return Ok(key.to_string());
+    }
+
+    let routines = proxy.list_routines().await?;
+    remote_routines_array(&routines)
+        .into_iter()
+        .find(|routine| json_str(routine, "name") == key || json_str(routine, "id") == key)
+        .map(|routine| json_str(routine, "id").to_string())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("Routine '{}' not found", key))
+}
+
+fn remote_runs_array(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    value
+        .get("runs")
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().collect())
+        .unwrap_or_default()
+}
+
+fn remote_runs_to_cron_history(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    remote_runs_array(value)
+        .into_iter()
+        .map(|run| {
+            let started_at = json_str(run, "started_at");
+            let completed_at = run.get("completed_at").and_then(|v| v.as_str());
+            serde_json::json!({
+                "timestamp": parse_rfc3339_millis(started_at).unwrap_or(0),
+                "status": remote_status_to_desktop(json_str(run, "status")),
+                "duration_ms": duration_ms(started_at, completed_at).unwrap_or(0),
+                "output": run.get("result_summary").cloned().unwrap_or(serde_json::Value::Null),
+            })
+        })
+        .collect()
+}
+
+fn remote_runs_to_audit_entries(
+    routine_key: &str,
+    value: &serde_json::Value,
+    outcome: Option<&str>,
+) -> Vec<super::types::RoutineAuditEntry> {
+    remote_runs_array(value)
+        .into_iter()
+        .filter_map(|run| {
+            let mapped_status = remote_status_to_desktop(json_str(run, "status"));
+            if let Some(filter) = outcome {
+                let keep = match filter {
+                    "success" | "ok" => mapped_status == "ok",
+                    "failure" | "failed" => mapped_status == "failed" || mapped_status == "error",
+                    "attention" => mapped_status == "attention",
+                    "running" => mapped_status == "running",
+                    _ => true,
+                };
+                if !keep {
+                    return None;
+                }
+            }
+
+            let started_at = json_str(run, "started_at").to_string();
+            let completed_at = run
+                .get("completed_at")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned);
+            Some(super::types::RoutineAuditEntry {
+                routine_key: routine_key.to_string(),
+                duration_ms: duration_ms(&started_at, completed_at.as_deref()).map(|ms| ms as u32),
+                error: run
+                    .get("result_summary")
+                    .and_then(|v| v.as_str())
+                    .map(ToOwned::to_owned),
+                started_at,
+                completed_at,
+                outcome: mapped_status,
+            })
+        })
+        .collect()
+}
+
+fn remote_channels_from_gateway_status(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    let Some(setup) = value.get("channel_setup").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+
+    setup
+        .iter()
+        .map(|(id, status)| {
+            serde_json::json!({
+                "id": id,
+                "name": channel_display_name(id),
+                "type": channel_type(id),
+                "enabled": status.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
+                "stream_mode": "",
+            })
+        })
+        .collect()
+}
+
+fn channel_display_name(id: &str) -> String {
+    id.split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn channel_type(id: &str) -> &'static str {
+    match id {
+        "gmail" => "builtin",
+        "slack" | "telegram" => "wasm",
+        _ => "native",
+    }
+}
+
+fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
+    value.get(key).and_then(|v| v.as_str()).unwrap_or_default()
+}
+
+fn remote_status_to_desktop(status: &str) -> String {
+    match status.to_ascii_lowercase().as_str() {
+        "ok" | "success" | "completed" => "ok".to_string(),
+        "failed" | "failure" | "error" => "error".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn parse_rfc3339_millis(value: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|ts| ts.timestamp_millis())
+}
+
+fn duration_ms(started_at: &str, completed_at: Option<&str>) -> Option<u64> {
+    let start = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    let end = chrono::DateTime::parse_from_rfc3339(completed_at?).ok()?;
+    Some((end - start).num_milliseconds().max(0) as u64)
 }

@@ -234,6 +234,20 @@ pub const SECRET_POLICIES: &[SecretPolicy] = &[
         grant: GrantFlag::Fal,
     },
     SecretPolicy {
+        thinclaw_names: &["llm_bedrock_api_key", "bedrock_api_key"],
+        provider_slug: "bedrock",
+        env_vars: &["BEDROCK_API_KEY", "AWS_BEARER_TOKEN_BEDROCK"],
+        keychain_key: "bedrock_api_key",
+        grant: GrantFlag::Bedrock,
+    },
+    SecretPolicy {
+        thinclaw_names: &["llm_bedrock_proxy_api_key", "bedrock_proxy_api_key"],
+        provider_slug: "bedrock_proxy",
+        env_vars: &["BEDROCK_PROXY_API_KEY"],
+        keychain_key: "bedrock_proxy_api_key",
+        grant: GrantFlag::Bedrock,
+    },
+    SecretPolicy {
         thinclaw_names: &["bedrock_access_key_id", "amazon-bedrock", "bedrock"],
         provider_slug: "amazon-bedrock",
         env_vars: &["AWS_ACCESS_KEY_ID"],
@@ -623,10 +637,10 @@ impl SecretsStore for KeychainSecretsAdapter {
         params: CreateSecretParams,
     ) -> Result<Secret, SecretError> {
         self.ensure_granted(&params.name)?;
-        let scrappy_key = self.keychain_key_for_name(&params.name).into_owned();
+        let thinclaw_key = self.keychain_key_for_name(&params.name).into_owned();
         let value = params.value.expose_secret();
 
-        keychain::set_key(&scrappy_key, Some(value)).map_err(|e| SecretError::KeychainError(e))?;
+        keychain::set_key(&thinclaw_key, Some(value)).map_err(|e| SecretError::KeychainError(e))?;
 
         Ok(Self::secret_record(
             _user_id,
@@ -640,8 +654,8 @@ impl SecretsStore for KeychainSecretsAdapter {
     /// expose encrypted bytes, so we use empty placeholders).
     async fn get(&self, _user_id: &str, name: &str) -> Result<Secret, SecretError> {
         self.ensure_granted(name)?;
-        let scrappy_key = self.keychain_key_for_name(name);
-        let _value = keychain::get_key(scrappy_key.as_ref())
+        let thinclaw_key = self.keychain_key_for_name(name);
+        let _value = keychain::get_key(thinclaw_key.as_ref())
             .ok_or_else(|| SecretError::NotFound(name.to_string()))?;
 
         Ok(Self::secret_record(_user_id, name.to_string(), None, None))
@@ -656,8 +670,8 @@ impl SecretsStore for KeychainSecretsAdapter {
         name: &str,
     ) -> Result<DecryptedSecret, SecretError> {
         self.ensure_granted(name)?;
-        let scrappy_key = self.keychain_key_for_name(name);
-        let value = keychain::get_key(scrappy_key.as_ref())
+        let thinclaw_key = self.keychain_key_for_name(name);
+        let value = keychain::get_key(thinclaw_key.as_ref())
             .ok_or_else(|| SecretError::NotFound(name.to_string()))?;
 
         if value.is_empty() {
@@ -683,28 +697,50 @@ impl SecretsStore for KeychainSecretsAdapter {
         if !self.is_granted(name) {
             return Ok(false);
         }
-        let scrappy_key = self.keychain_key_for_name(name);
-        Ok(keychain::get_key(scrappy_key.as_ref())
+        let thinclaw_key = self.keychain_key_for_name(name);
+        Ok(keychain::get_key(thinclaw_key.as_ref())
             .map(|v| !v.is_empty())
             .unwrap_or(false))
     }
 
     /// List all available secrets from the Keychain.
     async fn list(&self, _user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
-        Ok(keychain::PROVIDERS
-            .iter()
-            .filter(|p| self.is_granted(p))
-            .filter(|p| keychain::get_key(p).map(|v| !v.is_empty()).unwrap_or(false))
-            .map(|p| SecretRef::new(*p))
-            .collect())
+        let mut refs = Vec::new();
+        for policy in SECRET_POLICIES {
+            if matches!(policy.grant, GrantFlag::Unsupported)
+                || !self.is_granted(policy.keychain_key)
+            {
+                continue;
+            }
+            if keychain::get_key(policy.keychain_key)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+            {
+                refs.push(SecretRef::new(policy.thinclaw_names[0]));
+            }
+        }
+
+        if let Some(grants) = &self.grants {
+            for secret in grants.custom_secrets.iter().filter(|secret| secret.granted) {
+                if keychain::get_key(&secret.id)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+                {
+                    refs.push(SecretRef::new(secret.id.clone()));
+                }
+            }
+        }
+
+        Ok(refs)
     }
 
     /// Delete a secret from the Keychain.
     async fn delete(&self, _user_id: &str, name: &str) -> Result<bool, SecretError> {
         self.ensure_granted(name)?;
-        let scrappy_key = self.keychain_key_for_name(name);
-        let existed = keychain::get_key(scrappy_key.as_ref()).is_some();
-        keychain::set_key(scrappy_key.as_ref(), None).map_err(|e| SecretError::KeychainError(e))?;
+        let thinclaw_key = self.keychain_key_for_name(name);
+        let existed = keychain::get_key(thinclaw_key.as_ref()).is_some();
+        keychain::set_key(thinclaw_key.as_ref(), None)
+            .map_err(|e| SecretError::KeychainError(e))?;
         Ok(existed)
     }
 
@@ -849,6 +885,25 @@ mod tests {
         assert_eq!(map_key_name("llm_compatible_api_key"), "openrouter");
         assert_eq!(map_key_name("google"), "gemini");
         assert_eq!(map_key_name("search_brave_api_key"), "brave");
+        assert_eq!(map_key_name("llm_bedrock_api_key"), "bedrock_api_key");
+        assert_eq!(
+            map_key_name("llm_bedrock_proxy_api_key"),
+            "bedrock_proxy_api_key"
+        );
+    }
+
+    #[test]
+    fn keychain_new_writes_use_thinclaw_secret_identifiers() {
+        assert_eq!(keychain::canonical_key_name("openai"), "llm_openai_api_key");
+        assert_eq!(
+            keychain::canonical_key_name("anthropic"),
+            "llm_anthropic_api_key"
+        );
+        assert_eq!(
+            keychain::canonical_key_name("openrouter"),
+            "llm_compatible_api_key"
+        );
+        assert_eq!(keychain::canonical_key_name("huggingface"), "hf_token");
     }
 
     #[test]

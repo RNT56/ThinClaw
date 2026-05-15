@@ -10,13 +10,14 @@
 //!
 //! 1. **Primary:** Read `session_key` / `thread_id` from the StatusUpdate
 //!    metadata (injected by IronClaw's agent loop).
-//! 2. **Fallback:** If metadata doesn't contain a session key, look up the
-//!    most recently activated session in `active_sessions` (a bounded map
-//!    of `session_key → last_activated_at` timestamps).
+//! 2. **Fallback:** If a status variant carries its own thread ID (auth
+//!    events do), use that.
+//! 3. **Default:** Route unscoped status updates to `agent:main`.
 //!
 //! This replaces the old single-variable `session_context: Arc<RwLock<String>>`
 //! which was racy under concurrent sessions: setting session B's context
-//! could misroute session A's in-flight events.
+//! could misroute session A's in-flight events. Final responses still use the
+//! original message thread ID.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,7 +29,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use ironclaw::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use ironclaw::error::ChannelError;
 
-use super::ironclaw_types::status_to_ui_event;
+use super::ironclaw_types::{routing_from_status, status_to_ui_event};
 use super::sanitizer::strip_llm_tokens;
 use super::ui_types::UiEvent;
 
@@ -213,26 +214,14 @@ impl Channel for TauriChannel {
         status: StatusUpdate,
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
-        // Two-tier session routing:
-        // 1. Read from metadata (set by IronClaw's agent loop)
-        // 2. Fall back to most recently activated session
-        let session_key = metadata
-            .get("thread_id")
-            .or_else(|| metadata.get("session_key"))
-            .and_then(|v| v.as_str());
-
-        let resolved_session = if let Some(key) = session_key {
-            key.to_string()
-        } else {
-            self.most_recent_session().await
+        let (resolved_session, run_id, message_id) = {
+            let (session, run_id, message_id) = routing_from_status(&status, metadata);
+            (
+                session,
+                run_id.map(ToString::to_string),
+                message_id.to_string(),
+            )
         };
-
-        let run_id = metadata.get("run_id").and_then(|v| v.as_str());
-
-        let message_id = metadata
-            .get("message_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
 
         // Animate tray icon on activity events
         if matches!(
@@ -302,7 +291,9 @@ impl Channel for TauriChannel {
             _ => {}
         }
 
-        if let Some(event) = status_to_ui_event(status, &resolved_session, run_id, message_id) {
+        if let Some(event) =
+            status_to_ui_event(status, &resolved_session, run_id.as_deref(), &message_id)
+        {
             self.emit_ui_event(&event);
         }
 

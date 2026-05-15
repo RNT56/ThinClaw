@@ -27,6 +27,15 @@ fn json_bool_field(value: &serde_json::Value, key: &str) -> bool {
     value.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
 }
 
+fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn json_f64_map(value: &serde_json::Value, key: &str) -> std::collections::HashMap<String, f64> {
     value
         .get(key)
@@ -62,7 +71,6 @@ fn map_remote_cost_summary(value: serde_json::Value) -> Result<CostSummary, Stri
     })
 }
 
-#[cfg(test)]
 fn setting_value(raw: serde_json::Value) -> serde_json::Value {
     if let Some(value) = raw.get("value").cloned() {
         value
@@ -291,6 +299,45 @@ fn routing_rule_summaries(rules: &[RoutingRule]) -> Vec<RoutingRuleSummary> {
         .collect()
 }
 
+fn unavailable_route_simulation(reason: impl Into<String>) -> RouteSimulationResponse {
+    RouteSimulationResponse {
+        target: "unavailable".to_string(),
+        reason: reason.into(),
+        fallback_chain: Vec::new(),
+        candidate_list: Vec::new(),
+        rejections: Vec::new(),
+        score_breakdown: Vec::new(),
+        diagnostics: Vec::new(),
+    }
+}
+
+fn map_route_simulation_result(
+    result: ironclaw::llm::RouteSimulationResult,
+) -> RouteSimulationResponse {
+    RouteSimulationResponse {
+        target: result.target,
+        reason: result.reason,
+        fallback_chain: result.fallback_chain,
+        candidate_list: result.candidate_list,
+        rejections: result.rejections,
+        score_breakdown: result
+            .score_breakdown
+            .into_iter()
+            .map(|score| RouteSimulationScore {
+                target: score.target,
+                telemetry_key: score.telemetry_key,
+                quality: score.quality,
+                cost: score.cost,
+                latency: score.latency,
+                health: score.health,
+                policy_bias: score.policy_bias,
+                composite: score.composite,
+            })
+            .collect(),
+        diagnostics: result.diagnostics,
+    }
+}
+
 fn json_string_vec_field(value: &serde_json::Value, key: &str) -> Vec<String> {
     value
         .get(key)
@@ -313,7 +360,10 @@ fn remote_channel_status_entries(status: &serde_json::Value) -> Vec<ChannelStatu
     };
 
     [
+        ("slack", "Slack", "wasm"),
+        ("telegram", "Telegram", "wasm"),
         ("gmail", "Gmail", "builtin"),
+        ("apple_mail", "Apple Mail", "native"),
         ("nostr", "Nostr", "native"),
         ("matrix", "Matrix", "native"),
         ("voice_call", "Voice Call", "native"),
@@ -378,6 +428,75 @@ fn remote_channel_status_entry(
         last_error,
         stream_mode: String::new(),
     }
+}
+
+async fn remote_gmail_status(
+    proxy: &RemoteGatewayProxy,
+    gateway_status: &serde_json::Value,
+) -> Result<GmailStatusResponse, String> {
+    let gmail = gateway_status
+        .get("channel_setup")
+        .and_then(|value| value.get("gmail"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    async fn remote_setting_string(proxy: &RemoteGatewayProxy, key: &str) -> Option<String> {
+        proxy
+            .get_setting(key)
+            .await
+            .ok()
+            .map(setting_value)
+            .and_then(|value| value.as_str().map(ToOwned::to_owned))
+    }
+
+    let project_id = remote_setting_string(proxy, "channels.gmail_project_id")
+        .await
+        .unwrap_or_default();
+    let subscription_id = remote_setting_string(proxy, "channels.gmail_subscription_id")
+        .await
+        .unwrap_or_default();
+    let allowed_senders = remote_setting_string(proxy, "channels.gmail_allowed_senders")
+        .await
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let enabled = json_bool_field(&gmail, "enabled");
+    let configured = json_bool_field(&gmail, "configured");
+    let missing_fields = json_string_vec_field(&gmail, "missing_fields");
+    let oauth_configured = enabled && !json_bool_field(&gmail, "needs_oauth");
+
+    let status = if !enabled {
+        "disabled".to_string()
+    } else if configured {
+        if subscription_id.is_empty() {
+            "ready".to_string()
+        } else {
+            format!("ready ({})", subscription_id)
+        }
+    } else if json_bool_field(&gmail, "needs_oauth") {
+        "configured but OAuth not completed".to_string()
+    } else if !missing_fields.is_empty() {
+        format!("missing credentials: {}", missing_fields.join(", "))
+    } else {
+        "unavailable: remote gateway did not report Gmail setup details".to_string()
+    };
+
+    Ok(GmailStatusResponse {
+        enabled,
+        configured,
+        status,
+        project_id,
+        subscription_id,
+        label_filters: Vec::new(),
+        allowed_senders,
+        missing_fields,
+        oauth_configured,
+    })
 }
 
 #[cfg(test)]
@@ -509,6 +628,73 @@ mod tests {
 
         let matrix = entries.iter().find(|entry| entry.id == "matrix").unwrap();
         assert_eq!(matrix.state, "Disconnected");
+    }
+
+    #[test]
+    fn route_simulation_result_maps_planner_details() {
+        let mapped = map_route_simulation_result(ironclaw::llm::RouteSimulationResult {
+            target: "anthropic/claude-sonnet-4-5".to_string(),
+            reason: "matched large context policy".to_string(),
+            fallback_chain: vec!["openai/gpt-5-mini".to_string()],
+            candidate_list: vec![
+                "anthropic/claude-sonnet-4-5".to_string(),
+                "openai/gpt-5-mini".to_string(),
+            ],
+            rejections: vec!["groq/llama: missing vision support".to_string()],
+            score_breakdown: vec![ironclaw::llm::RouteSimulationScore {
+                target: "anthropic/claude-sonnet-4-5".to_string(),
+                telemetry_key: Some("primary|anthropic|claude-sonnet-4-5".to_string()),
+                quality: 0.95,
+                cost: 0.4,
+                latency: 0.7,
+                health: 1.0,
+                policy_bias: 0.2,
+                composite: 0.82,
+            }],
+            diagnostics: vec!["advisor ready".to_string()],
+        });
+
+        assert_eq!(mapped.target, "anthropic/claude-sonnet-4-5");
+        assert_eq!(mapped.fallback_chain, vec!["openai/gpt-5-mini"]);
+        assert_eq!(
+            mapped.rejections,
+            vec!["groq/llama: missing vision support"]
+        );
+        assert_eq!(mapped.score_breakdown.len(), 1);
+        assert_eq!(
+            mapped.score_breakdown[0].telemetry_key.as_deref(),
+            Some("primary|anthropic|claude-sonnet-4-5")
+        );
+        assert_eq!(mapped.diagnostics, vec!["advisor ready"]);
+    }
+
+    #[test]
+    fn unavailable_route_simulation_is_typed_and_visible() {
+        let response = unavailable_route_simulation("unavailable: remote endpoint missing");
+
+        assert_eq!(response.target, "unavailable");
+        assert_eq!(response.reason, "unavailable: remote endpoint missing");
+        assert!(response.candidate_list.is_empty());
+        assert!(response.score_breakdown.is_empty());
+    }
+
+    #[test]
+    fn remote_route_matrix_documents_p3_surfaces() {
+        let matrix = include_str!("../../../../documentation/remote-gateway-route-matrix.md");
+
+        for expected in [
+            "/api/providers/route/simulate",
+            "/api/jobs/*",
+            "/api/autonomy/*",
+            "/api/experiments/*",
+            "/api/learning/*",
+            "unavailable:",
+        ] {
+            assert!(
+                matrix.contains(expected),
+                "remote route matrix should mention {expected}"
+            );
+        }
     }
 }
 
@@ -675,6 +861,13 @@ pub async fn openclaw_agents_set_default(
     ironclaw: State<'_, IronClawState>,
     agent_id: String,
 ) -> Result<(), String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        proxy
+            .set_setting("default_agent_id", &serde_json::json!(agent_id))
+            .await?;
+        return Ok(());
+    }
+
     // Persist default agent via IronClaw's config API
     let agent = ironclaw.agent().await.ok();
     if let Some(agent) = agent {
@@ -700,6 +893,15 @@ pub async fn openclaw_clawhub_search(
     ironclaw: State<'_, IronClawState>,
     query: String,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy
+            .get_json(&format!(
+                "/api/extensions/registry?query={}",
+                urlencoding::encode(&query)
+            ))
+            .await;
+    }
+
     let cache_lock = ironclaw.catalog_cache().await?;
     let cache = cache_lock.lock().await;
     let entries = ironclaw::tauri_commands::clawhub_search(&cache, &query)?;
@@ -713,6 +915,15 @@ pub async fn openclaw_clawhub_install(
     ironclaw: State<'_, IronClawState>,
     plugin_id: String,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy
+            .post_json(
+                "/api/extensions/install",
+                &serde_json::json!({ "query": plugin_id }),
+            )
+            .await;
+    }
+
     let cache_lock = ironclaw.catalog_cache().await?;
     let cache = cache_lock.lock().await;
     let result = ironclaw::tauri_commands::clawhub_prepare_install(&cache, &plugin_id)?;
@@ -929,6 +1140,19 @@ pub async fn openclaw_routing_rules_save(
 pub async fn openclaw_gmail_oauth_start(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<GmailOAuthResult, String> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Ok(GmailOAuthResult {
+            success: false,
+            access_token: None,
+            refresh_token: None,
+            expires_in: None,
+            scope: None,
+            error: Some(
+                "unavailable: remote Gmail OAuth must be completed on the gateway host".to_string(),
+            ),
+        });
+    }
+
     // Call IronClaw's gmail_oauth_start which handles the full PKCE flow:
     // 1. Generates PKCE verifier/challenge
     // 2. Builds Google auth URL
@@ -1166,6 +1390,19 @@ pub async fn openclaw_routing_status(
                     .map(ToOwned::to_owned)
             })
             .unwrap_or_else(|| "openai-compatible".to_string());
+        let primary_model = json_string_field(&provider_config, "primary_model")
+            .or_else(|| json_string_field(&gateway_status, "primary_model"));
+        let preferred_cheap_provider =
+            json_string_field(&provider_config, "preferred_cheap_provider");
+        let cheap_model = json_string_field(&provider_config, "cheap_model");
+        let primary_pool_order = json_string_vec_field(&provider_config, "primary_pool_order");
+        let cheap_pool_order = json_string_vec_field(&provider_config, "cheap_pool_order");
+        let fallback_chain = json_string_vec_field(&provider_config, "fallback_chain")
+            .into_iter()
+            .chain(json_string_vec_field(&gateway_status, "fallback_chain"))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
 
         let latency_data = proxy
             .get_cost_summary()
@@ -1185,6 +1422,24 @@ pub async fn openclaw_routing_status(
         return Ok(RoutingStatusResponse {
             enabled,
             default_provider,
+            routing_mode: json_string_field(&provider_config, "routing_mode")
+                .unwrap_or_else(|| "primary".to_string()),
+            primary_model,
+            preferred_cheap_provider,
+            cheap_model,
+            primary_pool_order,
+            cheap_pool_order,
+            fallback_chain,
+            advisor_ready: json_bool_field(&provider_config, "advisor_ready"),
+            advisor_disabled_reason: json_string_field(&provider_config, "advisor_disabled_reason"),
+            executor_target: json_string_field(&provider_config, "executor_target"),
+            advisor_target: json_string_field(&provider_config, "advisor_target"),
+            diagnostics: json_string_vec_field(&provider_config, "diagnostics"),
+            runtime_revision: provider_config
+                .get("runtime_revision")
+                .and_then(|value| value.as_u64()),
+            llm_select_state:
+                "available: llm_select applies per conversation while a run is active".to_string(),
             rule_count: rules.len() as u32,
             rules: routing_rule_summaries(&rules),
             latency_data,
@@ -1194,6 +1449,38 @@ pub async fn openclaw_routing_status(
     let mut enabled = false;
     let mut rules: Vec<RoutingRule> = Vec::new();
     let mut default_provider = "openai-compatible".to_string();
+    let mut routing_mode = "primary".to_string();
+    let mut primary_model: Option<String> = None;
+    let mut preferred_cheap_provider: Option<String> = None;
+    let mut cheap_model: Option<String> = None;
+    let mut fallback_chain: Vec<String> = Vec::new();
+    let mut advisor_ready = false;
+    let mut advisor_disabled_reason: Option<String> = None;
+    let mut executor_target: Option<String> = None;
+    let mut advisor_target: Option<String> = None;
+    let mut runtime_revision: Option<u64> = None;
+
+    if let Ok(runtime) = ironclaw.llm_runtime().await {
+        let status = runtime.status();
+        enabled = status.routing_enabled;
+        routing_mode = status.routing_mode.as_str().to_string();
+        primary_model = Some(status.primary_model);
+        preferred_cheap_provider = status.cheap_model.as_deref().and_then(|model| {
+            model
+                .split_once('/')
+                .map(|(provider, _)| provider.to_string())
+        });
+        cheap_model = status.cheap_model;
+        if let Some(provider) = status.primary_provider {
+            default_provider = provider;
+        }
+        fallback_chain = status.fallback_chain;
+        advisor_ready = status.advisor_ready;
+        advisor_disabled_reason = status.advisor_disabled_reason;
+        executor_target = status.executor_target;
+        advisor_target = status.advisor_target;
+        runtime_revision = Some(status.revision);
+    }
 
     if let Some(agent) = ironclaw.agent().await.ok() {
         if let Some(store) = agent.store() {
@@ -1233,10 +1520,71 @@ pub async fn openclaw_routing_status(
     Ok(RoutingStatusResponse {
         enabled,
         default_provider,
+        routing_mode,
+        primary_model,
+        preferred_cheap_provider,
+        cheap_model,
+        primary_pool_order: Vec::new(),
+        cheap_pool_order: Vec::new(),
+        fallback_chain,
+        advisor_ready,
+        advisor_disabled_reason,
+        executor_target,
+        advisor_target,
+        diagnostics: Vec::new(),
+        runtime_revision,
+        llm_select_state: "available: llm_select applies per conversation while a run is active"
+            .to_string(),
         rule_count: rules.len() as u32,
         rules: rule_summaries,
         latency_data,
     })
+}
+
+/// Simulate ThinClaw's route decision for a draft prompt.
+#[tauri::command]
+#[specta::specta]
+pub async fn openclaw_routing_simulate(
+    ironclaw: State<'_, IronClawState>,
+    request: RouteSimulationRequest,
+) -> Result<RouteSimulationResponse, String> {
+    if request.prompt.trim().is_empty() {
+        return Ok(unavailable_route_simulation(
+            "unavailable: enter a prompt to simulate routing",
+        ));
+    }
+
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let body = serde_json::to_value(&request).map_err(|e| e.to_string())?;
+        return match proxy.simulate_route(&body).await {
+            Ok(value) => serde_json::from_value::<RouteSimulationResponse>(value)
+                .map_err(|err| format!("remote route simulation returned invalid data: {err}")),
+            Err(err) if err.contains("HTTP 404") => Ok(unavailable_route_simulation(
+                "unavailable: remote ThinClaw gateway does not expose route simulation",
+            )),
+            Err(err) if err.contains("HTTP 503") => Ok(unavailable_route_simulation(
+                "unavailable: remote ThinClaw LLM runtime is not running",
+            )),
+            Err(err) => Err(err),
+        };
+    }
+
+    let runtime = match ironclaw.llm_runtime().await {
+        Ok(runtime) => runtime,
+        Err(err) => return Ok(unavailable_route_simulation(format!("unavailable: {err}"))),
+    };
+    let ctx = ironclaw::llm::routing_policy::RoutingContext {
+        estimated_input_tokens: (request.prompt.len() / 4) as u32,
+        has_vision: request.has_vision,
+        has_tools: request.has_tools,
+        requires_streaming: request.requires_streaming,
+        budget_usd: None,
+    };
+
+    Ok(map_route_simulation_result(runtime.simulate_route_details(
+        ctx,
+        Some(request.prompt.as_str()),
+    )))
 }
 
 /// Get Gmail channel configuration status.
@@ -1245,6 +1593,11 @@ pub async fn openclaw_routing_status(
 pub async fn openclaw_gmail_status(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<GmailStatusResponse, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let status = proxy.get_status().await?;
+        return remote_gmail_status(&proxy, &status).await;
+    }
+
     let mut enabled = false;
     let mut project_id = String::new();
     let mut subscription_id = String::new();
@@ -1282,9 +1635,49 @@ pub async fn openclaw_gmail_status(
             .collect();
     }
 
-    // Check for OAuth token in settings store
+    // Fold in DB-backed ThinClaw channel settings when env vars are absent.
     if let Some(agent) = ironclaw.agent().await.ok() {
         if let Some(store) = agent.store() {
+            if std::env::var("GMAIL_ENABLED").is_err() {
+                if let Ok(Some(value)) = store
+                    .get_setting("local_user", "channels.gmail_enabled")
+                    .await
+                {
+                    enabled = value.as_bool().unwrap_or(enabled);
+                }
+            }
+            if project_id.is_empty() {
+                if let Ok(Some(value)) = store
+                    .get_setting("local_user", "channels.gmail_project_id")
+                    .await
+                {
+                    project_id = value.as_str().unwrap_or_default().to_string();
+                    missing_fields.retain(|field| field != "GMAIL_PROJECT_ID");
+                }
+            }
+            if subscription_id.is_empty() {
+                if let Ok(Some(value)) = store
+                    .get_setting("local_user", "channels.gmail_subscription_id")
+                    .await
+                {
+                    subscription_id = value.as_str().unwrap_or_default().to_string();
+                    missing_fields.retain(|field| field != "GMAIL_SUBSCRIPTION_ID");
+                }
+            }
+            if allowed_senders.is_empty() {
+                if let Ok(Some(value)) = store
+                    .get_setting("local_user", "channels.gmail_allowed_senders")
+                    .await
+                {
+                    if let Some(raw) = value.as_str() {
+                        allowed_senders = raw
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                    }
+                }
+            }
             if let Ok(Some(_)) = store.get_setting("local_user", "gmail_refresh_token").await {
                 oauth_configured = true;
             }

@@ -12,7 +12,7 @@ ThinClaw Desktop is a professional, open-source AI cockpit designed for executiv
 
 ## Installation & Setup
 
-For a deep dive into environment configuration, prerequisites, and production builds for all engines, see the **[Development Setup Guide](documentation/setup.md)**.
+For a deep dive into environment configuration, prerequisites, and production builds for all engines, see the **[Development Setup Guide](documentation/setup.md)**. For release acceptance, use the **[Manual Smoke Checklist](documentation/manual-smoke-checklist.md)** and record a dated smoke report.
 
 ### 1. Requirements
 - **macOS / Linux / Windows** (Tauri v2 compatible).
@@ -28,11 +28,11 @@ npm install
 npm run setup:all
 
 # 3. Launch in Developer Mode (default engine: llama.cpp)
-npm run tauri dev
+npm run tauri:dev:llamacpp
 
 # Or with a different inference engine:
-# npm run tauri dev -- -- --no-default-features --features mlx
-# npm run tauri dev -- -- --no-default-features --features ollama
+# npm run tauri:dev:mlx
+# npm run tauri:dev:ollama
 ```
 
 ### 3. Setup Advice
@@ -40,6 +40,16 @@ npm run tauri dev
 - **Custom Secrets**: You can now add arbitrary custom secrets for specialized agent workflows.
 - **Hugging Face**: A **Hugging Face Read Token** is highly recommended. It may be required on first launch to download gated LLMs (like Llama/Gemma) or specialized diffusion models. You can add this in **Settings > Secrets**.
 - **Models**: Download models via the in-app **Model Browser** (Settings → Models). Use the **Library** tab for bundled models or the **Discover** tab to search HuggingFace Hub. The Discover tab auto-filters by your active engine (GGUF for llama.cpp/Ollama, MLX safetensors for MLX, AWQ for vLLM).
+
+### 4. Alpha Contract And Handoff Docs
+- **[Bridge Contract](documentation/bridge-contract.md)**: stable Tauri command, event, routing, and binding contract.
+- **[Runtime Parity Checklist](documentation/runtime-parity-checklist.md)**: local ThinClaw runtime parity status and named remaining gaps.
+- **[Remote Gateway Route Matrix](documentation/remote-gateway-route-matrix.md)**: local/remote command behavior and unavailable-response rules.
+- **[Environment Requirements](documentation/env-requirements.md)**: required toolchains, env vars, and final gate commands.
+- **[Secrets Policy](documentation/secrets-policy.md)**: ThinClaw key naming, grants, legacy fallback, and remote secrecy rules.
+- **[Manual Smoke Checklist](documentation/manual-smoke-checklist.md)**: repeatable local and remote release smoke.
+- **[Known Post-Alpha Items](documentation/known-post-alpha.md)**: explicitly deferred work that must stay gated or documented.
+- **[Worker Handoff](documentation/handoff.md)**: source-of-truth orientation for follow-up agents.
 
 ---
 
@@ -53,7 +63,7 @@ npm run tauri dev
 *   **HuggingFace Hub Discovery**: Live search of HuggingFace models filtered by the active engine, with GGUF quantization picker, auto-mmproj detection, and streamed downloads.
 *   **Standalone Gateway Support**: Connect to local ThinClaw sidecars or remote gateways for distributed agent control.
 *   **Imagine Studio**: A dedicated creative suite for image generation with custom bespoke icons, multiple provider support (Local Stable Diffusion, Gemini Imagen 3), and a high-performance integrated **Gallery** with real-time generation progress tracking, horizontal recent-generations strip, and settings restoration support.
-*   **MCP Server Integration**: Connect a custom FastAPI MCP server to extend the agent with remote tools — finance APIs, news feeds, domain-specific capabilities — via the Rhai script sandbox.
+*   **MCP Server Integration**: Manage first-class ThinClaw MCP servers, tools, resources, prompts, OAuth, interaction responses, and legacy Rhai sandbox tools from Desktop.
 *   **Voice I/O (TTS & STT)**: Native Text-to-Speech (Piper) and Speech-to-Text (Whisper) sidecars for fully voice-enabled conversations.
 *   **Human-in-the-Loop (HITL)**: Advanced security protocols that pause execution for explicit user approval of high-risk shell commands.
 *   **Knowledge OS (RAG)**: Enterprise-grade retrieval pipeline with vector search (`usearch`), ONNX reranking, and citation-backed generation.
@@ -94,7 +104,8 @@ graph TD
         Manager[Sidecar Manager]
         Gateway[Gateway Controller]
         RigAgent[Native Rig Agent]
-        McpSandbox[MCP Rhai Sandbox]
+        McpManager[MCP Management]
+        McpSandbox[Legacy MCP Rhai Sandbox]
     end
 
     subgraph Sidecars [Sidecar Processes]
@@ -120,7 +131,8 @@ graph TD
     Claw <-->|ACP WebSockets| UI
     Gateway <-->|Remote/Local| Claw
     RigAgent -->|Tools| Sidecars
-    McpSandbox -->|HTTP/JWT| MCP[(External MCP Server)]
+    McpManager <-->|ThinClaw MCP APIs| MCP[(MCP Servers)]
+    McpSandbox -->|HTTP/JWT| LegacyMcp[(Legacy Sandbox MCP)]
 ```
 
 ### 1. The ThinClaw Engine
@@ -202,6 +214,7 @@ Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key 
 -   `src/imagine.rs` / `src/image_gen.rs` / `src/images.rs`: Imagine Studio and image generation pipeline.
 -   MCP tools crate: Rust crate providing the MCP sandbox (Rhai scripts, tool discovery, HTTP client).
 -   `documentation/openclaw/`: Historical architectural deep-dives from the pre-ThinClaw integration era.
+-   `documentation/`: Alpha contract, setup, runtime parity, route matrix, secrets policy, smoke, and handoff docs.
 
 ### Frontend (`frontend/src/`)
 -   `components/chat/`: The high-performance chat interface.
@@ -232,9 +245,9 @@ Skills extend the **ThinClaw** agent:
 3.  Ensure the tool emits progress events to the UI if long-running.
 
 ### Adding an MCP Remote Tool
-1.  Expose a new endpoint on your FastAPI MCP server.
-2.  Connect the server URL and token in **Settings > MCP Server**.
-3.  The Rhai sandbox will auto-discover and expose the tool to the agent.
+1.  Register the server through **Settings > MCP** or the ThinClaw gateway MCP APIs.
+2.  Verify tools, resources, prompts, OAuth, and interaction callbacks in the MCP management UI.
+3.  Keep the legacy Rhai sandbox path only for compatibility with older local tool servers.
 
 ---
 

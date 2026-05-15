@@ -2,6 +2,19 @@
 
 This document is the alpha compatibility contract for the Desktop bridge. Public product labels use ThinClaw / ThinClaw Desktop. Internal Tauri command names still use the `openclaw_*` prefix until the post-alpha rename.
 
+Last updated: 2026-05-15
+
+Related handoff docs:
+
+- Runtime parity: `apps/desktop/documentation/runtime-parity-checklist.md`
+- Remote gateway matrix: `apps/desktop/documentation/remote-gateway-route-matrix.md`
+- Environment requirements: `apps/desktop/documentation/env-requirements.md`
+- Packaging readiness: `apps/desktop/documentation/packaging-platform-readiness.md`
+- Platform readiness: `apps/desktop/documentation/packaging-platform-readiness.md`
+- Secrets policy: `apps/desktop/documentation/secrets-policy.md`
+- Manual smoke checklist: `apps/desktop/documentation/manual-smoke-checklist.md`
+- Known post-alpha work: `apps/desktop/documentation/known-post-alpha.md`
+
 ## Runtime Modes
 
 ### Local Mode
@@ -34,7 +47,20 @@ Desktop talks to a remote ThinClaw gateway through `RemoteGatewayProxy`.
 - Local transport: `apps/desktop/backend/src/openclaw/ironclaw_channel.rs`
 - Remote transport: `apps/desktop/backend/src/openclaw/remote_proxy.rs`
 
-Every current ThinClaw `StatusUpdate` variant must be either mapped to `UiEvent` or explicitly documented as intentionally ignored. As of this checkpoint, plan and usage updates are mapped rather than dropped.
+Every current ThinClaw `StatusUpdate` variant must be either mapped to `UiEvent` or explicitly documented as intentionally ignored. As of this checkpoint, Desktop maps chat, plan, usage, cost, lifecycle, approval, auth, canvas, job, subagent, agent-message, and routine events. Unknown remote gateway SSE events are forwarded as `UiEvent::GatewayEvent` instead of being silently dropped.
+
+### Routing Rules
+
+Event routing is metadata-first and must stay deterministic:
+
+1. Use `thread_id` when present.
+2. Use `session_key` when present and `thread_id` is absent.
+3. Use `run_id` as secondary metadata for run-local state and UI disambiguation.
+4. Use the explicit local command session for local token/chat deltas where ThinClaw emitted no metadata.
+5. Use `agent:main` for truly unscoped backend events.
+6. Never route remote SSE events by "latest visible session" when the gateway event carries thread/session metadata.
+
+Concurrent-session regressions should be treated as contract breaks, not UI bugs.
 
 ## IPC Stability
 
@@ -44,6 +70,31 @@ The alpha frontend and existing automation scripts depend on the current Tauri c
 - Keep `openclaw-event` stable for alpha.
 - Add new capabilities through additive commands or additive `UiEvent` variants.
 - Do not rename `thinclaw-desktop-tools` during alpha unless the migration is explicitly planned.
+- Regenerate `apps/desktop/frontend/src/lib/bindings.ts` from Rust after command/type changes. Do not hand-edit generated bindings.
+
+### Command Surface Groups
+
+The command registry lives in `apps/desktop/backend/src/setup/commands.rs`.
+
+| Surface | Local mode behavior | Remote mode behavior |
+| --- | --- | --- |
+| Chat/sessions/approvals | Uses in-process ThinClaw runtime and `TauriChannel`. | Proxies chat/session/approval HTTP routes and forwards gateway SSE. |
+| Memory/files | Uses ThinClaw memory/workspace APIs. | Proxies gateway memory routes where present; missing delete/export operations return explicit unavailable errors. |
+| Providers/routing/vault | Uses local keychain, provider config, route simulation, model discovery. | Uses provider gateway endpoints; raw secret reads remain denied. |
+| Skills/extensions/MCP | Uses root skill registry, extension manager, MCP API. | Uses `/api/skills`, `/api/extensions`, and `/api/mcp` gateway routes. |
+| Jobs/autonomy/experiments/learning | Uses root APIs when DB/runtime/config allow them. | Status/review routes are proxied; host-executing mutation stays gated or unavailable with concrete reasons. |
+| Channels/routines/pairing | Uses ThinClaw DB/runtime APIs and forwards routine lifecycle events. | Proxies gateway routes and status/config APIs where available. |
+
+## Binding Generation
+
+Bindings are exported by the debug Tauri startup path in `apps/desktop/backend/src/lib.rs`. For standalone regeneration without launching the app, create a temporary backend example that calls `tauri_app_lib::setup::commands::specta_builder().export(...)`, run it, and delete the example before committing. This is the same flow used during the P2-W4 checkpoint.
+
+After regeneration, run:
+
+```bash
+cd apps/desktop/backend && cargo check --locked
+cd apps/desktop && npm run lint:ts
+```
 
 ## Session Routing
 
@@ -51,7 +102,8 @@ Desktop event routing is metadata-first.
 
 - Prefer ThinClaw `thread_id` or `session_key` metadata.
 - Use `run_id` and `message_id` metadata when present.
-- Fall back to the most recently activated session only when ThinClaw metadata is absent.
+- Use the command-provided local session for local chat deltas without metadata.
+- Fall back to `agent:main` for truly unscoped events.
 - Concurrent session tests should prove one active run cannot receive another run's events.
 
 ## Secrets And Identifiers
@@ -59,3 +111,5 @@ Desktop event routing is metadata-first.
 New writes use ThinClaw identifiers. Legacy Scrappy identifiers are read-only fallback inputs for app data, cloud, and keychain migration.
 
 `KeychainSecretsAdapter` must deny ungranted access for `get`, `get_for_injection`, `exists`, `list`, and `is_accessible`.
+
+Remote mode must never return raw provider secrets. It may expose save/delete/status capability only. Raw local injection commands must remain local-only and unavailable in remote mode.

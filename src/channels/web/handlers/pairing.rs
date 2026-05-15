@@ -19,10 +19,17 @@ pub(crate) async fn pairing_list_handler(
             created_at: r.created_at,
         })
         .collect();
+    let approved = store
+        .read_allow_from(&channel)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|sender_id| PairingApprovedInfo { sender_id })
+        .collect();
 
     Ok(Json(PairingListResponse {
         channel,
         requests: infos,
+        approved,
     }))
 }
 

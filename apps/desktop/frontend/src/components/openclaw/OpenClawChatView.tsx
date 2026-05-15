@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronDown, Brain, Loader2, Zap, Trash2, Download, Sliders, FileDown, PanelRight } from 'lucide-react';
+import { Send, Radio, RefreshCw, AlertTriangle, Clock, User, Bot, Settings, ChevronDown, Brain, Loader2, Zap, Trash2, Download, Sliders, FileDown, PanelRight, ListChecks, CircleDollarSign, Cpu, ShieldCheck } from 'lucide-react';
 import { commands } from '../../lib/bindings';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
@@ -19,6 +19,7 @@ import { MemoryEditor } from './MemoryEditor';
 import SubAgentPanel, { useSubAgentCount } from './SubAgentPanel';
 import AutomationCard from './AutomationCard';
 import { Square } from 'lucide-react';
+import { OpenClawModeBadge, useOpenClawStatusSnapshot } from './OpenClawModeBadge';
 
 interface OpenClawChatViewProps {
     sessionKey: string | null;
@@ -33,6 +34,92 @@ interface OpenClawChatViewProps {
     onViewSession?: (sessionKey: string) => void;
 }
 
+interface RunTelemetry {
+    runId: string;
+    status: string;
+    phase?: string;
+    planEntries: any[];
+    usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        total_tokens?: number;
+    };
+    costUsd?: number;
+    model?: string;
+    approvalsPending: number;
+    approvalsResolved: number;
+    updatedAt: number;
+}
+
+function terminalRunStatus(status: string | undefined): boolean {
+    const lower = (status || '').toLowerCase();
+    return ['ok', 'error', 'aborted', 'done', 'interrupted', 'rejected', 'failed', 'completed'].includes(lower);
+}
+
+function RunTelemetryStrip({ items }: { items: RunTelemetry[] }) {
+    if (items.length === 0) return null;
+
+    return (
+        <div className="rounded-xl border border-border/40 bg-card/50 backdrop-blur-md p-3 shadow-sm">
+            <div className="mb-2 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                    <Zap className="h-3.5 w-3.5 text-primary" />
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Run State</span>
+                </div>
+                <span className="text-[10px] text-muted-foreground">{items.length} tracked</span>
+            </div>
+            <div className="grid gap-2 md:grid-cols-2">
+                {items.map(item => {
+                    const usage = item.usage || {};
+                    const input = Number(usage.input_tokens || 0);
+                    const output = Number(usage.output_tokens || 0);
+                    const total = Number(usage.total_tokens || input + output);
+                    const running = !terminalRunStatus(item.status);
+                    return (
+                        <div key={item.runId} className="rounded-lg border border-white/5 bg-white/[0.03] p-3">
+                            <div className="flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                    <div className="truncate font-mono text-[10px] text-foreground/80">{item.runId}</div>
+                                    <div className="mt-0.5 text-[10px] text-muted-foreground">{item.phase || 'agent'} · {item.status || 'running'}</div>
+                                </div>
+                                <span className={cn(
+                                    'h-2 w-2 shrink-0 rounded-full',
+                                    running ? 'bg-blue-400 animate-pulse' : item.status === 'error' || item.status === 'failed' ? 'bg-red-400' : 'bg-emerald-400',
+                                )} />
+                            </div>
+                            <div className="mt-3 grid grid-cols-3 gap-2 text-[10px] text-muted-foreground">
+                                <div className="flex items-center gap-1.5">
+                                    <ListChecks className="h-3 w-3" />
+                                    <span>{item.planEntries.length} steps</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <Cpu className="h-3 w-3" />
+                                    <span>{total ? total.toLocaleString() : '0'} tok</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                    <CircleDollarSign className="h-3 w-3" />
+                                    <span>{typeof item.costUsd === 'number' ? `$${item.costUsd.toFixed(4)}` : '$0.0000'}</span>
+                                </div>
+                            </div>
+                            {(item.model || item.approvalsPending > 0 || item.approvalsResolved > 0) && (
+                                <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+                                    {item.model && <span className="rounded bg-muted/40 px-1.5 py-0.5 font-mono">{item.model}</span>}
+                                    {(item.approvalsPending > 0 || item.approvalsResolved > 0) && (
+                                        <span className="inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-400">
+                                            <ShieldCheck className="h-3 w-3" />
+                                            {item.approvalsPending} pending / {item.approvalsResolved} resolved
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
 export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded = false, onBootstrapComplete = () => { }, onFactoryReset, onNavigateToSettings, onViewSession }: OpenClawChatViewProps) {
     const [messages, setMessages] = useState<OpenClawMessage[]>([]);
     const [input, setInput] = useState('');
@@ -43,9 +130,11 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
     const [showThinkingSlider, setShowThinkingSlider] = useState(false);
     const [currentRunId, setCurrentRunId] = useState<string | null>(null);
     const [activeRun, setActiveRun] = useState<StreamRun | null>(null);
+    const [runTelemetry, setRunTelemetry] = useState<Record<string, RunTelemetry>>({});
     const [subAgentPanelOpen, setSubAgentPanelOpen] = useState(false);
     const [subAgentPanelDismissed, setSubAgentPanelDismissed] = useState(false);
     const subAgentCount = useSubAgentCount(sessionKey || '');
+    const { status: runtimeStatus } = useOpenClawStatusSnapshot(20000);
 
     // Auto-open the panel when first sub-agent appears
     useEffect(() => {
@@ -69,6 +158,51 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
     const effectiveSessionKey = isCoreView ? 'agent:main' : sessionKey;
     // IC-014: Always initialize to 'chat' regardless of view type
     const [coreTab, setCoreTab] = useState<'chat' | 'console' | 'memory'>('chat');
+
+    useEffect(() => {
+        setRunTelemetry({});
+    }, [effectiveSessionKey]);
+
+    const updateRunTelemetry = useCallback((uiEvent: any) => {
+        const runId = uiEvent.run_id || uiEvent.message_id || currentRunId;
+        if (!runId) return;
+        setRunTelemetry(prev => {
+            const existing = prev[runId] || {
+                runId,
+                status: 'running',
+                planEntries: [],
+                approvalsPending: 0,
+                approvalsResolved: 0,
+                updatedAt: Date.now(),
+            };
+            const next: RunTelemetry = { ...existing, updatedAt: Date.now() };
+
+            if (uiEvent.kind === 'RunStatus') {
+                next.status = uiEvent.status || next.status;
+            } else if (uiEvent.kind === 'LifecycleUpdate') {
+                next.status = uiEvent.status || next.status;
+                next.phase = uiEvent.phase || next.phase;
+            } else if (uiEvent.kind === 'PlanUpdate') {
+                next.planEntries = Array.isArray(uiEvent.entries) ? uiEvent.entries : [];
+            } else if (uiEvent.kind === 'UsageUpdate') {
+                next.usage = uiEvent.usage || next.usage;
+                next.costUsd = typeof uiEvent.cost_usd === 'number' ? uiEvent.cost_usd : next.costUsd;
+                next.model = uiEvent.model || next.model;
+            } else if (uiEvent.kind === 'ApprovalRequested') {
+                next.approvalsPending += 1;
+                next.status = 'awaiting approval';
+            } else if (uiEvent.kind === 'ApprovalResolved') {
+                next.approvalsPending = Math.max(0, next.approvalsPending - 1);
+                next.approvalsResolved += 1;
+            } else if (uiEvent.kind === 'ToolUpdate' || uiEvent.kind === 'AssistantDelta' || uiEvent.kind === 'AssistantSnapshot' || uiEvent.kind === 'AssistantFinal') {
+                next.status = uiEvent.kind === 'AssistantFinal' ? 'completed' : next.status || 'running';
+            }
+
+            const nextMap: Record<string, RunTelemetry> = { ...prev, [runId]: next };
+            const sorted: RunTelemetry[] = Object.values(nextMap).sort((a, b) => b.updatedAt - a.updatedAt);
+            return Object.fromEntries(sorted.slice(0, 6).map(item => [item.runId, item])) as Record<string, RunTelemetry>;
+        });
+    }, [currentRunId]);
 
 
 
@@ -444,8 +578,12 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
             // ── Session-scoped events ────────────────────────────────────
             if (uiEvent.session_key !== effectiveSessionKey) return;
 
+            if (['AssistantInternal', 'AssistantSnapshot', 'AssistantDelta', 'AssistantFinal', 'ToolUpdate', 'RunStatus', 'LifecycleUpdate', 'PlanUpdate', 'UsageUpdate', 'ApprovalRequested', 'ApprovalResolved'].includes(uiEvent.kind)) {
+                updateRunTelemetry(uiEvent);
+            }
+
             // Handle message events
-            if (['AssistantInternal', 'AssistantSnapshot', 'AssistantDelta', 'AssistantFinal', 'ToolUpdate', 'RunStatus', 'PlanUpdate', 'UsageUpdate'].includes(uiEvent.kind)) {
+            if (['AssistantInternal', 'AssistantSnapshot', 'AssistantDelta', 'AssistantFinal', 'ToolUpdate', 'RunStatus', 'LifecycleUpdate', 'PlanUpdate', 'UsageUpdate', 'JobUpdate', 'AgentMessage'].includes(uiEvent.kind)) {
                 updateMessagesFromEvent(uiEvent);
                 if (isAutoScrollPinned.current) {
                     scrollToBottom();
@@ -453,7 +591,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
             }
 
             // Track active run for LiveAgentStatus
-            if (uiEvent.kind === 'RunStatus') {
+            if (uiEvent.kind === 'RunStatus' || uiEvent.kind === 'LifecycleUpdate') {
                 const lowerStatus = uiEvent.status?.toLowerCase?.() ?? '';
                 const TERMINAL_STATUSES = ['ok', 'error', 'aborted', 'done', 'interrupted', 'rejected'];
 
@@ -612,7 +750,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
             isMounted = false;
             unlistenPromise.then(fn => fn());
         };
-    }, [effectiveSessionKey, scrollToBottom]);
+    }, [effectiveSessionKey, scrollToBottom, currentRunId, updateRunTelemetry]);
 
     // Pin scroll on NEW messages
     useEffect(() => {
@@ -632,6 +770,12 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                 const existing = prev.find(m => m.id === uiEvent.message_id);
                 if (existing) return prev.map(m => m.id === uiEvent.message_id ? { ...m, text: uiEvent.text } : m);
                 return [...prev, { id: uiEvent.message_id, role: 'assistant', ts_ms: Date.now(), text: uiEvent.text, source: 'openclaw' }];
+            }
+            if (uiEvent.kind === 'AgentMessage') {
+                const existing = prev.find(m => m.id === uiEvent.message_id);
+                const metadata = { type: 'agent_message', message_type: uiEvent.message_type, run_id: uiEvent.run_id };
+                if (existing) return prev.map(m => m.id === uiEvent.message_id ? { ...m, text: uiEvent.content, metadata } : m);
+                return [...prev, { id: uiEvent.message_id, role: 'assistant', ts_ms: Date.now(), text: uiEvent.content, source: 'openclaw', metadata }];
             }
             if (uiEvent.kind === 'AssistantDelta') {
                 const existing = prev.find(m => m.id === uiEvent.message_id);
@@ -687,6 +831,22 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                 const existing = prev.find(m => m.id === usageMsgId);
                 if (existing) return prev.map(m => m.id === usageMsgId ? { ...m, text: content, metadata } : m);
                 return [...prev, { id: usageMsgId, role: 'system', ts_ms: Date.now(), text: content, source: 'openclaw', metadata }];
+            }
+            if (uiEvent.kind === 'LifecycleUpdate') {
+                const lifecycleMsgId = `lifecycle-${uiEvent.run_id}`;
+                const metadata = { type: 'lifecycle', phase: uiEvent.phase, status: uiEvent.status, run_id: uiEvent.run_id };
+                const existing = prev.find(m => m.id === lifecycleMsgId);
+                if (existing) return prev.map(m => m.id === lifecycleMsgId ? { ...m, metadata } : m);
+                return prev;
+            }
+            if (uiEvent.kind === 'JobUpdate') {
+                const jobMsgId = `job-${uiEvent.job_id}`;
+                const title = uiEvent.title || uiEvent.job_id;
+                const content = `Job ${uiEvent.status}: ${title}`;
+                const metadata = { type: 'job', job_id: uiEvent.job_id, status: uiEvent.status, url: uiEvent.url, payload: uiEvent.payload, run_id: uiEvent.run_id };
+                const existing = prev.find(m => m.id === jobMsgId);
+                if (existing) return prev.map(m => m.id === jobMsgId ? { ...m, text: content, metadata } : m);
+                return [...prev, { id: jobMsgId, role: 'system', ts_ms: Date.now(), text: content, source: 'openclaw', metadata }];
             }
             return prev;
         });
@@ -825,6 +985,9 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
         });
     if (currentSystemGroup.length > 0) groupedGroups.push({ type: 'group', items: [...currentSystemGroup] });
 
+    const telemetryItems = Object.values(runTelemetry)
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 4);
 
     return (
         <div className="flex-1 flex relative h-full overflow-hidden bg-background">
@@ -852,6 +1015,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                 {gatewayRunning && <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" title="Gateway Connected" />}
                             </div>
                         </div>
+                        <OpenClawModeBadge status={runtimeStatus} compact />
                     </div>
                     <div className="flex items-center gap-2">
                         {!isCoreView && (
@@ -988,6 +1152,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                                 </div>
                             ) : (
                                 <div className="max-w-4xl mx-auto space-y-6">
+                                    <RunTelemetryStrip items={telemetryItems} />
 
                                     {/* Message Timeline */}
                                     <AnimatePresence initial={false}>

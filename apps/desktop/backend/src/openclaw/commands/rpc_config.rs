@@ -8,6 +8,7 @@ use tracing::info;
 use super::remote_provider_config::{apply_remote_cloud_config, apply_remote_selected_cloud_model};
 use super::OpenClawManager;
 use crate::openclaw::ironclaw_bridge::IronClawState;
+use crate::openclaw::remote_proxy::RemoteGatewayProxy;
 
 // ============================================================================
 // Config commands
@@ -34,6 +35,10 @@ pub async fn openclaw_config_schema(
 pub async fn openclaw_config_get(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy.list_settings().await;
+    }
+
     let agent = ironclaw.agent().await?;
     if let Some(store) = agent.store() {
         let resp = ironclaw::api::config::list_settings(store, "local_user")
@@ -52,6 +57,11 @@ pub async fn openclaw_config_set(
     key: String,
     value: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        proxy.set_setting(&key, &value).await?;
+        return Ok(serde_json::json!({ "ok": true }));
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
@@ -68,6 +78,15 @@ pub async fn openclaw_config_patch(
     ironclaw: State<'_, IronClawState>,
     patch: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        if let Some(obj) = patch.as_object() {
+            for (key, value) in obj {
+                proxy.set_setting(key, value).await?;
+            }
+        }
+        return Ok(serde_json::json!({ "ok": true }));
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent.store().ok_or("Database not available")?;
 
@@ -174,8 +193,16 @@ pub async fn openclaw_set_dev_mode_wizard(
 #[specta::specta]
 pub async fn openclaw_set_autonomy_mode(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     enabled: bool,
 ) -> Result<(), String> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(RemoteGatewayProxy::unavailable(
+            "autonomy mode mutation",
+            "remote autonomy execution is controlled by the gateway host policy; desktop may only read remote autonomy status",
+        ));
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -207,7 +234,19 @@ pub async fn openclaw_set_autonomy_mode(
 /// Get the current autonomy mode setting.
 #[tauri::command]
 #[specta::specta]
-pub async fn openclaw_get_autonomy_mode(state: State<'_, OpenClawManager>) -> Result<bool, String> {
+pub async fn openclaw_get_autonomy_mode(
+    state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
+) -> Result<bool, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let status = proxy.get_autonomy_status().await?;
+        return Ok(status
+            .get("enabled")
+            .or_else(|| status.get("running"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false));
+    }
+
     let cfg = state.get_config().await;
     Ok(cfg.as_ref().map(|c| c.auto_approve_tools).unwrap_or(false))
 }
@@ -339,6 +378,23 @@ pub async fn openclaw_trigger_bootstrap(state: State<'_, OpenClawManager>) -> Re
 pub async fn openclaw_system_presence(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let status = proxy.get_status().await?;
+        return Ok(serde_json::json!({
+            "online": true,
+            "engine": "thinclaw",
+            "mode": "remote",
+            "session_count": status.get("thread_count").or_else(|| status.get("session_count")).cloned().unwrap_or(serde_json::json!(0)),
+            "sub_agent_count": status.get("sub_agent_count").cloned().unwrap_or(serde_json::json!(0)),
+            "tool_count": status.get("tool_count").cloned().unwrap_or(serde_json::json!(0)),
+            "hook_count": status.get("hook_count").cloned().unwrap_or(serde_json::json!(0)),
+            "channel_count": status.get("channel_count").cloned().unwrap_or(serde_json::json!(0)),
+            "routine_engine_running": status.get("routine_engine_running").cloned().unwrap_or(serde_json::json!(null)),
+            "uptime_secs": status.get("uptime_secs").cloned().unwrap_or(serde_json::json!(null)),
+            "gateway": status,
+        }));
+    }
+
     // Base: engine is always present if we reach this command
     let engine_up = ironclaw.is_initialized();
 
@@ -431,6 +487,13 @@ pub async fn openclaw_logs_tail(
     ironclaw: State<'_, IronClawState>,
     limit: u32,
 ) -> Result<serde_json::Value, String> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(RemoteGatewayProxy::unavailable(
+            "log tail",
+            "the gateway exposes live log SSE and log-level control but no recent-log snapshot endpoint",
+        ));
+    }
+
     let broadcaster = ironclaw.log_broadcaster().await?;
     let entries = broadcaster.recent_entries();
     let cap = (limit as usize).max(1).min(2000);
@@ -462,8 +525,16 @@ pub async fn openclaw_logs_tail(
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_update_run(
-    _ironclaw: State<'_, IronClawState>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<serde_json::Value, String> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Ok(serde_json::json!({
+            "status": "remote",
+            "update_available": false,
+            "message": "Desktop cannot update a remote ThinClaw gateway"
+        }));
+    }
+
     // Alpha compatibility IPC: the public command name remains for existing
     // frontend callers, but embedded IronClaw has no separate updater process.
     Ok(serde_json::json!({ "status": "embedded", "update_available": false }))
@@ -499,7 +570,8 @@ pub async fn openclaw_save_selected_cloud_model(
     ironclaw: State<'_, IronClawState>,
     model: Option<String>,
 ) -> Result<(), String> {
-    if let Some(proxy) = ironclaw.remote_proxy().await {
+    let remote_mode = ironclaw.remote_proxy().await;
+    if let Some(proxy) = remote_mode.as_ref() {
         let mut remote_config = proxy
             .get_providers_config()
             .await
@@ -560,7 +632,8 @@ pub async fn openclaw_save_cloud_config(
     enabled_models: std::collections::HashMap<String, Vec<String>>,
     custom_llm: Option<CustomLlmConfigInput>,
 ) -> Result<(), String> {
-    if let Some(proxy) = ironclaw.remote_proxy().await {
+    let remote_mode = ironclaw.remote_proxy().await;
+    if let Some(proxy) = remote_mode.as_ref() {
         let mut remote_config = proxy
             .get_providers_config()
             .await
@@ -607,10 +680,16 @@ pub async fn openclaw_save_cloud_config(
         cfg.custom_llm_enabled = c.enabled;
         cfg.custom_llm_url = c.url.clone();
         // Store custom LLM key in Keychain, not identity.json
-        if let Some(ref key) = c.key {
-            let _ = crate::openclaw::config::keychain::set_key("custom_llm_key", Some(key));
+        if remote_mode.is_none() {
+            if let Some(ref key) = c.key {
+                let _ = crate::openclaw::config::keychain::set_key("custom_llm_key", Some(key));
+            }
         }
-        cfg.custom_llm_key = c.key.clone();
+        cfg.custom_llm_key = if remote_mode.is_none() {
+            c.key.clone()
+        } else {
+            None
+        };
         cfg.custom_llm_model = c.model.clone();
     }
 

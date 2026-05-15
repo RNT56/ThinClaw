@@ -63,7 +63,7 @@ function ChatLayoutShell() {
 
             {/* Global floating canvas panels + toolbar */}
             <CanvasWindow />
-            <CanvasToolbar />
+            <CanvasToolbar showAvailability={isOpenClawMode} />
         </div>
     );
 }

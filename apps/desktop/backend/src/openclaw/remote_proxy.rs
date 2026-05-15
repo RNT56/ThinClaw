@@ -15,6 +15,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest::{header::HeaderMap, Method};
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -93,19 +94,40 @@ impl RemoteGatewayProxy {
         format!("Bearer {}", self.inner.auth_token)
     }
 
-    async fn get_json(&self, path: &str) -> Result<serde_json::Value, String> {
-        let url = self.url(path);
-        debug!("[remote_proxy] GET {}", url);
+    pub fn unavailable(capability: &str, reason: impl AsRef<str>) -> String {
+        format!(
+            "unavailable: remote ThinClaw gateway does not support {}: {}",
+            capability,
+            reason.as_ref()
+        )
+    }
 
-        let resp = self
+    async fn request_json(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        headers: HeaderMap,
+    ) -> Result<serde_json::Value, String> {
+        let url = self.url(path);
+        debug!("[remote_proxy] {} {}", method, url);
+
+        let mut req = self
             .inner
             .client
-            .get(&url)
-            .header("Authorization", self.auth_header())
+            .request(method, &url)
+            .header("Authorization", self.auth_header());
+        if !headers.is_empty() {
+            req = req.headers(headers);
+        }
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+
+        let resp = req
             .send()
             .await
             .map_err(|e| format!("Request failed ({}): {}", url, e))?;
-
         let status = resp.status();
         let body = resp
             .text()
@@ -116,8 +138,17 @@ impl RemoteGatewayProxy {
             return Err(format!("Remote returned HTTP {}: {}", status, body));
         }
 
+        if body.is_empty() {
+            return Ok(serde_json::json!({ "ok": true }));
+        }
+
         serde_json::from_str(&body)
             .map_err(|e| format!("Failed to parse JSON response from {}: {}", url, e))
+    }
+
+    pub async fn get_json(&self, path: &str) -> Result<serde_json::Value, String> {
+        self.request_json(Method::GET, path, None, HeaderMap::new())
+            .await
     }
 
     async fn get_text(&self, path: &str) -> Result<String, String> {
@@ -146,77 +177,44 @@ impl RemoteGatewayProxy {
         Ok(body)
     }
 
-    async fn post_json(
+    pub async fn post_json(
         &self,
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let url = self.url(path);
-        debug!("[remote_proxy] POST {}", url);
-
-        let resp = self
-            .inner
-            .client
-            .post(&url)
-            .header("Authorization", self.auth_header())
-            .json(body)
-            .send()
+        self.request_json(Method::POST, path, Some(body), HeaderMap::new())
             .await
-            .map_err(|e| format!("Request failed ({}): {}", url, e))?;
-
-        let status = resp.status();
-        let body_text = resp
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read response body: {}", e))?;
-
-        if !status.is_success() {
-            return Err(format!("Remote returned HTTP {}: {}", status, body_text));
-        }
-
-        // Some endpoints return empty body on success
-        if body_text.is_empty() {
-            return Ok(serde_json::json!({ "ok": true }));
-        }
-
-        serde_json::from_str(&body_text)
-            .map_err(|e| format!("Failed to parse JSON response from {}: {}", url, e))
     }
 
-    async fn put_json(
+    pub async fn post_json_confirm(
         &self,
         path: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let url = self.url(path);
-        debug!("[remote_proxy] PUT {}", url);
-
-        let resp = self
-            .inner
-            .client
-            .put(&url)
-            .header("Authorization", self.auth_header())
-            .json(body)
-            .send()
+        let mut headers = HeaderMap::new();
+        headers.insert("x-confirm-action", "true".parse().expect("valid header"));
+        self.request_json(Method::POST, path, Some(body), headers)
             .await
-            .map_err(|e| format!("Request failed ({}): {}", url, e))?;
+    }
 
-        let status = resp.status();
-        let body_text = resp
-            .text()
+    pub async fn put_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.request_json(Method::PUT, path, Some(body), HeaderMap::new())
             .await
-            .map_err(|e| format!("Failed to read response body: {}", e))?;
+    }
 
-        if !status.is_success() {
-            return Err(format!("Remote returned HTTP {}: {}", status, body_text));
-        }
-
-        if body_text.is_empty() {
-            return Ok(serde_json::json!({ "ok": true }));
-        }
-
-        serde_json::from_str(&body_text)
-            .map_err(|e| format!("Failed to parse JSON response from {}: {}", url, e))
+    pub async fn put_json_confirm(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-confirm-action", "true".parse().expect("valid header"));
+        self.request_json(Method::PUT, path, Some(body), headers)
+            .await
     }
 
     #[allow(dead_code)]
@@ -244,25 +242,24 @@ impl RemoteGatewayProxy {
     }
 
     #[allow(dead_code)]
-    async fn delete(&self, path: &str) -> Result<(), String> {
-        let url = self.url(path);
-        debug!("[remote_proxy] DELETE {}", url);
-
-        let resp = self
-            .inner
-            .client
-            .delete(&url)
-            .header("Authorization", self.auth_header())
-            .send()
+    pub async fn delete_json(&self, path: &str) -> Result<serde_json::Value, String> {
+        self.request_json(Method::DELETE, path, None, HeaderMap::new())
             .await
-            .map_err(|e| format!("Request failed ({}): {}", url, e))?;
+    }
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Remote returned HTTP {}: {}", status, body));
-        }
-        Ok(())
+    pub async fn delete_json_body(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.request_json(Method::DELETE, path, Some(body), HeaderMap::new())
+            .await
+    }
+
+    pub async fn delete_json_confirm(&self, path: &str) -> Result<serde_json::Value, String> {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-confirm-action", "true".parse().expect("valid header"));
+        self.request_json(Method::DELETE, path, None, headers).await
     }
 
     // ── Health ───────────────────────────────────────────────────────────────
@@ -313,52 +310,51 @@ impl RemoteGatewayProxy {
         session_key: &str,
         text: &str,
     ) -> Result<serde_json::Value, String> {
+        let thread_id = if session_key == "agent:main" || session_key.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(session_key.to_string())
+        };
         self.post_json(
             "/api/chat/send",
             &serde_json::json!({
-                "session_key": session_key,
-                "message": text,
-                "stream": true,
+                "thread_id": thread_id,
+                "content": text,
             }),
         )
         .await
     }
 
     /// Abort a running chat turn.
-    pub async fn abort_chat(&self, session_key: &str) -> Result<(), String> {
-        self.post_json(
-            "/api/chat/send",
-            &serde_json::json!({
-                "session_key": session_key,
-                "abort": true,
-            }),
-        )
-        .await
-        .map(|_| ())
+    pub async fn abort_chat(&self, _session_key: &str) -> Result<(), String> {
+        Err(Self::unavailable(
+            "chat abort",
+            "the gateway has no abort endpoint for active chat turns",
+        ))
     }
 
     /// Delete a chat session/thread.
     pub async fn delete_session(&self, session_key: &str) -> Result<(), String> {
-        self.post_json(
-            "/api/chat/threads/delete",
-            &serde_json::json!({
-                "session_key": session_key,
-            }),
-        )
+        if session_key == "agent:main" {
+            return Err(Self::unavailable(
+                "session delete",
+                "the gateway assistant thread is pinned and cannot be deleted",
+            ));
+        }
+        self.delete_json(&format!(
+            "/api/chat/thread/{}",
+            urlencoding::encode(session_key)
+        ))
         .await
         .map(|_| ())
     }
 
     /// Reset (clear history of) a chat session.
-    pub async fn reset_session(&self, session_key: &str) -> Result<(), String> {
-        self.post_json(
-            "/api/chat/threads/reset",
-            &serde_json::json!({
-                "session_key": session_key,
-            }),
-        )
-        .await
-        .map(|_| ())
+    pub async fn reset_session(&self, _session_key: &str) -> Result<(), String> {
+        Err(Self::unavailable(
+            "session reset",
+            "the gateway exposes delete/create thread but no clear-history endpoint",
+        ))
     }
 
     /// Get all chat sessions/threads.
@@ -372,12 +368,12 @@ impl RemoteGatewayProxy {
         session_key: &str,
         limit: u32,
     ) -> Result<serde_json::Value, String> {
-        self.get_json(&format!(
-            "/api/chat/history?session_key={}&limit={}",
-            urlencoding::encode(session_key),
-            limit
-        ))
-        .await
+        let mut query = format!("/api/chat/history?limit={}", limit);
+        if session_key != "agent:main" && !session_key.trim().is_empty() {
+            query.push_str("&thread_id=");
+            query.push_str(&urlencoding::encode(session_key));
+        }
+        self.get_json(&query).await
     }
 
     /// Resolve a tool approval request.
@@ -387,12 +383,18 @@ impl RemoteGatewayProxy {
         approved: bool,
         allow_session: bool,
     ) -> Result<serde_json::Value, String> {
+        let action = if approved && allow_session {
+            "always"
+        } else if approved {
+            "approve"
+        } else {
+            "deny"
+        };
         self.post_json(
             "/api/chat/approval",
             &serde_json::json!({
-                "approval_id": approval_id,
-                "approved": approved,
-                "allow_session": allow_session,
+                "request_id": approval_id,
+                "action": action,
             }),
         )
         .await
@@ -436,29 +438,33 @@ impl RemoteGatewayProxy {
 
     /// Delete a workspace file.
     ///
-    /// Remote endpoint: POST /api/memory/delete
+    /// The root gateway currently has read/write/list/search routes but no
+    /// delete route. Return explicit unavailable instead of posting to a
+    /// non-existent endpoint.
     pub async fn delete_file(&self, path: &str) -> Result<(), String> {
-        self.post_json(
-            "/api/memory/delete",
-            &serde_json::json!({
-                "path": path,
-            }),
-        )
-        .await
-        .map(|_| ())
+        let _ = path;
+        Err(Self::unavailable(
+            "workspace file delete",
+            "the gateway memory API has no delete endpoint",
+        ))
     }
 
     /// List all workspace files.
     ///
     /// Remote endpoint: GET /api/memory/list
     pub async fn list_files(&self) -> Result<Vec<String>, String> {
-        let resp = self.get_json("/api/memory/list").await?;
+        let resp = self.get_json("/api/memory/tree").await?;
         let paths: Vec<String> = resp
-            .get("paths")
+            .get("entries")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .filter(|v| !v.get("is_dir").and_then(|d| d.as_bool()).unwrap_or(false))
+                    .filter_map(|v| {
+                        v.get("path")
+                            .and_then(|p| p.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .collect()
             })
             .unwrap_or_default();
@@ -521,15 +527,71 @@ impl RemoteGatewayProxy {
         schedule: &str,
         task: &str,
     ) -> Result<serde_json::Value, String> {
-        // The remote IronClaw settings API can store config
         self.post_json(
-            "/api/settings/routines.create",
+            "/api/routines",
             &serde_json::json!({
                 "name": name,
                 "description": description,
                 "schedule": schedule,
                 "task": task,
             }),
+        )
+        .await
+    }
+
+    /// Toggle a routine enabled/disabled.
+    pub async fn toggle_routine(
+        &self,
+        routine_id: &str,
+        enabled: bool,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json(
+            &format!("/api/routines/{}/toggle", urlencoding::encode(routine_id)),
+            &serde_json::json!({ "enabled": enabled }),
+        )
+        .await
+    }
+
+    /// Delete a routine.
+    pub async fn delete_routine(&self, routine_id: &str) -> Result<serde_json::Value, String> {
+        self.delete_json(&format!(
+            "/api/routines/{}",
+            urlencoding::encode(routine_id)
+        ))
+        .await?;
+        Ok(serde_json::json!({ "ok": true, "deleted_id": routine_id }))
+    }
+
+    /// Clear routine run history. If `routine_id` is absent, clears runs for
+    /// all routines visible to the authenticated remote principal.
+    pub async fn clear_routine_runs(
+        &self,
+        routine_id: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        self.delete_json_body(
+            "/api/routines/runs",
+            &serde_json::json!({ "routine_id": routine_id }),
+        )
+        .await
+    }
+
+    // ── Channels / Pairing ─────────────────────────────────────────────────
+
+    /// List pending and approved channel pairings.
+    pub async fn list_pairings(&self, channel: &str) -> Result<serde_json::Value, String> {
+        self.get_json(&format!("/api/pairing/{}", urlencoding::encode(channel)))
+            .await
+    }
+
+    /// Approve a channel pairing code.
+    pub async fn approve_pairing(
+        &self,
+        channel: &str,
+        code: &str,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json(
+            &format!("/api/pairing/{}/approve", urlencoding::encode(channel)),
+            &serde_json::json!({ "code": code }),
         )
         .await
     }
@@ -564,6 +626,20 @@ impl RemoteGatewayProxy {
         .await
     }
 
+    /// List remote providers with sanitized credential status only.
+    pub async fn list_provider_status(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/providers").await
+    }
+
+    /// Simulate a remote route decision through ThinClaw's provider planner.
+    pub async fn simulate_route(
+        &self,
+        request: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json("/api/providers/route/simulate", request)
+            .await
+    }
+
     /// Save a remote provider API key through the provider vault endpoint.
     pub async fn save_provider_key(
         &self,
@@ -579,8 +655,9 @@ impl RemoteGatewayProxy {
 
     /// Delete a remote provider API key through the provider vault endpoint.
     pub async fn delete_provider_key(&self, slug: &str) -> Result<(), String> {
-        self.delete(&format!("/api/providers/{}/key", urlencoding::encode(slug)))
+        self.delete_json(&format!("/api/providers/{}/key", urlencoding::encode(slug)))
             .await
+            .map(|_| ())
     }
 
     // ── Costs ────────────────────────────────────────────────────────────────
@@ -606,18 +683,17 @@ impl RemoteGatewayProxy {
 
     /// Export a session as a formatted transcript.
     ///
-    /// Remote endpoint: GET /api/chat/export?session_key=...&format=...
+    /// The root gateway has history retrieval but no transcript export endpoint.
     pub async fn export_session(
         &self,
         session_key: &str,
         format: &str,
     ) -> Result<serde_json::Value, String> {
-        self.get_json(&format!(
-            "/api/chat/export?session_key={}&format={}",
-            urlencoding::encode(session_key),
-            urlencoding::encode(format)
+        let _ = (session_key, format);
+        Err(Self::unavailable(
+            "session export",
+            "the gateway has no transcript export endpoint",
         ))
-        .await
     }
 
     // ── Extensions ───────────────────────────────────────────────────────────
@@ -625,6 +701,26 @@ impl RemoteGatewayProxy {
     /// List all extensions.
     pub async fn list_extensions(&self) -> Result<serde_json::Value, String> {
         self.get_json("/api/extensions").await
+    }
+
+    pub async fn activate_extension(&self, name: &str) -> Result<serde_json::Value, String> {
+        self.post_json(
+            &format!("/api/extensions/{}/activate", urlencoding::encode(name)),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn remove_extension(&self, name: &str) -> Result<serde_json::Value, String> {
+        self.post_json(
+            &format!("/api/extensions/{}/remove", urlencoding::encode(name)),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn list_tools(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/extensions/tools").await
     }
 
     // ── Settings / Config ────────────────────────────────────────────────────
@@ -635,6 +731,11 @@ impl RemoteGatewayProxy {
             .await
     }
 
+    /// List all non-sensitive config settings from the remote agent.
+    pub async fn list_settings(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/settings").await
+    }
+
     /// Set a config setting on the remote agent.
     pub async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<(), String> {
         let url = format!("/api/settings/{}", urlencoding::encode(key));
@@ -642,35 +743,19 @@ impl RemoteGatewayProxy {
         self.put_json(&url, &body).await.map(|_| ())
     }
 
-    /// Inject API secrets into the remote agent.
+    /// Legacy raw-secret injection is intentionally unavailable in remote mode.
     ///
-    /// This uses the IronClaw settings API to push secrets individually.
-    /// Each key is sent as a separate settings write so the agent can
-    /// store them in its own SecretStore.
-    ///
-    /// Accepts a map of { "ANTHROPIC_API_KEY": "sk-ant-..." } etc.
+    /// Remote credentials must move through the Provider Vault save/delete
+    /// endpoints so the gateway stores them in its own secrets backend and only
+    /// returns sanitized status metadata to Desktop.
     pub async fn inject_secrets(
         &self,
-        secrets: &std::collections::HashMap<String, String>,
+        _secrets: &std::collections::HashMap<String, String>,
     ) -> Result<u32, String> {
-        let mut count = 0u32;
-        for (key, value) in secrets {
-            match self
-                .set_setting(key, &serde_json::Value::String(value.clone()))
-                .await
-            {
-                Ok(()) => count += 1,
-                Err(e) => {
-                    warn!("[remote_proxy] Failed to inject secret {}: {}", key, e);
-                }
-            }
-        }
-        info!(
-            "[remote_proxy] Injected {}/{} secrets",
-            count,
-            secrets.len()
-        );
-        Ok(count)
+        Err(
+            "unavailable: remote raw secret injection is disabled; use provider vault save/delete"
+                .to_string(),
+        )
     }
 
     // ── Diagnostics / Logs ───────────────────────────────────────────────────
@@ -678,6 +763,148 @@ impl RemoteGatewayProxy {
     /// Get full diagnostics from the remote gateway.
     pub async fn get_diagnostics(&self) -> Result<serde_json::Value, String> {
         self.get_json("/api/gateway/status").await
+    }
+
+    // ── Jobs / Autonomy / Experiments / Learning / MCP ─────────────────────
+
+    pub async fn get_jobs(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/jobs").await
+    }
+
+    pub async fn get_jobs_summary(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/jobs/summary").await
+    }
+
+    pub async fn get_job_detail(&self, job_id: &str) -> Result<serde_json::Value, String> {
+        self.get_json(&format!("/api/jobs/{}", urlencoding::encode(job_id)))
+            .await
+    }
+
+    pub async fn cancel_job(&self, job_id: &str) -> Result<serde_json::Value, String> {
+        self.post_json(
+            &format!("/api/jobs/{}/cancel", urlencoding::encode(job_id)),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn restart_job(&self, job_id: &str) -> Result<serde_json::Value, String> {
+        self.post_json(
+            &format!("/api/jobs/{}/restart", urlencoding::encode(job_id)),
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn prompt_job(
+        &self,
+        job_id: &str,
+        content: Option<String>,
+        done: bool,
+    ) -> Result<serde_json::Value, String> {
+        let mut body = serde_json::Map::new();
+        if let Some(content) = content {
+            body.insert("content".to_string(), serde_json::Value::String(content));
+        }
+        body.insert("done".to_string(), serde_json::Value::Bool(done));
+        self.post_json(
+            &format!("/api/jobs/{}/prompt", urlencoding::encode(job_id)),
+            &serde_json::Value::Object(body),
+        )
+        .await
+    }
+
+    pub async fn get_job_events(&self, job_id: &str) -> Result<serde_json::Value, String> {
+        self.get_json(&format!("/api/jobs/{}/events", urlencoding::encode(job_id)))
+            .await
+    }
+
+    pub async fn list_job_files(
+        &self,
+        job_id: &str,
+        path: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let suffix = path
+            .filter(|p| !p.is_empty())
+            .map(|p| format!("?path={}", urlencoding::encode(p)))
+            .unwrap_or_default();
+        self.get_json(&format!(
+            "/api/jobs/{}/files/list{}",
+            urlencoding::encode(job_id),
+            suffix
+        ))
+        .await
+    }
+
+    pub async fn read_job_file(
+        &self,
+        job_id: &str,
+        path: &str,
+    ) -> Result<serde_json::Value, String> {
+        self.get_json(&format!(
+            "/api/jobs/{}/files/read?path={}",
+            urlencoding::encode(job_id),
+            urlencoding::encode(path)
+        ))
+        .await
+    }
+
+    pub async fn get_autonomy_status(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/autonomy/status").await
+    }
+
+    pub async fn bootstrap_autonomy(&self) -> Result<serde_json::Value, String> {
+        self.post_json("/api/autonomy/bootstrap", &serde_json::json!({}))
+            .await
+    }
+
+    pub async fn pause_autonomy(
+        &self,
+        reason: Option<String>,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json(
+            "/api/autonomy/pause",
+            &serde_json::json!({ "reason": reason }),
+        )
+        .await
+    }
+
+    pub async fn resume_autonomy(&self) -> Result<serde_json::Value, String> {
+        self.post_json("/api/autonomy/resume", &serde_json::json!({}))
+            .await
+    }
+
+    pub async fn get_autonomy_permissions(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/autonomy/permissions").await
+    }
+
+    pub async fn rollback_autonomy(&self) -> Result<serde_json::Value, String> {
+        self.post_json("/api/autonomy/rollback", &serde_json::json!({}))
+            .await
+    }
+
+    pub async fn get_autonomy_rollouts(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/autonomy/rollouts").await
+    }
+
+    pub async fn get_autonomy_checks(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/autonomy/checks").await
+    }
+
+    pub async fn get_autonomy_evidence(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/autonomy/evidence").await
+    }
+
+    pub async fn get_learning_status(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/learning/status").await
+    }
+
+    pub async fn get_experiment_projects(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/experiments/projects").await
+    }
+
+    pub async fn get_mcp_servers(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/mcp/servers").await
     }
 
     // ── SSE Event Subscription ───────────────────────────────────────────────
@@ -804,11 +1031,11 @@ impl RemoteGatewayProxy {
 
     /// Consume a live SSE response stream and forward events to Tauri.
     ///
-    /// The IronClaw gateway sends events in SSE format:
-    ///   data: {"kind":"AssistantDelta","session_key":"...","delta":"..."}\n\n
+    /// The ThinClaw gateway sends events in SSE format:
+    ///   data: {"type":"stream_chunk","thread_id":"...","content":"..."}\n\n
     ///
-    /// We parse each `data:` line as a `UiEvent` (same JSON schema as the
-    /// local TauriChannel uses) and re-emit in identical format.
+    /// We normalize each `data:` line onto the desktop `UiEvent` contract and
+    /// re-emit it on the same Tauri bus as local mode.
     async fn consume_sse_stream(
         &self,
         response: reqwest::Response,
@@ -837,7 +1064,9 @@ impl RemoteGatewayProxy {
                             continue;
                         }
 
-                        // Try to parse as UiEvent for typed re-emit
+                        // Prefer UiEvent for remote gateways that already speak
+                        // the desktop contract. Otherwise normalize ThinClaw
+                        // gateway SSE (`type`) events into the same bus.
                         match serde_json::from_str::<crate::openclaw::ui_types::UiEvent>(data) {
                             Ok(event) => {
                                 debug!("[remote_proxy] SSE event: {:?}", event);
@@ -845,16 +1074,26 @@ impl RemoteGatewayProxy {
                                     warn!("[remote_proxy] Failed to emit Tauri event: {}", e);
                                 }
                             }
-                            Err(_) => {
-                                // Not a UiEvent — emit as raw JSON so frontend
-                                // can inspect it (gracefully degraded)
-                                if let Ok(raw_json) =
-                                    serde_json::from_str::<serde_json::Value>(data)
-                                {
-                                    debug!("[remote_proxy] Unknown SSE event (raw): {}", data);
-                                    let _ = app_handle.emit("openclaw-raw-event", &raw_json);
+                            Err(_) => match serde_json::from_str::<serde_json::Value>(data) {
+                                Ok(raw_json) => {
+                                    for event in
+                                        crate::openclaw::ironclaw_types::gateway_sse_to_ui_events(
+                                            raw_json,
+                                        )
+                                    {
+                                        debug!("[remote_proxy] normalized SSE event: {:?}", event);
+                                        if let Err(e) = app_handle.emit("openclaw-event", &event) {
+                                            warn!(
+                                                "[remote_proxy] Failed to emit mapped gateway event: {}",
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
-                            }
+                                Err(e) => {
+                                    warn!("[remote_proxy] Failed to parse SSE data as JSON: {}", e)
+                                }
+                            },
                         }
                     }
                 } else {
@@ -864,5 +1103,37 @@ impl RemoteGatewayProxy {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RemoteGatewayProxy;
+
+    #[test]
+    fn unavailable_errors_are_explicitly_typed_by_prefix() {
+        let message = RemoteGatewayProxy::unavailable("chat abort", "no endpoint");
+        assert!(message.starts_with("unavailable:"));
+        assert!(message.contains("chat abort"));
+        assert!(message.contains("no endpoint"));
+    }
+
+    #[test]
+    fn constructor_normalizes_trailing_slash() {
+        let proxy = RemoteGatewayProxy::new("http://127.0.0.1:18789/", "token");
+        assert_eq!(proxy.base_url(), "http://127.0.0.1:18789");
+    }
+
+    #[tokio::test]
+    async fn raw_secret_injection_is_unavailable_in_remote_mode() {
+        let proxy = RemoteGatewayProxy::new("http://127.0.0.1:18789", "token");
+        let error = proxy
+            .inject_secrets(&std::collections::HashMap::new())
+            .await
+            .expect_err("remote raw secret injection should stay disabled");
+
+        assert!(error.starts_with("unavailable:"));
+        assert!(error.contains("raw secret injection is disabled"));
+        assert!(error.contains("provider vault save/delete"));
     }
 }

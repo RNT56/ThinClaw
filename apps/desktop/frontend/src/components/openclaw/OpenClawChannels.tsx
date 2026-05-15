@@ -19,12 +19,16 @@ import {
     ExternalLink,
     Loader2,
     CheckCircle2,
-    MessageCircle
+    MessageCircle,
+    Save,
+    ToggleLeft,
+    ToggleRight
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
 import { toast } from 'sonner';
 import { listen } from '@tauri-apps/api/event';
+import { OpenClawModeBadge, useOpenClawStatusSnapshot } from './OpenClawModeBadge';
 
 // ── Channel icon mapping ────────────────────────────────────────
 const CHANNEL_ICONS: Record<string, any> = {
@@ -192,6 +196,11 @@ export function OpenClawChannels() {
     const [expandedChannel, setExpandedChannel] = useState<string | null>(null);
     const [qrCode, setQrCode] = useState<string | null>(null);
     const [_waStatus, setWaStatus] = useState<'connected' | 'disconnected' | 'authenticating' | 'error'>('disconnected');
+    const [settingsMap, setSettingsMap] = useState<Record<string, any>>({});
+    const { status: runtimeStatus, isRemote } = useOpenClawStatusSnapshot(15000);
+    const [appleAllowFrom, setAppleAllowFrom] = useState('');
+    const [applePollInterval, setApplePollInterval] = useState('10');
+    const [gmailAllowedSenders, setGmailAllowedSenders] = useState('');
 
     const fetchChannels = useCallback(async () => {
         try {
@@ -217,8 +226,22 @@ export function OpenClawChannels() {
         }
     }, []);
 
+    const fetchSettings = useCallback(async () => {
+        try {
+            const resp = await openclaw.listSettings();
+            const next: Record<string, any> = {};
+            for (const item of resp.settings || []) {
+                next[item.key] = item.value;
+            }
+            setSettingsMap(next);
+        } catch (e) {
+            console.error('Failed to fetch channel settings:', e);
+        }
+    }, []);
+
     useEffect(() => {
         fetchChannels();
+        fetchSettings();
 
         // Listen for login events (QR codes, etc)
         const unlisten = listen('openclaw-event', (event: any) => {
@@ -243,7 +266,7 @@ export function OpenClawChannels() {
         });
 
         return () => { unlisten.then(fn => fn()); };
-    }, [fetchChannels]);
+    }, [fetchChannels, fetchSettings]);
 
     // ── Gmail OAuth + Status ────────────────────────────────────────────
     const [gmailConnecting, setGmailConnecting] = useState(false);
@@ -258,6 +281,7 @@ export function OpenClawChannels() {
                 const status = await openclaw.getGmailStatus();
                 setGmailStatus(status);
                 setGmailConnected(status.oauth_configured);
+                setGmailAllowedSenders(status.allowed_senders.join(', '));
                 if (status.label_filters.length > 0) {
                     setGmailLabelFilter(status.label_filters.join(', '));
                 }
@@ -266,6 +290,35 @@ export function OpenClawChannels() {
             }
         })();
     }, []);
+
+    useEffect(() => {
+        const allow = settingsMap['channels.apple_mail_allow_from'];
+        setAppleAllowFrom(typeof allow === 'string' ? allow : '');
+        const poll = settingsMap['channels.apple_mail_poll_interval'];
+        setApplePollInterval(poll == null ? '10' : String(poll));
+        const gmailSenders = settingsMap['channels.gmail_allowed_senders'];
+        if (typeof gmailSenders === 'string' && gmailSenders.length > 0) {
+            setGmailAllowedSenders(gmailSenders);
+        }
+    }, [settingsMap]);
+
+    const settingBool = (key: string, fallback = false) => {
+        const value = settingsMap[key];
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'string') return value === 'true';
+        return fallback;
+    };
+
+    const saveSetting = async (key: string, value: any, label: string) => {
+        try {
+            await openclaw.setSetting(key, value);
+            setSettingsMap(prev => ({ ...prev, [key]: value }));
+            toast.success(`${label} updated`);
+            fetchChannels();
+        } catch (e) {
+            toast.error(`Failed to update ${label}: ${String(e)}`);
+        }
+    };
 
     const handleGmailConnect = async () => {
         setGmailConnecting(true);
@@ -331,12 +384,15 @@ export function OpenClawChannels() {
                         <span className="ml-1 text-muted-foreground/50">/ {channels.length} total</span>
                     </p>
                 </div>
-                <button
-                    onClick={() => { setIsLoading(true); fetchChannels(); }}
-                    className="p-2.5 rounded-lg bg-card border border-border/40 hover:bg-white/5 transition-colors"
-                >
-                    <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
-                </button>
+                <div className="flex items-center gap-2">
+                    <OpenClawModeBadge status={runtimeStatus} />
+                    <button
+                        onClick={() => { setIsLoading(true); fetchChannels(); fetchSettings(); }}
+                        className="p-2.5 rounded-lg bg-card border border-border/40 hover:bg-white/5 transition-colors"
+                    >
+                        <RefreshCw className={cn("w-4 h-4", isLoading && "animate-spin")} />
+                    </button>
+                </div>
             </div>
 
             {/* Active channels */}
@@ -491,17 +547,27 @@ export function OpenClawChannels() {
                                                 </span>
                                             </div>
                                         )}
-                                        {/* Allowed senders */}
-                                        {gmailStatus?.allowed_senders && gmailStatus.allowed_senders.length > 0 && (
-                                            <div>
-                                                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60 mb-1">
-                                                    Allowed Senders
-                                                </p>
-                                                <p className="text-xs text-muted-foreground font-mono">
-                                                    {gmailStatus.allowed_senders.join(', ')}
-                                                </p>
+                                        <div>
+                                            <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
+                                                Allowed Senders
+                                            </label>
+                                            <div className="mt-1 flex gap-2">
+                                                <input
+                                                    type="text"
+                                                    value={gmailAllowedSenders}
+                                                    onChange={e => setGmailAllowedSenders(e.target.value)}
+                                                    placeholder="name@example.com, team@example.com"
+                                                    className="h-8 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-xs font-mono outline-none transition-all focus:ring-1 focus:ring-primary/30"
+                                                />
+                                                <button
+                                                    onClick={() => saveSetting('channels.gmail_allowed_senders', gmailAllowedSenders.trim() || null, 'Gmail senders')}
+                                                    className="flex h-8 items-center gap-1.5 rounded-lg border border-red-500/20 bg-red-500/10 px-3 text-[10px] font-bold uppercase tracking-wider text-red-400 hover:bg-red-500/20"
+                                                >
+                                                    <Save className="h-3.5 w-3.5" />
+                                                    Save
+                                                </button>
                                             </div>
-                                        )}
+                                        </div>
                                         {/* Label filter */}
                                         <div>
                                             <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
@@ -537,6 +603,112 @@ export function OpenClawChannels() {
                                         )}
                                     </button>
                                 )}
+                            </div>
+                        </div>
+                    </div>
+                </motion.div>
+
+                <motion.div
+                    initial={{ opacity: 0, y: 5 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="rounded-2xl border border-border/40 bg-card/30 backdrop-blur-md overflow-hidden"
+                >
+                    <div className="p-5">
+                        <div className="flex items-start gap-4">
+                            <div className={cn(
+                                "p-3 rounded-xl border transition-colors",
+                                settingBool('channels.apple_mail_enabled')
+                                    ? "bg-blue-500/10 border-blue-500/20 text-blue-400"
+                                    : "bg-white/5 border-border/40 text-muted-foreground"
+                            )}>
+                                <Mail className="w-5 h-5" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <h3 className="font-semibold text-sm">Apple Mail</h3>
+                                    <span className={cn(
+                                        "inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border",
+                                        settingBool('channels.apple_mail_enabled')
+                                            ? "text-blue-400 bg-blue-500/10 border-blue-500/20"
+                                            : "text-muted-foreground bg-zinc-500/10 border-zinc-500/20"
+                                    )}>
+                                        {settingBool('channels.apple_mail_enabled') ? 'Enabled' : 'Disabled'}
+                                    </span>
+                                    {isRemote && (
+                                        <span className="rounded-full border border-cyan-500/20 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-medium text-cyan-400">
+                                            Host-side macOS access
+                                        </span>
+                                    )}
+                                </div>
+                                <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">
+                                    {CHANNEL_DESCRIPTIONS['apple_mail']}
+                                </p>
+
+                                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                                    <button
+                                        onClick={() => saveSetting('channels.apple_mail_enabled', !settingBool('channels.apple_mail_enabled'), 'Apple Mail')}
+                                        className={cn(
+                                            "flex items-center justify-between rounded-xl border px-3 py-2 text-xs font-medium transition-all",
+                                            settingBool('channels.apple_mail_enabled')
+                                                ? "border-blue-500/25 bg-blue-500/10 text-blue-400"
+                                                : "border-border/40 bg-white/[0.03] text-muted-foreground hover:text-foreground"
+                                        )}
+                                    >
+                                        <span>Enabled</span>
+                                        {settingBool('channels.apple_mail_enabled') ? <ToggleRight className="h-4 w-4" /> : <ToggleLeft className="h-4 w-4" />}
+                                    </button>
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="number"
+                                            min={5}
+                                            max={120}
+                                            value={applePollInterval}
+                                            onChange={e => setApplePollInterval(e.target.value)}
+                                            className="h-9 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-xs font-mono outline-none focus:ring-1 focus:ring-primary/30"
+                                        />
+                                        <button
+                                            onClick={() => saveSetting('channels.apple_mail_poll_interval', Number(applePollInterval) || 10, 'Apple Mail poll interval')}
+                                            className="rounded-lg border border-border/40 bg-white/[0.03] px-3 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground"
+                                        >
+                                            Save
+                                        </button>
+                                    </div>
+                                    <div className="md:col-span-2">
+                                        <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground/60">
+                                            Allowed Senders
+                                        </label>
+                                        <div className="mt-1 flex gap-2">
+                                            <input
+                                                type="text"
+                                                value={appleAllowFrom}
+                                                onChange={e => setAppleAllowFrom(e.target.value)}
+                                                placeholder="name@example.com, team@example.com"
+                                                className="h-8 min-w-0 flex-1 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-xs font-mono outline-none transition-all focus:ring-1 focus:ring-primary/30"
+                                            />
+                                            <button
+                                                onClick={() => saveSetting('channels.apple_mail_allow_from', appleAllowFrom.trim() || null, 'Apple Mail senders')}
+                                                className="flex h-8 items-center gap-1.5 rounded-lg border border-border/40 bg-white/[0.03] px-3 text-[10px] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground"
+                                            >
+                                                <Save className="h-3.5 w-3.5" />
+                                                Save
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <button
+                                        onClick={() => saveSetting('channels.apple_mail_unread_only', !settingBool('channels.apple_mail_unread_only', true), 'Unread-only mode')}
+                                        className="flex items-center justify-between rounded-xl border border-border/40 bg-white/[0.03] px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
+                                    >
+                                        <span>Unread only</span>
+                                        {settingBool('channels.apple_mail_unread_only', true) ? <ToggleRight className="h-4 w-4 text-blue-400" /> : <ToggleLeft className="h-4 w-4" />}
+                                    </button>
+                                    <button
+                                        onClick={() => saveSetting('channels.apple_mail_mark_as_read', !settingBool('channels.apple_mail_mark_as_read', true), 'Mark-as-read mode')}
+                                        className="flex items-center justify-between rounded-xl border border-border/40 bg-white/[0.03] px-3 py-2 text-xs text-muted-foreground hover:text-foreground"
+                                    >
+                                        <span>Mark as read</span>
+                                        {settingBool('channels.apple_mail_mark_as_read', true) ? <ToggleRight className="h-4 w-4 text-blue-400" /> : <ToggleLeft className="h-4 w-4" />}
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>

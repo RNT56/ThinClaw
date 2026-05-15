@@ -17,6 +17,7 @@ use ironclaw::extensions::lifecycle_hooks::AuditLogHook;
 use ironclaw::extensions::manifest_validator::ManifestValidator;
 use ironclaw::llm::cost_tracker::CostTracker;
 use ironclaw::llm::response_cache_ext::CachedResponseStore;
+use ironclaw::llm::LlmRuntimeManager;
 
 use super::tool_bridge::TauriToolBridge;
 use super::ui_types::UiEvent;
@@ -56,6 +57,8 @@ pub(crate) struct IronClawInner {
     /// OAuth credential sync task handle; dropping it aborts the sync loop.
     #[allow(dead_code)]
     pub oauth_credential_sync: Option<ironclaw::llm::OAuthCredentialSyncHandle>,
+    /// LLM runtime manager used for provider routing, advisor state, and route simulation.
+    pub llm_runtime: Arc<LlmRuntimeManager>,
     /// Desktop-local auxiliary tasks tied to the embedded engine lifecycle.
     pub auxiliary_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -580,6 +583,16 @@ impl IronClawState {
             .await
             .as_ref()
             .map(|i| Arc::clone(&i.response_cache))
+            .ok_or_else(|| "IronClaw engine is not running".to_string())
+    }
+
+    /// Get the LLM runtime manager, or error if engine is stopped.
+    pub async fn llm_runtime(&self) -> Result<Arc<LlmRuntimeManager>, String> {
+        self.inner
+            .read()
+            .await
+            .as_ref()
+            .map(|i| Arc::clone(&i.llm_runtime))
             .ok_or_else(|| "IronClaw engine is not running".to_string())
     }
 

@@ -13,6 +13,7 @@ import {
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
 import * as openclawApi from '../../lib/openclaw';
+import { OpenClawModeBadge, useOpenClawStatusSnapshot } from './OpenClawModeBadge';
 
 type PairingItem = openclawApi.PairingItem;
 
@@ -24,14 +25,18 @@ export function OpenClawPairing() {
     const [loading, setLoading] = useState(false);
     const [approveCode, setApproveCode] = useState('');
     const [approving, setApproving] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const { status: runtimeStatus } = useOpenClawStatusSnapshot(15000);
 
     const fetchPairings = useCallback(async () => {
         setLoading(true);
         try {
             const resp = await openclawApi.listPairings(selectedChannel);
             setPairings(resp.pairings);
+            setError(null);
         } catch (err) {
             console.error('Failed to load pairings:', err);
+            setError(String(err));
             setPairings([]);
         } finally {
             setLoading(false);
@@ -40,6 +45,11 @@ export function OpenClawPairing() {
 
     useEffect(() => {
         fetchPairings();
+    }, [fetchPairings]);
+
+    useEffect(() => {
+        const timer = window.setInterval(fetchPairings, 20000);
+        return () => window.clearInterval(timer);
     }, [fetchPairings]);
 
     const handleApprove = async () => {
@@ -79,14 +89,23 @@ export function OpenClawPairing() {
                         </p>
                     </div>
                 </div>
-                <button
-                    onClick={fetchPairings}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 transition-all"
-                >
-                    <RefreshCw className={cn("w-3.5 h-3.5", loading && "animate-spin")} />
-                    Refresh
-                </button>
+                <div className="flex items-center gap-2">
+                    <OpenClawModeBadge status={runtimeStatus} />
+                    <button
+                        onClick={fetchPairings}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-white/[0.03] hover:bg-white/5 transition-all"
+                    >
+                        <RefreshCw className={cn("w-3.5 h-3.5", loading && "animate-spin")} />
+                        Refresh
+                    </button>
+                </div>
             </div>
+
+            {error && (
+                <div className="rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-xs text-amber-300">
+                    {error}
+                </div>
+            )}
 
             {/* Channel Tabs */}
             <div className="flex gap-1.5 flex-wrap">
@@ -182,6 +201,11 @@ export function OpenClawPairing() {
                         <h3 className="text-xs font-bold uppercase tracking-widest text-green-500 mb-3 flex items-center gap-1.5">
                             <UserCheck className="w-3.5 h-3.5" />
                             Approved ({activePairings.length})
+                            {pendingPairings.length > 0 && (
+                                <span className="ml-2 rounded-full bg-amber-500/10 px-2 py-0.5 text-[9px] text-amber-400">
+                                    {pendingPairings.length} pending
+                                </span>
+                            )}
                         </h3>
 
                         {activePairings.length === 0 && pendingPairings.length === 0 ? (

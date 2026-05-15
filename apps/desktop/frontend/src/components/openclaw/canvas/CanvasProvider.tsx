@@ -15,6 +15,7 @@ import type {
     CanvasAction, CanvasActionShow, UiComponent,
     PanelPosition, NotifyLevel
 } from '../../../lib/openclaw';
+import { dismissCanvasPanel, getCanvasPanel, listCanvasPanels } from '../../../lib/openclaw';
 
 // ── Panel State ─────────────────────────────────────────────────────
 
@@ -41,6 +42,10 @@ interface CanvasContextType {
     hasContent: boolean;
     /** Total panel count */
     panelCount: number;
+    /** Backend canvas command availability */
+    availability: 'checking' | 'ready' | 'unavailable';
+    availabilityReason: string | null;
+    refreshPanels: () => Promise<void>;
     /** Focus a specific panel */
     focusPanel: (id: string) => void;
     /** Dismiss a panel */
@@ -65,6 +70,8 @@ export function CanvasProviderWrapper({ children }: { children: ReactNode }) {
     const [focusedPanelId, setFocusedPanelId] = useState<string | null>(null);
     const [legacyContent, setLegacyContent] = useState<CanvasContextType['legacyContent']>(null);
     const [legacyVisible, setLegacyVisible] = useState(false);
+    const [availability, setAvailability] = useState<CanvasContextType['availability']>('checking');
+    const [availabilityReason, setAvailabilityReason] = useState<string | null>(null);
     const toastTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
     // ── Handle CanvasAction payloads ──────────────────────────────────
@@ -140,6 +147,39 @@ export function CanvasProviderWrapper({ children }: { children: ReactNode }) {
         }
     }, [focusedPanelId]);
 
+    const refreshPanels = useCallback(async () => {
+        try {
+            const listing = await listCanvasPanels();
+            const loaded = await Promise.all(
+                (listing.panels || []).map(summary => getCanvasPanel(summary.panel_id))
+            );
+            const now = Date.now();
+            const next = new Map<string, CanvasPanel>();
+            for (const panel of loaded) {
+                if (!panel) continue;
+                const metadata = (panel.metadata && typeof panel.metadata === 'object' ? panel.metadata : {}) as Record<string, any>;
+                next.set(panel.panel_id, {
+                    id: panel.panel_id,
+                    title: panel.title,
+                    components: Array.isArray(panel.components) ? panel.components as UiComponent[] : [],
+                    position: (metadata.position || 'right') as PanelPosition,
+                    modal: Boolean(metadata.modal),
+                    sessionKey: metadata.session_key,
+                    runId: metadata.run_id,
+                    createdAt: now,
+                    updatedAt: now,
+                });
+            }
+            setPanels(next);
+            setFocusedPanelId(prev => prev && next.has(prev) ? prev : next.keys().next().value || null);
+            setAvailability('ready');
+            setAvailabilityReason(null);
+        } catch (e) {
+            setAvailability('unavailable');
+            setAvailabilityReason(String(e));
+        }
+    }, []);
+
     // ── Event listeners ──────────────────────────────────────────────
     useEffect(() => {
         const unlisteners: Array<() => void> = [];
@@ -193,14 +233,16 @@ export function CanvasProviderWrapper({ children }: { children: ReactNode }) {
         };
 
         setup();
+        refreshPanels();
         return () => {
             unlisteners.forEach(u => u());
             toastTimers.current.forEach(t => clearTimeout(t));
         };
-    }, [handleCanvasAction]);
+    }, [handleCanvasAction, refreshPanels]);
 
     const focusPanel = useCallback((id: string) => setFocusedPanelId(id), []);
     const dismissPanel = useCallback((id: string) => {
+        dismissCanvasPanel(id).catch(() => { });
         setPanels(prev => {
             const next = new Map(prev);
             next.delete(id);
@@ -209,11 +251,12 @@ export function CanvasProviderWrapper({ children }: { children: ReactNode }) {
         if (focusedPanelId === id) setFocusedPanelId(null);
     }, [focusedPanelId]);
     const dismissAll = useCallback(() => {
+        panels.forEach((_panel, id) => dismissCanvasPanel(id).catch(() => { }));
         setPanels(new Map());
         setFocusedPanelId(null);
         setLegacyContent(null);
         setLegacyVisible(false);
-    }, []);
+    }, [panels]);
 
     const panelCount = panels.size + (legacyVisible && legacyContent ? 1 : 0);
     const hasContent = panelCount > 0;
@@ -221,6 +264,7 @@ export function CanvasProviderWrapper({ children }: { children: ReactNode }) {
     return (
         <CanvasContext.Provider value={{
             panels, focusedPanelId, legacyContent, hasContent, panelCount,
+            availability, availabilityReason, refreshPanels,
             focusPanel, dismissPanel, dismissAll, setLegacyVisible, legacyVisible,
         }}>
             {children}

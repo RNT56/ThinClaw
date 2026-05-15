@@ -7,12 +7,12 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Layers, X, Eye, Trash2, ChevronUp } from 'lucide-react';
+import { Layers, X, Eye, Trash2, ChevronUp, AlertTriangle, RefreshCw } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import { useCanvas } from './CanvasProvider';
 
-export function CanvasToolbar() {
-    const { panels, panelCount, focusedPanelId, focusPanel, dismissPanel, dismissAll, legacyVisible, legacyContent, setLegacyVisible } = useCanvas();
+export function CanvasToolbar({ showAvailability = false }: { showAvailability?: boolean }) {
+    const { panels, panelCount, focusedPanelId, focusPanel, dismissPanel, dismissAll, legacyVisible, legacyContent, setLegacyVisible, availability, availabilityReason, refreshPanels } = useCanvas();
     const [isOpen, setIsOpen] = useState(false);
     const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -29,7 +29,35 @@ export function CanvasToolbar() {
         }
     }, [isOpen]);
 
-    if (panelCount === 0) return null;
+    if (panelCount === 0) {
+        if (!showAvailability) return null;
+        const unavailable = availability === 'unavailable';
+        return (
+            <div ref={popoverRef} className="fixed bottom-4 right-4 z-[60]">
+                <motion.button
+                    initial={{ scale: 0 }}
+                    animate={{ scale: 1 }}
+                    onClick={() => refreshPanels()}
+                    className={cn(
+                        'flex items-center gap-2 px-3 py-2 rounded-full shadow-lg border transition-all',
+                        unavailable
+                            ? 'bg-amber-950/80 border-amber-500/20 text-amber-300'
+                            : 'bg-zinc-900/70 backdrop-blur-xl border-white/10 text-zinc-400 hover:border-cyan-500/30 hover:text-cyan-300',
+                    )}
+                    title={unavailable ? `Canvas/A2UI unavailable: ${availabilityReason || 'unknown'}` : 'Canvas/A2UI ready'}
+                >
+                    {availability === 'checking' ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : unavailable ? (
+                        <AlertTriangle className="w-4 h-4" />
+                    ) : (
+                        <Layers className="w-4 h-4" />
+                    )}
+                    <span className="text-xs font-semibold">0</span>
+                </motion.button>
+            </div>
+        );
+    }
 
     return (
         <div ref={popoverRef} className="fixed bottom-4 right-4 z-[60]">

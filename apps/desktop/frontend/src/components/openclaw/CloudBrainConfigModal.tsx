@@ -43,6 +43,34 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
     xiaomi: 'Xiaomi',
 };
 
+const PROVIDER_STATUS_KEYS: Record<string, { has: keyof openclaw.OpenClawStatus; granted: keyof openclaw.OpenClawStatus }> = {
+    anthropic: { has: 'has_anthropic_key', granted: 'anthropic_granted' },
+    openai: { has: 'has_openai_key', granted: 'openai_granted' },
+    openrouter: { has: 'has_openrouter_key', granted: 'openrouter_granted' },
+    groq: { has: 'has_groq_key', granted: 'groq_granted' },
+    gemini: { has: 'has_gemini_key', granted: 'gemini_granted' },
+    xai: { has: 'has_xai_key', granted: 'xai_granted' },
+    mistral: { has: 'has_mistral_key', granted: 'mistral_granted' },
+    together: { has: 'has_together_key', granted: 'together_granted' },
+    'amazon-bedrock': { has: 'has_bedrock_key', granted: 'bedrock_granted' },
+    venice: { has: 'has_venice_key', granted: 'venice_granted' },
+    moonshot: { has: 'has_moonshot_key', granted: 'moonshot_granted' },
+    minimax: { has: 'has_minimax_key', granted: 'minimax_granted' },
+    nvidia: { has: 'has_nvidia_key', granted: 'nvidia_granted' },
+    qianfan: { has: 'has_qianfan_key', granted: 'qianfan_granted' },
+    xiaomi: { has: 'has_xiaomi_key', granted: 'xiaomi_granted' },
+};
+
+function providerCredentialState(status: openclaw.OpenClawStatus | null, provider: string) {
+    if (!status) return { hasKey: false, granted: false };
+    const keys = PROVIDER_STATUS_KEYS[provider];
+    if (!keys) return { hasKey: false, granted: false };
+    return {
+        hasKey: Boolean(status[keys.has]),
+        granted: Boolean(status[keys.granted]),
+    };
+}
+
 const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, onClose, status, onUpdate }) => {
     const [enabledProviders, setEnabledProviders] = useState<string[]>([]);
     const [enabledModels, setEnabledModels] = useState<Record<string, string[]>>({});
@@ -56,6 +84,7 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
     const [selectedModel, setSelectedModel] = useState<string | null>(null);
     const [isSaving, setIsSaving] = useState(false);
     const [expandedModelPicker, setExpandedModelPicker] = useState<string | null>(null);
+    const [routingStatus, setRoutingStatus] = useState<openclaw.RoutingStatusResponse | null>(null);
 
     const hasInitialized = React.useRef(false);
 
@@ -111,8 +140,16 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
             hasInitialized.current = true;
         } else if (!isOpen) {
             hasInitialized.current = false;
+            setRoutingStatus(null);
         }
     }, [isOpen, status]);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        openclaw.getRoutingStatus()
+            .then(setRoutingStatus)
+            .catch(e => console.warn('[CloudBrainConfig] Failed to load routing status:', e));
+    }, [isOpen]);
 
     const handleToggleProvider = (provider: string) => {
         const isEnabled = enabledProviders.includes(provider);
@@ -266,12 +303,13 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                         </label>
 
                         <div className="grid grid-cols-1 gap-2">
-                            {['anthropic', 'openai', 'openrouter', 'groq', 'gemini', 'xai', 'mistral', 'together', 'amazon-bedrock', 'venice', 'moonshot', 'minimax', 'nvidia', 'qianfan', 'xiaomi'].map(provider => {
-                                const isEnabled = enabledProviders.includes(provider);
-                                const providerEnabledModels = enabledModels[provider] || [];
-                                const providerAllModels = providerModels[provider] || [];
+	                            {['anthropic', 'openai', 'openrouter', 'groq', 'gemini', 'xai', 'mistral', 'together', 'amazon-bedrock', 'venice', 'moonshot', 'minimax', 'nvidia', 'qianfan', 'xiaomi'].map(provider => {
+	                                const isEnabled = enabledProviders.includes(provider);
+	                                const providerEnabledModels = enabledModels[provider] || [];
+	                                const providerAllModels = providerModels[provider] || [];
+	                                const credential = providerCredentialState(status, provider);
 
-                                return (
+	                                return (
                                     <div key={provider}>
                                         <div
                                             onClick={() => handleToggleProvider(provider)}
@@ -284,11 +322,20 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                                                 }`}>
                                                 {isEnabled && <CheckCircle className="w-3 h-3 text-primary-foreground" />}
                                             </div>
-                                            <div className="flex-1">
-                                                <span className="font-medium">{PROVIDER_DISPLAY_NAMES[provider] || provider}</span>
-                                                {isEnabled && (
-                                                    <span className="text-xs text-muted-foreground ml-2 font-mono">
-                                                        ({providerEnabledModels.length}/{providerAllModels.length} models)
+	                                            <div className="flex-1">
+	                                                <span className="font-medium">{PROVIDER_DISPLAY_NAMES[provider] || provider}</span>
+	                                                <span className={`ml-2 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded ${credential.hasKey
+	                                                    ? credential.granted
+	                                                        ? 'bg-emerald-500/10 text-emerald-500'
+	                                                        : 'bg-amber-500/10 text-amber-500'
+	                                                    : 'bg-muted text-muted-foreground'
+	                                                    }`}>
+	                                                    <Key className="w-3 h-3" />
+	                                                    {credential.hasKey ? (credential.granted ? 'ready' : 'locked') : 'no key'}
+	                                                </span>
+	                                                {isEnabled && (
+	                                                    <span className="text-xs text-muted-foreground ml-2 font-mono">
+	                                                        ({providerEnabledModels.length}/{providerAllModels.length} models)
                                                     </span>
                                                 )}
                                             </div>
@@ -351,16 +398,38 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                                                                     ? 'bg-primary border-primary'
                                                                     : 'border-muted-foreground/50'
                                                                     }`}>
-                                                                    {isModelEnabled && (
-                                                                        <svg className="w-2.5 h-2.5 text-primary-foreground" viewBox="0 0 12 12" fill="none">
+	                                                {isModelEnabled && (
+	                                                                        <svg className="w-2.5 h-2.5 text-primary-foreground" viewBox="0 0 12 12" fill="none">
                                                                             <path d="M2 6l3 3 5-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                                                                         </svg>
                                                                     )}
                                                                 </div>
-                                                                <span className="font-mono text-xs">{model.label}</span>
-                                                            </div>
-                                                            <div className="flex items-center gap-2">
-                                                                {model.recommended && (
+	                                                                <span className="font-mono text-xs">{model.label}</span>
+	                                                                {selectedProvider === provider && selectedModel === model.id && (
+	                                                                    <span className="text-[9px] bg-yellow-500/15 text-yellow-500 px-1.5 py-0.5 rounded">PRIMARY</span>
+	                                                                )}
+	                                                            </div>
+	                                                            <div className="flex items-center gap-2">
+	                                                                {isModelEnabled && selectedProvider === provider && selectedModel !== model.id && (
+	                                                                    <span
+	                                                                        role="button"
+	                                                                        tabIndex={0}
+	                                                                        onClick={(e) => {
+	                                                                            e.stopPropagation();
+	                                                                            setSelectedModel(model.id);
+	                                                                        }}
+	                                                                        onKeyDown={(e) => {
+	                                                                            if (e.key === 'Enter' || e.key === ' ') {
+	                                                                                e.stopPropagation();
+	                                                                                setSelectedModel(model.id);
+	                                                                            }
+	                                                                        }}
+	                                                                        className="text-[9px] bg-yellow-500/10 text-yellow-500 px-1.5 py-0.5 rounded"
+	                                                                    >
+	                                                                        SET PRIMARY
+	                                                                    </span>
+	                                                                )}
+	                                                                {model.recommended && (
                                                                     <span className="text-[9px] bg-emerald-500/15 text-emerald-500 px-1.5 py-0.5 rounded">
                                                                         REC
                                                                     </span>
@@ -467,8 +536,8 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                     )}
 
                     {/* Active Selection Summary */}
-                    {selectedProvider && (
-                        <div className="p-3 bg-primary/5 border border-primary/10 rounded-lg">
+	                    {selectedProvider && (
+	                        <div className="p-3 bg-primary/5 border border-primary/10 rounded-lg">
                             <div className="text-[10px] text-primary/70 uppercase font-bold mb-1">Default Provider</div>
                             <div className="text-sm font-medium text-foreground">
                                 <span className="capitalize">{selectedProvider}</span>
@@ -476,13 +545,18 @@ const CloudBrainConfigModal: React.FC<CloudBrainConfigModalProps> = ({ isOpen, o
                                     <span className="text-muted-foreground font-mono"> / {selectedModel}</span>
                                 )}
                             </div>
-                            {selectedProvider !== 'custom' && (
-                                <div className="text-[10px] text-muted-foreground mt-1">
-                                    {(enabledModels[selectedProvider] || []).length} model(s) allowed for this provider
-                                </div>
-                            )}
-                        </div>
-                    )}
+	                            {selectedProvider !== 'custom' && (
+	                                <div className="text-[10px] text-muted-foreground mt-1">
+	                                    {(enabledModels[selectedProvider] || []).length} model(s) allowed for this provider
+	                                </div>
+	                            )}
+	                            {routingStatus?.cheap_model && (
+	                                <div className="text-[10px] text-muted-foreground mt-1">
+	                                    Cheap lane: <span className="font-mono">{routingStatus.cheap_model}</span>
+	                                </div>
+	                            )}
+	                        </div>
+	                    )}
                 </div>
 
                 <div className="p-4 bg-muted/30 border-t border-border flex justify-end gap-3">

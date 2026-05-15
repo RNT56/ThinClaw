@@ -1,8 +1,18 @@
 # ThinClaw Desktop: Development Setup Guide
 
-> **Last updated:** 2026-02-23
+> **Last updated:** 2026-05-15
 
 ThinClaw Desktop is a cross-platform desktop AI application built with Tauri (Rust + React). It supports **multiple inference engines** — the engine is selected at compile time via Cargo feature flags.
+
+For alpha bridge and handoff details, also see:
+
+- [Bridge Contract](bridge-contract.md)
+- [Environment Requirements](env-requirements.md)
+- [Secrets Policy](secrets-policy.md)
+- [Remote Gateway Route Matrix](remote-gateway-route-matrix.md)
+- [Packaging And Platform Readiness](packaging-platform-readiness.md)
+- [Manual Smoke Checklist](manual-smoke-checklist.md)
+- [Known Post-Alpha Items](known-post-alpha.md)
 
 | Engine | Platforms | Model Format | Notes |
 |--------|-----------|-------------|-------|
@@ -30,6 +40,10 @@ ThinClaw Desktop is a cross-platform desktop AI application built with Tauri (Ru
 - **Xcode Command Line Tools**:
   ```bash
   xcode-select --install
+  ```
+- **Full Xcode** *(release packaging only)*: required for signing and notarizing macOS release candidates. After installing Xcode, select it with:
+  ```bash
+  sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
   ```
 - **Homebrew** *(recommended)*:
   ```bash
@@ -73,11 +87,11 @@ This does everything in one go:
 | Script | npm command | What it does |
 |--------|------------|-------------|
 | `setup_chromium.sh` | `npm run setup:chromium` | Downloads Chromium for local web scraping |
-| `download_ai_binaries.js` | `npm run setup:ai` | Downloads llama-server, whisper-server, sd (Stable Diffusion) binaries + shared libraries |
+| `download_ai_binaries.cjs` | `npm run setup:ai` | Downloads macOS ARM64 alpha llama-server, whisper-server, sd (Stable Diffusion) binaries + shared libraries |
 
 All scripts are **idempotent** — they skip binaries that already exist in `backend/bin/`.
 
-> **Tip:** You can also run any sub-script individually, e.g. `npm run setup:ai` to re-download just the AI binaries.
+> **Tip:** You can also run any sub-script individually, e.g. `npm run setup:ai` to re-download just the AI binaries. For non-macOS-ARM64 local builds, prefer the engine-specific scripts such as `scripts/setup_llama.sh` and `scripts/setup_uv.sh`.
 
 ### 3. Advanced: Individual Sidecar Setup
 If you need specific binaries individually or want to update just one:
@@ -114,7 +128,7 @@ On Linux, the suffix would be `x86_64-unknown-linux-gnu`. On Windows, `x86_64-pc
 
 ### Default (llama.cpp)
 ```bash
-npm run tauri dev
+npm run tauri:dev:llamacpp
 ```
 This uses the default Cargo feature `llamacpp`. The app will launch with llama.cpp as the inference engine.
 
@@ -122,19 +136,16 @@ This uses the default Cargo feature `llamacpp`. The app will launch with llama.c
 To develop with a different engine, pass the feature flags through to Cargo:
 ```bash
 # MLX (macOS Apple Silicon only)
-npm run tauri dev -- -- --no-default-features --features mlx
+npm run tauri:dev:mlx
 
 # vLLM (Linux CUDA only)
-npm run tauri dev -- -- --no-default-features --features vllm
+npm run tauri:dev:vllm
 
 # Ollama (requires `ollama serve` running separately)
-npm run tauri dev -- -- --no-default-features --features ollama
-
-# Cloud-only (no local inference)
-npm run tauri dev -- -- --no-default-features
+npm run tauri:dev:ollama
 ```
 
-> **Note on `-- --`:** The first `--` passes args to the Tauri CLI; the second `--` passes args to `cargo build`.
+The dedicated scripts generate `backend/tauri.override.json` before launching Tauri so sidecar declarations match the selected engine.
 
 ---
 
@@ -148,7 +159,7 @@ ThinClaw Desktop provides **dedicated npm scripts** for building each engine var
 ```bash
 npm run tauri:build:llamacpp
 ```
-**Bundles:** llama-server, whisper-server, sd, piper, Chromium, all `.dylib`/`.metal` assets.
+**Bundles:** llama-server, optional whisper-server/sd/piper when present, Chromium when `backend/resources/chromium` exists or `INCLUDE_CHROMIUM=1`, and all required `.dylib`/`.metal` assets.
 
 ### MLX Build *(macOS Apple Silicon)*
 ```bash
@@ -158,7 +169,7 @@ bash scripts/setup_uv.sh
 # Build
 npm run tauri:build:mlx
 ```
-**Bundles:** `uv` (Python manager), whisper-server, piper, Chromium.
+**Bundles:** `uv` (Python manager), optional whisper-server/piper when present, Chromium when `backend/resources/chromium` exists or `INCLUDE_CHROMIUM=1`.
 **Does NOT bundle:** llama-server, sd (not needed for MLX inference).
 **First-launch behavior:** The app shows an `EngineSetupBanner` guiding the user through a one-time Python environment setup (~200 MB, 2-3 minutes).
 
@@ -170,14 +181,14 @@ bash scripts/setup_uv.sh
 # Build
 npm run tauri:build:vllm
 ```
-**Bundles:** `uv`, whisper-server, piper, Chromium.
+**Bundles:** `uv`, optional whisper-server/piper when present, Chromium when `backend/resources/chromium` exists or `INCLUDE_CHROMIUM=1`.
 **First-launch behavior:** Same as MLX — one-time Python bootstrap (~1 GB, 5-10 minutes).
 
 ### Ollama Build
 ```bash
 npm run tauri:build:ollama
 ```
-**Bundles:** whisper-server, piper, Chromium.
+**Bundles:** optional whisper-server/piper when present, Chromium when `backend/resources/chromium` exists or `INCLUDE_CHROMIUM=1`.
 **Does NOT bundle:** llama-server, uv (Ollama manages its own inference).
 **Requires:** User must install [Ollama](https://ollama.ai) separately and run `ollama serve`.
 
@@ -185,8 +196,13 @@ npm run tauri:build:ollama
 ```bash
 npm run tauri:build:cloud
 ```
-**Bundles:** Chromium.
+**Bundles:** Chromium when `backend/resources/chromium` exists or `INCLUDE_CHROMIUM=1`.
 **Minimal footprint** — no local inference at all. Uses cloud providers (Anthropic, OpenAI, Gemini, Groq, etc.) exclusively.
+
+For an unsigned local packaging smoke without updater signing secrets:
+```bash
+npm run tauri:build:cloud:unsigned
+```
 
 ### What `generate_tauri_overrides.sh` Does
 
@@ -198,6 +214,16 @@ The `scripts/generate_tauri_overrides.sh` script generates `backend/tauri.overri
 | mlx / vllm | uv, whisper, whisper-server, tts | `libwhisper*.dylib`, chromium |
 | ollama | whisper, whisper-server, tts | `libwhisper*.dylib`, chromium |
 | none (cloud) | *(none)* | chromium |
+
+Chromium inclusion is automatic when `backend/resources/chromium` exists. Use `INCLUDE_CHROMIUM=1 npm run tauri:build:llamacpp` for release builds that must fail if Chromium has not been prepared, or `INCLUDE_CHROMIUM=0` for a deliberate no-browser bundle.
+
+Release builds keep updater artifacts enabled and require `TAURI_SIGNING_PRIVATE_KEY`. The unsigned cloud smoke disables updater artifact generation through the generated override only for local validation.
+
+### Packaging Readiness Gate
+```bash
+npm run validate:packaging
+```
+This validates Tauri metadata, macOS app identity, entitlements, updater metadata, sidecar override generation, Keychain identifier alignment, legacy Scrappy fallback tests, and migration path checks. See [Packaging And Platform Readiness](packaging-platform-readiness.md).
 
 ---
 
@@ -284,12 +310,40 @@ While ThinClaw Desktop can run fully local AI, its advanced features benefit fro
 
 ## 🔌 MCP Server (External Tool Integration)
 
-ThinClaw Desktop supports connecting to a custom **FastAPI MCP server** to extend the agent with remote tools (finance APIs, news feeds, domain-specific capabilities).
+ThinClaw Desktop has two MCP surfaces:
+
+1. A legacy **FastAPI MCP sandbox** setting for custom remote tools used by the older Rhai sandbox path.
+2. First-class **ThinClaw MCP server management** for configured MCP servers, tools, resources, prompts, OAuth metadata, log levels, and pending interactions.
 
 - Configure in **Settings → MCP Server**.
 - Enter your server's **Base URL** and optional **JWT Bearer Token**.
 - Toggle **Enable MCP Sandbox** to allow the agent to discover and execute MCP tools via Rhai scripts during conversations.
-- Use the **Test Connection** button to verify reachability before enabling.
+- Use the **Test Connection** button to verify legacy FastAPI sandbox reachability before enabling.
+- Use the **ThinClaw MCP Servers** section to inspect configured ThinClaw MCP servers and their live capabilities.
+
+---
+
+## 🔐 Secrets And Remote Gateway Notes
+
+- Store provider keys in **Settings → Secrets** where possible.
+- Saving a key does not grant agent access. Toggle **Grant Access** per provider.
+- New writes use ThinClaw identifiers; legacy Scrappy/OpenClaw names are read-only fallback inputs.
+- Remote gateway mode can save/delete/status provider-vault keys, but it must never return raw secrets to Desktop.
+- Raw secret injection is local-only and intentionally unavailable in remote mode.
+
+For the full policy, see [Secrets Policy](secrets-policy.md).
+
+---
+
+## 🌐 Remote Gateway Mode
+
+Desktop can connect to a remote ThinClaw gateway while preserving the same frontend IPC and event contract.
+
+- Tauri command names remain `openclaw_*`.
+- Events still arrive on `openclaw-event`.
+- Gateway SSE events are normalized into the same `UiEvent` schema as local mode.
+- Unsupported remote behavior must show a concrete unavailable reason.
+- The route-by-route support table lives in [Remote Gateway Route Matrix](remote-gateway-route-matrix.md).
 
 ---
 

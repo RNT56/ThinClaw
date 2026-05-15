@@ -41,6 +41,79 @@ pub(crate) async fn routines_list_handler(
     Ok(Json(RoutineListResponse { routines: items }))
 }
 
+pub(crate) async fn routines_create_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    Json(req): Json<RoutineCreateRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let schedule =
+        crate::agent::routine::canonicalize_schedule_expr(&req.schedule).map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid schedule: {error}"),
+            )
+        })?;
+    let next_fire_at = crate::agent::routine::next_schedule_fire(&schedule).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid schedule: {error}"),
+        )
+    })?;
+    let now = chrono::Utc::now();
+    let routine_id = Uuid::new_v4();
+    let routine = crate::agent::routine::Routine {
+        id: routine_id,
+        name: req.name.clone(),
+        description: req.description.clone(),
+        user_id: request_identity.principal_id.clone(),
+        actor_id: request_identity.actor_id.clone(),
+        enabled: true,
+        trigger: crate::agent::routine::Trigger::Cron {
+            schedule: schedule.clone(),
+        },
+        action: crate::agent::routine::RoutineAction::FullJob {
+            title: req.name.clone(),
+            description: req.task.clone(),
+            max_iterations: 10,
+            allowed_tools: None,
+            allowed_skills: None,
+            tool_profile: None,
+        },
+        guardrails: crate::agent::routine::RoutineGuardrails::default(),
+        notify: crate::agent::routine::NotifyConfig::default(),
+        policy: crate::agent::routine::RoutinePolicy::default(),
+        last_run_at: None,
+        next_fire_at,
+        run_count: 0,
+        consecutive_failures: 0,
+        state: serde_json::Value::Null,
+        config_version: 1,
+        created_at: now,
+        updated_at: now,
+    };
+
+    store
+        .create_routine(&routine)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    refresh_event_cache_if_present(state.as_ref()).await;
+
+    Ok(Json(serde_json::json!({
+        "id": routine_id.to_string(),
+        "name": req.name,
+        "description": req.description,
+        "schedule": schedule,
+        "task": req.task,
+        "created_at": now.to_rfc3339(),
+        "next_fire_at": routine.next_fire_at.map(|ts| ts.to_rfc3339()),
+    })))
+}
+
 pub(crate) async fn routines_summary_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -418,6 +491,52 @@ pub(crate) async fn routines_runs_handler(
     Ok(Json(serde_json::json!({
         "routine_id": routine_id,
         "runs": run_infos,
+    })))
+}
+
+pub(crate) async fn routines_clear_runs_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    Json(req): Json<RoutineClearRunsRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let routine_ids = if let Some(routine_id) = req.routine_id {
+        let routine = store
+            .get_routine(routine_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+        if routine.user_id != request_identity.principal_id
+            || routine.owner_actor_id() != request_identity.actor_id
+        {
+            return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+        }
+        vec![routine_id]
+    } else {
+        store
+            .list_routines_for_actor(&request_identity.principal_id, &request_identity.actor_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .into_iter()
+            .map(|routine| routine.id)
+            .collect()
+    };
+
+    let mut deleted = 0u64;
+    for routine_id in routine_ids {
+        deleted += store
+            .delete_routine_runs(routine_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
+    Ok(Json(serde_json::json!({
+        "deleted": deleted,
+        "scope": req.routine_id.map(|id| id.to_string()).unwrap_or_else(|| "all".to_string()),
     })))
 }
 

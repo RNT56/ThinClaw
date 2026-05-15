@@ -118,6 +118,14 @@ fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
         "import {\n\tinvoke as TAURI_INVOKE,\n\tChannel as TAURI_CHANNEL,\n} from \"@tauri-apps/api/core\";",
         "import { invoke as TAURI_INVOKE } from \"@tauri-apps/api/core\";",
     );
+    source = source.replace(
+        "async openclawMcpGetPrompt(serverName: string, promptName: string, arguments: JsonValue | null)",
+        "async openclawMcpGetPrompt(serverName: string, promptName: string, promptArguments: JsonValue | null)",
+    );
+    source = source.replace(
+        "TAURI_INVOKE(\"openclaw_mcp_get_prompt\", { serverName, promptName, arguments })",
+        "TAURI_INVOKE(\"openclaw_mcp_get_prompt\", { serverName, promptName, arguments: promptArguments })",
+    );
 
     if !source.contains("export const events =") {
         if let (Some(import_start), Some(result_start)) = (
@@ -127,8 +135,14 @@ fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
             source.replace_range(import_start..result_start, "");
         }
         if let Some(events_start) = source.find("\nfunction __makeEvents__") {
-            source.truncate(events_start);
-            source.push('\n');
+            let commands_start = source.find("export const commands");
+            if commands_start
+                .map(|start| events_start > start)
+                .unwrap_or(events_start > 0)
+            {
+                source.truncate(events_start);
+                source.push('\n');
+            }
         }
     }
 
@@ -144,6 +158,48 @@ fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(all(test, debug_assertions))]
+mod binding_sanitizer_tests {
+    use super::sanitize_typescript_bindings;
+
+    #[test]
+    fn sanitizer_restores_tauri_channel_type_and_prompt_argument_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bindings.ts");
+        std::fs::write(
+            &path,
+            r#"import {
+	invoke as TAURI_INVOKE,
+	Channel as TAURI_CHANNEL,
+} from "@tauri-apps/api/core";
+import * as TAURI_API_EVENT from "@tauri-apps/api/event";
+export type Result<T, E> = { status: "ok"; data: T } | { status: "error"; error: E }
+export type TAURI_CHANNEL<TSend> = null
+export const commands = {
+async openclawMcpGetPrompt(serverName: string, promptName: string, arguments: JsonValue | null) {
+    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_get_prompt", { serverName, promptName, arguments }) };
+}
+}
+function __makeEvents__() {}
+"#,
+        )
+        .expect("write binding fixture");
+
+        sanitize_typescript_bindings(path.to_str().expect("utf8 path")).expect("sanitize");
+        let sanitized = std::fs::read_to_string(path).expect("read sanitized bindings");
+
+        assert!(sanitized.contains("import { invoke as TAURI_INVOKE }"));
+        assert!(sanitized.contains(
+            "export type TAURI_CHANNEL<TSend> = import(\"@tauri-apps/api/core\").Channel<TSend>"
+        ));
+        assert!(sanitized.contains("promptArguments: JsonValue | null"));
+        assert!(sanitized.contains("arguments: promptArguments"));
+        assert!(!sanitized.contains("import * as TAURI_API_EVENT"));
+        assert!(!sanitized.contains("function __makeEvents__"));
+        assert!(sanitized.ends_with('\n'));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -242,7 +298,8 @@ pub fn run() {
     #[cfg(debug_assertions)]
     specta_builder
         .export(
-            specta_typescript::Typescript::default(),
+            specta_typescript::Typescript::default()
+                .bigint(specta_typescript::BigIntExportBehavior::Number),
             "../frontend/src/lib/bindings.ts",
         )
         .expect("Failed to export typescript bindings");

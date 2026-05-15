@@ -15,12 +15,45 @@ use super::OpenClawManager;
 use crate::openclaw::ironclaw_bridge::IronClawState;
 use crate::sidecar::SidecarManager;
 
+async fn remote_secret_reads_are_opaque(ironclaw: &IronClawState) -> bool {
+    ironclaw.remote_proxy().await.is_some()
+}
+
+async fn save_remote_provider_key_if_needed(
+    ironclaw: &IronClawState,
+    provider_slug: &str,
+    key: Option<&str>,
+) -> Result<bool, String> {
+    let Some(proxy) = ironclaw.remote_proxy().await else {
+        return Ok(false);
+    };
+
+    let trimmed = key.unwrap_or("").trim();
+    let provider_slug = normalize_provider_slug(provider_slug);
+    if trimmed.is_empty() {
+        proxy
+            .delete_provider_key(&provider_slug)
+            .await
+            .map_err(|err| format!("remote provider key delete failed: {}", err))?;
+    } else {
+        proxy
+            .save_provider_key(&provider_slug, trimmed)
+            .await
+            .map_err(|err| format!("remote provider key save failed: {}", err))?;
+    }
+    Ok(true)
+}
+
 /// Get OpenAI API key
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_get_openai_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<Option<String>, String> {
+    if remote_secret_reads_are_opaque(&ironclaw).await {
+        return Ok(None);
+    }
     let config = state.get_config().await;
     Ok(config.and_then(|cfg| cfg.openai_api_key.clone()))
 }
@@ -30,8 +63,13 @@ pub async fn openclaw_get_openai_key(
 #[specta::specta]
 pub async fn openclaw_save_openai_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     key: Option<String>,
 ) -> Result<(), String> {
+    if save_remote_provider_key_if_needed(&ironclaw, "openai", key.as_deref()).await? {
+        return Ok(());
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -68,7 +106,11 @@ pub async fn openclaw_save_openai_key(
 #[specta::specta]
 pub async fn openclaw_get_openrouter_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<Option<String>, String> {
+    if remote_secret_reads_are_opaque(&ironclaw).await {
+        return Ok(None);
+    }
     let config = state.get_config().await;
     Ok(config.and_then(|cfg| cfg.openrouter_api_key.clone()))
 }
@@ -78,8 +120,13 @@ pub async fn openclaw_get_openrouter_key(
 #[specta::specta]
 pub async fn openclaw_save_openrouter_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     key: Option<String>,
 ) -> Result<(), String> {
+    if save_remote_provider_key_if_needed(&ironclaw, "openrouter", key.as_deref()).await? {
+        return Ok(());
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -115,7 +162,11 @@ pub async fn openclaw_save_openrouter_key(
 #[specta::specta]
 pub async fn openclaw_get_gemini_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<Option<String>, String> {
+    if remote_secret_reads_are_opaque(&ironclaw).await {
+        return Ok(None);
+    }
     let config = state.get_config().await;
     Ok(config.and_then(|cfg| cfg.gemini_api_key.clone()))
 }
@@ -125,8 +176,13 @@ pub async fn openclaw_get_gemini_key(
 #[specta::specta]
 pub async fn openclaw_save_gemini_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     key: Option<String>,
 ) -> Result<(), String> {
+    if save_remote_provider_key_if_needed(&ironclaw, "gemini", key.as_deref()).await? {
+        return Ok(());
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -163,7 +219,11 @@ pub async fn openclaw_save_gemini_key(
 #[specta::specta]
 pub async fn openclaw_get_groq_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<Option<String>, String> {
+    if remote_secret_reads_are_opaque(&ironclaw).await {
+        return Ok(None);
+    }
     let config = state.get_config().await;
     Ok(config.and_then(|cfg| cfg.groq_api_key.clone()))
 }
@@ -173,8 +233,13 @@ pub async fn openclaw_get_groq_key(
 #[specta::specta]
 pub async fn openclaw_save_groq_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     key: Option<String>,
 ) -> Result<(), String> {
+    if save_remote_provider_key_if_needed(&ironclaw, "groq", key.as_deref()).await? {
+        return Ok(());
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -211,7 +276,11 @@ pub async fn openclaw_save_groq_key(
 #[specta::specta]
 pub async fn openclaw_get_anthropic_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<Option<String>, String> {
+    if remote_secret_reads_are_opaque(&ironclaw).await {
+        return Ok(None);
+    }
     let config = state.get_config().await;
     Ok(config.and_then(|cfg| cfg.anthropic_api_key.clone()))
 }
@@ -221,7 +290,11 @@ pub async fn openclaw_get_anthropic_key(
 #[specta::specta]
 pub async fn openclaw_get_brave_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<Option<String>, String> {
+    if remote_secret_reads_are_opaque(&ironclaw).await {
+        return Ok(None);
+    }
     let config = state.get_config().await;
     Ok(config.and_then(|cfg| cfg.brave_search_api_key.clone()))
 }
@@ -231,8 +304,13 @@ pub async fn openclaw_get_brave_key(
 #[specta::specta]
 pub async fn openclaw_save_anthropic_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     key: Option<String>,
 ) -> Result<(), String> {
+    if save_remote_provider_key_if_needed(&ironclaw, "anthropic", key.as_deref()).await? {
+        return Ok(());
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -280,8 +358,16 @@ pub async fn openclaw_save_anthropic_key(
 #[specta::specta]
 pub async fn openclaw_save_brave_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     key: Option<String>,
 ) -> Result<(), String> {
+    if remote_secret_reads_are_opaque(&ironclaw).await {
+        return Err(
+            "unavailable: remote Brave Search key management has no ThinClaw gateway endpoint"
+                .to_string(),
+        );
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -418,8 +504,16 @@ pub async fn select_openclaw_brain(
 #[specta::specta]
 pub async fn openclaw_set_hf_token(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     token: String,
 ) -> Result<(), String> {
+    if remote_secret_reads_are_opaque(&ironclaw).await {
+        return Err(
+            "unavailable: remote Hugging Face token management has no ThinClaw gateway endpoint"
+                .to_string(),
+        );
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -512,6 +606,7 @@ pub async fn openclaw_save_implicit_provider_key(
                 .await
                 .map_err(|err| format!("remote provider key save failed: {}", err))?;
         }
+        return Ok(());
     }
 
     let mut cfg = if let Some(c) = state.get_config().await {
@@ -567,8 +662,12 @@ pub async fn openclaw_save_implicit_provider_key(
 #[specta::specta]
 pub async fn openclaw_get_implicit_provider_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     provider: String,
 ) -> Result<Option<String>, String> {
+    if remote_secret_reads_are_opaque(&ironclaw).await {
+        return Ok(None);
+    }
     let config = state.get_config().await;
     Ok(config.and_then(|cfg| cfg.get_implicit_provider_key(&provider)))
 }
@@ -578,10 +677,27 @@ pub async fn openclaw_get_implicit_provider_key(
 #[specta::specta]
 pub async fn openclaw_save_bedrock_credentials(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     access_key_id: String,
     secret_access_key: String,
     region: String,
 ) -> Result<(), String> {
+    if remote_secret_reads_are_opaque(&ironclaw).await {
+        if access_key_id.trim().is_empty() && secret_access_key.trim().is_empty() {
+            if let Some(proxy) = ironclaw.remote_proxy().await {
+                proxy
+                    .delete_provider_key("bedrock")
+                    .await
+                    .map_err(|err| format!("remote Bedrock key delete failed: {}", err))?;
+                return Ok(());
+            }
+        }
+        return Err(
+            "unavailable: remote Bedrock AWS credential management has no ThinClaw gateway endpoint for access key id, secret access key, and region"
+                .to_string(),
+        );
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -650,7 +766,11 @@ pub async fn openclaw_save_bedrock_credentials(
 #[specta::specta]
 pub async fn openclaw_get_bedrock_credentials(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
 ) -> Result<(Option<String>, Option<String>, Option<String>), String> {
+    if remote_secret_reads_are_opaque(&ironclaw).await {
+        return Ok((None, None, None));
+    }
     let config = state.get_config().await;
     Ok(config
         .map(|cfg| cfg.get_bedrock_credentials())

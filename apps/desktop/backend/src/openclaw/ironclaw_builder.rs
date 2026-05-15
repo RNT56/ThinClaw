@@ -29,6 +29,54 @@ use super::ironclaw_channel::TauriChannel;
 use super::tool_bridge::TauriToolBridge;
 use super::ui_types::UiEvent;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DesktopSendRoute {
+    session_key: String,
+}
+
+fn is_desktop_send_platform(platform: &str) -> bool {
+    matches!(
+        platform.trim().to_ascii_lowercase().as_str(),
+        "tauri" | "desktop" | "thinclaw_desktop" | "local" | "app" | "web"
+    )
+}
+
+fn is_session_like_recipient(recipient: &str) -> bool {
+    let trimmed = recipient.trim();
+    trimmed.starts_with("agent:") || trimmed.starts_with("session:")
+}
+
+fn desktop_send_route(
+    platform: &str,
+    recipient: &str,
+    thread_id: Option<&str>,
+    attachment_count: usize,
+) -> Result<DesktopSendRoute, String> {
+    if !is_desktop_send_platform(platform) {
+        return Err(format!(
+            "Desktop local send_message supports only the Tauri/Desktop event surface; \
+             platform '{}' must be routed by a configured channel.",
+            platform
+        ));
+    }
+
+    if attachment_count > 0 {
+        return Err(
+            "Desktop local send_message does not support attachments yet; use a configured channel."
+                .to_string(),
+        );
+    }
+
+    let session_key = thread_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| is_session_like_recipient(recipient).then(|| recipient.trim().to_string()))
+        .unwrap_or_else(|| "system".to_string());
+
+    Ok(DesktopSendRoute { session_key })
+}
+
 fn resolved_workspace_root() -> &'static std::sync::RwLock<Option<String>> {
     static ROOT: OnceLock<std::sync::RwLock<Option<String>>> = OnceLock::new();
     ROOT.get_or_init(|| std::sync::RwLock::new(None))
@@ -506,6 +554,42 @@ pub(crate) async fn build_inner(
     let channel_manager = Arc::new(ChannelManager::new());
     channel_manager.add(Box::new(tauri_channel)).await;
 
+    {
+        let send_handle = app_handle.clone();
+        components.tools.register_send_message_tool(Some(Arc::new(
+            move |platform: String,
+                  recipient: String,
+                  text: String,
+                  thread_id: Option<String>,
+                  attachments: Vec<ironclaw::media::MediaContent>| {
+                let send_handle = send_handle.clone();
+                Box::pin(async move {
+                    let route = desktop_send_route(
+                        &platform,
+                        &recipient,
+                        thread_id.as_deref(),
+                        attachments.len(),
+                    )?;
+                    let message_id = uuid::Uuid::new_v4().to_string();
+                    let event = UiEvent::AssistantFinal {
+                        session_key: route.session_key,
+                        run_id: None,
+                        message_id: message_id.clone(),
+                        text,
+                        usage: None,
+                    };
+
+                    use tauri::Emitter as _;
+                    send_handle
+                        .emit("openclaw-event", &event)
+                        .map_err(|error| format!("Failed to emit desktop message: {}", error))?;
+                    Ok(message_id)
+                })
+            },
+        )));
+        tracing::info!("[ironclaw] send_message tool registered for local Tauri/Desktop delivery");
+    }
+
     // ── 6. Create SSE broadcast channel + agent ─────────────────────
     // Channel must be created BEFORE AgentDeps so we can wire sse_sender in.
     // The forwarder below subscribes and forwards RoutineLifecycle events
@@ -712,6 +796,19 @@ pub(crate) async fn build_inner(
         Some(components.context_manager.clone()),
         None,
     ));
+
+    agent.tools().register_job_tools(
+        components.context_manager.clone(),
+        None,
+        components.db.clone(),
+        Some(Arc::clone(agent.scheduler())),
+        None,
+        Some(inject_tx.clone()),
+        None,
+        None,
+        components.secrets_store.clone(),
+    );
+    tracing::info!("[ironclaw] Job tools registered with desktop scheduler-backed execution");
 
     // ── 6b. Sub-agent result injector ───────────────────────────────
     // Polls the SubagentExecutor's result channel and re-injects
@@ -1106,6 +1203,96 @@ pub(crate) async fn build_inner(
         audit_log_hook,
         manifest_validator,
         oauth_credential_sync: components.oauth_credential_sync,
+        llm_runtime: components.llm_runtime.clone(),
         auxiliary_tasks,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_send_route_accepts_local_platform_aliases() {
+        for platform in [
+            "tauri",
+            "desktop",
+            "thinclaw_desktop",
+            "local",
+            "app",
+            "web",
+        ] {
+            let route = desktop_send_route(platform, "agent:main", None, 0)
+                .expect("desktop platform should be accepted");
+            assert_eq!(route.session_key, "agent:main");
+        }
+    }
+
+    #[test]
+    fn desktop_send_route_rejects_external_channel_platforms() {
+        for platform in [
+            "slack",
+            "telegram",
+            "gmail",
+            "email",
+            "apple_mail",
+            "discord",
+        ] {
+            let error = desktop_send_route(platform, "agent:main", None, 0)
+                .expect_err("external channel should not use local desktop route");
+            assert!(error.contains("supports only the Tauri/Desktop event surface"));
+        }
+    }
+
+    #[test]
+    fn desktop_send_route_thread_id_wins_over_recipient() {
+        let route = desktop_send_route("desktop", "agent:wrong", Some("agent:right"), 0)
+            .expect("desktop route should resolve");
+        assert_eq!(route.session_key, "agent:right");
+    }
+
+    #[test]
+    fn desktop_send_route_non_session_recipient_uses_system_session() {
+        let route = desktop_send_route("desktop", "local_user", None, 0)
+            .expect("desktop route should resolve");
+        assert_eq!(route.session_key, "system");
+    }
+
+    #[test]
+    fn desktop_send_route_rejects_attachments() {
+        let error = desktop_send_route("desktop", "agent:main", None, 1)
+            .expect_err("attachments should be explicit unsupported");
+        assert!(error.contains("does not support attachments"));
+    }
+
+    #[test]
+    fn agent_deps_keeps_desktop_runtime_parity_handles_wired() {
+        let source = include_str!("ironclaw_builder.rs");
+        let deps_block = source
+            .split("let agent_deps = AgentDeps")
+            .nth(1)
+            .expect("desktop AgentDeps construction should stay explicit");
+
+        for required in [
+            "store: components.db.clone()",
+            "tools: components.tools.clone()",
+            "extension_manager: components.extension_manager.clone()",
+            "skill_registry: components.skill_registry.clone()",
+            "cost_tracker: Some(components.cost_tracker.clone())",
+            "response_cache: Some(components.response_cache.clone())",
+            "llm_runtime: Some(components.llm_runtime.clone())",
+            "routing_policy: Some(components.routing_policy.clone())",
+            "sse_sender: Some(sse_tx.clone())",
+            "agent_router: Some(shared_agent_router)",
+            "agent_registry: Some(agent_registry)",
+            "canvas_store: Some(",
+            "subagent_executor: Some(subagent_executor.clone())",
+            "model_override: Some(model_override)",
+        ] {
+            assert!(
+                deps_block.contains(required),
+                "desktop AgentDeps should wire {required}"
+            );
+        }
+    }
 }

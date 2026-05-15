@@ -145,6 +145,14 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::openclaw::commands::openclaw_skills_list,
         crate::openclaw::commands::openclaw_skills_status,
         crate::openclaw::commands::openclaw_skills_toggle,
+        crate::openclaw::commands::openclaw_skills_search,
+        crate::openclaw::commands::openclaw_skill_install,
+        crate::openclaw::commands::openclaw_skill_remove,
+        crate::openclaw::commands::openclaw_skill_trust,
+        crate::openclaw::commands::openclaw_skill_reload,
+        crate::openclaw::commands::openclaw_skills_reload_all,
+        crate::openclaw::commands::openclaw_skill_inspect,
+        crate::openclaw::commands::openclaw_skill_publish,
         crate::openclaw::commands::openclaw_install_skill_repo,
         crate::openclaw::commands::openclaw_install_skill_deps,
         crate::openclaw::commands::openclaw_config_schema,
@@ -172,6 +180,25 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::openclaw::commands::openclaw_set_bootstrap_completed,
         crate::openclaw::commands::openclaw_check_bootstrap_needed,
         crate::openclaw::commands::openclaw_trigger_bootstrap,
+        crate::openclaw::commands::openclaw_jobs_list,
+        crate::openclaw::commands::openclaw_jobs_summary,
+        crate::openclaw::commands::openclaw_job_detail,
+        crate::openclaw::commands::openclaw_job_cancel,
+        crate::openclaw::commands::openclaw_job_restart,
+        crate::openclaw::commands::openclaw_job_prompt,
+        crate::openclaw::commands::openclaw_job_events,
+        crate::openclaw::commands::openclaw_job_files_list,
+        crate::openclaw::commands::openclaw_job_file_read,
+        crate::openclaw::commands::openclaw_autonomy_status,
+        crate::openclaw::commands::openclaw_autonomy_bootstrap,
+        crate::openclaw::commands::openclaw_autonomy_pause,
+        crate::openclaw::commands::openclaw_autonomy_resume,
+        crate::openclaw::commands::openclaw_autonomy_permissions,
+        crate::openclaw::commands::openclaw_desktop_permission_status,
+        crate::openclaw::commands::openclaw_autonomy_rollback,
+        crate::openclaw::commands::openclaw_autonomy_rollouts,
+        crate::openclaw::commands::openclaw_autonomy_checks,
+        crate::openclaw::commands::openclaw_autonomy_evidence,
         crate::openclaw::commands::openclaw_set_hf_token,
         crate::openclaw::commands::openclaw_save_implicit_provider_key,
         crate::openclaw::commands::openclaw_get_implicit_provider_key,
@@ -201,8 +228,26 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::openclaw::commands::openclaw_hooks_register,
         crate::openclaw::commands::openclaw_hooks_unregister,
         crate::openclaw::commands::openclaw_extensions_list,
+        crate::openclaw::commands::openclaw_extension_install,
         crate::openclaw::commands::openclaw_extension_activate,
+        crate::openclaw::commands::openclaw_extension_reconnect,
+        crate::openclaw::commands::openclaw_extension_setup_get,
+        crate::openclaw::commands::openclaw_extension_setup_submit,
+        crate::openclaw::commands::openclaw_extension_validate_setup,
         crate::openclaw::commands::openclaw_extension_remove,
+        crate::openclaw::commands::openclaw_extension_registry_search,
+        crate::openclaw::commands::openclaw_mcp_servers,
+        crate::openclaw::commands::openclaw_mcp_server,
+        crate::openclaw::commands::openclaw_mcp_server_tools,
+        crate::openclaw::commands::openclaw_mcp_server_resources,
+        crate::openclaw::commands::openclaw_mcp_read_resource,
+        crate::openclaw::commands::openclaw_mcp_resource_templates,
+        crate::openclaw::commands::openclaw_mcp_server_prompts,
+        crate::openclaw::commands::openclaw_mcp_get_prompt,
+        crate::openclaw::commands::openclaw_mcp_oauth,
+        crate::openclaw::commands::openclaw_mcp_set_log_level,
+        crate::openclaw::commands::openclaw_mcp_interactions,
+        crate::openclaw::commands::openclaw_mcp_interaction_respond,
         // Diagnostics & tools
         crate::openclaw::commands::openclaw_diagnostics,
         crate::openclaw::commands::openclaw_tools_list,
@@ -233,8 +278,35 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::openclaw::commands::openclaw_routing_rules_remove,
         crate::openclaw::commands::openclaw_routing_rules_reorder,
         crate::openclaw::commands::openclaw_routing_status,
+        crate::openclaw::commands::openclaw_routing_simulate,
         crate::openclaw::commands::openclaw_gmail_oauth_start,
         crate::openclaw::commands::openclaw_gmail_status,
+        // Experiments & learning review
+        crate::openclaw::commands::openclaw_learning_status,
+        crate::openclaw::commands::openclaw_learning_history,
+        crate::openclaw::commands::openclaw_learning_candidates,
+        crate::openclaw::commands::openclaw_learning_artifact_versions,
+        crate::openclaw::commands::openclaw_learning_provider_health,
+        crate::openclaw::commands::openclaw_learning_code_proposals,
+        crate::openclaw::commands::openclaw_learning_outcomes,
+        crate::openclaw::commands::openclaw_learning_rollbacks,
+        crate::openclaw::commands::openclaw_learning_review_code_proposal,
+        crate::openclaw::commands::openclaw_learning_review_outcome,
+        crate::openclaw::commands::openclaw_learning_record_rollback,
+        crate::openclaw::commands::openclaw_learning_evaluate_outcomes,
+        crate::openclaw::commands::openclaw_experiments_projects,
+        crate::openclaw::commands::openclaw_experiments_campaigns,
+        crate::openclaw::commands::openclaw_experiments_runners,
+        crate::openclaw::commands::openclaw_experiments_targets,
+        crate::openclaw::commands::openclaw_experiments_trials,
+        crate::openclaw::commands::openclaw_experiments_trial_artifacts,
+        crate::openclaw::commands::openclaw_experiments_model_usage,
+        crate::openclaw::commands::openclaw_experiments_opportunities,
+        crate::openclaw::commands::openclaw_experiments_gpu_clouds,
+        crate::openclaw::commands::openclaw_experiments_validate_runner,
+        crate::openclaw::commands::openclaw_experiments_campaign_action,
+        crate::openclaw::commands::openclaw_experiments_gpu_validate,
+        crate::openclaw::commands::openclaw_experiments_gpu_launch_test,
         // ── Permissions ─────────────────────────────────────────────────
         crate::permissions::get_permission_status,
         crate::permissions::request_permission,
@@ -279,4 +351,58 @@ pub fn specta_builder() -> tauri_specta::Builder {
         crate::openclaw::commands::openclaw_write_agent_workspace_file,
         crate::openclaw::commands::openclaw_reveal_file,
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn generated_bindings_cover_phase_two_desktop_surfaces() {
+        let bindings = include_str!("../../../frontend/src/lib/bindings.ts");
+
+        assert!(
+            bindings.contains("generated by [tauri-specta"),
+            "frontend bindings must stay generated, not hand-authored"
+        );
+
+        for command in [
+            "openclawRoutineCreate",
+            "openclawRoutineToggle",
+            "openclawRoutineAuditList",
+            "openclawClearRoutineRuns",
+            "openclawGmailOauthStart",
+            "openclawGmailStatus",
+            "openclawPairingList",
+            "openclawMemorySearch",
+            "openclawCanvasPanelsList",
+            "openclawCanvasPanelGet",
+            "openclawJobsList",
+            "openclawAutonomyStatus",
+            "openclawLearningStatus",
+            "openclawExperimentsProjects",
+        ] {
+            assert!(
+                bindings.contains(command),
+                "generated bindings should include {command}"
+            );
+        }
+
+        for event_variant in [
+            "PlanUpdate",
+            "UsageUpdate",
+            "LifecycleUpdate",
+            "ApprovalRequested",
+            "WebLogin",
+            "CanvasUpdate",
+            "SubAgentUpdate",
+            "AgentMessage",
+            "JobUpdate",
+            "RoutineLifecycle",
+            "CostAlert",
+        ] {
+            assert!(
+                bindings.contains(event_variant),
+                "UiEvent binding should include {event_variant}"
+            );
+        }
+    }
 }

@@ -129,7 +129,28 @@ async fn load_channel_setup_status(state: &GatewayState, user_id: &str) -> Chann
     };
 
     ChannelSetupStatus {
+        slack: build_native_lifecycle_setup_status(
+            "SLACK_ENABLED",
+            settings.channels.slack_enabled,
+            true,
+            &[
+                ("bot_token", &["SLACK_BOT_TOKEN"][..]),
+                ("app_token", &["SLACK_APP_TOKEN"][..]),
+            ],
+        ),
+        telegram: build_native_lifecycle_setup_status(
+            "TELEGRAM_ENABLED",
+            settings.channels.telegram_owner_id.is_some(),
+            true,
+            &[("bot_token", &["TELEGRAM_BOT_TOKEN"][..])],
+        ),
         gmail: build_gmail_setup_status(&settings),
+        apple_mail: build_native_lifecycle_setup_status(
+            "APPLE_MAIL_ENABLED",
+            settings.channels.apple_mail_enabled,
+            cfg!(target_os = "macos"),
+            &[],
+        ),
         nostr: build_nostr_setup_status(&settings, nostr_diagnostics.as_ref()),
         matrix: build_native_lifecycle_setup_status(
             "MATRIX_ENABLED",
@@ -496,7 +517,10 @@ pub(crate) struct GatewayStatusResponse {
 
 #[derive(serde::Serialize)]
 struct ChannelSetupStatus {
+    slack: PartialChannelSetupStatus,
+    telegram: PartialChannelSetupStatus,
     gmail: PartialChannelSetupStatus,
+    apple_mail: PartialChannelSetupStatus,
     nostr: PartialChannelSetupStatus,
     matrix: PartialChannelSetupStatus,
     voice_call: PartialChannelSetupStatus,

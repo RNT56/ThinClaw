@@ -212,6 +212,9 @@ export interface Skill {
         type: string;
         bins: string[];
     }>;
+    version?: string;
+    trust?: string;
+    keywords?: string[];
 }
 
 export interface OpenClawSkillsStatus {
@@ -585,6 +588,85 @@ export async function installOpenClawSkillRepo(repoUrl: string): Promise<string>
 
 export async function installOpenClawSkillDeps(name: string, installId?: string): Promise<void> {
     return invoke('openclaw_install_skill_deps', { name, installId });
+}
+
+export interface SkillInfo {
+    name: string;
+    description: string;
+    version: string;
+    trust: string;
+    source: string;
+    keywords: string[];
+}
+
+export interface SkillSearchResponse {
+    catalog: any[];
+    installed: SkillInfo[];
+    registry_url: string;
+    catalog_error?: string | null;
+}
+
+export interface SkillActionResponse {
+    success?: boolean;
+    ok?: boolean;
+    message?: string;
+    [key: string]: any;
+}
+
+export async function searchSkillsCatalog(query: string): Promise<SkillSearchResponse> {
+    return invoke('openclaw_skills_search', { query });
+}
+
+export async function installSkill(name: string, opts: { url?: string | null; content?: string | null; force?: boolean } = {}): Promise<SkillActionResponse> {
+    return invoke('openclaw_skill_install', {
+        name,
+        url: opts.url ?? null,
+        content: opts.content ?? null,
+        force: opts.force ?? false,
+    });
+}
+
+export async function removeSkill(name: string): Promise<SkillActionResponse> {
+    return invoke('openclaw_skill_remove', { name });
+}
+
+export async function setSkillTrust(name: string, trust: string): Promise<SkillActionResponse> {
+    return invoke('openclaw_skill_trust', { name, trust });
+}
+
+export async function reloadSkill(name: string): Promise<SkillActionResponse> {
+    return invoke('openclaw_skill_reload', { name });
+}
+
+export async function reloadAllSkills(): Promise<SkillActionResponse> {
+    return invoke('openclaw_skills_reload_all');
+}
+
+export async function inspectSkill(
+    name: string,
+    opts: { includeContent?: boolean; includeFiles?: boolean; audit?: boolean } = {},
+): Promise<any> {
+    return invoke('openclaw_skill_inspect', {
+        name,
+        includeContent: opts.includeContent ?? false,
+        includeFiles: opts.includeFiles ?? true,
+        audit: opts.audit ?? true,
+    });
+}
+
+export async function publishSkill(
+    name: string,
+    targetRepo: string,
+    opts: { dryRun?: boolean; remoteWrite?: boolean; confirmRemoteWrite?: boolean; approveRisky?: boolean } = {},
+): Promise<any> {
+    return invoke('openclaw_skill_publish', {
+        name,
+        targetRepo,
+        dryRun: opts.dryRun ?? true,
+        remoteWrite: opts.remoteWrite ?? false,
+        confirmRemoteWrite: opts.confirmRemoteWrite ?? false,
+        approveRisky: opts.approveRisky ?? false,
+    });
 }
 
 export async function getOpenClawConfigSchema(): Promise<Record<string, any>> {
@@ -985,12 +1067,20 @@ export interface ExtensionInfoItem {
     name: string;
     kind: string;
     description: string | null;
+    url: string | null;
     active: boolean;
     authenticated: boolean;
+    auth_mode: string;
+    auth_status: string;
     tools: string[];
     needs_setup: boolean;
+    shared_auth_provider: string | null;
+    missing_scopes: string[];
     activation_status: string | null;
     activation_error: string | null;
+    channel_diagnostics: any | null;
+    reconnect_supported: boolean;
+    setup: any;
 }
 
 export interface ExtensionsListResponse {
@@ -1001,6 +1091,16 @@ export interface ExtensionsListResponse {
 export interface ExtensionActionResponse {
     ok: boolean;
     message: string | null;
+    auth_url?: string | null;
+    setup_url?: string | null;
+    auth_mode?: string | null;
+    auth_status?: string | null;
+    awaiting_token?: boolean | null;
+    instructions?: string | null;
+    shared_auth_provider?: string | null;
+    missing_scopes?: string[];
+    activated?: boolean | null;
+    needs_restart?: boolean | null;
 }
 
 /** List all installed extensions/plugins. */
@@ -1008,14 +1108,91 @@ export async function listExtensions(): Promise<ExtensionsListResponse> {
     return invoke('openclaw_extensions_list');
 }
 
+export async function installExtension(name: string, url?: string | null, kind?: string | null): Promise<ExtensionActionResponse> {
+    return invoke('openclaw_extension_install', { name, url: url ?? null, kind: kind ?? null });
+}
+
+export async function searchExtensionRegistry(query?: string): Promise<{ entries: any[] }> {
+    return invoke('openclaw_extension_registry_search', { query: query ?? null });
+}
+
 /** Activate an extension by name. */
 export async function activateExtension(name: string): Promise<ExtensionActionResponse> {
     return invoke('openclaw_extension_activate', { name });
 }
 
+export async function reconnectExtension(name: string): Promise<ExtensionActionResponse> {
+    return invoke('openclaw_extension_reconnect', { name });
+}
+
+export async function getExtensionSetup(name: string): Promise<any> {
+    return invoke('openclaw_extension_setup_get', { name });
+}
+
+export async function submitExtensionSetup(name: string, secrets: Record<string, string>): Promise<ExtensionActionResponse> {
+    return invoke('openclaw_extension_setup_submit', { name, secrets });
+}
+
+export async function validateExtensionSetup(name: string): Promise<ExtensionActionResponse> {
+    return invoke('openclaw_extension_validate_setup', { name });
+}
+
 /** Remove an extension by name. */
 export async function removeExtension(name: string): Promise<ExtensionActionResponse> {
     return invoke('openclaw_extension_remove', { name });
+}
+
+export async function listMcpServers(): Promise<any> {
+    return invoke('openclaw_mcp_servers');
+}
+
+export async function getMcpServer(name: string): Promise<any> {
+    return invoke('openclaw_mcp_server', { name });
+}
+
+export async function listMcpServerTools(name: string): Promise<any> {
+    return invoke('openclaw_mcp_server_tools', { name });
+}
+
+export async function listMcpServerResources(name: string): Promise<any> {
+    return invoke('openclaw_mcp_server_resources', { name });
+}
+
+export async function readMcpResource(name: string, uri: string): Promise<any> {
+    return invoke('openclaw_mcp_read_resource', { name, uri });
+}
+
+export async function listMcpResourceTemplates(name: string): Promise<any> {
+    return invoke('openclaw_mcp_resource_templates', { name });
+}
+
+export async function listMcpServerPrompts(name: string): Promise<any> {
+    return invoke('openclaw_mcp_server_prompts', { name });
+}
+
+export async function getMcpPrompt(serverName: string, promptName: string, args?: any): Promise<any> {
+    return invoke('openclaw_mcp_get_prompt', { serverName, promptName, promptArgs: args ?? null });
+}
+
+export async function discoverMcpOauth(name: string): Promise<any> {
+    return invoke('openclaw_mcp_oauth', { name });
+}
+
+export async function setMcpLogLevel(name: string, level: string): Promise<ExtensionActionResponse> {
+    return invoke('openclaw_mcp_set_log_level', { name, level });
+}
+
+export async function listMcpInteractions(): Promise<any> {
+    return invoke('openclaw_mcp_interactions');
+}
+
+export async function respondMcpInteraction(interactionId: string, action: string, response?: any, message?: string): Promise<ExtensionActionResponse> {
+    return invoke('openclaw_mcp_interaction_respond', {
+        interactionId,
+        action,
+        response: response ?? null,
+        message: message ?? null,
+    });
 }
 
 // ============================================================================
@@ -1379,6 +1556,20 @@ export interface LatencyEntry {
 export interface RoutingStatusResponse {
     enabled: boolean;
     default_provider: string;
+    routing_mode: string;
+    primary_model: string | null;
+    preferred_cheap_provider: string | null;
+    cheap_model: string | null;
+    primary_pool_order: string[];
+    cheap_pool_order: string[];
+    fallback_chain: string[];
+    advisor_ready: boolean;
+    advisor_disabled_reason: string | null;
+    executor_target: string | null;
+    advisor_target: string | null;
+    diagnostics: string[];
+    runtime_revision: number | null;
+    llm_select_state: string;
     rule_count: number;
     rules: RoutingRuleSummary[];
     latency_data: LatencyEntry[];
@@ -1387,6 +1578,39 @@ export interface RoutingStatusResponse {
 /** Get full routing policy status including latency data. */
 export async function getRoutingStatus(): Promise<RoutingStatusResponse> {
     return invoke('openclaw_routing_status');
+}
+
+export interface RouteSimulationRequest {
+    prompt: string;
+    has_vision: boolean;
+    has_tools: boolean;
+    requires_streaming: boolean;
+}
+
+export interface RouteSimulationScore {
+    target: string;
+    telemetry_key: string | null;
+    quality: number;
+    cost: number;
+    latency: number;
+    health: number;
+    policy_bias: number;
+    composite: number;
+}
+
+export interface RouteSimulationResponse {
+    target: string;
+    reason: string;
+    fallback_chain: string[];
+    candidate_list: string[];
+    rejections: string[];
+    score_breakdown: RouteSimulationScore[];
+    diagnostics: string[];
+}
+
+/** Simulate how ThinClaw will route a prompt without executing a model call. */
+export async function simulateRouting(request: RouteSimulationRequest): Promise<RouteSimulationResponse> {
+    return invoke('openclaw_routing_simulate', { request });
 }
 
 // --- Gmail Status ---
@@ -1473,6 +1697,203 @@ export async function getAutonomyMode(): Promise<boolean> {
 }
 
 // ============================================================================
+// Jobs
+// ============================================================================
+
+export interface OpenClawJob {
+    id: string;
+    title: string;
+    state: string;
+    user_id?: string;
+    created_at?: string;
+    started_at?: string | null;
+    execution_backend?: string | null;
+    runtime_family?: string | null;
+    runtime_mode?: string | null;
+}
+
+export interface OpenClawJobSummary {
+    total: number;
+    pending: number;
+    in_progress: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    interrupted: number;
+    stuck: number;
+}
+
+export interface OpenClawJobTransition {
+    from: string;
+    to: string;
+    timestamp: string;
+    reason?: string | null;
+}
+
+export interface OpenClawJobDetail extends OpenClawJob {
+    description?: string;
+    completed_at?: string | null;
+    elapsed_secs?: number | null;
+    project_dir?: string | null;
+    browse_url?: string | null;
+    runtime_capabilities?: string[];
+    network_isolation?: string | null;
+    job_mode?: string | null;
+    interactive?: boolean;
+    transitions?: OpenClawJobTransition[];
+}
+
+export interface OpenClawJobEvent {
+    id?: string;
+    event_type: string;
+    data?: unknown;
+    created_at?: string;
+}
+
+export interface OpenClawJobFileEntry {
+    name: string;
+    path: string;
+    is_dir: boolean;
+}
+
+export async function listJobs(): Promise<{ jobs: OpenClawJob[]; capabilities?: Record<string, boolean>; unavailable?: Record<string, string> }> {
+    return safeInvoke('openclaw_jobs_list');
+}
+
+export async function getJobsSummary(): Promise<OpenClawJobSummary> {
+    return safeInvoke('openclaw_jobs_summary');
+}
+
+export async function getJobDetail(jobId: string): Promise<OpenClawJobDetail> {
+    return safeInvoke('openclaw_job_detail', { jobId });
+}
+
+export async function cancelJob(jobId: string): Promise<unknown> {
+    return safeInvoke('openclaw_job_cancel', { jobId });
+}
+
+export async function restartJob(jobId: string): Promise<unknown> {
+    return safeInvoke('openclaw_job_restart', { jobId });
+}
+
+export async function promptJob(jobId: string, content: string | null, done = false): Promise<unknown> {
+    return safeInvoke('openclaw_job_prompt', { jobId, content, done });
+}
+
+export async function getJobEvents(jobId: string): Promise<{ job_id: string; events: OpenClawJobEvent[]; events_available?: boolean; unavailable_reason?: string | null }> {
+    return safeInvoke('openclaw_job_events', { jobId });
+}
+
+export async function listJobFiles(jobId: string, path?: string): Promise<{ entries: OpenClawJobFileEntry[] }> {
+    return safeInvoke('openclaw_job_files_list', { jobId, path: path || null });
+}
+
+export async function readJobFile(jobId: string, path: string): Promise<{ path: string; content: string }> {
+    return safeInvoke('openclaw_job_file_read', { jobId, path });
+}
+
+// ============================================================================
+// Desktop autonomy runtime
+// ============================================================================
+
+export interface AutonomyStatus {
+    enabled: boolean;
+    profile: string;
+    deployment_mode: string;
+    paused: boolean;
+    pause_reason?: string | null;
+    bootstrap_passed: boolean;
+    emergency_stop_active: boolean;
+    capture_evidence: boolean;
+    kill_switch_hotkey: string;
+    current_build_id?: string | null;
+    last_bootstrap_at?: string | null;
+    last_error?: string | null;
+    code_auto_apply_paused: boolean;
+    session_ready: boolean;
+    action_ready: boolean;
+    blocking_reason?: string | null;
+    permission_summary?: unknown;
+    prerequisite_summary?: unknown;
+}
+
+export interface AutonomyCheckResult {
+    name: string;
+    passed: boolean;
+    detail?: string | null;
+    evidence?: unknown;
+}
+
+export interface AutonomyRolloutSummary {
+    current_build_id?: string | null;
+    last_successful_build_id?: string | null;
+    rollback_target_build_id?: string | null;
+    code_auto_apply_paused: boolean;
+    pause_reason?: string | null;
+    consecutive_failed_promotions: number;
+    failed_canary_count: number;
+    recent_builds: Array<{
+        build_id: string;
+        proposal_id: string;
+        title: string;
+        created_at: string;
+        promoted: boolean;
+        checks: AutonomyCheckResult[];
+        metadata?: unknown;
+    }>;
+}
+
+export interface AutonomyChecksSummary {
+    bootstrap_checks: AutonomyCheckResult[];
+    latest_canary_checks: AutonomyCheckResult[];
+    permission_report?: unknown;
+}
+
+export interface AutonomyEvidenceSummary {
+    latest_bootstrap_report?: unknown;
+    latest_canary_report?: unknown;
+    recent_events: Array<{ kind: string; message: string; timestamp?: string | null }>;
+    seeded_routines: string[];
+    seeded_skills: string[];
+}
+
+export async function getAutonomyStatus(): Promise<AutonomyStatus> {
+    return safeInvoke('openclaw_autonomy_status');
+}
+
+export async function bootstrapAutonomy(): Promise<unknown> {
+    return safeInvoke('openclaw_autonomy_bootstrap');
+}
+
+export async function pauseAutonomy(reason?: string): Promise<unknown> {
+    return safeInvoke('openclaw_autonomy_pause', { reason: reason || null });
+}
+
+export async function resumeAutonomy(): Promise<unknown> {
+    return safeInvoke('openclaw_autonomy_resume');
+}
+
+export async function getAutonomyPermissions(): Promise<unknown> {
+    return safeInvoke('openclaw_autonomy_permissions');
+}
+
+export async function rollbackAutonomy(): Promise<unknown> {
+    return safeInvoke('openclaw_autonomy_rollback');
+}
+
+export async function getAutonomyRollouts(): Promise<AutonomyRolloutSummary> {
+    return safeInvoke('openclaw_autonomy_rollouts');
+}
+
+export async function getAutonomyChecks(): Promise<AutonomyChecksSummary> {
+    return safeInvoke('openclaw_autonomy_checks');
+}
+
+export async function getAutonomyEvidence(): Promise<AutonomyEvidenceSummary> {
+    return safeInvoke('openclaw_autonomy_evidence');
+}
+
+// ============================================================================
 // Bootstrap ritual
 // ============================================================================
 
@@ -1543,4 +1964,113 @@ export async function writeAgentWorkspaceFile(relativePath: string, content: str
  */
 export async function setHeartbeatInterval(intervalMinutes: number): Promise<any> {
     return safeInvoke('openclaw_heartbeat_set_interval', { intervalMinutes });
+}
+
+// ── Experiments & learning review ───────────────────────────────────────────
+
+export type OpenClawJson = null | boolean | number | string | OpenClawJson[] | { [key: string]: OpenClawJson };
+
+export async function getLearningStatus(limit = 50): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_status', { limit });
+}
+
+export async function getLearningHistory(limit = 50): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_history', { limit });
+}
+
+export async function getLearningCandidates(limit = 50): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_candidates', { limit });
+}
+
+export async function getLearningArtifactVersions(limit = 50): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_artifact_versions', { limit });
+}
+
+export async function getLearningProviderHealth(): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_provider_health');
+}
+
+export async function getLearningCodeProposals(status: string | null = null, limit = 50): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_code_proposals', { status, limit });
+}
+
+export async function getLearningOutcomes(status: string | null = null, limit = 50): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_outcomes', { status, limit });
+}
+
+export async function getLearningRollbacks(limit = 50): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_rollbacks', { limit });
+}
+
+export async function reviewLearningCodeProposal(proposalId: string, decision: 'approve' | 'reject', note?: string): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_review_code_proposal', { proposalId, decision, note: note || null });
+}
+
+export async function reviewLearningOutcome(outcomeId: string, decision: 'confirm' | 'dismiss' | 'requeue', verdict?: 'positive' | 'neutral' | 'negative'): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_review_outcome', { outcomeId, decision, verdict: verdict || null });
+}
+
+export async function recordLearningRollback(artifactType: string, artifactName: string, reason: string, artifactVersionId?: string): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_record_rollback', {
+        artifactType,
+        artifactName,
+        artifactVersionId: artifactVersionId || null,
+        reason,
+    });
+}
+
+export async function evaluateLearningOutcomes(): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_learning_evaluate_outcomes');
+}
+
+export async function getExperimentProjects(): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_projects');
+}
+
+export async function getExperimentCampaigns(): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_campaigns');
+}
+
+export async function getExperimentRunners(): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_runners');
+}
+
+export async function getExperimentTargets(): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_targets');
+}
+
+export async function getExperimentTrials(campaignId: string): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_trials', { campaignId });
+}
+
+export async function getExperimentTrialArtifacts(trialId: string): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_trial_artifacts', { trialId });
+}
+
+export async function getExperimentModelUsage(limit = 100): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_model_usage', { limit });
+}
+
+export async function getExperimentOpportunities(limit = 100): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_opportunities', { limit });
+}
+
+export async function getExperimentGpuClouds(): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_gpu_clouds');
+}
+
+export async function validateExperimentRunner(runnerId: string): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_validate_runner', { runnerId });
+}
+
+export async function runExperimentCampaignAction(campaignId: string, action: 'pause' | 'resume' | 'cancel' | 'promote' | 'reissue-lease'): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_campaign_action', { campaignId, action });
+}
+
+export async function validateExperimentGpuCloud(provider: string): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_gpu_validate', { provider });
+}
+
+export async function launchExperimentGpuCloudTest(provider: string): Promise<OpenClawJson> {
+    return safeInvoke('openclaw_experiments_gpu_launch_test', { provider });
 }

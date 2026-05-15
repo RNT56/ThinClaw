@@ -18,6 +18,7 @@ import {
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
 import { toast } from 'sonner';
+import { OpenClawModeBadge, useOpenClawStatusSnapshot } from './OpenClawModeBadge';
 
 export function OpenClawMemory() {
     const [logs, setLogs] = useState<string[]>([]);
@@ -28,6 +29,8 @@ export function OpenClawMemory() {
     const [searchMode, setSearchMode] = useState<'files' | 'semantic'>('files');
     const [searchResults, setSearchResults] = useState<openclaw.MemorySearchResult[]>([]);
     const [isSearching, setIsSearching] = useState(false);
+    const [searchError, setSearchError] = useState<string | null>(null);
+    const { status: runtimeStatus } = useOpenClawStatusSnapshot(15000);
 
     const fetchLogs = async () => {
         try {
@@ -64,11 +67,13 @@ export function OpenClawMemory() {
         try {
             const resp = await openclaw.searchMemory(search.trim(), 20);
             setSearchResults(resp.results);
+            setSearchError(null);
             if (resp.results.length === 0) {
                 toast.info('No matching memories found');
             }
         } catch (e) {
             console.error('Memory search failed:', e);
+            setSearchError(String(e));
             toast.error('Memory search failed');
         } finally {
             setIsSearching(false);
@@ -105,9 +110,12 @@ export function OpenClawMemory() {
                             <History className="w-5 h-5 text-primary" />
                             <h2 className="text-sm font-bold uppercase tracking-wider">Temporal Logs</h2>
                         </div>
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-mono border border-primary/20">
-                            {logs.length}
-                        </span>
+                        <div className="flex items-center gap-2">
+                            <OpenClawModeBadge status={runtimeStatus} compact />
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-primary/10 text-primary font-mono border border-primary/20">
+                                {logs.length}
+                            </span>
+                        </div>
                     </div>
 
                     {/* Search Mode Toggle */}
@@ -157,6 +165,11 @@ export function OpenClawMemory() {
                             <RefreshCw className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-primary animate-spin" />
                         )}
                     </div>
+                    {searchError && (
+                        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-[10px] text-amber-300">
+                            {searchError}
+                        </div>
+                    )}
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-3 space-y-1">
@@ -170,7 +183,7 @@ export function OpenClawMemory() {
                                 className="space-y-1.5"
                             >
                                 <div className="px-2 py-1.5 text-[10px] font-bold text-primary uppercase tracking-widest">
-                                    {searchResults.length} result{searchResults.length !== 1 ? 's' : ''}
+                                    {searchResults.length} memory result{searchResults.length !== 1 ? 's' : ''}
                                 </div>
                                 {searchResults.map((result, i) => (
                                     <button

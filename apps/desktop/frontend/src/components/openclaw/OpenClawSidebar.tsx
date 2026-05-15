@@ -3,7 +3,8 @@ import {
     MessageCircle, Radio, ChevronLeft, RefreshCw, Settings,
     Layout, Smartphone, Timer, Package, Cpu, Shield, Brain, History,
     ChevronDown, Server, Laptop, Trash2, Anchor, Plug, Settings2, Activity,
-    Stethoscope, Wrench, KeyRound, DollarSign, Database, Zap, FileText, Star, GitBranch
+    Stethoscope, Wrench, KeyRound, DollarSign, Database, Zap, FileText, Star, GitBranch,
+    Play, ShieldCheck, FlaskConical, BrainCircuit
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -12,7 +13,7 @@ import { OpenClawSession } from '../../lib/openclaw';
 
 import { motion } from 'framer-motion';
 
-export type OpenClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'channel-status' | 'presence' | 'automations' | 'routine-audit' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing' | 'cost-dashboard' | 'cache-stats' | 'routing';
+export type OpenClawPage = 'chat' | 'dashboard' | 'fleet' | 'channels' | 'channel-status' | 'presence' | 'automations' | 'jobs' | 'autonomy' | 'routine-audit' | 'skills' | 'hooks' | 'plugins' | 'system-control' | 'brain' | 'memory' | 'config' | 'event-inspector' | 'doctor' | 'tool-policies' | 'pairing' | 'cost-dashboard' | 'cache-stats' | 'routing' | 'experiments' | 'learning';
 
 const containerVariants = {
     hidden: { opacity: 0 },
@@ -340,6 +341,7 @@ export function OpenClawSidebar({
                             items: [
                                 { id: 'brain', label: 'The Brain', icon: Brain },
                                 { id: 'memory', label: 'Temporal Memory', icon: History },
+                                { id: 'learning', label: 'Learning Review', icon: BrainCircuit },
                                 { id: 'cost-dashboard', label: 'Cost Dashboard', icon: DollarSign },
                                 { id: 'cache-stats', label: 'Cache Stats', icon: Database },
                             ]
@@ -358,6 +360,9 @@ export function OpenClawSidebar({
                             label: 'Automation',
                             items: [
                                 { id: 'automations', label: 'Automations', icon: Timer },
+                                { id: 'jobs', label: 'Jobs', icon: Play },
+                                { id: 'autonomy', label: 'Autonomy', icon: ShieldCheck },
+                                { id: 'experiments', label: 'Experiments', icon: FlaskConical },
                                 { id: 'routine-audit', label: 'Routine Audit', icon: FileText },
                                 { id: 'hooks', label: 'Hooks', icon: Anchor },
                             ]

@@ -288,12 +288,20 @@ pub struct ExtensionInfoItem {
     pub name: String,
     pub kind: String,
     pub description: Option<String>,
+    pub url: Option<String>,
     pub active: bool,
     pub authenticated: bool,
+    pub auth_mode: String,
+    pub auth_status: String,
     pub tools: Vec<String>,
     pub needs_setup: bool,
+    pub shared_auth_provider: Option<String>,
+    pub missing_scopes: Vec<String>,
     pub activation_status: Option<String>,
     pub activation_error: Option<String>,
+    pub channel_diagnostics: Option<serde_json::Value>,
+    pub reconnect_supported: bool,
+    pub setup: serde_json::Value,
 }
 
 /// Extensions list response
@@ -308,6 +316,16 @@ pub struct ExtensionsListResponse {
 pub struct ExtensionActionResponse {
     pub ok: bool,
     pub message: Option<String>,
+    pub auth_url: Option<String>,
+    pub setup_url: Option<String>,
+    pub auth_mode: Option<String>,
+    pub auth_status: Option<String>,
+    pub awaiting_token: Option<bool>,
+    pub instructions: Option<String>,
+    pub shared_auth_provider: Option<String>,
+    pub missing_scopes: Vec<String>,
+    pub activated: Option<bool>,
+    pub needs_restart: Option<bool>,
 }
 
 // ============================================================================
@@ -522,9 +540,58 @@ pub struct LatencyEntry {
 pub struct RoutingStatusResponse {
     pub enabled: bool,
     pub default_provider: String,
+    pub routing_mode: String,
+    pub primary_model: Option<String>,
+    pub preferred_cheap_provider: Option<String>,
+    pub cheap_model: Option<String>,
+    pub primary_pool_order: Vec<String>,
+    pub cheap_pool_order: Vec<String>,
+    pub fallback_chain: Vec<String>,
+    pub advisor_ready: bool,
+    pub advisor_disabled_reason: Option<String>,
+    pub executor_target: Option<String>,
+    pub advisor_target: Option<String>,
+    pub diagnostics: Vec<String>,
+    #[specta(type = Option<f64>)]
+    pub runtime_revision: Option<u64>,
+    pub llm_select_state: String,
     pub rule_count: u32,
     pub rules: Vec<RoutingRuleSummary>,
     pub latency_data: Vec<LatencyEntry>,
+}
+
+/// Request payload for provider route simulation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct RouteSimulationRequest {
+    pub prompt: String,
+    pub has_vision: bool,
+    pub has_tools: bool,
+    pub requires_streaming: bool,
+}
+
+/// Per-candidate score returned by ThinClaw's route planner.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct RouteSimulationScore {
+    pub target: String,
+    pub telemetry_key: Option<String>,
+    pub quality: f64,
+    pub cost: f64,
+    pub latency: f64,
+    pub health: f64,
+    pub policy_bias: f64,
+    pub composite: f64,
+}
+
+/// Result from ThinClaw route simulation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct RouteSimulationResponse {
+    pub target: String,
+    pub reason: String,
+    pub fallback_chain: Vec<String>,
+    pub candidate_list: Vec<String>,
+    pub rejections: Vec<String>,
+    pub score_breakdown: Vec<RouteSimulationScore>,
+    pub diagnostics: Vec<String>,
 }
 
 /// Gmail channel configuration status.

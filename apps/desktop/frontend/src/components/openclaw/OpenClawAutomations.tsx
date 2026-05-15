@@ -20,20 +20,24 @@ import {
     Heart,
     Activity,
     Gauge,
+    ToggleLeft,
+    ToggleRight,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as openclaw from '../../lib/openclaw';
 import { toast } from 'sonner';
+import { OpenClawModeBadge, useOpenClawStatusSnapshot } from './OpenClawModeBadge';
 
 interface JobCardProps {
     job: openclaw.CronJob;
     onRun: (key: string) => void;
     onViewHistory: (key: string) => void;
     onDelete: (key: string, name: string) => void;
+    onToggle: (key: string, enabled: boolean, name: string) => void;
     onRefresh?: () => void;
 }
 
-function JobCard({ job, onRun, onViewHistory, onDelete, onRefresh }: JobCardProps) {
+function JobCard({ job, onRun, onViewHistory, onDelete, onToggle, onRefresh }: JobCardProps) {
     const [confirmingDelete, setConfirmingDelete] = useState(false);
     const [updatingInterval, setUpdatingInterval] = useState(false);
 
@@ -112,10 +116,23 @@ function JobCard({ job, onRun, onViewHistory, onDelete, onRefresh }: JobCardProp
                     </button>
                     <button
                         onClick={() => onRun(job.key)}
+                        disabled={job.enabled === false}
                         className="p-1.5 rounded-md hover:bg-white/5 text-primary transition-colors"
-                        title="Run Now"
+                        title={job.enabled === false ? 'Enable routine before running' : 'Run Now'}
                     >
                         <Play className="w-4 h-4 fill-current" />
+                    </button>
+                    <button
+                        onClick={() => onToggle(job.key, !(job.enabled !== false), job.name ?? job.key)}
+                        className={cn(
+                            "p-1.5 rounded-md transition-colors",
+                            job.enabled === false
+                                ? "hover:bg-emerald-500/10 text-muted-foreground hover:text-emerald-400"
+                                : "hover:bg-amber-500/10 text-muted-foreground hover:text-amber-400",
+                        )}
+                        title={job.enabled === false ? 'Enable Routine' : 'Disable Routine'}
+                    >
+                        {job.enabled === false ? <ToggleLeft className="w-4 h-4" /> : <ToggleRight className="w-4 h-4" />}
                     </button>
                     {/* Only show delete button for non-system routines */}
                     {job.name !== '__heartbeat__' && (
@@ -177,7 +194,9 @@ function JobCard({ job, onRun, onViewHistory, onDelete, onRefresh }: JobCardProp
 
             <div className="mt-4 pt-4 border-t border-white/5 flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                    {job.lastStatus === 'ok' ? (
+                    {job.enabled === false ? (
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-500" />
+                    ) : job.lastStatus === 'ok' ? (
                         <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
                     ) : job.lastStatus === 'error' ? (
                         <AlertCircle className="w-3.5 h-3.5 text-red-500" />
@@ -185,7 +204,7 @@ function JobCard({ job, onRun, onViewHistory, onDelete, onRefresh }: JobCardProp
                         <CircleIcon className="w-3.5 h-3.5 text-muted-foreground/30" />
                     )}
                     <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-tight">
-                        Last Exit: {job.lastStatus || 'Never'}
+                        {job.enabled === false ? 'Disabled' : `Last Exit: ${job.lastStatus || 'Never'}`}
                     </span>
                 </div>
                 <span className="text-[10px] text-muted-foreground font-mono">
@@ -512,6 +531,7 @@ export function OpenClawAutomations() {
     const [history, setHistory] = useState<any[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [showCreateModal, setShowCreateModal] = useState(false);
+    const { status: runtimeStatus } = useOpenClawStatusSnapshot(15000);
 
     // Cron lint state
     const [cronExpr, setCronExpr] = useState('');
@@ -580,6 +600,17 @@ export function OpenClawAutomations() {
         }
     };
 
+    const handleToggle = async (key: string, enabled: boolean, name: string) => {
+        try {
+            await openclaw.toggleRoutine(key, enabled);
+            setJobs(prev => prev.map(job => job.key === key ? { ...job, enabled } : job));
+            toast.success(`Routine "${name}" ${enabled ? 'enabled' : 'disabled'}`);
+            fetchData();
+        } catch (e) {
+            toast.error(`Failed to update routine: ${String(e)}`);
+        }
+    };
+
     const handleViewHistory = async (key: string) => {
         setHistoryJob(key);
         setHistory([]);
@@ -618,6 +649,7 @@ export function OpenClawAutomations() {
                     <p className="text-muted-foreground mt-1">Managed cron jobs and scheduled agent tasks.</p>
                 </div>
                 <div className="flex items-center gap-2">
+                    <OpenClawModeBadge status={runtimeStatus} />
                     <button
                         onClick={() => setShowCreateModal(true)}
                         className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 transition-all shadow-lg shadow-primary/20"
@@ -725,6 +757,7 @@ export function OpenClawAutomations() {
                             onRun={handleRun}
                             onViewHistory={handleViewHistory}
                             onDelete={handleDelete}
+                            onToggle={handleToggle}
                             onRefresh={fetchData}
                         />
                     ))

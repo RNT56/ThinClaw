@@ -534,6 +534,8 @@ pub struct RegistrySearchQuery {
 pub struct PairingListResponse {
     pub channel: String,
     pub requests: Vec<PairingRequestInfo>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approved: Vec<PairingApprovedInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -543,6 +545,11 @@ pub struct PairingRequestInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
     pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PairingApprovedInfo {
+    pub sender_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -690,6 +697,21 @@ pub struct RoutineInfo {
 #[derive(Debug, Serialize)]
 pub struct RoutineListResponse {
     pub routines: Vec<RoutineInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoutineCreateRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub schedule: String,
+    pub task: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoutineClearRunsRequest {
+    #[serde(default)]
+    pub routine_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
