@@ -35,6 +35,15 @@ export interface SecretDescriptor {
   allowedConsumers: SecretConsumer[];
 }
 
+export interface ProviderCredentialDescriptor {
+  providerSlug: string;
+  displayName: string;
+  secretName: string;
+  envKeyName: string;
+  setupUrl?: string | null;
+  credentialReady: boolean;
+}
+
 export type LocalRuntimeKind = "llama_cpp" | "mlx" | "vllm" | "ollama" | "none";
 export type RuntimeCapability = "chat" | "embedding" | "tts" | "stt" | "diffusion";
 export type RuntimeExposurePolicy = "direct_only" | "shared_when_enabled" | "network_exposed";
@@ -104,10 +113,31 @@ export type AssetOrigin =
   | "voice_input"
   | "voice_output"
   | "rag_document";
+export type AssetStatus = "ready" | "pending" | "deleted" | "error";
+export type AssetVisibility = "private" | "shared_by_explicit_handoff";
 
 export interface AssetRef {
   namespace: AssetNamespace;
   id: string;
+}
+
+export interface AssetRecord {
+  reference: AssetRef;
+  kind: AssetKind;
+  origin: AssetOrigin;
+  status: AssetStatus;
+  visibility: AssetVisibility;
+  path: string;
+  mimeType?: string | null;
+  sizeBytes?: number | null;
+  sha256?: string | null;
+  prompt?: string | null;
+  provider?: string | null;
+  width?: number | null;
+  height?: number | null;
+  metadata: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DirectAttachedDocument {
@@ -123,4 +153,35 @@ export interface DirectChatMessage {
   attachedDocs?: DirectAttachedDocument[] | null;
   isSummary?: boolean | null;
   originalMessages?: DirectChatMessage[] | null;
+}
+
+export interface DirectChatPayload {
+  model: string;
+  messages: DirectChatMessage[];
+  temperature: number;
+  topP: number;
+  webSearchEnabled: boolean;
+  autoMode: boolean;
+  projectId?: string | null;
+  conversationId?: string | null;
+}
+
+export interface DirectTokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface DirectStreamChunk {
+  content: string;
+  done: boolean;
+  usage?: DirectTokenUsage | null;
+  contextUpdate?: DirectChatMessage[] | null;
+}
+
+export interface DirectConversation {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
 }
