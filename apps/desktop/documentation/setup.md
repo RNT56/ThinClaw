@@ -4,7 +4,7 @@
 
 ThinClaw Desktop is a cross-platform desktop AI application built with Tauri (Rust + React). It supports **multiple inference engines** — the engine is selected at compile time via Cargo feature flags.
 
-For alpha bridge and handoff details, also see:
+For alpha bridge and release-gate details, also see:
 
 - [Bridge Contract](bridge-contract.md)
 - [Environment Requirements](env-requirements.md)

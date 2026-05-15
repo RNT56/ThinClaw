@@ -4,7 +4,7 @@
 
 # ThinClaw Desktop: The ThinClaw Companion App
 
-ThinClaw Desktop is a professional, open-source AI cockpit designed for executive-level workflows, privacy-focused developers, and power users. Built on a high-performance **Tauri v2 / Rust** backend, it features a dual-engine agent architecture: the **ThinClaw** engine for autonomous tasks and a **Native Rust Agent (Rig)** for high-efficiency RAG and search.
+ThinClaw Desktop is a professional, open-source AI cockpit designed for executive-level workflows, privacy-focused developers, and power users. Built on a high-performance **Tauri v2 / Rust** backend, it intentionally contains two AI systems: the **Direct AI Workbench** for standard local/cloud chat, RAG, voice, and media generation, and the **ThinClaw Agent Cockpit** for autonomous ThinClaw runtime control.
 
 ![ThinClaw Desktop App Preview](assets/app-preview.png)
 
@@ -41,7 +41,8 @@ npm run tauri:dev:llamacpp
 - **Hugging Face**: A **Hugging Face Read Token** is highly recommended. It may be required on first launch to download gated LLMs (like Llama/Gemma) or specialized diffusion models. You can add this in **Settings > Secrets**.
 - **Models**: Download models via the in-app **Model Browser** (Settings → Models). Use the **Library** tab for bundled models or the **Discover** tab to search HuggingFace Hub. The Discover tab auto-filters by your active engine (GGUF for llama.cpp/Ollama, MLX safetensors for MLX, AWQ for vLLM).
 
-### 4. Alpha Contract And Handoff Docs
+### 4. Alpha Contract Docs
+- **[Runtime Boundaries](documentation/runtime-boundaries.md)**: the two-system Desktop architecture: Direct AI Workbench vs ThinClaw Agent Cockpit, shared services, state ownership, and iOS implications.
 - **[Bridge Contract](documentation/bridge-contract.md)**: stable Tauri command, event, routing, and binding contract.
 - **[Runtime Parity Checklist](documentation/runtime-parity-checklist.md)**: local ThinClaw runtime parity status and fixture/release criteria.
 - **[Remote Gateway Route Matrix](documentation/remote-gateway-route-matrix.md)**: local/remote command behavior and unavailable-response rules.
@@ -49,19 +50,18 @@ npm run tauri:dev:llamacpp
 - **[Secrets Policy](documentation/secrets-policy.md)**: ThinClaw key naming, grants, legacy fallback, and remote secrecy rules.
 - **[Manual Smoke Checklist](documentation/manual-smoke-checklist.md)**: repeatable local and remote release smoke.
 - **[External Release Prerequisites](documentation/external-release-prerequisites.md)**: release-operator inputs that must stay gated or documented.
-- **[Worker Handoff](documentation/handoff.md)**: source-of-truth orientation for follow-up agents.
 
 ---
 
 ## Vision & Key Capabilities
 
-*   **ThinClaw Agent Architecture**: Full implementation of the ThinClaw streaming protocol, enabling agents to plan, execute tools, and reflect in real-time.
-*   **Native Rust Agency (Rig)**: A high-performance agent built on `rig-core` for specialized RAG, deep web search, and visual asset generation.
+*   **ThinClaw Agent Cockpit**: Full implementation of the ThinClaw streaming protocol, enabling the autonomous agent runtime to plan, execute tools, and reflect in real-time.
+*   **Direct AI Workbench (Rig + Inference Router)**: A high-performance direct chat/media stack built on `rig-core`, local/cloud inference engines, RAG, deep web search, and visual asset generation.
 *   **Autonomous Agency**: The ThinClaw agent ecosystem enables human-in-the-loop agents that can execute shell commands, manage files, and browse the web.
 *   **Custom Secrets & Privacy**: Securely manage Anthropic, OpenAI, Gemini, Groq, OpenRouter, and custom API keys with granular "Grant Access" controls.
 *   **Multi-Engine Inference**: Supports **llama.cpp** (Metal/CUDA), **MLX** (Apple Silicon), **vLLM** (CUDA), and **Ollama** as swappable local inference backends — selected at compile time via Cargo feature flags. Each engine exposes a unified OpenAI-compatible HTTP API.
 *   **HuggingFace Hub Discovery**: Live search of HuggingFace models filtered by the active engine, with GGUF quantization picker, auto-mmproj detection, and streamed downloads.
-*   **Standalone Gateway Support**: Connect to local ThinClaw sidecars or remote gateways for distributed agent control.
+*   **Standalone Gateway Support**: Use the embedded ThinClaw runtime locally or connect to remote ThinClaw gateways for distributed agent control.
 *   **Imagine Studio**: A dedicated creative suite for image generation with custom bespoke icons, multiple provider support (Local Stable Diffusion, Gemini Imagen 3), and a high-performance integrated **Gallery** with real-time generation progress tracking, horizontal recent-generations strip, and settings restoration support.
 *   **MCP Server Integration**: Manage first-class ThinClaw MCP servers, tools, resources, prompts, OAuth, interaction responses, and legacy Rhai sandbox tools from Desktop.
 *   **Voice I/O (TTS & STT)**: Native Text-to-Speech (Piper) and Speech-to-Text (Whisper) sidecars for fully voice-enabled conversations.
@@ -89,60 +89,79 @@ ThinClaw Desktop includes a premium **Spotlight Bar**—a glassmorphic, system-w
 
 ## Technical Architecture
 
+ThinClaw Desktop intentionally contains two AI systems. The **Direct AI Workbench** powers standard local/cloud chat, RAG, voice, and media generation without autonomous agent behavior. The **ThinClaw Agent Cockpit** embeds or remotely controls the ThinClaw autonomous runtime. Read the **[Runtime Boundaries](documentation/runtime-boundaries.md)** before changing either path.
+
 ThinClaw Desktop uses a **Modular Sidecar Architecture**. The Rust core orchestrates several specialized processes to keep the main application lightweight and responsive.
 
 ```mermaid
 graph TD
     subgraph Frontend [React 19 Frontend - frontend/src/]
-        UI[User Interface / Glassmorphism]
-        State[State Mgmt / Hooks]
-        Stream[ThinClaw Stream Hook]
+        Shell[App Shell / Navigation]
+        DirectUI[Chat + Imagine Modes]
+        AgentUI[ThinClaw Mode]
     end
 
     subgraph Backend [Rust Core - backend/src/]
         Tauri[Tauri v2 Main]
-        Manager[Sidecar Manager]
-        Gateway[Gateway Controller]
-        RigAgent[Native Rig Agent]
-        McpManager[MCP Management]
-        McpSandbox[Legacy MCP Rhai Sandbox]
+        DirectBackend[Direct Workbench Commands]
+        SidecarManager[Sidecar Manager]
+        EngineManager[Engine Manager]
+        InferenceRouter[Inference Router]
+        RigAgent[Rig Orchestrator]
+        ThinClawBridge[ThinClaw Bridge]
+        RemoteProxy[Remote Gateway Proxy]
     end
 
     subgraph Sidecars [Sidecar Processes]
-        EngineManager[/EngineManager\]
         Llama[llama.cpp / MLX / vLLM / Ollama]
-        Claw[ThinClaw Agent \n In-Process Rust Library]
         Chromium[Chromium Web Scraper]
         Whisper[Whisper STT]
         TTS[Piper TTS]
         SD[Stable Diffusion]
     end
 
-    subgraph Storage [Persistence]
-        SQLite[(SQLite DB)]
-        Vectors[(USearch Index)]
-        Identity[(macOS Keychain + Identity.json)]
+    subgraph AgentRuntime [ThinClaw Runtime]
+        Embedded[Embedded ThinClaw Library]
+        RemoteGateway[Remote ThinClaw Gateway]
     end
 
-    UI <-->|IPC Events| Tauri
-    Tauri -->|Spawns/Monitors| Sidecars
-    Tauri <-->|Reads/Writes| Storage
-    EngineManager -->|Manages| Llama
-    Claw <-->|ACP WebSockets| UI
-    Gateway <-->|Remote/Local| Claw
-    RigAgent -->|Tools| Sidecars
-    McpManager <-->|ThinClaw MCP APIs| MCP[(MCP Servers)]
-    McpSandbox -->|HTTP/JWT| LegacyMcp[(Legacy Sandbox MCP)]
+    subgraph Storage [Persistence]
+        DirectSQLite[(Direct Workbench SQLite)]
+        Vectors[(Direct RAG USearch Index)]
+        ThinClawStore[(ThinClaw Runtime Store)]
+        Identity[(Keychain + Identity.json)]
+    end
+
+    Shell --> DirectUI
+    Shell --> AgentUI
+    DirectUI <-->|chat_stream / imagine_generate / history commands| DirectBackend
+    AgentUI <-->|thinclaw_* commands + thinclaw-event| ThinClawBridge
+    DirectBackend --> SidecarManager
+    DirectBackend --> EngineManager
+    DirectBackend --> InferenceRouter
+    DirectBackend --> RigAgent
+    SidecarManager --> Sidecars
+    EngineManager --> Llama
+    RigAgent --> Chromium
+    RigAgent --> Vectors
+    DirectBackend <-->|reads/writes| DirectSQLite
+    DirectBackend <-->|reads/writes| Vectors
+    ThinClawBridge --> Embedded
+    ThinClawBridge --> RemoteProxy
+    RemoteProxy --> RemoteGateway
+    Embedded <-->|runtime state| ThinClawStore
+    ThinClawBridge <-->|secrets/grants| Identity
+    DirectBackend <-->|provider secrets| Identity
 ```
 
-### 1. The ThinClaw Engine
+### 1. The ThinClaw Agent Cockpit
 The heart of ThinClaw Desktop's autonomous agency. Built on the **ThinClaw** Rust agent runtime, running **in-process** as a library crate — no Node.js sidecar, no WebSocket bridge:
 -   **Session Management**: Each conversation has a dedicated thread with persistent history.
 -   **Tool System**: Built-in tools for `exec` (shell), `file_io`, `browser`, `skill` extensions, and **MCP remote tools**.
 -   **Streaming Response**: Real-time streaming of tokens, tool inputs, and internal "thinking" via `TauriChannel`.
 
-### 2. The Native Rust Agent (`backend/src/rig_lib`)
-A specialized agent engine built using **Rig**. It focuses on performance and reliability for core features:
+### 2. The Direct AI Workbench (`backend/src/chat.rs`, `backend/src/rig_lib`, `backend/src/inference`)
+A non-autonomous local/cloud AI stack for standard chat, RAG, search, voice, and media generation. It focuses on direct user requests:
 -   **RAG Integration**: Direct access to the `usearch` vector store for context injection.
 -   **Deep Search**: Utilizes `DDGSearchTool` and `ScrapePageTool` for gathering real-time information.
 -   **Image Generation**: Native integration with image generation sidecars via `ImageGenTool`, featuring a premium studio interface with real-time progress tracking, style presets, and multi-resolution support (512px to 2K).
@@ -200,7 +219,7 @@ Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key 
     -   `tool_bridge.rs`: MCP tool bridge for ThinClaw agent tool calls.
     -   `sanitizer.rs`: LLM token stripping (ChatML, Llama, Jinja markers).
     -   `ui_types.rs`: `UiEvent` enum — stable UI contract (16+ variants).
--   `src/rig_lib/`: Implementation of the Native Rust Agent and its specialized tools.
+-   `src/rig_lib/`: Direct AI Workbench orchestration and specialized tools.
     -   `tools/`: `web_search.rs` (29KB), `calculator_tool.rs` (37KB), `scrape_page.rs`, `image_gen_tool.rs`, `rag_tool.rs`.
     -   `orchestrator.rs`: Multi-turn web search and synthesis pipeline.
     -   `unified_provider.rs`: Unified inference provider abstraction.
@@ -213,8 +232,7 @@ Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key 
 -   `src/tts.rs` / `src/stt.rs`: Text-to-Speech (Piper) and Speech-to-Text (Whisper) integration.
 -   `src/imagine.rs` / `src/image_gen.rs` / `src/images.rs`: Imagine Studio and image generation pipeline.
 -   MCP tools crate: Rust crate providing the MCP sandbox (Rhai scripts, tool discovery, HTTP client).
--   `documentation/thinclaw/`: Historical architectural deep-dives from the pre-ThinClaw integration era.
--   `documentation/`: Alpha contract, setup, runtime parity, route matrix, secrets policy, smoke, and handoff docs.
+-   `documentation/`: Current Desktop runtime boundaries, bridge contract, setup, route matrix, secrets policy, smoke checklist, and release-gate docs.
 
 ### Frontend (`frontend/src/`)
 -   `components/chat/`: The high-performance chat interface.
@@ -266,7 +284,7 @@ Skills extend the **ThinClaw** agent:
 
 ThinClaw Desktop is an evolving platform. We welcome contributions to the RAG pipeline, new agent skills, or UI refinements.
 
-1.  Explore the `documentation/thinclaw/` folder for architectural deep-dives.
+1.  Read `documentation/runtime-boundaries.md` before deciding whether a feature belongs to the Direct AI Workbench, the ThinClaw Agent Cockpit, or shared Desktop infrastructure.
 2.  Check `backend/src/thinclaw/commands/` and `backend/src/rig_lib/agent.rs` for backend extension points.
 
 ---

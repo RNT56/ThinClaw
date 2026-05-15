@@ -3,11 +3,14 @@
 This document is the final bridge contract for the Desktop bridge. Public
 product labels use ThinClaw / ThinClaw Desktop, public Tauri command names use
 the `thinclaw_*` prefix, and frontend events are emitted on `thinclaw-event`.
+It covers the ThinClaw Agent Cockpit only. For the two-system Desktop split and
+the non-agent Direct AI Workbench, read `runtime-boundaries.md` first.
 
 Last updated: 2026-05-15
 
-Related handoff docs:
+Related docs:
 
+- Runtime boundaries: `apps/desktop/documentation/runtime-boundaries.md`
 - Runtime parity: `apps/desktop/documentation/runtime-parity-checklist.md`
 - Remote gateway matrix: `apps/desktop/documentation/remote-gateway-route-matrix.md`
 - Environment requirements: `apps/desktop/documentation/env-requirements.md`

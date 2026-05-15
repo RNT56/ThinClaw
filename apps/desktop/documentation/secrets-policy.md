@@ -76,7 +76,7 @@ P3 contract tests should cover:
 
 ## Operational Checklist
 
-Before handoff:
+Before release or review:
 
 - Save a key in Settings > Secrets.
 - Confirm status shows saved but ungranted.
