@@ -435,24 +435,24 @@ mod tests {
     #[test]
     fn test_key_to_path() {
         assert_eq!(
-            DropboxProvider::key_to_path("db/openclaw.db.enc"),
-            "/ThinClaw Desktop/db/openclaw.db.enc"
+            DropboxProvider::key_to_path("db/thinclaw.db.enc"),
+            "/ThinClaw Desktop/db/thinclaw.db.enc"
         );
     }
 
     #[test]
     fn test_path_to_key() {
         assert_eq!(
-            DropboxProvider::path_to_key("/ThinClaw Desktop/db/openclaw.db.enc"),
-            "db/openclaw.db.enc"
+            DropboxProvider::path_to_key("/ThinClaw Desktop/db/thinclaw.db.enc"),
+            "db/thinclaw.db.enc"
         );
     }
 
     #[test]
     fn test_legacy_path_to_key() {
         assert_eq!(
-            DropboxProvider::path_to_key("/Scrappy/db/openclaw.db.enc"),
-            "db/openclaw.db.enc"
+            DropboxProvider::path_to_key("/Scrappy/db/thinclaw.db.enc"),
+            "db/thinclaw.db.enc"
         );
     }
 

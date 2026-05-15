@@ -25,7 +25,7 @@
 //! ## Key Constraint
 //!
 //! All API keys are read from `SecretStore` (live reads from keychain cache),
-//! never from `OpenClawConfig` (which is a stale snapshot).
+//! never from `ThinClawConfig` (which is a stale snapshot).
 
 pub mod chat;
 pub mod diffusion;
@@ -450,7 +450,7 @@ fn remote_model_option_to_entry(
 }
 
 async fn remote_discover_cloud_models(
-    proxy: crate::openclaw::remote_proxy::RemoteGatewayProxy,
+    proxy: crate::thinclaw::remote_proxy::RemoteGatewayProxy,
     providers: Vec<String>,
 ) -> Result<model_discovery::types::DiscoveryResult, String> {
     let config = proxy.get_providers_config().await?;
@@ -490,7 +490,7 @@ async fn remote_discover_cloud_models(
 #[tauri::command]
 #[specta::specta]
 pub async fn discover_cloud_models(
-    ironclaw: tauri::State<'_, crate::openclaw::ironclaw_bridge::IronClawState>,
+    ironclaw: tauri::State<'_, crate::thinclaw::ironclaw_bridge::IronClawState>,
     registry: tauri::State<'_, CloudModelRegistry>,
     providers: Vec<String>,
 ) -> Result<model_discovery::types::DiscoveryResult, String> {
@@ -520,7 +520,7 @@ pub async fn discover_cloud_models(
 #[tauri::command]
 #[specta::specta]
 pub async fn refresh_cloud_models(
-    ironclaw: tauri::State<'_, crate::openclaw::ironclaw_bridge::IronClawState>,
+    ironclaw: tauri::State<'_, crate::thinclaw::ironclaw_bridge::IronClawState>,
     registry: tauri::State<'_, CloudModelRegistry>,
     provider: String,
 ) -> Result<model_discovery::types::ProviderDiscoveryResult, String> {

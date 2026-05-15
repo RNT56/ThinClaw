@@ -21,7 +21,7 @@ import {
     Link,
 } from 'lucide-react';
 import { commands } from '../../lib/bindings';
-import * as openclaw from '../../lib/openclaw';
+import * as thinclaw from '../../lib/thinclaw';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 
@@ -274,7 +274,7 @@ export function McpTab() {
     const refreshMcpServers = useCallback(async () => {
         setMcpLoading(true);
         try {
-            const result = await openclaw.listMcpServers();
+            const result = await thinclaw.listMcpServers();
             const nextServers = result.servers || [];
             setServers(nextServers);
             setSelectedServer(current => current || nextServers[0]?.name || null);
@@ -290,11 +290,11 @@ export function McpTab() {
         setMcpLoading(true);
         try {
             const [tools, resources, templates, prompts, interactions] = await Promise.all([
-                openclaw.listMcpServerTools(name).catch(() => ({ tools: [] })),
-                openclaw.listMcpServerResources(name).catch(() => ({ resources: [] })),
-                openclaw.listMcpResourceTemplates(name).catch(() => ({ resource_templates: [] })),
-                openclaw.listMcpServerPrompts(name).catch(() => ({ prompts: [] })),
-                openclaw.listMcpInteractions().catch(() => ({ interactions: [] })),
+                thinclaw.listMcpServerTools(name).catch(() => ({ tools: [] })),
+                thinclaw.listMcpServerResources(name).catch(() => ({ resources: [] })),
+                thinclaw.listMcpResourceTemplates(name).catch(() => ({ resource_templates: [] })),
+                thinclaw.listMcpServerPrompts(name).catch(() => ({ prompts: [] })),
+                thinclaw.listMcpInteractions().catch(() => ({ interactions: [] })),
             ]);
             setServerTools(tools.tools || []);
             setServerResources(resources.resources || []);
@@ -314,7 +314,7 @@ export function McpTab() {
     const handleReadResource = async () => {
         if (!selectedServer || !resourceUri.trim()) return;
         try {
-            setResourceResult(await openclaw.readMcpResource(selectedServer, resourceUri.trim()));
+            setResourceResult(await thinclaw.readMcpResource(selectedServer, resourceUri.trim()));
         } catch (e) {
             toast.error('Resource read failed', { description: String(e) });
         }
@@ -324,7 +324,7 @@ export function McpTab() {
         if (!selectedServer) return;
         try {
             const args = promptArgs.trim() ? JSON.parse(promptArgs) : {};
-            setPromptResult(await openclaw.getMcpPrompt(selectedServer, promptName, args));
+            setPromptResult(await thinclaw.getMcpPrompt(selectedServer, promptName, args));
         } catch (e) {
             toast.error('Prompt request failed', { description: String(e) });
         }
@@ -333,7 +333,7 @@ export function McpTab() {
     const handleOauth = async () => {
         if (!selectedServer) return;
         try {
-            setOauthResult(await openclaw.discoverMcpOauth(selectedServer));
+            setOauthResult(await thinclaw.discoverMcpOauth(selectedServer));
         } catch (e) {
             toast.error('OAuth discovery failed', { description: String(e) });
         }
@@ -342,7 +342,7 @@ export function McpTab() {
     const handleLogLevel = async (level: string) => {
         if (!selectedServer) return;
         try {
-            const resp = await openclaw.setMcpLogLevel(selectedServer, level);
+            const resp = await thinclaw.setMcpLogLevel(selectedServer, level);
             resp.ok ? toast.success(resp.message || 'MCP log level updated') : toast.error(resp.message || 'MCP log level update failed');
             refreshMcpServers();
         } catch (e) {
@@ -352,7 +352,7 @@ export function McpTab() {
 
     const handleInteraction = async (interactionId: string, action: string) => {
         try {
-            const resp = await openclaw.respondMcpInteraction(interactionId, action);
+            const resp = await thinclaw.respondMcpInteraction(interactionId, action);
             resp.ok ? toast.success(resp.message || 'Interaction updated') : toast.error(resp.message || 'Interaction update failed');
             refreshMcpDetails(selectedServer);
         } catch (e) {

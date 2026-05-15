@@ -3,7 +3,7 @@ import { commands } from '../../lib/bindings';
 import { Eye, EyeOff, Save, ShieldCheck, ShieldAlert, Loader2, Trash2, Search } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
-import { reloadSecrets } from '../../lib/openclaw';
+import { reloadSecrets } from '../../lib/thinclaw';
 
 export interface SecretCardProps {
     title: string;

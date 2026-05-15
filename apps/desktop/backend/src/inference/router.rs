@@ -1,7 +1,7 @@
 //! InferenceRouter — the central routing struct.
 //!
 //! Holds one active backend per modality, loaded from `UserConfig`.
-//! Cloud backends receive keys from `SecretStore` (not `OpenClawConfig`).
+//! Cloud backends receive keys from `SecretStore` (not `ThinClawConfig`).
 
 use crate::config::UserConfig;
 use crate::secret_store::SecretStore;

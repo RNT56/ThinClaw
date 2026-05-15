@@ -3,7 +3,7 @@ import { Toaster } from "sonner";
 import { useState, useEffect } from "react";
 import { OnboardingWizard } from "./components/onboarding/OnboardingWizard";
 import { SpotlightBar } from "./components/chat/SpotlightBar";
-import * as openclaw from "./lib/openclaw";
+import * as thinclaw from "./lib/thinclaw";
 import { UpdateChecker } from "./components/UpdateChecker";
 
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -31,7 +31,7 @@ function App() {
 
   const checkSetup = async () => {
     try {
-      const status = await openclaw.getOpenClawStatus();
+      const status = await thinclaw.getThinClawStatus();
       // If status is empty or setup_completed is missing/false, show wizard
       // Also show if dev_mode_wizard is enabled
       if (!status || !status.setup_completed || status.dev_mode_wizard) {

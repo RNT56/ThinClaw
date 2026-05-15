@@ -40,9 +40,9 @@ pub struct EncryptionMeta {
 /// A single file in the archive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestFile {
-    /// Cloud storage key (e.g. "db/openclaw.db.enc")
+    /// Cloud storage key (e.g. "db/thinclaw.db.enc")
     pub key: String,
-    /// Original local path relative to app_data_dir (e.g. "openclaw.db")
+    /// Original local path relative to app_data_dir (e.g. "thinclaw.db")
     pub original_path: String,
     /// Original uncompressed/unencrypted size in bytes
     pub size_bytes: u64,
@@ -86,7 +86,7 @@ impl FileType {
 
     /// Determine file type from its relative path.
     pub fn from_path(path: &str) -> Self {
-        if path.starts_with("openclaw.db") || path.ends_with(".db") {
+        if path.starts_with("thinclaw.db") || path.ends_with(".db") {
             FileType::Database
         } else if path.starts_with("documents/") {
             FileType::Document
@@ -98,7 +98,7 @@ impl FileType {
             FileType::VectorIndex
         } else if path.starts_with("previews/") {
             FileType::Preview
-        } else if path.starts_with("openclaw/") {
+        } else if path.starts_with("thinclaw/") {
             FileType::AgentState
         } else {
             FileType::Other
@@ -221,8 +221,8 @@ mod tests {
             ArchiveManifest::new("0.1.0".to_string(), 12, "test-key-2026".to_string());
 
         manifest.add_file(
-            "db/openclaw.db.enc".to_string(),
-            "openclaw.db".to_string(),
+            "db/thinclaw.db.enc".to_string(),
+            "thinclaw.db".to_string(),
             b"fake db data",
             128,
         );
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_file_type_classification() {
-        assert_eq!(FileType::from_path("openclaw.db"), FileType::Database);
+        assert_eq!(FileType::from_path("thinclaw.db"), FileType::Database);
         assert_eq!(FileType::from_path("documents/a.pdf"), FileType::Document);
         assert_eq!(FileType::from_path("images/b.png"), FileType::ChatImage);
         assert_eq!(
@@ -259,7 +259,7 @@ mod tests {
         );
         assert_eq!(FileType::from_path("previews/d.jpg"), FileType::Preview);
         assert_eq!(
-            FileType::from_path("openclaw/soul.md"),
+            FileType::from_path("thinclaw/soul.md"),
             FileType::AgentState
         );
         assert_eq!(FileType::from_path("random.txt"), FileType::Other);
@@ -364,7 +364,7 @@ mod tests {
         manifest.add_file("k1".into(), "documents/a.pdf".into(), b"a", 10);
         manifest.add_file("k2".into(), "documents/b.pdf".into(), b"b", 20);
         manifest.add_file("k3".into(), "images/c.png".into(), b"c", 30);
-        manifest.add_file("k4".into(), "openclaw.db".into(), b"d", 40);
+        manifest.add_file("k4".into(), "thinclaw.db".into(), b"d", 40);
 
         let groups = manifest.files_by_type();
 

@@ -93,8 +93,8 @@ export function ChatModeIcon({ className, isActive, size = 22 }: ModeIconProps) 
     );
 }
 
-// OpenClaw Mode Icon - Futuristic AI bot with pulsing core
-export function OpenClawModeIcon({ className, isActive, size = 22 }: ModeIconProps) {
+// ThinClaw Mode Icon - Futuristic AI bot with pulsing core
+export function ThinClawModeIcon({ className, isActive, size = 22 }: ModeIconProps) {
     return (
         <motion.svg
             viewBox="0 0 32 32"

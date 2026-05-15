@@ -635,13 +635,13 @@ impl CloudManager {
 
 pub(crate) fn save_provider_credentials(config: &CloudProviderConfig) -> Result<(), String> {
     if let Some(access_key_id) = config.access_key_id.as_deref() {
-        crate::openclaw::config::keychain::set_key(
+        crate::thinclaw::config::keychain::set_key(
             &cloud_provider_credential_key(config, "access_key_id"),
             Some(access_key_id),
         )?;
     }
     if let Some(secret_access_key) = config.secret_access_key.as_deref() {
-        crate::openclaw::config::keychain::set_key(
+        crate::thinclaw::config::keychain::set_key(
             &cloud_provider_credential_key(config, "secret_access_key"),
             Some(secret_access_key),
         )?;
@@ -652,12 +652,12 @@ pub(crate) fn save_provider_credentials(config: &CloudProviderConfig) -> Result<
 
 pub(crate) fn hydrate_provider_credentials(mut config: CloudProviderConfig) -> CloudProviderConfig {
     if config.access_key_id.is_none() {
-        config.access_key_id = crate::openclaw::config::keychain::get_key(
+        config.access_key_id = crate::thinclaw::config::keychain::get_key(
             &cloud_provider_credential_key(&config, "access_key_id"),
         );
     }
     if config.secret_access_key.is_none() {
-        config.secret_access_key = crate::openclaw::config::keychain::get_key(
+        config.secret_access_key = crate::thinclaw::config::keychain::get_key(
             &cloud_provider_credential_key(&config, "secret_access_key"),
         );
     }

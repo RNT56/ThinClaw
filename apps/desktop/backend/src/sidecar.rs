@@ -260,7 +260,7 @@ impl SidecarManager {
         }
 
         // NOTE: Stop tokens are NOT injected as CLI args (llama-server doesn't support --stop).
-        // They are enforced at the API request level via OpenClaw model config (Layer 2 in config.rs).
+        // They are enforced at the API request level via ThinClaw model config (Layer 2 in config.rs).
         println!(
             "[sidecar] Stop tokens for family '{}' will be enforced at API request level",
             detected_family

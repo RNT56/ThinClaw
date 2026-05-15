@@ -48,7 +48,7 @@ const CATEGORY_META: Record<string, { icon: typeof Cloud; color: string }> = {
     ironclaw_db: { icon: Cpu, color: 'bg-orange-500' },
     vectors: { icon: FolderOpen, color: 'bg-cyan-500' },
     previews: { icon: ImageIcon, color: 'bg-pink-500' },
-    openclaw: { icon: Box, color: 'bg-rose-500' },
+    thinclaw: { icon: Box, color: 'bg-rose-500' },
 };
 
 // ── A5-2: StorageBreakdown — Visual bar chart ────────────────────────────

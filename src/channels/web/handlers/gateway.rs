@@ -113,6 +113,32 @@ pub(crate) async fn gateway_status_handler(
     })
 }
 
+pub(crate) async fn cache_stats_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Json<serde_json::Value> {
+    if let Some(cache) = state.response_cache.as_ref() {
+        let stats = cache.read().await.stats();
+        return Json(serde_json::json!({
+            "hits": stats.hits,
+            "misses": stats.misses,
+            "evictions": stats.evictions,
+            "size_bytes": stats.size,
+            "size": stats.size,
+            "hit_rate": stats.hit_rate,
+        }));
+    }
+
+    Json(serde_json::json!({
+        "hits": 0,
+        "misses": 0,
+        "evictions": 0,
+        "size_bytes": 0,
+        "size": 0,
+        "hit_rate": 0.0,
+        "reason": "unavailable: response cache is not attached to this gateway"
+    }))
+}
+
 async fn load_channel_setup_status(state: &GatewayState, user_id: &str) -> ChannelSetupStatus {
     let settings = if let Some(store) = state.store.as_ref()
         && let Ok(map) = store.get_all_settings(user_id).await

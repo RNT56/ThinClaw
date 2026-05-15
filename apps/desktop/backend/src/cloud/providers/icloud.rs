@@ -494,34 +494,34 @@ mod tests {
         let primary = tmp.path().join(ICLOUD_FOLDER);
         let legacy = tmp.path().join(LEGACY_ICLOUD_FOLDER);
         tokio::fs::create_dir_all(legacy.join("db")).await.unwrap();
-        tokio::fs::write(legacy.join("db/openclaw.db.enc"), b"legacy-db")
+        tokio::fs::write(legacy.join("db/thinclaw.db.enc"), b"legacy-db")
             .await
             .unwrap();
 
         let provider = ICloudProvider::with_legacy_dir(primary.clone(), legacy.clone());
 
         assert_eq!(
-            provider.get("db/openclaw.db.enc").await.unwrap(),
+            provider.get("db/thinclaw.db.enc").await.unwrap(),
             b"legacy-db"
         );
-        assert!(provider.exists("db/openclaw.db.enc").await.unwrap());
+        assert!(provider.exists("db/thinclaw.db.enc").await.unwrap());
 
         let entries = provider.list("db/").await.unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].key, "db/openclaw.db.enc");
+        assert_eq!(entries[0].key, "db/thinclaw.db.enc");
 
         provider
-            .put("db/openclaw.db.enc", b"thinclaw-db")
+            .put("db/thinclaw.db.enc", b"thinclaw-db")
             .await
             .unwrap();
         assert_eq!(
-            tokio::fs::read(primary.join("db/openclaw.db.enc"))
+            tokio::fs::read(primary.join("db/thinclaw.db.enc"))
                 .await
                 .unwrap(),
             b"thinclaw-db"
         );
         assert_eq!(
-            provider.get("db/openclaw.db.enc").await.unwrap(),
+            provider.get("db/thinclaw.db.enc").await.unwrap(),
             b"thinclaw-db"
         );
 

@@ -24,7 +24,7 @@ pub struct McpOrchestratorConfig {
 ///
 /// This factory function is used by:
 /// 1. `Orchestrator` (for Rig agents)
-/// 2. `McpRequestHandler` (for OpenClaw requests via IPC)
+/// 2. `McpRequestHandler` (for ThinClaw requests via IPC)
 pub fn create_sandbox<R>(
     rig: Arc<RigManager>,
     mcp_config: &McpOrchestratorConfig,

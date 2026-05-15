@@ -586,15 +586,15 @@ async agentChat(request: string) : Promise<Result<string, string>> {
 }
 },
 /**
- * Get OpenClaw status.
+ * Get ThinClaw status.
  *
- * Config fields (API keys, grants, cloud settings) come from `OpenClawConfig`.
+ * Config fields (API keys, grants, cloud settings) come from `ThinClawConfig`.
  * Engine status fields (`engine_running`, `engine_connected`) reflect the active
  * gateway mode: embedded runtime in local mode or a connected proxy in remote mode.
  */
-async openclawGetStatus() : Promise<Result<OpenClawStatus, string>> {
+async thinclawGetStatus() : Promise<Result<ThinClawStatus, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_status") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_status") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -603,9 +603,9 @@ async openclawGetStatus() : Promise<Result<OpenClawStatus, string>> {
 /**
  * Save Slack configuration
  */
-async openclawSaveAnthropicKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveAnthropicKey(key: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_anthropic_key", { key }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_anthropic_key", { key }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -614,9 +614,9 @@ async openclawSaveAnthropicKey(key: string | null) : Promise<Result<null, string
 /**
  * Get Anthropic API key
  */
-async openclawGetAnthropicKey() : Promise<Result<string | null, string>> {
+async thinclawGetAnthropicKey() : Promise<Result<string | null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_anthropic_key") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_anthropic_key") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -625,9 +625,9 @@ async openclawGetAnthropicKey() : Promise<Result<string | null, string>> {
 /**
  * Save Brave Search API key
  */
-async openclawSaveBraveKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveBraveKey(key: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_brave_key", { key }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_brave_key", { key }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -636,9 +636,9 @@ async openclawSaveBraveKey(key: string | null) : Promise<Result<null, string>> {
 /**
  * Get Brave Search API key
  */
-async openclawGetBraveKey() : Promise<Result<string | null, string>> {
+async thinclawGetBraveKey() : Promise<Result<string | null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_brave_key") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_brave_key") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -647,9 +647,9 @@ async openclawGetBraveKey() : Promise<Result<string | null, string>> {
 /**
  * Save OpenAI API key
  */
-async openclawSaveOpenaiKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveOpenaiKey(key: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_openai_key", { key }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_openai_key", { key }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -658,9 +658,9 @@ async openclawSaveOpenaiKey(key: string | null) : Promise<Result<null, string>> 
 /**
  * Get OpenAI API key
  */
-async openclawGetOpenaiKey() : Promise<Result<string | null, string>> {
+async thinclawGetOpenaiKey() : Promise<Result<string | null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_openai_key") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_openai_key") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -669,9 +669,9 @@ async openclawGetOpenaiKey() : Promise<Result<string | null, string>> {
 /**
  * Save OpenRouter API key
  */
-async openclawSaveOpenrouterKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveOpenrouterKey(key: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_openrouter_key", { key }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_openrouter_key", { key }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -680,9 +680,9 @@ async openclawSaveOpenrouterKey(key: string | null) : Promise<Result<null, strin
 /**
  * Get OpenRouter API key
  */
-async openclawGetOpenrouterKey() : Promise<Result<string | null, string>> {
+async thinclawGetOpenrouterKey() : Promise<Result<string | null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_openrouter_key") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_openrouter_key") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -691,9 +691,9 @@ async openclawGetOpenrouterKey() : Promise<Result<string | null, string>> {
 /**
  * Save Gemini API key
  */
-async openclawSaveGeminiKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveGeminiKey(key: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_gemini_key", { key }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_gemini_key", { key }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -702,9 +702,9 @@ async openclawSaveGeminiKey(key: string | null) : Promise<Result<null, string>> 
 /**
  * Get Gemini API key
  */
-async openclawGetGeminiKey() : Promise<Result<string | null, string>> {
+async thinclawGetGeminiKey() : Promise<Result<string | null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_gemini_key") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_gemini_key") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -713,9 +713,9 @@ async openclawGetGeminiKey() : Promise<Result<string | null, string>> {
 /**
  * Save Groq API key
  */
-async openclawSaveGroqKey(key: string | null) : Promise<Result<null, string>> {
+async thinclawSaveGroqKey(key: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_groq_key", { key }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_groq_key", { key }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -724,9 +724,9 @@ async openclawSaveGroqKey(key: string | null) : Promise<Result<null, string>> {
 /**
  * Get Groq API key
  */
-async openclawGetGroqKey() : Promise<Result<string | null, string>> {
+async thinclawGetGroqKey() : Promise<Result<string | null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_groq_key") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_groq_key") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -735,9 +735,9 @@ async openclawGetGroqKey() : Promise<Result<string | null, string>> {
 /**
  * Save selected cloud model
  */
-async openclawSaveSelectedCloudModel(model: string | null) : Promise<Result<null, string>> {
+async thinclawSaveSelectedCloudModel(model: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_selected_cloud_model", { model }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_selected_cloud_model", { model }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -746,36 +746,36 @@ async openclawSaveSelectedCloudModel(model: string | null) : Promise<Result<null
 /**
  * Select the cloud brain to use for the agent
  */
-async selectOpenclawBrain(brain: string | null) : Promise<Result<null, string>> {
+async selectThinclawBrain(brain: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("select_openclaw_brain", { brain }) };
+    return { status: "ok", data: await TAURI_INVOKE("select_thinclaw_brain", { brain }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSaveCloudConfig(enabledProviders: string[], enabledModels: { [key in string]: string[] }, customLlm: CustomLlmConfigInput | null) : Promise<Result<null, string>> {
+async thinclawSaveCloudConfig(enabledProviders: string[], enabledModels: { [key in string]: string[] }, customLlm: CustomLlmConfigInput | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_cloud_config", { enabledProviders, enabledModels, customLlm }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_cloud_config", { enabledProviders, enabledModels, customLlm }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * Toggle secret access for OpenClaw
+ * Toggle secret access for ThinClaw
  */
-async openclawToggleSecretAccess(secret: string, granted: boolean) : Promise<Result<null, string>> {
+async thinclawToggleSecretAccess(secret: string, granted: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_secret_access", { secret, granted }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_secret_access", { secret, granted }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSaveSlackConfig(configInput: SlackConfigInput) : Promise<Result<null, string>> {
+async thinclawSaveSlackConfig(configInput: SlackConfigInput) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_slack_config", { configInput }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_slack_config", { configInput }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -784,9 +784,9 @@ async openclawSaveSlackConfig(configInput: SlackConfigInput) : Promise<Result<nu
 /**
  * Save Telegram configuration
  */
-async openclawSaveTelegramConfig(configInput: TelegramConfigInput) : Promise<Result<null, string>> {
+async thinclawSaveTelegramConfig(configInput: TelegramConfigInput) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_telegram_config", { configInput }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_telegram_config", { configInput }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -795,9 +795,9 @@ async openclawSaveTelegramConfig(configInput: TelegramConfigInput) : Promise<Res
 /**
  * Save Gateway configuration
  */
-async openclawSaveGatewaySettings(mode: string, url: string | null, token: string | null) : Promise<Result<null, string>> {
+async thinclawSaveGatewaySettings(mode: string, url: string | null, token: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_gateway_settings", { mode, url, token }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_gateway_settings", { mode, url, token }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -806,9 +806,9 @@ async openclawSaveGatewaySettings(mode: string, url: string | null, token: strin
 /**
  * Add or update an agent profile
  */
-async openclawAddAgentProfile(profile: AgentProfile) : Promise<Result<null, string>> {
+async thinclawAddAgentProfile(profile: AgentProfile) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_add_agent_profile", { profile }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_add_agent_profile", { profile }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -817,9 +817,9 @@ async openclawAddAgentProfile(profile: AgentProfile) : Promise<Result<null, stri
 /**
  * Remove an agent profile
  */
-async openclawRemoveAgentProfile(id: string) : Promise<Result<null, string>> {
+async thinclawRemoveAgentProfile(id: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_remove_agent_profile", { id }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_remove_agent_profile", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -832,9 +832,9 @@ async openclawRemoveAgentProfile(id: string) : Promise<Result<null, string>> {
  * updates gateway settings from the selected profile, and
  * restarts the connection with the new configuration.
  */
-async openclawSwitchToProfile(profileId: string) : Promise<Result<null, string>> {
+async thinclawSwitchToProfile(profileId: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_switch_to_profile", { profileId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_switch_to_profile", { profileId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -849,25 +849,25 @@ async openclawSwitchToProfile(profileId: string) : Promise<Result<null, string>>
  * This was previously a stub (command registered but returning error).
  * Now fully implemented using RemoteGatewayProxy.
  */
-async openclawTestConnection(url: string, token: string | null) : Promise<Result<boolean, string>> {
+async thinclawTestConnection(url: string, token: string | null) : Promise<Result<boolean, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_test_connection", { url, token }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_test_connection", { url, token }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawGetFleetStatus() : Promise<Result<AgentStatusSummary[], string>> {
+async thinclawGetFleetStatus() : Promise<Result<AgentStatusSummary[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_fleet_status") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_fleet_status") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawBroadcastCommand(command: string) : Promise<Result<null, string>> {
+async thinclawBroadcastCommand(command: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_broadcast_command", { command }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_broadcast_command", { command }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -885,12 +885,12 @@ async openclawBroadcastCommand(command: string) : Promise<Result<null, string>> 
  * - Creates a RemoteGatewayProxy, verifies health, opens SSE subscription
  * - No local engine is started
  *
- * In both modes, the frontend receives the same events via `openclaw-event`
+ * In both modes, the frontend receives the same events via `thinclaw-event`
  * and invokes the same Tauri commands — all routing is transparent.
  */
-async openclawStartGateway() : Promise<Result<null, string>> {
+async thinclawStartGateway() : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_start_gateway") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_start_gateway") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -902,9 +902,9 @@ async openclawStartGateway() : Promise<Result<null, string>> {
  * - Local mode: shuts down in-process engine gracefully.
  * - Remote mode: closes the SSE subscription and clears the proxy.
  */
-async openclawStopGateway() : Promise<Result<null, string>> {
+async thinclawStopGateway() : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_stop_gateway") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_stop_gateway") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -921,9 +921,9 @@ async openclawStopGateway() : Promise<Result<null, string>> {
  *
  * This is a no-op if the engine isn't running.
  */
-async openclawReloadSecrets() : Promise<Result<null, string>> {
+async thinclawReloadSecrets() : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_reload_secrets") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_reload_secrets") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -932,9 +932,9 @@ async openclawReloadSecrets() : Promise<Result<null, string>> {
 /**
  * Get sessions list from IronClaw.
  */
-async openclawGetSessions() : Promise<Result<OpenClawSessionsResponse, string>> {
+async thinclawGetSessions() : Promise<Result<ThinClawSessionsResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_sessions") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_sessions") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -944,11 +944,11 @@ async openclawGetSessions() : Promise<Result<OpenClawSessionsResponse, string>> 
  * Get chat history for a session.
  *
  * Routes to remote proxy when in remote mode, converting the gateway's
- * message format to OpenClawHistoryResponse.
+ * message format to ThinClawHistoryResponse.
  */
-async openclawGetHistory(sessionKey: string, limit: number, before: string | null) : Promise<Result<OpenClawHistoryResponse, string>> {
+async thinclawGetHistory(sessionKey: string, limit: number, before: string | null) : Promise<Result<ThinClawHistoryResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_history", { sessionKey, limit, before }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_history", { sessionKey, limit, before }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -957,9 +957,9 @@ async openclawGetHistory(sessionKey: string, limit: number, before: string | nul
 /**
  * Delete a session.
  */
-async openclawDeleteSession(sessionKey: string) : Promise<Result<null, string>> {
+async thinclawDeleteSession(sessionKey: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_delete_session", { sessionKey }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_delete_session", { sessionKey }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -968,9 +968,9 @@ async openclawDeleteSession(sessionKey: string) : Promise<Result<null, string>> 
 /**
  * Reset a session (clear history).
  */
-async openclawResetSession(sessionKey: string) : Promise<Result<null, string>> {
+async thinclawResetSession(sessionKey: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_reset_session", { sessionKey }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_reset_session", { sessionKey }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -979,14 +979,14 @@ async openclawResetSession(sessionKey: string) : Promise<Result<null, string>> {
 /**
  * Send a message to the IronClaw agent.
  *
- * Returns immediately — the actual response streams back via `openclaw-event`
+ * Returns immediately — the actual response streams back via `thinclaw-event`
  * Tauri events (AssistantDelta, ToolUpdate, etc.).
  *
  * Routes to RemoteGatewayProxy when in remote mode.
  */
-async openclawSendMessage(sessionKey: string, text: string, deliver: boolean) : Promise<Result<OpenClawRpcResponse, string>> {
+async thinclawSendMessage(sessionKey: string, text: string, deliver: boolean) : Promise<Result<ThinClawRpcResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_send_message", { sessionKey, text, deliver }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_send_message", { sessionKey, text, deliver }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -997,9 +997,9 @@ async openclawSendMessage(sessionKey: string, text: string, deliver: boolean) : 
  *
  * **Intentional no-op**: IronClaw sends events directly via TauriChannel.
  */
-async openclawSubscribeSession(sessionKey: string) : Promise<Result<OpenClawRpcResponse, string>> {
+async thinclawSubscribeSession(sessionKey: string) : Promise<Result<ThinClawRpcResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_subscribe_session", { sessionKey }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_subscribe_session", { sessionKey }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1008,9 +1008,9 @@ async openclawSubscribeSession(sessionKey: string) : Promise<Result<OpenClawRpcR
 /**
  * Abort a running chat turn.
  */
-async openclawAbortChat(sessionKey: string, runId: string | null) : Promise<Result<OpenClawRpcResponse, string>> {
+async thinclawAbortChat(sessionKey: string, runId: string | null) : Promise<Result<ThinClawRpcResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_abort_chat", { sessionKey, runId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_abort_chat", { sessionKey, runId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1021,9 +1021,9 @@ async openclawAbortChat(sessionKey: string, runId: string | null) : Promise<Resu
  *
  * In remote mode, sends the approval decision to the remote gateway.
  */
-async openclawResolveApproval(approvalId: string, approved: boolean, allowSession: boolean | null) : Promise<Result<OpenClawRpcResponse, string>> {
+async thinclawResolveApproval(approvalId: string, approved: boolean, allowSession: boolean | null) : Promise<Result<ThinClawRpcResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_resolve_approval", { approvalId, approved, allowSession }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_resolve_approval", { approvalId, approved, allowSession }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1032,9 +1032,9 @@ async openclawResolveApproval(approvalId: string, approved: boolean, allowSessio
 /**
  * Get engine diagnostic info.
  */
-async openclawGetDiagnostics() : Promise<Result<OpenClawDiagnostics, string>> {
+async thinclawGetDiagnostics() : Promise<Result<ThinClawDiagnostics, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_diagnostics") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_diagnostics") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1047,9 +1047,9 @@ async openclawGetDiagnostics() : Promise<Result<OpenClawDiagnostics, string>> {
  * DB-backed workspace API. For "all" (factory reset), it stops the
  * engine and wipes the legacy state directories.
  */
-async openclawClearMemory(target: string) : Promise<Result<null, string>> {
+async thinclawClearMemory(target: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_clear_memory", { target }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_clear_memory", { target }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1058,9 +1058,9 @@ async openclawClearMemory(target: string) : Promise<Result<null, string>> {
 /**
  * Get MEMORY.md content from IronClaw's DB-backed workspace.
  */
-async openclawGetMemory() : Promise<Result<string, string>> {
+async thinclawGetMemory() : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_memory") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_memory") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1069,9 +1069,9 @@ async openclawGetMemory() : Promise<Result<string, string>> {
 /**
  * Get contents of a workspace file (e.g. SOUL.md) from IronClaw's DB.
  */
-async openclawGetFile(path: string) : Promise<Result<string, string>> {
+async thinclawGetFile(path: string) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_file", { path }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_file", { path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1080,9 +1080,9 @@ async openclawGetFile(path: string) : Promise<Result<string, string>> {
 /**
  * Write content to a workspace file in IronClaw's DB.
  */
-async openclawWriteFile(path: string, content: string) : Promise<Result<null, string>> {
+async thinclawWriteFile(path: string, content: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_write_file", { path, content }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_write_file", { path, content }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1096,9 +1096,9 @@ async openclawWriteFile(path: string, content: string) : Promise<Result<null, st
  * files, or project sub-files. If the path matches a directory prefix,
  * all files under that prefix are deleted.
  */
-async openclawDeleteFile(path: string) : Promise<Result<null, string>> {
+async thinclawDeleteFile(path: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_delete_file", { path }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_delete_file", { path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1107,9 +1107,9 @@ async openclawDeleteFile(path: string) : Promise<Result<null, string>> {
 /**
  * Save MEMORY.md content to IronClaw's DB-backed workspace.
  */
-async openclawSaveMemory(content: string) : Promise<Result<null, string>> {
+async thinclawSaveMemory(content: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_memory", { content }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_memory", { content }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1120,33 +1120,33 @@ async openclawSaveMemory(content: string) : Promise<Result<null, string>> {
  *
  * Returns flat file paths (e.g., `SOUL.md`, `daily/2026-03-09.md`).
  */
-async openclawListWorkspaceFiles() : Promise<Result<string[], string>> {
+async thinclawListWorkspaceFiles() : Promise<Result<string[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_list_workspace_files") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_list_workspace_files") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawCronList() : Promise<Result<JsonValue, string>> {
+async thinclawCronList() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_cron_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawCronRun(key: string) : Promise<Result<JsonValue, string>> {
+async thinclawCronRun(key: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_run", { key }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_cron_run", { key }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawCronHistory(key: string, limit: number) : Promise<Result<JsonValue, string>> {
+async thinclawCronHistory(key: string, limit: number) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_history", { key, limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_cron_history", { key, limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1156,9 +1156,9 @@ async openclawCronHistory(key: string, limit: number) : Promise<Result<JsonValue
  * Validates a cron expression and returns next fire times.
  * This is a frontend-facing version of `ironclaw cron lint`.
  */
-async openclawCronLint(expression: string) : Promise<Result<JsonValue, string>> {
+async thinclawCronLint(expression: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_cron_lint", { expression }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_cron_lint", { expression }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1170,9 +1170,9 @@ async openclawCronLint(expression: string) : Promise<Result<JsonValue, string>> 
  * Stores the routine in IronClaw's RoutineStore so it persists
  * and is picked up by the RoutineEngine on its next tick.
  */
-async openclawRoutineCreate(name: string, description: string, schedule: string, task: string) : Promise<Result<JsonValue, string>> {
+async thinclawRoutineCreate(name: string, description: string, schedule: string, task: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routine_create", { name, description, schedule, task }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routine_create", { name, description, schedule, task }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1184,185 +1184,185 @@ async openclawRoutineCreate(name: string, description: string, schedule: string,
  * Queries the agent's ChannelManager for actually registered channels
  * instead of reading static config/env vars.
  */
-async openclawChannelsList() : Promise<Result<JsonValue, string>> {
+async thinclawChannelsList() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_channels_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_channels_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSkillsList() : Promise<Result<JsonValue, string>> {
+async thinclawSkillsList() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_skills_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSkillsStatus() : Promise<Result<JsonValue, string>> {
+async thinclawSkillsStatus() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_status") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_skills_status") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSkillsToggle(key: string, enabled: boolean) : Promise<Result<JsonValue, string>> {
+async thinclawSkillsToggle(key: string, enabled: boolean) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_toggle", { key, enabled }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_skills_toggle", { key, enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSkillsSearch(query: string) : Promise<Result<JsonValue, string>> {
+async thinclawSkillsSearch(query: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_search", { query }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_skills_search", { query }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSkillInstall(name: string, url: string | null, content: string | null, force: boolean | null) : Promise<Result<JsonValue, string>> {
+async thinclawSkillInstall(name: string, url: string | null, content: string | null, force: boolean | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_install", { name, url, content, force }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_install", { name, url, content, force }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSkillRemove(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawSkillRemove(name: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_remove", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_remove", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSkillTrust(name: string, trust: string) : Promise<Result<JsonValue, string>> {
+async thinclawSkillTrust(name: string, trust: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_trust", { name, trust }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_trust", { name, trust }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSkillReload(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawSkillReload(name: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_reload", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_reload", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSkillsReloadAll() : Promise<Result<JsonValue, string>> {
+async thinclawSkillsReloadAll() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skills_reload_all") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_skills_reload_all") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSkillInspect(name: string, includeContent: boolean | null, includeFiles: boolean | null, audit: boolean | null) : Promise<Result<JsonValue, string>> {
+async thinclawSkillInspect(name: string, includeContent: boolean | null, includeFiles: boolean | null, audit: boolean | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_inspect", { name, includeContent, includeFiles, audit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_inspect", { name, includeContent, includeFiles, audit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSkillPublish(name: string, targetRepo: string, dryRun: boolean | null, remoteWrite: boolean | null, confirmRemoteWrite: boolean | null, approveRisky: boolean | null) : Promise<Result<JsonValue, string>> {
+async thinclawSkillPublish(name: string, targetRepo: string, dryRun: boolean | null, remoteWrite: boolean | null, confirmRemoteWrite: boolean | null, approveRisky: boolean | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_skill_publish", { name, targetRepo, dryRun, remoteWrite, confirmRemoteWrite, approveRisky }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_skill_publish", { name, targetRepo, dryRun, remoteWrite, confirmRemoteWrite, approveRisky }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawInstallSkillRepo(repoUrl: string) : Promise<Result<string, string>> {
+async thinclawInstallSkillRepo(repoUrl: string) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_install_skill_repo", { repoUrl }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_install_skill_repo", { repoUrl }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawInstallSkillDeps(name: string, installId: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawInstallSkillDeps(name: string, installId: string | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_install_skill_deps", { name, installId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_install_skill_deps", { name, installId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawConfigSchema() : Promise<Result<JsonValue, string>> {
+async thinclawConfigSchema() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_config_schema") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_config_schema") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawConfigGet() : Promise<Result<JsonValue, string>> {
+async thinclawConfigGet() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_config_get") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_config_get") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawConfigSet(key: string, value: JsonValue) : Promise<Result<JsonValue, string>> {
+async thinclawConfigSet(key: string, value: JsonValue) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_config_set", { key, value }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_config_set", { key, value }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawConfigPatch(patch: JsonValue) : Promise<Result<JsonValue, string>> {
+async thinclawConfigPatch(patch: JsonValue) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_config_patch", { patch }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_config_patch", { patch }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSystemPresence() : Promise<Result<JsonValue, string>> {
+async thinclawSystemPresence() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_system_presence") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_system_presence") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLogsTail(limit: number) : Promise<Result<JsonValue, string>> {
+async thinclawLogsTail(limit: number) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_logs_tail", { limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_logs_tail", { limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawUpdateRun() : Promise<Result<JsonValue, string>> {
+async thinclawUpdateRun() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_update_run") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_update_run") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawWebLoginWhatsapp() : Promise<Result<JsonValue, string>> {
+async thinclawWebLoginWhatsapp() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_web_login_whatsapp") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_web_login_whatsapp") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawWebLoginTelegram() : Promise<Result<JsonValue, string>> {
+async thinclawWebLoginTelegram() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_web_login_telegram") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_web_login_telegram") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1371,9 +1371,9 @@ async openclawWebLoginTelegram() : Promise<Result<JsonValue, string>> {
 /**
  * Add a custom secret
  */
-async openclawAddCustomSecret(name: string, value: string, description: string | null) : Promise<Result<null, string>> {
+async thinclawAddCustomSecret(name: string, value: string, description: string | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_add_custom_secret", { name, value, description }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_add_custom_secret", { name, value, description }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1382,31 +1382,31 @@ async openclawAddCustomSecret(name: string, value: string, description: string |
 /**
  * Remove a custom secret
  */
-async openclawRemoveCustomSecret(id: string) : Promise<Result<null, string>> {
+async thinclawRemoveCustomSecret(id: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_remove_custom_secret", { id }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_remove_custom_secret", { id }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * Toggle custom secret access for OpenClaw
+ * Toggle custom secret access for ThinClaw
  */
-async openclawToggleCustomSecret(id: string, granted: boolean) : Promise<Result<null, string>> {
+async thinclawToggleCustomSecret(id: string, granted: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_custom_secret", { id, granted }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_custom_secret", { id, granted }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * Toggle local dev tools (shell, write_file, read_file, etc.) for OpenClaw
+ * Toggle local dev tools (shell, write_file, read_file, etc.) for ThinClaw
  */
-async openclawToggleLocalTools(enabled: boolean) : Promise<Result<null, string>> {
+async thinclawToggleLocalTools(enabled: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_local_tools", { enabled }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_local_tools", { enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1415,52 +1415,52 @@ async openclawToggleLocalTools(enabled: boolean) : Promise<Result<null, string>>
 /**
  * Set workspace mode and optional root directory for the agent
  */
-async openclawSetWorkspaceMode(mode: string, root: string | null) : Promise<Result<string, string>> {
+async thinclawSetWorkspaceMode(mode: string, root: string | null) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_workspace_mode", { mode, root }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_workspace_mode", { mode, root }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * Toggle local inference (exposing local LLM) for OpenClaw
+ * Toggle local inference (exposing local LLM) for ThinClaw
  */
-async openclawToggleLocalInference(enabled: boolean) : Promise<Result<null, string>> {
+async thinclawToggleLocalInference(enabled: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_local_inference", { enabled }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_local_inference", { enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawToggleExposeInference(enabled: boolean) : Promise<Result<JsonValue, string>> {
+async thinclawToggleExposeInference(enabled: boolean) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_expose_inference", { enabled }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_expose_inference", { enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSetSetupCompleted(completed: boolean) : Promise<Result<null, string>> {
+async thinclawSetSetupCompleted(completed: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_setup_completed", { completed }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_setup_completed", { completed }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawToggleAutoStart(enabled: boolean) : Promise<Result<null, string>> {
+async thinclawToggleAutoStart(enabled: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_toggle_auto_start", { enabled }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_toggle_auto_start", { enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawSetDevModeWizard(enabled: boolean) : Promise<Result<null, string>> {
+async thinclawSetDevModeWizard(enabled: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_dev_mode_wizard", { enabled }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_dev_mode_wizard", { enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1475,9 +1475,9 @@ async openclawSetDevModeWizard(enabled: boolean) : Promise<Result<null, string>>
  *
  * Persisted to identity.json and applied via env var for next engine start.
  */
-async openclawSetAutonomyMode(enabled: boolean) : Promise<Result<null, string>> {
+async thinclawSetAutonomyMode(enabled: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_autonomy_mode", { enabled }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_autonomy_mode", { enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1486,9 +1486,9 @@ async openclawSetAutonomyMode(enabled: boolean) : Promise<Result<null, string>> 
 /**
  * Get the current autonomy mode setting.
  */
-async openclawGetAutonomyMode() : Promise<Result<boolean, string>> {
+async thinclawGetAutonomyMode() : Promise<Result<boolean, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_autonomy_mode") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_autonomy_mode") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1497,9 +1497,9 @@ async openclawGetAutonomyMode() : Promise<Result<boolean, string>> {
 /**
  * Mark the first-run identity bootstrap as completed.
  */
-async openclawSetBootstrapCompleted(completed: boolean) : Promise<Result<null, string>> {
+async thinclawSetBootstrapCompleted(completed: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_bootstrap_completed", { completed }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_bootstrap_completed", { completed }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1516,9 +1516,9 @@ async openclawSetBootstrapCompleted(completed: boolean) : Promise<Result<null, s
  * completed the ritual already (the save just failed silently).  We
  * auto-mark it done here so the button never shows the wrong label again.
  */
-async openclawCheckBootstrapNeeded() : Promise<Result<boolean, string>> {
+async thinclawCheckBootstrapNeeded() : Promise<Result<boolean, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_check_bootstrap_needed") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_check_bootstrap_needed") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1530,161 +1530,161 @@ async openclawCheckBootstrapNeeded() : Promise<Result<boolean, string>> {
  * Resets bootstrap_completed to false so the BootstrapModal shows again
  * on next startup. The agent will re-run its identity awakening.
  */
-async openclawTriggerBootstrap() : Promise<Result<null, string>> {
+async thinclawTriggerBootstrap() : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_trigger_bootstrap") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_trigger_bootstrap") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawJobsList() : Promise<Result<JsonValue, string>> {
+async thinclawJobsList() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_jobs_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_jobs_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawJobsSummary() : Promise<Result<JsonValue, string>> {
+async thinclawJobsSummary() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_jobs_summary") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_jobs_summary") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawJobDetail(jobId: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobDetail(jobId: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_detail", { jobId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_detail", { jobId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawJobCancel(jobId: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobCancel(jobId: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_cancel", { jobId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_cancel", { jobId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawJobRestart(jobId: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobRestart(jobId: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_restart", { jobId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_restart", { jobId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawJobPrompt(jobId: string, content: string | null, done: boolean | null) : Promise<Result<JsonValue, string>> {
+async thinclawJobPrompt(jobId: string, content: string | null, done: boolean | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_prompt", { jobId, content, done }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_prompt", { jobId, content, done }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawJobEvents(jobId: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobEvents(jobId: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_events", { jobId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_events", { jobId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawJobFilesList(jobId: string, path: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawJobFilesList(jobId: string, path: string | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_files_list", { jobId, path }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_files_list", { jobId, path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawJobFileRead(jobId: string, path: string) : Promise<Result<JsonValue, string>> {
+async thinclawJobFileRead(jobId: string, path: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_job_file_read", { jobId, path }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_job_file_read", { jobId, path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawAutonomyStatus() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyStatus() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_status") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_status") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawAutonomyBootstrap() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyBootstrap() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_bootstrap") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_bootstrap") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawAutonomyPause(reason: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyPause(reason: string | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_pause", { reason }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_pause", { reason }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawAutonomyResume() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyResume() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_resume") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_resume") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawAutonomyPermissions() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyPermissions() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_permissions") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_permissions") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawDesktopPermissionStatus() : Promise<Result<JsonValue, string>> {
+async thinclawDesktopPermissionStatus() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_desktop_permission_status") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_desktop_permission_status") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawAutonomyRollback() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyRollback() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_rollback") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_rollback") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawAutonomyRollouts() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyRollouts() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_rollouts") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_rollouts") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawAutonomyChecks() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyChecks() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_checks") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_checks") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawAutonomyEvidence() : Promise<Result<JsonValue, string>> {
+async thinclawAutonomyEvidence() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_autonomy_evidence") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_autonomy_evidence") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1693,9 +1693,9 @@ async openclawAutonomyEvidence() : Promise<Result<JsonValue, string>> {
 /**
  * Save HuggingFace token
  */
-async openclawSetHfToken(token: string) : Promise<Result<null, string>> {
+async thinclawSetHfToken(token: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_hf_token", { token }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_hf_token", { token }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1706,9 +1706,9 @@ async openclawSetHfToken(token: string) : Promise<Result<null, string>> {
  * Supports: xai, venice, together, moonshot, minimax, nvidia, qianfan, mistral,
  * xiaomi, cohere, voyage, deepgram, elevenlabs, stability, fal.
  */
-async openclawSaveImplicitProviderKey(provider: string, key: string) : Promise<Result<null, string>> {
+async thinclawSaveImplicitProviderKey(provider: string, key: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_implicit_provider_key", { provider, key }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_implicit_provider_key", { provider, key }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1717,9 +1717,9 @@ async openclawSaveImplicitProviderKey(provider: string, key: string) : Promise<R
 /**
  * Get an implicit cloud provider API key (generic)
  */
-async openclawGetImplicitProviderKey(provider: string) : Promise<Result<string | null, string>> {
+async thinclawGetImplicitProviderKey(provider: string) : Promise<Result<string | null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_implicit_provider_key", { provider }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_implicit_provider_key", { provider }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1728,9 +1728,9 @@ async openclawGetImplicitProviderKey(provider: string) : Promise<Result<string |
 /**
  * Save Amazon Bedrock AWS credentials
  */
-async openclawSaveBedrockCredentials(accessKeyId: string, secretAccessKey: string, region: string) : Promise<Result<null, string>> {
+async thinclawSaveBedrockCredentials(accessKeyId: string, secretAccessKey: string, region: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_save_bedrock_credentials", { accessKeyId, secretAccessKey, region }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_save_bedrock_credentials", { accessKeyId, secretAccessKey, region }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1739,9 +1739,9 @@ async openclawSaveBedrockCredentials(accessKeyId: string, secretAccessKey: strin
 /**
  * Get Amazon Bedrock credentials
  */
-async openclawGetBedrockCredentials() : Promise<Result<[string | null, string | null, string | null], string>> {
+async thinclawGetBedrockCredentials() : Promise<Result<[string | null, string | null, string | null], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_bedrock_credentials") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_bedrock_credentials") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1753,9 +1753,9 @@ async openclawGetBedrockCredentials() : Promise<Result<[string | null, string | 
  * Still needed: ThinClaw Desktop manages the local llama-server sidecar and needs to
  * sync its port/model info to the config that IronClaw reads on restart.
  */
-async openclawSyncLocalLlm() : Promise<Result<null, string>> {
+async thinclawSyncLocalLlm() : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_sync_local_llm") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_sync_local_llm") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1777,9 +1777,9 @@ async openclawSyncLocalLlm() : Promise<Result<null, string>> {
  * - Optional: systemd service (--systemd)
  * 4. Return the URL + generated token via `deploy-status`
  */
-async openclawDeployRemote(ip: string, user: string, tailscaleKey: string | null, enableSystemd: boolean | null) : Promise<Result<null, string>> {
+async thinclawDeployRemote(ip: string, user: string, tailscaleKey: string | null, enableSystemd: boolean | null) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_deploy_remote", { ip, user, tailscaleKey, enableSystemd }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_deploy_remote", { ip, user, tailscaleKey, enableSystemd }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1793,9 +1793,9 @@ async openclawDeployRemote(ip: string, user: string, tailscaleKey: string | null
  * session's frontend. If no parent is provided, behaves like a standalone
  * session spawn.
  */
-async openclawSpawnSession(agentId: string, task: string, parentSession: string | null) : Promise<Result<SpawnSessionResponse, string>> {
+async thinclawSpawnSession(agentId: string, task: string, parentSession: string | null) : Promise<Result<SpawnSessionResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_spawn_session", { agentId, task, parentSession }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_spawn_session", { agentId, task, parentSession }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1807,9 +1807,9 @@ async openclawSpawnSession(agentId: string, task: string, parentSession: string 
  * Falls back to scanning the live session list for child key patterns
  * (`<parent>:task-<uuid>`) so the Fleet panel persists across restarts.
  */
-async openclawListChildSessions(parentSession: string) : Promise<Result<ChildSessionInfo[], string>> {
+async thinclawListChildSessions(parentSession: string) : Promise<Result<ChildSessionInfo[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_list_child_sessions", { parentSession }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_list_child_sessions", { parentSession }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1820,9 +1820,9 @@ async openclawListChildSessions(parentSession: string) : Promise<Result<ChildSes
  *
  * Also emits a `SubAgentUpdate` event to the parent session's frontend.
  */
-async openclawUpdateSubAgentStatus(childSession: string, status: string, resultSummary: string | null) : Promise<Result<OpenClawRpcResponse, string>> {
+async thinclawUpdateSubAgentStatus(childSession: string, status: string, resultSummary: string | null) : Promise<Result<ThinClawRpcResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_update_sub_agent_status", { childSession, status, resultSummary }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_update_sub_agent_status", { childSession, status, resultSummary }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1831,9 +1831,9 @@ async openclawUpdateSubAgentStatus(childSession: string, status: string, resultS
 /**
  * List available agents (Discovery)
  */
-async openclawAgentsList() : Promise<Result<AgentProfile[], string>> {
+async thinclawAgentsList() : Promise<Result<AgentProfile[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_agents_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_agents_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1842,9 +1842,9 @@ async openclawAgentsList() : Promise<Result<AgentProfile[], string>> {
 /**
  * Push content to the Canvas UI
  */
-async openclawCanvasPush(content: string) : Promise<Result<null, string>> {
+async thinclawCanvasPush(content: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_push", { content }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_push", { content }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1853,9 +1853,9 @@ async openclawCanvasPush(content: string) : Promise<Result<null, string>> {
 /**
  * Navigate the Canvas UI
  */
-async openclawCanvasNavigate(url: string) : Promise<Result<null, string>> {
+async thinclawCanvasNavigate(url: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_navigate", { url }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_navigate", { url }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1864,9 +1864,9 @@ async openclawCanvasNavigate(url: string) : Promise<Result<null, string>> {
 /**
  * List all active canvas panels.
  */
-async openclawCanvasPanelsList() : Promise<Result<JsonValue, string>> {
+async thinclawCanvasPanelsList() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_panels_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_panels_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1875,9 +1875,9 @@ async openclawCanvasPanelsList() : Promise<Result<JsonValue, string>> {
 /**
  * Get a specific canvas panel's full data.
  */
-async openclawCanvasPanelGet(panelId: string) : Promise<Result<JsonValue, string>> {
+async thinclawCanvasPanelGet(panelId: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_panel_get", { panelId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_panel_get", { panelId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1886,9 +1886,9 @@ async openclawCanvasPanelGet(panelId: string) : Promise<Result<JsonValue, string
 /**
  * Dismiss (remove) a canvas panel.
  */
-async openclawCanvasPanelDismiss(panelId: string) : Promise<Result<boolean, string>> {
+async thinclawCanvasPanelDismiss(panelId: string) : Promise<Result<boolean, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_canvas_panel_dismiss", { panelId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_canvas_panel_dismiss", { panelId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1897,9 +1897,9 @@ async openclawCanvasPanelDismiss(panelId: string) : Promise<Result<boolean, stri
 /**
  * Delete a routine by ID or name.
  */
-async openclawRoutineDelete(routineId: string) : Promise<Result<JsonValue, string>> {
+async thinclawRoutineDelete(routineId: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routine_delete", { routineId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routine_delete", { routineId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1908,9 +1908,9 @@ async openclawRoutineDelete(routineId: string) : Promise<Result<JsonValue, strin
 /**
  * Toggle a routine enabled/disabled by ID or name.
  */
-async openclawRoutineToggle(routineId: string, enabled: boolean) : Promise<Result<JsonValue, string>> {
+async thinclawRoutineToggle(routineId: string, enabled: boolean) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routine_toggle", { routineId, enabled }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routine_toggle", { routineId, enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1924,9 +1924,9 @@ async openclawRoutineToggle(routineId: string, enabled: boolean) : Promise<Resul
  *
  * `interval_minutes` must be between 5 and 1440 (24 hours).
  */
-async openclawHeartbeatSetInterval(intervalMinutes: number) : Promise<Result<JsonValue, string>> {
+async thinclawHeartbeatSetInterval(intervalMinutes: number) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_heartbeat_set_interval", { intervalMinutes }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_heartbeat_set_interval", { intervalMinutes }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1939,9 +1939,9 @@ async openclawHeartbeatSetInterval(intervalMinutes: number) : Promise<Result<Jso
  * "Think step by step" to messages. Now we set the env vars
  * that IronClaw's ThinkingConfig reads natively.
  */
-async openclawSetThinking(enabled: boolean, budgetTokens: number | null) : Promise<Result<ThinkingConfig, string>> {
+async thinclawSetThinking(enabled: boolean, budgetTokens: number | null) : Promise<Result<ThinkingConfig, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_set_thinking", { enabled, budgetTokens }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_set_thinking", { enabled, budgetTokens }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1953,9 +1953,9 @@ async openclawSetThinking(enabled: boolean, budgetTokens: number | null) : Promi
  * Falls back to simple text search across workspace files if the
  * vector search API isn't available.
  */
-async openclawMemorySearch(query: string, limit: number | null) : Promise<Result<MemorySearchResponse, string>> {
+async thinclawMemorySearch(query: string, limit: number | null) : Promise<Result<MemorySearchResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_memory_search", { query, limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_memory_search", { query, limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1968,9 +1968,9 @@ async openclawMemorySearch(query: string, limit: number | null) : Promise<Result
  * The `format` parameter is optional — `None` defaults to markdown
  * for backward compatibility with existing frontend callers.
  */
-async openclawExportSession(sessionKey: string, format: string | null) : Promise<Result<SessionExportResponse, string>> {
+async thinclawExportSession(sessionKey: string, format: string | null) : Promise<Result<SessionExportResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_export_session", { sessionKey, format }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_export_session", { sessionKey, format }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1979,9 +1979,9 @@ async openclawExportSession(sessionKey: string, format: string | null) : Promise
 /**
  * List all registered lifecycle hooks with their details.
  */
-async openclawHooksList() : Promise<Result<HooksListResponse, string>> {
+async thinclawHooksList() : Promise<Result<HooksListResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_hooks_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_hooks_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1990,9 +1990,9 @@ async openclawHooksList() : Promise<Result<HooksListResponse, string>> {
 /**
  * Register hooks from a declarative JSON bundle (rules and/or outbound webhooks).
  */
-async openclawHooksRegister(input: HookRegisterInput) : Promise<Result<HookRegisterResponse, string>> {
+async thinclawHooksRegister(input: HookRegisterInput) : Promise<Result<HookRegisterResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_hooks_register", { input }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_hooks_register", { input }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2001,9 +2001,9 @@ async openclawHooksRegister(input: HookRegisterInput) : Promise<Result<HookRegis
 /**
  * Unregister (remove) a hook by name.
  */
-async openclawHooksUnregister(hookName: string) : Promise<Result<HookUnregisterResponse, string>> {
+async thinclawHooksUnregister(hookName: string) : Promise<Result<HookUnregisterResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_hooks_unregister", { hookName }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_hooks_unregister", { hookName }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2012,9 +2012,9 @@ async openclawHooksUnregister(hookName: string) : Promise<Result<HookUnregisterR
 /**
  * List all installed extensions/plugins.
  */
-async openclawExtensionsList() : Promise<Result<ExtensionsListResponse, string>> {
+async thinclawExtensionsList() : Promise<Result<ExtensionsListResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_extensions_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_extensions_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2023,9 +2023,9 @@ async openclawExtensionsList() : Promise<Result<ExtensionsListResponse, string>>
 /**
  * Install an extension by registry name or direct URL.
  */
-async openclawExtensionInstall(name: string, url: string | null, kind: string | null) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionInstall(name: string, url: string | null, kind: string | null) : Promise<Result<ExtensionActionResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_install", { name, url, kind }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_install", { name, url, kind }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2034,9 +2034,9 @@ async openclawExtensionInstall(name: string, url: string | null, kind: string | 
 /**
  * Activate an extension by name.
  */
-async openclawExtensionActivate(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionActivate(name: string) : Promise<Result<ExtensionActionResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_activate", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_activate", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2045,9 +2045,9 @@ async openclawExtensionActivate(name: string) : Promise<Result<ExtensionActionRe
 /**
  * Reconnect an installed channel extension when the gateway supports it.
  */
-async openclawExtensionReconnect(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionReconnect(name: string) : Promise<Result<ExtensionActionResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_reconnect", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_reconnect", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2056,9 +2056,9 @@ async openclawExtensionReconnect(name: string) : Promise<Result<ExtensionActionR
 /**
  * Fetch an extension setup schema.
  */
-async openclawExtensionSetupGet(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawExtensionSetupGet(name: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_setup_get", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_setup_get", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2067,9 +2067,9 @@ async openclawExtensionSetupGet(name: string) : Promise<Result<JsonValue, string
 /**
  * Submit extension setup secrets.
  */
-async openclawExtensionSetupSubmit(name: string, secrets: { [key in string]: string }) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionSetupSubmit(name: string, secrets: { [key in string]: string }) : Promise<Result<ExtensionActionResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_setup_submit", { name, secrets }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_setup_submit", { name, secrets }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2078,9 +2078,9 @@ async openclawExtensionSetupSubmit(name: string, secrets: { [key in string]: str
 /**
  * Validate extension setup and manifest/auth readiness.
  */
-async openclawExtensionValidateSetup(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionValidateSetup(name: string) : Promise<Result<ExtensionActionResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_validate_setup", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_validate_setup", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2089,9 +2089,9 @@ async openclawExtensionValidateSetup(name: string) : Promise<Result<ExtensionAct
 /**
  * Remove an extension by name.
  */
-async openclawExtensionRemove(name: string) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawExtensionRemove(name: string) : Promise<Result<ExtensionActionResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_remove", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_remove", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2100,9 +2100,9 @@ async openclawExtensionRemove(name: string) : Promise<Result<ExtensionActionResp
 /**
  * Search the bundled extension registry.
  */
-async openclawExtensionRegistrySearch(query: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawExtensionRegistrySearch(query: string | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_extension_registry_search", { query }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_extension_registry_search", { query }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2111,9 +2111,9 @@ async openclawExtensionRegistrySearch(query: string | null) : Promise<Result<Jso
 /**
  * List configured MCP servers.
  */
-async openclawMcpServers() : Promise<Result<JsonValue, string>> {
+async thinclawMcpServers() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_servers") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_servers") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2122,9 +2122,9 @@ async openclawMcpServers() : Promise<Result<JsonValue, string>> {
 /**
  * Fetch one MCP server's status/config.
  */
-async openclawMcpServer(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpServer(name: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_server", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_server", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2133,9 +2133,9 @@ async openclawMcpServer(name: string) : Promise<Result<JsonValue, string>> {
 /**
  * List tools exposed by an MCP server.
  */
-async openclawMcpServerTools(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpServerTools(name: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_server_tools", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_server_tools", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2144,9 +2144,9 @@ async openclawMcpServerTools(name: string) : Promise<Result<JsonValue, string>> 
 /**
  * List resources exposed by an MCP server.
  */
-async openclawMcpServerResources(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpServerResources(name: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_server_resources", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_server_resources", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2155,9 +2155,9 @@ async openclawMcpServerResources(name: string) : Promise<Result<JsonValue, strin
 /**
  * Read one MCP resource by URI.
  */
-async openclawMcpReadResource(name: string, uri: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpReadResource(name: string, uri: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_read_resource", { name, uri }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_read_resource", { name, uri }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2166,9 +2166,9 @@ async openclawMcpReadResource(name: string, uri: string) : Promise<Result<JsonVa
 /**
  * List resource templates exposed by an MCP server.
  */
-async openclawMcpResourceTemplates(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpResourceTemplates(name: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_resource_templates", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_resource_templates", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2177,9 +2177,9 @@ async openclawMcpResourceTemplates(name: string) : Promise<Result<JsonValue, str
 /**
  * List prompts exposed by an MCP server.
  */
-async openclawMcpServerPrompts(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpServerPrompts(name: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_server_prompts", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_server_prompts", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2188,9 +2188,9 @@ async openclawMcpServerPrompts(name: string) : Promise<Result<JsonValue, string>
 /**
  * Render one MCP prompt.
  */
-async openclawMcpGetPrompt(serverName: string, promptName: string, promptArgs: JsonValue | null) : Promise<Result<JsonValue, string>> {
+async thinclawMcpGetPrompt(serverName: string, promptName: string, promptArgs: JsonValue | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_get_prompt", { serverName, promptName, promptArgs }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_get_prompt", { serverName, promptName, promptArgs }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2199,9 +2199,9 @@ async openclawMcpGetPrompt(serverName: string, promptName: string, promptArgs: J
 /**
  * Discover OAuth metadata for an HTTP MCP server.
  */
-async openclawMcpOauth(name: string) : Promise<Result<JsonValue, string>> {
+async thinclawMcpOauth(name: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_oauth", { name }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_oauth", { name }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2210,9 +2210,9 @@ async openclawMcpOauth(name: string) : Promise<Result<JsonValue, string>> {
 /**
  * Set MCP server log level.
  */
-async openclawMcpSetLogLevel(name: string, level: string) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawMcpSetLogLevel(name: string, level: string) : Promise<Result<ExtensionActionResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_set_log_level", { name, level }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_set_log_level", { name, level }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2221,9 +2221,9 @@ async openclawMcpSetLogLevel(name: string, level: string) : Promise<Result<Exten
 /**
  * List pending MCP interaction/auth requests.
  */
-async openclawMcpInteractions() : Promise<Result<JsonValue, string>> {
+async thinclawMcpInteractions() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_interactions") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_interactions") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2232,25 +2232,25 @@ async openclawMcpInteractions() : Promise<Result<JsonValue, string>> {
 /**
  * Respond to a pending MCP interaction/auth request.
  */
-async openclawMcpInteractionRespond(interactionId: string, action: string, response: JsonValue | null, message: string | null) : Promise<Result<ExtensionActionResponse, string>> {
+async thinclawMcpInteractionRespond(interactionId: string, action: string, response: JsonValue | null, message: string | null) : Promise<Result<ExtensionActionResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_interaction_respond", { interactionId, action, response, message }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_interaction_respond", { interactionId, action, response, message }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawDiagnostics() : Promise<Result<DiagnosticsResponse, string>> {
+async thinclawDiagnostics() : Promise<Result<DiagnosticsResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_diagnostics") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_diagnostics") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawToolsList() : Promise<Result<ToolsListResponse, string>> {
+async thinclawToolsList() : Promise<Result<ToolsListResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_tools_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_tools_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2259,9 +2259,9 @@ async openclawToolsList() : Promise<Result<ToolsListResponse, string>> {
 /**
  * Get the set of globally disabled tools (deny-list stored in settings).
  */
-async openclawToolPolicyGet() : Promise<Result<string[], string>> {
+async thinclawToolPolicyGet() : Promise<Result<string[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_tool_policy_get") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_tool_policy_get") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2270,33 +2270,33 @@ async openclawToolPolicyGet() : Promise<Result<string[], string>> {
 /**
  * Set (overwrite) the list of globally disabled tools.
  */
-async openclawToolPolicySet(disabledTools: string[]) : Promise<Result<null, string>> {
+async thinclawToolPolicySet(disabledTools: string[]) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_tool_policy_set", { disabledTools }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_tool_policy_set", { disabledTools }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawPairingList(channel: string) : Promise<Result<PairingListResponse, string>> {
+async thinclawPairingList(channel: string) : Promise<Result<PairingListResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_pairing_list", { channel }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_pairing_list", { channel }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawPairingApprove(channel: string, code: string) : Promise<Result<JsonValue, string>> {
+async thinclawPairingApprove(channel: string, code: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_pairing_approve", { channel, code }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_pairing_approve", { channel, code }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawCompactSession(sessionKey: string) : Promise<Result<CompactSessionResponse, string>> {
+async thinclawCompactSession(sessionKey: string) : Promise<Result<CompactSessionResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_compact_session", { sessionKey }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_compact_session", { sessionKey }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2310,9 +2310,9 @@ async openclawCompactSession(sessionKey: string) : Promise<Result<CompactSession
  *
  * Also auto-persists entries to the IronClaw DB on each poll (cheap, ~10s interval).
  */
-async openclawCostSummary() : Promise<Result<CostSummary, string>> {
+async thinclawCostSummary() : Promise<Result<CostSummary, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_cost_summary") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_cost_summary") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2321,9 +2321,9 @@ async openclawCostSummary() : Promise<Result<CostSummary, string>> {
 /**
  * Export cost data as CSV.
  */
-async openclawCostExportCsv() : Promise<Result<string, string>> {
+async thinclawCostExportCsv() : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_cost_export_csv") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_cost_export_csv") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2334,9 +2334,9 @@ async openclawCostExportCsv() : Promise<Result<string, string>> {
  *
  * Clears in-memory entries and persists the empty state to the IronClaw DB.
  */
-async openclawCostReset() : Promise<Result<null, string>> {
+async thinclawCostReset() : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_cost_reset") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_cost_reset") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2348,9 +2348,9 @@ async openclawCostReset() : Promise<Result<null, string>> {
  * Queries the agent's ChannelManager for actually registered channels
  * instead of reading static config/env vars.
  */
-async openclawChannelStatusList() : Promise<Result<ChannelStatusEntry[], string>> {
+async thinclawChannelStatusList() : Promise<Result<ChannelStatusEntry[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_channel_status_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_channel_status_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2359,9 +2359,9 @@ async openclawChannelStatusList() : Promise<Result<ChannelStatusEntry[], string>
 /**
  * Set the default agent profile.
  */
-async openclawAgentsSetDefault(agentId: string) : Promise<Result<null, string>> {
+async thinclawAgentsSetDefault(agentId: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_agents_set_default", { agentId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_agents_set_default", { agentId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2370,9 +2370,9 @@ async openclawAgentsSetDefault(agentId: string) : Promise<Result<null, string>> 
 /**
  * Search ClawHub plugin catalog (proxied through IronClaw).
  */
-async openclawClawhubSearch(query: string) : Promise<Result<JsonValue, string>> {
+async thinclawClawhubSearch(query: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_clawhub_search", { query }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_clawhub_search", { query }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2381,9 +2381,9 @@ async openclawClawhubSearch(query: string) : Promise<Result<JsonValue, string>> 
 /**
  * Install a plugin from ClawHub.
  */
-async openclawClawhubInstall(pluginId: string) : Promise<Result<JsonValue, string>> {
+async thinclawClawhubInstall(pluginId: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_clawhub_install", { pluginId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_clawhub_install", { pluginId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2392,12 +2392,12 @@ async openclawClawhubInstall(pluginId: string) : Promise<Result<JsonValue, strin
 /**
  * List routine audit entries with optional outcome filter.
  *
- * Replaces the empty `openclaw_cron_history` stub with actual data
+ * Replaces the empty `thinclaw_cron_history` stub with actual data
  * access from IronClaw's RoutineAuditLog.
  */
-async openclawRoutineAuditList(routineKey: string, limit: number | null, outcome: string | null) : Promise<Result<RoutineAuditEntry[], string>> {
+async thinclawRoutineAuditList(routineKey: string, limit: number | null, outcome: string | null) : Promise<Result<RoutineAuditEntry[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routine_audit_list", { routineKey, limit, outcome }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routine_audit_list", { routineKey, limit, outcome }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2409,9 +2409,9 @@ async openclawRoutineAuditList(routineKey: string, limit: number | null, outcome
  * If `key` is provided, clears runs for that specific routine.
  * If `key` is null, clears ALL routine runs.
  */
-async openclawClearRoutineRuns(key: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawClearRoutineRuns(key: string | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_clear_routine_runs", { key }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_clear_routine_runs", { key }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2420,9 +2420,9 @@ async openclawClearRoutineRuns(key: string | null) : Promise<Result<JsonValue, s
 /**
  * Get response cache statistics.
  */
-async openclawCacheStats() : Promise<Result<CacheStats, string>> {
+async thinclawCacheStats() : Promise<Result<CacheStats, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_cache_stats") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_cache_stats") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2431,9 +2431,9 @@ async openclawCacheStats() : Promise<Result<CacheStats, string>> {
 /**
  * List plugin lifecycle events.
  */
-async openclawPluginLifecycleList() : Promise<Result<LifecycleEventItem[], string>> {
+async thinclawPluginLifecycleList() : Promise<Result<LifecycleEventItem[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_plugin_lifecycle_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_plugin_lifecycle_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2442,9 +2442,9 @@ async openclawPluginLifecycleList() : Promise<Result<LifecycleEventItem[], strin
 /**
  * Validate a plugin's manifest.
  */
-async openclawManifestValidate(pluginId: string) : Promise<Result<ManifestValidationResponse, string>> {
+async thinclawManifestValidate(pluginId: string) : Promise<Result<ManifestValidationResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_manifest_validate", { pluginId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_manifest_validate", { pluginId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2453,9 +2453,9 @@ async openclawManifestValidate(pluginId: string) : Promise<Result<ManifestValida
 /**
  * Get the current smart routing configuration.
  */
-async openclawRoutingGet() : Promise<Result<JsonValue, string>> {
+async thinclawRoutingGet() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_get") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_get") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2464,9 +2464,9 @@ async openclawRoutingGet() : Promise<Result<JsonValue, string>> {
 /**
  * Enable or disable smart routing.
  */
-async openclawRoutingSet(smartRoutingEnabled: boolean) : Promise<Result<null, string>> {
+async thinclawRoutingSet(smartRoutingEnabled: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_set", { smartRoutingEnabled }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_set", { smartRoutingEnabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2475,9 +2475,9 @@ async openclawRoutingSet(smartRoutingEnabled: boolean) : Promise<Result<null, st
 /**
  * List all routing rules along with the smart routing toggle state.
  */
-async openclawRoutingRulesList() : Promise<Result<RoutingRulesResponse, string>> {
+async thinclawRoutingRulesList() : Promise<Result<RoutingRulesResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_rules_list") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_rules_list") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2486,9 +2486,9 @@ async openclawRoutingRulesList() : Promise<Result<RoutingRulesResponse, string>>
 /**
  * Save routing rules (full replace).
  */
-async openclawRoutingRulesSave(rules: RoutingRule[]) : Promise<Result<null, string>> {
+async thinclawRoutingRulesSave(rules: RoutingRule[]) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_rules_save", { rules }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_rules_save", { rules }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2497,9 +2497,9 @@ async openclawRoutingRulesSave(rules: RoutingRule[]) : Promise<Result<null, stri
 /**
  * Add a routing rule at a specific position (or at the end).
  */
-async openclawRoutingRulesAdd(rule: RoutingRule, position: number | null) : Promise<Result<RoutingRule[], string>> {
+async thinclawRoutingRulesAdd(rule: RoutingRule, position: number | null) : Promise<Result<RoutingRule[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_rules_add", { rule, position }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_rules_add", { rule, position }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2508,9 +2508,9 @@ async openclawRoutingRulesAdd(rule: RoutingRule, position: number | null) : Prom
 /**
  * Remove a routing rule by index.
  */
-async openclawRoutingRulesRemove(index: number) : Promise<Result<RoutingRule[], string>> {
+async thinclawRoutingRulesRemove(index: number) : Promise<Result<RoutingRule[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_rules_remove", { index }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_rules_remove", { index }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2519,9 +2519,20 @@ async openclawRoutingRulesRemove(index: number) : Promise<Result<RoutingRule[], 
 /**
  * Reorder a routing rule (move from one position to another).
  */
-async openclawRoutingRulesReorder(from: number, to: number) : Promise<Result<RoutingRule[], string>> {
+async thinclawRoutingRulesReorder(from: number, to: number) : Promise<Result<RoutingRule[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_rules_reorder", { from, to }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_rules_reorder", { from, to }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Save explicit provider order for primary and cheap routing pools.
+ */
+async thinclawRoutingPoolsSave(primaryPoolOrder: string[], cheapPoolOrder: string[]) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_pools_save", { primaryPoolOrder, cheapPoolOrder }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2530,9 +2541,9 @@ async openclawRoutingRulesReorder(from: number, to: number) : Promise<Result<Rou
 /**
  * Get full routing policy status including latency data.
  */
-async openclawRoutingStatus() : Promise<Result<RoutingStatusResponse, string>> {
+async thinclawRoutingStatus() : Promise<Result<RoutingStatusResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_status") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_status") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2541,9 +2552,9 @@ async openclawRoutingStatus() : Promise<Result<RoutingStatusResponse, string>> {
 /**
  * Simulate ThinClaw's route decision for a draft prompt.
  */
-async openclawRoutingSimulate(request: RouteSimulationRequest) : Promise<Result<RouteSimulationResponse, string>> {
+async thinclawRoutingSimulate(request: RouteSimulationRequest) : Promise<Result<RouteSimulationResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_routing_simulate", { request }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_routing_simulate", { request }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2556,9 +2567,9 @@ async openclawRoutingSimulate(request: RouteSimulationRequest) : Promise<Result<
  * callback, exchanges the auth code for tokens, and returns them.
  * On success, the tokens are also stored in the Keychain.
  */
-async openclawGmailOauthStart() : Promise<Result<GmailOAuthResult, string>> {
+async thinclawGmailOauthStart() : Promise<Result<GmailOAuthResult, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_gmail_oauth_start") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_gmail_oauth_start") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2567,209 +2578,209 @@ async openclawGmailOauthStart() : Promise<Result<GmailOAuthResult, string>> {
 /**
  * Get Gmail channel configuration status.
  */
-async openclawGmailStatus() : Promise<Result<GmailStatusResponse, string>> {
+async thinclawGmailStatus() : Promise<Result<GmailStatusResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_gmail_status") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_gmail_status") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningStatus(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningStatus(limit: number | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_status", { limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_status", { limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningHistory(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningHistory(limit: number | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_history", { limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_history", { limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningCandidates(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningCandidates(limit: number | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_candidates", { limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_candidates", { limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningArtifactVersions(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningArtifactVersions(limit: number | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_artifact_versions", { limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_artifact_versions", { limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningProviderHealth() : Promise<Result<JsonValue, string>> {
+async thinclawLearningProviderHealth() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_provider_health") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_provider_health") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningCodeProposals(status: string | null, limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningCodeProposals(status: string | null, limit: number | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_code_proposals", { status, limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_code_proposals", { status, limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningOutcomes(status: string | null, limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningOutcomes(status: string | null, limit: number | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_outcomes", { status, limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_outcomes", { status, limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningRollbacks(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningRollbacks(limit: number | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_rollbacks", { limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_rollbacks", { limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningReviewCodeProposal(proposalId: string, decision: string, note: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningReviewCodeProposal(proposalId: string, decision: string, note: string | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_review_code_proposal", { proposalId, decision, note }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_review_code_proposal", { proposalId, decision, note }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningReviewOutcome(outcomeId: string, decision: string, verdict: string | null) : Promise<Result<JsonValue, string>> {
+async thinclawLearningReviewOutcome(outcomeId: string, decision: string, verdict: string | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_review_outcome", { outcomeId, decision, verdict }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_review_outcome", { outcomeId, decision, verdict }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningRecordRollback(artifactType: string, artifactName: string, artifactVersionId: string | null, reason: string) : Promise<Result<JsonValue, string>> {
+async thinclawLearningRecordRollback(artifactType: string, artifactName: string, artifactVersionId: string | null, reason: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_record_rollback", { artifactType, artifactName, artifactVersionId, reason }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_record_rollback", { artifactType, artifactName, artifactVersionId, reason }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawLearningEvaluateOutcomes() : Promise<Result<JsonValue, string>> {
+async thinclawLearningEvaluateOutcomes() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_learning_evaluate_outcomes") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_learning_evaluate_outcomes") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsProjects() : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsProjects() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_projects") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_projects") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsCampaigns() : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsCampaigns() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_campaigns") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_campaigns") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsRunners() : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsRunners() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_runners") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_runners") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsTargets() : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsTargets() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_targets") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_targets") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsTrials(campaignId: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsTrials(campaignId: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_trials", { campaignId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_trials", { campaignId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsTrialArtifacts(trialId: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsTrialArtifacts(trialId: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_trial_artifacts", { trialId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_trial_artifacts", { trialId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsModelUsage(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsModelUsage(limit: number | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_model_usage", { limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_model_usage", { limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsOpportunities(limit: number | null) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsOpportunities(limit: number | null) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_opportunities", { limit }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_opportunities", { limit }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsGpuClouds() : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsGpuClouds() : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_gpu_clouds") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_gpu_clouds") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsValidateRunner(runnerId: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsValidateRunner(runnerId: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_validate_runner", { runnerId }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_validate_runner", { runnerId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsCampaignAction(campaignId: string, action: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsCampaignAction(campaignId: string, action: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_campaign_action", { campaignId, action }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_campaign_action", { campaignId, action }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsGpuValidate(provider: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsGpuValidate(provider: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_gpu_validate", { provider }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_gpu_validate", { provider }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async openclawExperimentsGpuLaunchTest(provider: string) : Promise<Result<JsonValue, string>> {
+async thinclawExperimentsGpuLaunchTest(provider: string) : Promise<Result<JsonValue, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_experiments_gpu_launch_test", { provider }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_experiments_gpu_launch_test", { provider }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3160,9 +3171,9 @@ async cloudGetStorageBreakdown() : Promise<Result<StorageCategory[], string>> {
  * This is the directory where the agent writes local files (write_file, shell, etc.).
  * Defaults to the same app-data agent workspace used by the ThinClaw bridge.
  */
-async openclawGetWorkspacePath() : Promise<Result<string, string>> {
+async thinclawGetWorkspacePath() : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_get_workspace_path") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_get_workspace_path") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3173,9 +3184,9 @@ async openclawGetWorkspacePath() : Promise<Result<string, string>> {
  *
  * Creates the directory if it doesn't exist yet. Returns the path that was opened.
  */
-async openclawRevealWorkspace() : Promise<Result<string, string>> {
+async thinclawRevealWorkspace() : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_reveal_workspace") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_reveal_workspace") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3187,9 +3198,9 @@ async openclawRevealWorkspace() : Promise<Result<string, string>> {
  * Returns relative paths (from workspace root), file sizes, and modification
  * timestamps so the frontend can build a proper file browser.
  */
-async openclawListAgentWorkspaceFiles() : Promise<Result<JsonValue[], string>> {
+async thinclawListAgentWorkspaceFiles() : Promise<Result<JsonValue[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_list_agent_workspace_files") };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_list_agent_workspace_files") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3202,9 +3213,9 @@ async openclawListAgentWorkspaceFiles() : Promise<Result<JsonValue[], string>> {
  * are created automatically. Path traversal (`..`) is rejected for safety.
  * Returns the absolute path of the written file.
  */
-async openclawWriteAgentWorkspaceFile(relativePath: string, content: string) : Promise<Result<string, string>> {
+async thinclawWriteAgentWorkspaceFile(relativePath: string, content: string) : Promise<Result<string, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_write_agent_workspace_file", { relativePath, content }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_write_agent_workspace_file", { relativePath, content }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3216,9 +3227,9 @@ async openclawWriteAgentWorkspaceFile(relativePath: string, content: string) : P
  * Uses `open -R <path>` on macOS to select the file in a Finder window,
  * which is more user-friendly than just opening the parent folder.
  */
-async openclawRevealFile(path: string) : Promise<Result<null, string>> {
+async thinclawRevealFile(path: string) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_reveal_file", { path }) };
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_reveal_file", { path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -3642,42 +3653,6 @@ auth_url: string;
  */
 code_verifier: string }
 /**
- * Diagnostic info
- */
-export type OpenClawDiagnostics = { timestamp: string; engine_running: boolean; engine_connected: boolean; version: string; platform: string; port: number | null; state_dir: string | null; slack_enabled: boolean | null; telegram_enabled: boolean | null }
-/**
- * Chat history response
- */
-export type OpenClawHistoryResponse = { messages: OpenClawMessage[]; has_more: boolean }
-/**
- * Message in chat history
- */
-export type OpenClawMessage = { id: string; role: string; ts_ms: number; text: string; source: string | null }
-/**
- * RPC result response
- */
-export type OpenClawRpcResponse = { ok: boolean; message: string | null }
-/**
- * Session info from gateway
- */
-export type OpenClawSession = { session_key: string; title: string | null; updated_at_ms: number | null; source: string | null }
-/**
- * Sessions list response
- */
-export type OpenClawSessionsResponse = { sessions: OpenClawSession[] }
-/**
- * OpenClaw status response
- */
-export type OpenClawStatus = { engine_running: boolean; engine_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
-/**
- * Whether the agent runs tools without individual approval prompts.
- */
-auto_approve_tools: boolean;
-/**
- * Whether the first-run identity bootstrap ritual has been completed.
- */
-bootstrap_completed: boolean; custom_llm_url: string | null; custom_llm_key: string | null; custom_llm_model: string | null; custom_llm_enabled: boolean; enabled_cloud_providers: string[]; enabled_cloud_models: { [key in string]: string[] }; profiles: AgentProfile[]; has_xai_key: boolean; xai_granted: boolean; has_venice_key: boolean; venice_granted: boolean; has_together_key: boolean; together_granted: boolean; has_moonshot_key: boolean; moonshot_granted: boolean; has_minimax_key: boolean; minimax_granted: boolean; has_nvidia_key: boolean; nvidia_granted: boolean; has_qianfan_key: boolean; qianfan_granted: boolean; has_mistral_key: boolean; mistral_granted: boolean; has_xiaomi_key: boolean; xiaomi_granted: boolean; has_cohere_key: boolean; cohere_granted: boolean; has_voyage_key: boolean; voyage_granted: boolean; has_deepgram_key: boolean; deepgram_granted: boolean; has_elevenlabs_key: boolean; elevenlabs_granted: boolean; has_stability_key: boolean; stability_granted: boolean; has_fal_key: boolean; fal_granted: boolean; has_bedrock_key: boolean; bedrock_granted: boolean }
-/**
  * A single paired device/user
  */
 export type PairingItem = { channel: string; user_id: string; paired_at: string; status: string }
@@ -3839,6 +3814,42 @@ export type TAURI_CHANNEL<TSend> = import("@tauri-apps/api/core").Channel<TSend>
  */
 export type TelegramConfigInput = { enabled: boolean; bot_token: string | null; dm_policy: string; groups_enabled: boolean }
 /**
+ * Diagnostic info
+ */
+export type ThinClawDiagnostics = { timestamp: string; engine_running: boolean; engine_connected: boolean; version: string; platform: string; port: number | null; state_dir: string | null; slack_enabled: boolean | null; telegram_enabled: boolean | null }
+/**
+ * Chat history response
+ */
+export type ThinClawHistoryResponse = { messages: ThinClawMessage[]; has_more: boolean }
+/**
+ * Message in chat history
+ */
+export type ThinClawMessage = { id: string; role: string; ts_ms: number; text: string; source: string | null }
+/**
+ * RPC result response
+ */
+export type ThinClawRpcResponse = { ok: boolean; message: string | null }
+/**
+ * Session info from gateway
+ */
+export type ThinClawSession = { session_key: string; title: string | null; updated_at_ms: number | null; source: string | null }
+/**
+ * Sessions list response
+ */
+export type ThinClawSessionsResponse = { sessions: ThinClawSession[] }
+/**
+ * ThinClaw status response
+ */
+export type ThinClawStatus = { engine_running: boolean; engine_connected: boolean; slack_enabled: boolean; telegram_enabled: boolean; port: number; gateway_mode: string; remote_url: string | null; remote_token: string | null; device_id: string; auth_token: string; state_dir: string; has_huggingface_token: boolean; huggingface_granted: boolean; has_anthropic_key: boolean; anthropic_granted: boolean; has_brave_key: boolean; brave_granted: boolean; has_openai_key: boolean; openai_granted: boolean; has_openrouter_key: boolean; openrouter_granted: boolean; has_gemini_key: boolean; gemini_granted: boolean; has_groq_key: boolean; groq_granted: boolean; custom_secrets: CustomSecret[]; allow_local_tools: boolean; workspace_mode: string; workspace_root: string | null; local_inference_enabled: boolean; selected_cloud_brain: string | null; selected_cloud_model: string | null; setup_completed: boolean; auto_start_gateway: boolean; dev_mode_wizard: boolean;
+/**
+ * Whether the agent runs tools without individual approval prompts.
+ */
+auto_approve_tools: boolean;
+/**
+ * Whether the first-run identity bootstrap ritual has been completed.
+ */
+bootstrap_completed: boolean; custom_llm_url: string | null; custom_llm_key: string | null; custom_llm_model: string | null; custom_llm_enabled: boolean; enabled_cloud_providers: string[]; enabled_cloud_models: { [key in string]: string[] }; profiles: AgentProfile[]; has_xai_key: boolean; xai_granted: boolean; has_venice_key: boolean; venice_granted: boolean; has_together_key: boolean; together_granted: boolean; has_moonshot_key: boolean; moonshot_granted: boolean; has_minimax_key: boolean; minimax_granted: boolean; has_nvidia_key: boolean; nvidia_granted: boolean; has_qianfan_key: boolean; qianfan_granted: boolean; has_mistral_key: boolean; mistral_granted: boolean; has_xiaomi_key: boolean; xiaomi_granted: boolean; has_cohere_key: boolean; cohere_granted: boolean; has_voyage_key: boolean; voyage_granted: boolean; has_deepgram_key: boolean; deepgram_granted: boolean; has_elevenlabs_key: boolean; elevenlabs_granted: boolean; has_stability_key: boolean; stability_granted: boolean; has_fal_key: boolean; fal_granted: boolean; has_bedrock_key: boolean; bedrock_granted: boolean }
+/**
  * Thinking mode configuration
  */
 export type ThinkingConfig = { enabled: boolean; budget_tokens: number | null }
@@ -3852,7 +3863,7 @@ export type ToolInfoItem = { name: string; description: string; enabled: boolean
  */
 export type ToolsListResponse = { tools: ToolInfoItem[]; total: number }
 /**
- * Stable UI event contract — what the OpenClaw chat UI consumes.
+ * Stable UI event contract — what the ThinClaw chat UI consumes.
  *
  * Tagged with `#[serde(tag = "kind")]` so JSON looks like:
  * `{ "kind": "AssistantDelta", "session_key": "...", "delta": "..." }`
@@ -3933,7 +3944,7 @@ export type UiEvent =
 /**
  * Sub-agent progress update (relayed to parent session's UI).
  *
- * Emitted when a child session spawned by `openclaw_spawn_session`
+ * Emitted when a child session spawned by `thinclaw_spawn_session`
  * changes state. The frontend can use this to show a progress panel
  * in the parent session's chat view.
  */
@@ -3965,7 +3976,7 @@ export type UiEvent =
 { kind: "CostAlert"; alert_type: string; current_cost_usd: number; limit_usd: number; message: string | null } |
 /**
  * Typed catch-all for ThinClaw gateway events that do not yet have a
- * dedicated desktop rendering surface. Keeping these on `openclaw-event`
+ * dedicated desktop rendering surface. Keeping these on `thinclaw-event`
  * prevents silent drops while frontend surfaces catch up.
  */
 { kind: "GatewayEvent"; event_type: string; session_key: string | null; run_id: string | null; payload: JsonValue } |

@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
-export type SettingsPage = 'models' | 'inference' | 'inference-mode' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'openclaw-slack' | 'openclaw-telegram' | 'openclaw-gateway' | 'secrets' | 'mcp' | 'cloud-storage';
+export type SettingsPage = 'models' | 'inference' | 'inference-mode' | 'persona' | 'personalization' | 'server' | 'troubleshooting' | 'appearance' | 'thinclaw-slack' | 'thinclaw-telegram' | 'thinclaw-gateway' | 'secrets' | 'mcp' | 'cloud-storage';
 
 interface SettingsSidebarProps {
     activePage: SettingsPage;
@@ -49,9 +49,9 @@ const NAV_ITEMS = [
     {
         section: "ThinClaw",
         items: [
-            { id: 'openclaw-slack', label: 'Slack', icon: MessageSquare },
-            { id: 'openclaw-telegram', label: 'Telegram', icon: Send },
-            { id: 'openclaw-gateway', label: 'Gateway', icon: Radio },
+            { id: 'thinclaw-slack', label: 'Slack', icon: MessageSquare },
+            { id: 'thinclaw-telegram', label: 'Telegram', icon: Send },
+            { id: 'thinclaw-gateway', label: 'Gateway', icon: Radio },
         ]
     },
     {

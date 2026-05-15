@@ -124,7 +124,7 @@ pub async fn run_to_cloud(
 
     sanitize_persisted_provider_config(pool).await?;
 
-    let snapshot_path = app_data_dir.join("openclaw_snapshot.db");
+    let snapshot_path = app_data_dir.join("thinclaw_snapshot.db");
     let snapshot_size = snapshot::create_snapshot(pool, &snapshot_path)
         .await
         .map_err(|e| format!("Snapshot failed: {}", e))?;
@@ -149,8 +149,8 @@ pub async fn run_to_cloud(
         .await
         .map_err(|e| format!("Failed to read snapshot: {}", e))?;
 
-    let db_cloud_key = "db/openclaw.db.enc";
-    let encrypted_db = encryption::encrypt(master_key, "openclaw.db", &db_data)
+    let db_cloud_key = "db/thinclaw.db.enc";
+    let encrypted_db = encryption::encrypt(master_key, "thinclaw.db", &db_data)
         .map_err(|e| format!("DB encryption failed: {}", e))?;
 
     provider
@@ -160,7 +160,7 @@ pub async fn run_to_cloud(
 
     manifest.add_file(
         db_cloud_key.to_string(),
-        "openclaw.db".to_string(),
+        "thinclaw.db".to_string(),
         &db_data,
         encrypted_db.len() as u64,
     );
@@ -617,7 +617,7 @@ async fn collect_migration_files(app_data_dir: &Path) -> Result<Vec<MigrationFil
         ("generated", "generated/"),
         ("vectors", "vectors/"),
         ("previews", "previews/"),
-        ("openclaw", "openclaw/"),
+        ("thinclaw", "thinclaw/"),
     ];
 
     for (dir_name, _prefix) in &categories {
@@ -978,11 +978,11 @@ mod tests {
     #[test]
     fn test_validated_manifest_relative_path_rejects_traversal() {
         for path in [
-            "../openclaw.db",
-            "documents/../../openclaw.db",
-            "/tmp/openclaw.db",
-            "\\tmp\\openclaw.db",
-            "C:\\tmp\\openclaw.db",
+            "../thinclaw.db",
+            "documents/../../thinclaw.db",
+            "/tmp/thinclaw.db",
+            "\\tmp\\thinclaw.db",
+            "C:\\tmp\\thinclaw.db",
             "documents/./report.txt",
             "documents//report.txt",
         ] {
@@ -1007,10 +1007,10 @@ mod tests {
     async fn test_restore_staging_keeps_live_files_unchanged_when_databases_present() {
         let tmp = tempfile::tempdir().unwrap();
         let staging_dir = restore_staging_dir(tmp.path(), "migration-test");
-        let open_live = tmp.path().join("openclaw.db");
+        let open_live = tmp.path().join("thinclaw.db");
         let iron_live = tmp.path().join("ironclaw.db");
         let doc_live = tmp.path().join("documents").join("report.txt");
-        let open_staged = staging_dir.join("openclaw.db");
+        let open_staged = staging_dir.join("thinclaw.db");
         let iron_staged = staging_dir.join("ironclaw.db");
         let doc_staged = staging_dir.join("documents").join("report.txt");
 
@@ -1023,8 +1023,8 @@ mod tests {
 
         let mut manifest = ArchiveManifest::new("0.1.0".to_string(), 1, "test-key".to_string());
         manifest.add_file(
-            "db/openclaw.db.enc".to_string(),
-            "openclaw.db".to_string(),
+            "db/thinclaw.db.enc".to_string(),
+            "thinclaw.db".to_string(),
             b"new-open",
             64,
         );
@@ -1047,7 +1047,7 @@ mod tests {
         let targets = build_restore_targets(tmp.path(), &staging_dir, &manifest).unwrap();
         for target in &targets {
             let data: &[u8] = match target.manifest_file.original_path.as_str() {
-                "openclaw.db" => b"new-open",
+                "thinclaw.db" => b"new-open",
                 "ironclaw.db" => b"new-iron",
                 "documents/report.txt" => b"new-doc",
                 other => panic!("unexpected manifest path: {}", other),
@@ -1067,7 +1067,7 @@ mod tests {
         assert_eq!(tokio::fs::read(&open_staged).await.unwrap(), b"new-open");
         assert_eq!(tokio::fs::read(&iron_staged).await.unwrap(), b"new-iron");
         assert_eq!(tokio::fs::read(&doc_staged).await.unwrap(), b"new-doc");
-        assert!(!staging_dir.join(".openclaw.db.restoring").exists());
+        assert!(!staging_dir.join(".thinclaw.db.restoring").exists());
         assert!(!staging_dir.join(".ironclaw.db.restoring").exists());
     }
 }

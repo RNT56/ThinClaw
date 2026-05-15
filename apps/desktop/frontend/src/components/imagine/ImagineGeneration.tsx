@@ -13,7 +13,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { useModelContext } from '../model-context';
 import { ModelVariant } from '../../lib/model-library';
 import { downloadImageToDisk } from '../../lib/fs-utils';
-import * as openclaw from '../../lib/openclaw';
+import * as thinclaw from '../../lib/thinclaw';
 
 interface ImagineGenerationProps {
     onGenerate?: (prompt: string, options: GenerationOptions) => Promise<void>;
@@ -198,11 +198,11 @@ export function ImagineGeneration({
 
     const [hasGeminiKey, setHasGeminiKey] = useState<boolean>(false);
 
-    // Fetch openclaw status to check for keys
+    // Fetch thinclaw status to check for keys
     useEffect(() => {
         const checkStatus = async () => {
             try {
-                const status = await openclaw.getOpenClawStatus();
+                const status = await thinclaw.getThinClawStatus();
                 setHasGeminiKey(status.has_gemini_key);
             } catch (e) {
                 console.error("Failed to check status:", e);

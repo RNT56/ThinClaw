@@ -43,12 +43,12 @@ npm run tauri:dev:llamacpp
 
 ### 4. Alpha Contract And Handoff Docs
 - **[Bridge Contract](documentation/bridge-contract.md)**: stable Tauri command, event, routing, and binding contract.
-- **[Runtime Parity Checklist](documentation/runtime-parity-checklist.md)**: local ThinClaw runtime parity status and named remaining gaps.
+- **[Runtime Parity Checklist](documentation/runtime-parity-checklist.md)**: local ThinClaw runtime parity status and fixture/release criteria.
 - **[Remote Gateway Route Matrix](documentation/remote-gateway-route-matrix.md)**: local/remote command behavior and unavailable-response rules.
 - **[Environment Requirements](documentation/env-requirements.md)**: required toolchains, env vars, and final gate commands.
 - **[Secrets Policy](documentation/secrets-policy.md)**: ThinClaw key naming, grants, legacy fallback, and remote secrecy rules.
 - **[Manual Smoke Checklist](documentation/manual-smoke-checklist.md)**: repeatable local and remote release smoke.
-- **[Known Post-Alpha Items](documentation/known-post-alpha.md)**: explicitly deferred work that must stay gated or documented.
+- **[External Release Prerequisites](documentation/external-release-prerequisites.md)**: release-operator inputs that must stay gated or documented.
 - **[Worker Handoff](documentation/handoff.md)**: source-of-truth orientation for follow-up agents.
 
 ---
@@ -156,7 +156,7 @@ ThinClaw is highly configurable through a combination of system files and worksp
 ### 1. System Infrastructure
 These files handle the mechanical aspects of the agent:
 - **`identity.json`**: Stores your persistent device ID, auth token, grant flags, and enabled provider/model lists. **Does not contain API keys** — those are stored in the macOS Keychain.
-- **Runtime config**: Core ThinClaw runtime config defining the gateway port (default `18789`), model providers, and channel settings. During alpha it is stored in the legacy-compatible `openclaw.json` file.
+- **Runtime config**: Core ThinClaw runtime config defining the gateway port (default `18789`), model providers, and channel settings. During alpha it is stored in the legacy-compatible `thinclaw.json` file.
 
 ### 2. Workspace Markdown (The Agent's "Brain")
 The agent's personality and rules are defined by markdown files in its workspace. These are injected into the system prompt on session start:
@@ -192,7 +192,7 @@ Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key 
 ## Project Structure
 
 ### Backend (`backend/`)
--   `src/openclaw/`: ThinClaw integration layer.
+-   `src/thinclaw/`: ThinClaw integration layer.
     -   `commands/`: Tauri IPC command handlers (`gateway.rs`, `keys.rs`, `sessions.rs`, `rpc.rs`, etc.)
     -   `ironclaw_bridge.rs`: ThinClaw agent lifecycle — init, config, Agent construction, shutdown.
     -   `ironclaw_channel.rs`: `TauriChannel` bridging ThinClaw events to Tauri `emit()`.
@@ -213,15 +213,15 @@ Configure all API keys in **Settings > Secrets**. Toggle "Grant Access" per key 
 -   `src/tts.rs` / `src/stt.rs`: Text-to-Speech (Piper) and Speech-to-Text (Whisper) integration.
 -   `src/imagine.rs` / `src/image_gen.rs` / `src/images.rs`: Imagine Studio and image generation pipeline.
 -   MCP tools crate: Rust crate providing the MCP sandbox (Rhai scripts, tool discovery, HTTP client).
--   `documentation/openclaw/`: Historical architectural deep-dives from the pre-ThinClaw integration era.
+-   `documentation/thinclaw/`: Historical architectural deep-dives from the pre-ThinClaw integration era.
 -   `documentation/`: Alpha contract, setup, runtime parity, route matrix, secrets policy, smoke, and handoff docs.
 
 ### Frontend (`frontend/src/`)
 -   `components/chat/`: The high-performance chat interface.
--   `components/openclaw/`: Visualizations for ThinClaw status and tool execution.
+-   `components/thinclaw/`: Visualizations for ThinClaw status and tool execution.
 -   `components/imagine/`: Imagine Studio UI (gallery, prompt, style presets).
 -   `components/settings/`: Settings pages including `McpTab.tsx`, `SettingsSidebar.tsx`, `SettingsPages.tsx`.
--   `hooks/use-openclaw-stream.ts`: Real-time agent event processing.
+-   `hooks/use-thinclaw-stream.ts`: Real-time agent event processing.
 -   `hooks/use-chat.ts`: Core chat state management.
 
 ---
@@ -266,8 +266,8 @@ Skills extend the **ThinClaw** agent:
 
 ThinClaw Desktop is an evolving platform. We welcome contributions to the RAG pipeline, new agent skills, or UI refinements.
 
-1.  Explore the `documentation/openclaw/` folder for architectural deep-dives.
-2.  Check `backend/src/openclaw/commands/` and `backend/src/rig_lib/agent.rs` for backend extension points.
+1.  Explore the `documentation/thinclaw/` folder for architectural deep-dives.
+2.  Check `backend/src/thinclaw/commands/` and `backend/src/rig_lib/agent.rs` for backend extension points.
 
 ---
 

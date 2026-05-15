@@ -1,11 +1,11 @@
 import { useState } from 'react';
-import { commands, type OpenClawStatus } from '../../lib/bindings';
+import { commands, type ThinClawStatus } from '../../lib/bindings';
 import { Eye, EyeOff, Save, Bot, Loader2, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
 
 export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
-    status: OpenClawStatus | null;
+    status: ThinClawStatus | null;
     loadStatus: () => Promise<void>;
     handleToggle: (secret: string, granted: boolean) => Promise<void>;
 }) {
@@ -23,7 +23,7 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
     const handleFetch = async () => {
         setFetching(true);
         try {
-            const res = await commands.openclawGetBedrockCredentials();
+            const res = await commands.thinclawGetBedrockCredentials();
             if (res.status === 'ok' && res.data) {
                 const [ak, sk, r] = res.data;
                 if (ak) setAccessKeyId(ak);
@@ -41,7 +41,7 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
     const handleSave = async () => {
         setLoading(true);
         try {
-            const res = await commands.openclawSaveBedrockCredentials(accessKeyId, secretAccessKey, region);
+            const res = await commands.thinclawSaveBedrockCredentials(accessKeyId, secretAccessKey, region);
             if (res.status === 'ok') {
                 await loadStatus();
                 toast.success('Bedrock credentials saved');
@@ -56,7 +56,7 @@ export function BedrockCredentialsCard({ status, loadStatus, handleToggle }: {
     const handleDelete = async () => {
         setLoading(true);
         try {
-            const res = await commands.openclawSaveBedrockCredentials('', '', '');
+            const res = await commands.thinclawSaveBedrockCredentials('', '', '');
             if (res.status === 'ok') {
                 setAccessKeyId('');
                 setSecretAccessKey('');

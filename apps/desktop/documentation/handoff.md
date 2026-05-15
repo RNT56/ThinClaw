@@ -7,13 +7,14 @@ This is the quick orientation document for future Desktop parity workers.
 ## Current Contract
 
 - Public product name: ThinClaw Desktop.
-- Stable alpha Tauri commands: `openclaw_*`.
-- Stable alpha event bus: `openclaw-event`.
+- Public Tauri commands: `thinclaw_*`.
+- Public event bus: `thinclaw-event`.
+- Parity checkpoint commit before absolute-completion work: `1884781a`.
 - Generated frontend bindings: `apps/desktop/frontend/src/lib/bindings.ts`.
-- Local runtime bridge: `apps/desktop/backend/src/openclaw/ironclaw_bridge.rs`.
-- Local event channel: `apps/desktop/backend/src/openclaw/ironclaw_channel.rs`.
-- Event conversion: `apps/desktop/backend/src/openclaw/ironclaw_types.rs`.
-- Remote gateway proxy: `apps/desktop/backend/src/openclaw/remote_proxy.rs`.
+- Local runtime bridge: `apps/desktop/backend/src/thinclaw/ironclaw_bridge.rs`.
+- Local event channel: `apps/desktop/backend/src/thinclaw/ironclaw_channel.rs`.
+- Event conversion: `apps/desktop/backend/src/thinclaw/ironclaw_types.rs`.
+- Remote gateway proxy: `apps/desktop/backend/src/thinclaw/remote_proxy.rs`.
 - IPC registry: `apps/desktop/backend/src/setup/commands.rs`.
 
 ## Source Of Truth Docs
@@ -26,25 +27,25 @@ Read these before changing Desktop bridge behavior:
 4. `apps/desktop/documentation/secrets-policy.md`
 5. `apps/desktop/documentation/env-requirements.md`
 6. `apps/desktop/documentation/packaging-platform-readiness.md`
-7. `apps/desktop/documentation/packaging-platform-readiness.md`
+7. `apps/desktop/documentation/packaging-readiness.md`
 8. `apps/desktop/documentation/manual-smoke-checklist.md`
-9. `apps/desktop/documentation/known-post-alpha.md`
+9. `apps/desktop/documentation/external-release-prerequisites.md`
 
 ## Where To Add Work
 
 | Task | Primary files |
 | --- | --- |
-| Add/modify Tauri command | `apps/desktop/backend/src/openclaw/commands/*`, then register in `setup/commands.rs`. |
+| Add/modify Tauri command | `apps/desktop/backend/src/thinclaw/commands/*`, then register in `setup/commands.rs`. |
 | Add/modify event schema | `ui_types.rs`, `ironclaw_types.rs`, frontend event consumers, regenerate bindings. |
 | Add remote route | `remote_proxy.rs`, matching root `src/channels/web/handlers/*`, update route matrix. |
-| Add provider/secret behavior | `openclaw/commands/keys.rs`, `ironclaw_secrets.rs`, `openclaw/config/keychain.rs`, secrets policy. |
-| Add UI surface | `apps/desktop/frontend/src/components/openclaw/*` or `components/settings/*`, wrapper in `lib/openclaw.ts`. |
+| Add provider/secret behavior | `thinclaw/commands/keys.rs`, `ironclaw_secrets.rs`, `thinclaw/config/keychain.rs`, secrets policy. |
+| Add UI surface | `apps/desktop/frontend/src/components/thinclaw/*` or `components/settings/*`, wrapper in `lib/thinclaw.ts`. |
 | Add root gateway endpoint | `src/channels/web/server.rs`, `src/channels/web/handlers/*`, shared `src/api/*` when possible. |
 
 ## Required Workflow
 
 1. Preserve dirty worktree changes you did not make.
-2. Use existing command names during alpha.
+2. Use `thinclaw_*` command names and `thinclaw-event`.
 3. Make unsupported behavior explicit and typed.
 4. Regenerate bindings from Rust after command/type changes.
 5. Update documentation when adding/removing a Desktop-exposed route.

@@ -106,7 +106,7 @@ Do not commit release private keys, Apple credentials, generated `.app` bundles,
 
 ## Platform Gates
 
-- iCloud Drive uses local filesystem roots for alpha. Native entitlement container work is deferred; legacy Scrappy iCloud roots are read-only fallback paths.
+- iCloud Drive uses local filesystem roots. Native entitlement container work requires release-operator entitlement validation; legacy Scrappy iCloud roots are read-only fallback paths.
 - Autonomy execution remains disabled unless explicit reckless desktop config and host permission checks allow it.
 - GPU cloud experiment launch/test actions must remain unavailable with concrete reasons unless the gateway/API and required secrets are configured.
 - Remote mode must never expose raw provider secrets; only save, delete, and status capabilities are allowed.

@@ -3,7 +3,7 @@ import { cn } from '../../lib/utils';
 import { useChatLayout } from './ChatProvider';
 import { ModeNavigator } from '../navigation/ModeNavigator';
 import { ChatSidebar } from './sidebars/ChatSidebar';
-import { OpenClawSidebarSlice } from './sidebars/OpenClawSidebarSlice';
+import { ThinClawSidebarSlice } from './sidebars/ThinClawSidebarSlice';
 import { ImagineSidebarSlice } from './sidebars/ImagineSidebarSlice';
 import { SettingsSidebarSlice } from './sidebars/SettingsSidebarSlice';
 
@@ -13,10 +13,10 @@ export function Sidebar() {
         setSidebarOpen,
         activeTab,
         appMode,
-        isOpenClawMode,
+        isThinClawMode,
         isImagineMode,
         isSettingsMode,
-        openclawGatewayRunning,
+        thinclawGatewayRunning,
         setActiveTab,
     } = useChatLayout();
 
@@ -36,8 +36,8 @@ export function Sidebar() {
                 <AnimatePresence mode="wait">
                     {activeTab === 'chat' ? (
                         <ChatSidebar key="chat-sidebar" />
-                    ) : isOpenClawMode ? (
-                        <OpenClawSidebarSlice key="openclaw-sidebar" />
+                    ) : isThinClawMode ? (
+                        <ThinClawSidebarSlice key="thinclaw-sidebar" />
                     ) : isImagineMode ? (
                         <ImagineSidebarSlice key="imagine-sidebar" />
                     ) : isSettingsMode ? (
@@ -58,7 +58,7 @@ export function Sidebar() {
                         }
                     }}
                     sidebarOpen={sidebarOpen}
-                    gatewayRunning={openclawGatewayRunning}
+                    gatewayRunning={thinclawGatewayRunning}
                 />
             </div>
         </div>

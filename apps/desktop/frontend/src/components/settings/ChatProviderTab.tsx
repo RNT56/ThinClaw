@@ -18,7 +18,7 @@ export function ChatProviderTab() {
     const loadAll = async () => {
         setLoading(true);
         try {
-            const s = await commands.openclawGetStatus();
+            const s = await commands.thinclawGetStatus();
             if (s.status === 'ok') setStatus(s.data);
         } catch (e) {
             console.error(e);

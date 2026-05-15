@@ -27,7 +27,7 @@ Run commands from `apps/desktop` unless noted.
 | Ollama dev | `npm run tauri:dev:ollama` |
 | Cloud-only build | `npm run tauri:build:cloud` |
 
-Desktop backend remains outside the root Cargo workspace for alpha. Use `apps/desktop/backend` for desktop backend checks.
+Desktop backend remains outside the root Cargo workspace unless a later CI change intentionally moves it. Use `apps/desktop/backend` for desktop backend checks.
 
 ## Required Setup Commands
 
@@ -53,22 +53,22 @@ bash scripts/setup_llama.sh
 
 ## Generated Runtime Variables
 
-ThinClaw Desktop generates these for the embedded gateway/engine process. Do not set `OPENCLAW_HOME` for Desktop.
+ThinClaw Desktop generates these for the embedded gateway/engine process. Do not set `THINCLAW_HOME` for Desktop.
 
 | Variable | Owner | Notes |
 | --- | --- | --- |
-| `OPENCLAW_STATE_DIR` | Desktop | Points at the app data runtime state directory. |
-| `OPENCLAW_ENGINE_CONFIG` | Desktop | Runtime config path. |
-| `OPENCLAW_CONFIG_PATH` | Desktop | Runtime config path. |
-| `OPENCLAW_GATEWAY_PORT` | Desktop | Local gateway port. |
-| `OPENCLAW_GATEWAY_TOKEN` | Desktop | Local gateway auth token. |
-| `OPENCLAW_LOCAL_INFERENCE_ENABLED` | Desktop | Mirrors local inference toggle. |
-| `OPENCLAW_EXPOSE_INFERENCE` | Desktop | Mirrors network exposure toggle. |
-| `OPENCLAW_ENABLED_CLOUD_PROVIDERS` | Desktop | Provider allowlist sent to the runtime. |
-| `OPENCLAW_CUSTOM_LLM_ENABLED` | Desktop | Enables custom OpenAI-compatible provider path. |
-| `OPENCLAW_CUSTOM_LLM_URL` | User/Desktop | Custom provider base URL. |
-| `OPENCLAW_CUSTOM_LLM_MODEL` | User/Desktop | Custom provider model. |
-| `OPENCLAW_CUSTOM_LLM_KEY` | Secret-backed | Injected only when granted. |
+| `THINCLAW_STATE_DIR` | Desktop | Points at the app data runtime state directory. |
+| `THINCLAW_ENGINE_CONFIG` | Desktop | Runtime config path. |
+| `THINCLAW_CONFIG_PATH` | Desktop | Runtime config path. |
+| `THINCLAW_GATEWAY_PORT` | Desktop | Local gateway port. |
+| `THINCLAW_GATEWAY_TOKEN` | Desktop | Local gateway auth token. |
+| `THINCLAW_LOCAL_INFERENCE_ENABLED` | Desktop | Mirrors local inference toggle. |
+| `THINCLAW_EXPOSE_INFERENCE` | Desktop | Mirrors network exposure toggle. |
+| `THINCLAW_ENABLED_CLOUD_PROVIDERS` | Desktop | Provider allowlist sent to the runtime. |
+| `THINCLAW_CUSTOM_LLM_ENABLED` | Desktop | Enables custom OpenAI-compatible provider path. |
+| `THINCLAW_CUSTOM_LLM_URL` | User/Desktop | Custom provider base URL. |
+| `THINCLAW_CUSTOM_LLM_MODEL` | User/Desktop | Custom provider model. |
+| `THINCLAW_CUSTOM_LLM_KEY` | Secret-backed | Injected only when granted. |
 
 ## Optional User Variables
 
@@ -82,7 +82,7 @@ ThinClaw Desktop generates these for the embedded gateway/engine process. Do not
 | `HF_TOKEN`, `HUGGINGFACE_TOKEN` | Hugging Face gated model access. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `AWS_DEFAULT_REGION` | Bedrock credential fallback. Prefer Settings > Secrets. |
 | `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_API_KEY`, `BEDROCK_PROXY_API_KEY` | Bedrock bearer/proxy fallback paths. |
-| `OPENCLAW_REMOTE_TOKEN` | Legacy remote token fallback. Prefer Gateway settings. |
+| `THINCLAW_REMOTE_TOKEN` | Legacy remote token fallback. Prefer Gateway settings. |
 | `THINCLAW_MCP_URL`, `THINCLAW_MCP_TOKEN` | Legacy FastAPI MCP sandbox URL/token shown in Settings > MCP Server. |
 | `THINCLAW_GENERATED_MEDIA_ROOTS` | Additional generated-media roots allowed for outbound media lookup. |
 

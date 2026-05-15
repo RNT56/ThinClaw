@@ -584,7 +584,7 @@ impl CloudProvider for GDriveProvider {
 
 // ── Key ↔ Filename Conversion ────────────────────────────────────────────
 
-/// Convert a cloud key (e.g. "db/openclaw.db.enc") to a safe filename.
+/// Convert a cloud key (e.g. "db/thinclaw.db.enc") to a safe filename.
 ///
 /// Replaces `/` with `__` to flatten the path for Google Drive.
 fn key_to_filename(key: &str) -> String {
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_key_to_filename() {
-        assert_eq!(key_to_filename("db/openclaw.db.enc"), "db__openclaw.db.enc");
+        assert_eq!(key_to_filename("db/thinclaw.db.enc"), "db__thinclaw.db.enc");
         assert_eq!(
             key_to_filename("documents/sub/file.pdf.enc"),
             "documents__sub__file.pdf.enc"
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_filename_to_key() {
-        assert_eq!(filename_to_key("db__openclaw.db.enc"), "db/openclaw.db.enc");
+        assert_eq!(filename_to_key("db__thinclaw.db.enc"), "db/thinclaw.db.enc");
         assert_eq!(
             filename_to_key("documents__sub__file.pdf.enc"),
             "documents/sub/file.pdf.enc"
@@ -625,12 +625,12 @@ mod tests {
     #[test]
     fn test_key_roundtrip() {
         let keys = vec![
-            "db/openclaw.db.enc",
+            "db/thinclaw.db.enc",
             "documents/test.pdf.enc",
             "images/photo.png.enc",
             "manifest.json.enc",
             "vectors/global.usearch.enc",
-            "openclaw/MEMORY.md.enc",
+            "thinclaw/MEMORY.md.enc",
         ];
 
         for key in keys {

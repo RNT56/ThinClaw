@@ -138,7 +138,7 @@ async fn test_full_encrypt_upload_download_decrypt_roundtrip() {
             }
             v
         }),
-        ("openclaw/MEMORY.md", b"Agent memory state".to_vec()),
+        ("thinclaw/MEMORY.md", b"Agent memory state".to_vec()),
     ];
 
     // ── Phase 1: Encrypt + Upload ───────────────────────────────────────
@@ -279,13 +279,13 @@ async fn test_file_type_classification_in_roundtrip() {
     let mut manifest = ArchiveManifest::new("0.1.0".to_string(), 1, "k".to_string());
 
     let paths_and_types = vec![
-        ("openclaw.db", FileType::Database),
+        ("thinclaw.db", FileType::Database),
         ("documents/a.pdf", FileType::Document),
         ("images/b.png", FileType::ChatImage),
         ("generated/c.png", FileType::GeneratedImage),
         ("vectors/d.usearch", FileType::VectorIndex),
         ("previews/e.jpg", FileType::Preview),
-        ("openclaw/SOUL.md", FileType::AgentState),
+        ("thinclaw/SOUL.md", FileType::AgentState),
         ("misc.bin", FileType::Other),
     ];
 
@@ -373,7 +373,7 @@ async fn test_schema_migration_on_restore() {
     // Simulate old-version files
     let test_files = vec![
         (
-            "openclaw.db",
+            "thinclaw.db",
             b"SQLite format 3\0 - old schema v5 data".to_vec(),
         ),
         ("documents/notes.md", b"# Old notes\nFrom v0.8.0".to_vec()),

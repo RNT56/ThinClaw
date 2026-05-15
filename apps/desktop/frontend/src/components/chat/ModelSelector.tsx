@@ -17,7 +17,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
     useEffect(() => {
         const loadStatus = async () => {
             try {
-                const s = await commands.openclawGetStatus();
+                const s = await commands.thinclawGetStatus();
                 if (s.status === 'ok') setStatus(s.data);
             } catch (e) {
                 console.error("Failed to load status in ModelSelector", e);
@@ -196,12 +196,12 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                 };
 
                 await updateConfig(newConfig);
-                if (commands.openclawSaveSelectedCloudModel) {
-                    await commands.openclawSaveSelectedCloudModel(modelId);
+                if (commands.thinclawSaveSelectedCloudModel) {
+                    await commands.thinclawSaveSelectedCloudModel(modelId);
                 }
 
                 // Refresh status to reflect new cloud model
-                const s = await commands.openclawGetStatus();
+                const s = await commands.thinclawGetStatus();
                 if (s.status === 'ok') setStatus(s.data);
 
                 setIsOpen(false);
@@ -229,7 +229,7 @@ export function ModelSelector({ onManageClick, isAutoMode, toggleAutoMode }: { o
                 const newConfig = { ...config, selected_chat_provider: "local" };
                 await updateConfig(newConfig);
                 // Refresh status to ensure consistency
-                const s = await commands.openclawGetStatus();
+                const s = await commands.thinclawGetStatus();
                 if (s.status === 'ok') setStatus(s.data);
             } catch (e) {
                 console.error("Failed to update config to local", e);

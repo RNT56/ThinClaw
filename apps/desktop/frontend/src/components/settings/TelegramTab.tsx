@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { Send, Key, CheckCircle, Info, AlertTriangle, Users } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
-import * as openclaw from '../../lib/openclaw';
+import * as thinclaw from '../../lib/thinclaw';
 
 interface TelegramTabProps {
     className?: string;
@@ -19,7 +19,7 @@ export function TelegramTab({ className }: TelegramTabProps) {
 
     // Load initial state from backend
     useEffect(() => {
-        openclaw.getOpenClawStatus().then(status => {
+        thinclaw.getThinClawStatus().then(status => {
             setEnabled(status.telegram_enabled);
         }).catch(console.error);
     }, []);
@@ -28,7 +28,7 @@ export function TelegramTab({ className }: TelegramTabProps) {
         setIsLoading(true);
 
         try {
-            await openclaw.saveTelegramConfig({
+            await thinclaw.saveTelegramConfig({
                 enabled,
                 bot_token: botToken || null,
                 dm_policy: dmPolicy,

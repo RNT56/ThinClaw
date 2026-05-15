@@ -28,16 +28,16 @@ vi.mock('../../lib/bindings', () => ({
         getModelMetadata: vi.fn().mockResolvedValue({ status: 'ok', data: {} }),
         updateUserConfig: vi.fn().mockResolvedValue(undefined),
         startChatServer: vi.fn().mockResolvedValue(undefined),
-        openclawGetStatus: vi.fn().mockResolvedValue({ status: 'ok', data: { engine_running: false } }),
+        thinclawGetStatus: vi.fn().mockResolvedValue({ status: 'ok', data: { engine_running: false } }),
         getChatServerConfig: vi.fn().mockResolvedValue(null),
-        openclawStopGateway: vi.fn().mockResolvedValue(undefined),
-        openclawStartGateway: vi.fn().mockResolvedValue(undefined),
+        thinclawStopGateway: vi.fn().mockResolvedValue(undefined),
+        thinclawStartGateway: vi.fn().mockResolvedValue(undefined),
     },
 }));
 
-// Mock openclaw lib so GatewayTab/SecretsTab don't need real IPC
-vi.mock('../../lib/openclaw', () => ({
-    getOpenClawStatus: vi.fn().mockResolvedValue({
+// Mock thinclaw lib so GatewayTab/SecretsTab don't need real IPC
+vi.mock('../../lib/thinclaw', () => ({
+    getThinClawStatus: vi.fn().mockResolvedValue({
         engine_running: false, engine_connected: false, port: 18789,
         gateway_mode: 'local', slack_enabled: false, telegram_enabled: false,
         remote_url: null, remote_token: null, device_id: '', auth_token: '',
@@ -52,16 +52,16 @@ vi.mock('../../lib/openclaw', () => ({
         profiles: [], enabled_cloud_providers: [],
     }),
     getPermissionStatus: vi.fn().mockResolvedValue({ accessibility: false, screen_recording: false }),
-    toggleOpenClawLocalInference: vi.fn().mockResolvedValue(undefined),
+    toggleThinClawLocalInference: vi.fn().mockResolvedValue(undefined),
     removeAgentProfile: vi.fn().mockResolvedValue(undefined),
     saveGatewaySettings: vi.fn().mockResolvedValue(undefined),
-    startOpenClawGateway: vi.fn().mockResolvedValue(undefined),
-    stopOpenClawGateway: vi.fn().mockResolvedValue(undefined),
-    getOpenClawDiagnostics: vi.fn().mockResolvedValue({}),
-    getOpenClawMemory: vi.fn().mockResolvedValue(''),
-    getOpenClawFile: vi.fn().mockResolvedValue(''),
+    startThinClawGateway: vi.fn().mockResolvedValue(undefined),
+    stopThinClawGateway: vi.fn().mockResolvedValue(undefined),
+    getThinClawDiagnostics: vi.fn().mockResolvedValue({}),
+    getThinClawMemory: vi.fn().mockResolvedValue(''),
+    getThinClawFile: vi.fn().mockResolvedValue(''),
     revealPath: vi.fn().mockResolvedValue(undefined),
-    patchOpenClawConfig: vi.fn().mockResolvedValue(undefined),
+    patchThinClawConfig: vi.fn().mockResolvedValue(undefined),
 }));
 
 // Mock all three heavy tabs so we can verify routing without their full DOM
@@ -139,8 +139,8 @@ describe('SettingsContent routing', () => {
         await waitFor(() => expect(screen.getByTestId('model-browser')).toBeInTheDocument());
     });
 
-    it('renders GatewayTab for the "openclaw-gateway" page', async () => {
-        renderPage('openclaw-gateway');
+    it('renders GatewayTab for the "thinclaw-gateway" page', async () => {
+        renderPage('thinclaw-gateway');
         await waitFor(() => expect(screen.getByTestId('gateway-tab')).toBeInTheDocument());
     });
 
@@ -159,13 +159,13 @@ describe('SettingsContent routing', () => {
         await waitFor(() => expect(screen.getByTestId('personalization-tab')).toBeInTheDocument());
     });
 
-    it('renders SlackTab for "openclaw-slack"', async () => {
-        renderPage('openclaw-slack');
+    it('renders SlackTab for "thinclaw-slack"', async () => {
+        renderPage('thinclaw-slack');
         await waitFor(() => expect(screen.getByTestId('slack-tab')).toBeInTheDocument());
     });
 
-    it('renders TelegramTab for "openclaw-telegram"', async () => {
-        renderPage('openclaw-telegram');
+    it('renders TelegramTab for "thinclaw-telegram"', async () => {
+        renderPage('thinclaw-telegram');
         await waitFor(() => expect(screen.getByTestId('telegram-tab')).toBeInTheDocument());
     });
 
@@ -186,7 +186,7 @@ describe('Lazy tab code-splitting', () => {
         renderPage('models');
         await waitFor(() => expect(screen.getByTestId('model-browser')).toBeInTheDocument());
 
-        renderPage('openclaw-gateway');
+        renderPage('thinclaw-gateway');
         await waitFor(() => expect(screen.getByTestId('gateway-tab')).toBeInTheDocument());
 
         renderPage('secrets');
@@ -204,7 +204,7 @@ describe('PageHeader content', () => {
     });
 
     it('shows "ThinClaw Gateway" heading on the gateway page', async () => {
-        renderPage('openclaw-gateway');
+        renderPage('thinclaw-gateway');
         await waitFor(() => expect(screen.getByRole('heading', { name: /ThinClaw Gateway/i })).toBeInTheDocument());
     });
 

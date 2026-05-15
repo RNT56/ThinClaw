@@ -19,6 +19,7 @@ use crate::channels::web::identity_helpers::{
 };
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::agent::submission::Submission;
 use thinclaw_gateway::web::ports::RouteStatePort;
 use thinclaw_gateway::web::submission::{build_gateway_message, submit_gateway_message};
 
@@ -135,6 +136,74 @@ pub(crate) async fn chat_approval_handler(
             status: "accepted",
         }),
     ))
+}
+
+async fn submit_thread_command(
+    state: &Arc<GatewayState>,
+    headers: &HeaderMap,
+    request_identity: &GatewayRequestIdentity,
+    req: ThreadCommandRequest,
+    submission: Submission,
+) -> Result<(StatusCode, Json<ThreadCommandResponse>), (StatusCode, String)> {
+    let request_identity = request_identity_with_overrides(
+        state,
+        request_identity,
+        req.user_id.as_deref(),
+        req.actor_id.as_deref(),
+    )
+    .await;
+    let browser_origin = request_origin(headers);
+    let content = serde_json::to_string(&submission).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize thread command: {}", e),
+        )
+    })?;
+    let msg = build_gateway_message(
+        "gateway",
+        &request_identity,
+        content,
+        req.thread_id.as_deref(),
+        browser_origin.as_deref(),
+    );
+    let msg_id = submit_gateway_message(state.as_ref(), msg)
+        .await
+        .map_err(gateway_submission_error)?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ThreadCommandResponse {
+            message_id: msg_id,
+            status: "accepted",
+        }),
+    ))
+}
+
+pub(crate) async fn chat_abort_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    request_identity: GatewayRequestIdentity,
+    Json(req): Json<ThreadCommandRequest>,
+) -> Result<(StatusCode, Json<ThreadCommandResponse>), (StatusCode, String)> {
+    submit_thread_command(&state, &headers, &request_identity, req, Submission::Interrupt).await
+}
+
+pub(crate) async fn chat_thread_reset_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    request_identity: GatewayRequestIdentity,
+    Json(req): Json<ThreadCommandRequest>,
+) -> Result<(StatusCode, Json<ThreadCommandResponse>), (StatusCode, String)> {
+    submit_thread_command(&state, &headers, &request_identity, req, Submission::Clear).await
+}
+
+pub(crate) async fn chat_thread_compact_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: HeaderMap,
+    request_identity: GatewayRequestIdentity,
+    Json(req): Json<ThreadCommandRequest>,
+) -> Result<(StatusCode, Json<ThreadCommandResponse>), (StatusCode, String)> {
+    submit_thread_command(&state, &headers, &request_identity, req, Submission::Compact).await
 }
 
 pub(crate) fn gateway_submission_error(error: String) -> (StatusCode, String) {
@@ -672,6 +741,77 @@ pub(crate) async fn chat_threads_handler(
     }))
 }
 
+pub(crate) async fn chat_thread_export_handler(
+    State(state): State<Arc<GatewayState>>,
+    request_identity: GatewayRequestIdentity,
+    Path(id): Path<String>,
+    Query(query): Query<ThreadExportQuery>,
+) -> Result<Json<ThreadExportResponse>, (StatusCode, String)> {
+    let thread_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid thread id".to_string()))?;
+    let request_identity = request_identity_with_overrides(
+        &state,
+        &request_identity,
+        query.user_id.as_deref(),
+        query.actor_id.as_deref(),
+    )
+    .await;
+
+    if let Some(ref store) = state.store {
+        let owned = store
+            .conversation_belongs_to_actor(
+                thread_id,
+                &request_identity.principal_id,
+                &request_identity.actor_id,
+            )
+            .await
+            .unwrap_or(false);
+        if !owned {
+            return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
+        }
+        let (messages, _) = store
+            .list_conversation_messages_paginated(thread_id, None, 500)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let format = query.format.unwrap_or_else(|| "markdown".to_string());
+        let content = if format == "json" {
+            let serializable = messages
+                .iter()
+                .map(|message| {
+                    serde_json::json!({
+                        "id": message.id,
+                        "role": message.role,
+                        "content": message.content,
+                        "actor_id": message.actor_id,
+                        "actor_display_name": message.actor_display_name,
+                        "raw_sender_id": message.raw_sender_id,
+                        "metadata": message.metadata,
+                        "created_at": message.created_at,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::to_string_pretty(&serializable)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        } else {
+            messages
+                .iter()
+                .map(|message| format!("## {}\n\n{}", message.role, message.content))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+        return Ok(Json(ThreadExportResponse {
+            thread_id,
+            format,
+            content,
+        }));
+    }
+
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Store not available".to_string(),
+    ))
+}
+
 pub(crate) async fn chat_new_thread_handler(
     State(state): State<Arc<GatewayState>>,
     request_identity: GatewayRequestIdentity,
@@ -880,11 +1020,13 @@ mod tests {
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
+            response_cache: None,
             routine_engine: None,
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
             channel_manager: None,
+            hooks: None,
         })
     }
 

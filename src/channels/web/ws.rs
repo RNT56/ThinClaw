@@ -719,7 +719,9 @@ mod tests {
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
             channel_manager: None,
+            hooks: None,
             cost_tracker: None,
+            response_cache: None,
         }
     }
 }

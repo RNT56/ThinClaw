@@ -3,11 +3,11 @@ import { motion } from 'framer-motion';
 import { Radio, Play, Square, RefreshCw, Shield, AlertTriangle, CheckCircle, XCircle, Copy, Zap, Code, Monitor, Server, RotateCcw, Trash2, Globe, Cpu, Settings, FolderOpen } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
-import * as openclaw from '../../lib/openclaw';
+import * as thinclaw from '../../lib/thinclaw';
 import { type CustomSecret } from '../../lib/bindings';
 import { useModelContext } from '../model-context';
-import { RemoteDeployWizard } from '../openclaw/RemoteDeployWizard';
-import CloudBrainConfigModal from '../openclaw/CloudBrainConfigModal';
+import { RemoteDeployWizard } from '../thinclaw/RemoteDeployWizard';
+import CloudBrainConfigModal from '../thinclaw/CloudBrainConfigModal';
 
 interface GatewayTabProps {
     className?: string;
@@ -51,7 +51,7 @@ interface StatusInfo {
     groqGranted: boolean;
     selectedCloudBrain: string | null;
     autoStartGateway: boolean;
-    profiles: openclaw.AgentProfile[];
+    profiles: thinclaw.AgentProfile[];
     enabled_cloud_providers: string[];
     /** Agent runs tools without per-call approval prompts */
     autoApproveTools: boolean;
@@ -97,7 +97,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
         bootstrapCompleted: false,
     });
 
-    const [rawStatus, setRawStatus] = useState<openclaw.OpenClawStatus | null>(null);
+    const [rawStatus, setRawStatus] = useState<thinclaw.ThinClawStatus | null>(null);
 
     const [isCloudConfigOpen, setIsCloudConfigOpen] = useState(false); // Added this state
     const [showDeployWizard, setShowDeployWizard] = useState(false);
@@ -122,7 +122,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
     // Poll gateway status
     const fetchStatus = useCallback(async () => {
         try {
-            const s = await openclaw.getOpenClawStatus();
+            const s = await thinclaw.getThinClawStatus();
             setStatus({
                 gateway: s.engine_running ? 'running' : 'stopped',
                 wsConnected: s.engine_connected,
@@ -161,13 +161,13 @@ export function GatewayTab({ className }: GatewayTabProps) {
             });
             setRawStatus(s);
 
-            const perms = await openclaw.getPermissionStatus();
+            const perms = await thinclaw.getPermissionStatus();
             setPermissions(perms);
 
             if (s.remote_url) setRemoteUrlInput(s.remote_url);
             if (s.remote_token) setRemoteTokenInput(s.remote_token);
         } catch (e) {
-            console.error('Failed to fetch openclaw status:', e);
+            console.error('Failed to fetch thinclaw status:', e);
         }
     }, []);
 
@@ -184,7 +184,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
         setStatus(s => ({ ...s, gateway: 'starting' }));
 
         try {
-            await openclaw.startOpenClawGateway();
+            await thinclaw.startThinClawGateway();
             await fetchStatus();
             toast.success('ThinClaw Gateway started');
         } catch (e) {
@@ -217,7 +217,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
         setIsLoading(true);
 
         try {
-            await openclaw.stopOpenClawGateway();
+            await thinclaw.stopThinClawGateway();
             await fetchStatus();
             toast.info('ThinClaw Gateway stopped');
         } catch (e) {
@@ -236,7 +236,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
 
     const handleSaveGateway = async (mode: string, url: string | null, token: string | null) => {
         try {
-            await openclaw.saveGatewaySettings(mode, url, token);
+            await thinclaw.saveGatewaySettings(mode, url, token);
             await fetchStatus();
             toast.success('Gateway settings updated');
         } catch (e) {
@@ -251,7 +251,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
 
     const copyDiagnostics = async () => {
         try {
-            const diag = await openclaw.getOpenClawDiagnostics();
+            const diag = await thinclaw.getThinClawDiagnostics();
             navigator.clipboard.writeText(JSON.stringify(diag, null, 2));
             toast.success('Diagnostics copied to clipboard');
         } catch (e) {
@@ -394,7 +394,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 <button
                                     onClick={(e) => {
                                         e.stopPropagation();
-                                        openclaw.removeAgentProfile(profile.id).then(fetchStatus);
+                                        thinclaw.removeAgentProfile(profile.id).then(fetchStatus);
                                     }}
                                     className="p-2 text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition-colors"
                                     title="Remove Profile"
@@ -581,7 +581,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             <button
                                 onClick={async () => {
                                     if (!status.localInferenceEnabled) {
-                                        await openclaw.toggleOpenClawLocalInference(true);
+                                        await thinclaw.toggleThinClawLocalInference(true);
                                         await fetchStatus();
                                         toast.success('Switched to Local Core');
                                     }
@@ -627,7 +627,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                     className="absolute inset-0 z-0"
                                     onClick={async () => {
                                         if (status.localInferenceEnabled) {
-                                            await openclaw.toggleOpenClawLocalInference(false);
+                                            await thinclaw.toggleThinClawLocalInference(false);
                                             await fetchStatus();
                                             toast.success('Switched to Cloud Intelligence');
                                         }
@@ -709,7 +709,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             onClick={async () => {
                                 const next = !status.autoApproveTools;
                                 try {
-                                    await openclaw.setAutonomyMode(next);
+                                    await thinclaw.setAutonomyMode(next);
                                     setStatus(s => ({ ...s, autoApproveTools: next }));
                                     toast.success(next ? 'Autonomous mode enabled — restart gateway' : 'Human-in-the-loop mode enabled');
                                 } catch (e) { toast.error('Failed to update autonomy mode'); }
@@ -749,7 +749,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                         <button
                             onClick={async () => {
                                 try {
-                                    await openclaw.triggerBootstrap();
+                                    await thinclaw.triggerBootstrap();
                                     setStatus(s => ({ ...s, bootstrapCompleted: false }));
                                     toast.success('Identity ritual re-initiated — start a new chat!');
                                 } catch (e) { toast.error('Failed to trigger bootstrap'); }
@@ -776,7 +776,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 if (status.stateDir) {
                                     try {
                                         const baseDir = status.stateDir.replace(/\/state$/, '');
-                                        await openclaw.revealPath(`${baseDir}/workspace`);
+                                        await thinclaw.revealPath(`${baseDir}/workspace`);
                                     } catch (e) { toast.error('Directory access denied'); }
                                 }
                             }}
@@ -802,8 +802,8 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                 onClick={async () => {
                                     try {
                                         const content = file.memory
-                                            ? await openclaw.getOpenClawMemory()
-                                            : await openclaw.getOpenClawFile(file.id);
+                                            ? await thinclaw.getThinClawMemory()
+                                            : await thinclaw.getThinClawFile(file.id);
                                         setViewingFile({ title: file.id, content });
                                     } catch (e) { toast.error(`Failed to read ${file.id}`); }
                                 }}
@@ -846,7 +846,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             <button
                                 onClick={async () => {
                                     try {
-                                        await openclaw.toggleOpenClawLocalTools(!status.allowLocalTools);
+                                        await thinclaw.toggleThinClawLocalTools(!status.allowLocalTools);
                                         await fetchStatus();
                                         toast.success(status.allowLocalTools ? 'Dev tools disabled' : 'Dev tools enabled');
                                     } catch (e) { toast.error('toggle failed'); }
@@ -879,7 +879,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                             <button
                                 onClick={async () => {
                                     try {
-                                        await openclaw.toggleOpenClawAutoStart(!status.autoStartGateway);
+                                        await thinclaw.toggleThinClawAutoStart(!status.autoStartGateway);
                                         await fetchStatus();
                                         toast.success(`Auto-start ${!status.autoStartGateway ? 'enabled' : 'disabled'}`);
                                     } catch (e) { toast.error('Toggle failed'); }
@@ -944,7 +944,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                     onClick={async () => {
                                         try {
                                             // Pass null for root — backend will auto-generate if needed
-                                            const resolvedPath = await openclaw.setOpenClawWorkspaceMode(
+                                            const resolvedPath = await thinclaw.setThinClawWorkspaceMode(
                                                 mode,
                                                 mode === 'unrestricted' ? null : (status.workspaceRoot || null)
                                             );
@@ -1008,7 +1008,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                     <button
                                         onClick={async () => {
                                             try {
-                                                const resolvedPath = await openclaw.setOpenClawWorkspaceMode(
+                                                const resolvedPath = await thinclaw.setThinClawWorkspaceMode(
                                                     status.workspaceMode,
                                                     status.workspaceRoot
                                                 );
@@ -1066,8 +1066,8 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                     try {
                                         setIsLoading(true);
                                         // Force stop gateway first to ensure clean state
-                                        await openclaw.stopOpenClawGateway();
-                                        await openclaw.clearOpenClawMemory('all');
+                                        await thinclaw.stopThinClawGateway();
+                                        await thinclaw.clearThinClawMemory('all');
                                         setStatus(s => ({ ...s, gateway: 'stopped', wsConnected: false }));
                                         toast.success("Agent factory reset initiated.");
                                         setViewingFile(null);
@@ -1100,7 +1100,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                     <h5 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">OS Governance</h5>
                                     <button
                                         onClick={async () => {
-                                            const perms = await openclaw.getPermissionStatus();
+                                            const perms = await thinclaw.getPermissionStatus();
                                             setPermissions(perms);
                                         }}
                                         className="text-[9px] text-muted-foreground/50 hover:text-muted-foreground transition-colors uppercase tracking-wider font-bold"
@@ -1133,7 +1133,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                                     </div>
                                                     <button
                                                         onClick={async () => {
-                                                            await openclaw.openPermissionSettings(perm.id);
+                                                            await thinclaw.openPermissionSettings(perm.id);
                                                             toast.info(`Revoke ${perm.label} in System Settings`, {
                                                                 description: "Toggle the switch off, then restart ThinClaw Desktop for changes to take effect."
                                                             });
@@ -1141,7 +1141,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                                             const poller = setInterval(async () => {
                                                                 checks++;
                                                                 if (checks > 15) { clearInterval(poller); return; }
-                                                                const fresh = await openclaw.getPermissionStatus();
+                                                                const fresh = await thinclaw.getPermissionStatus();
                                                                 setPermissions(fresh);
                                                                 if (!fresh[perm.id as keyof typeof fresh]) {
                                                                     toast.success(`${perm.label} revoked. Restart ThinClaw Desktop to apply.`);
@@ -1159,7 +1159,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                                 <button
                                                     onClick={async () => {
                                                         try {
-                                                            const updated = await openclaw.requestPermission(perm.id);
+                                                            const updated = await thinclaw.requestPermission(perm.id);
                                                             setPermissions(updated);
                                                             if (updated[perm.id as keyof typeof updated]) {
                                                                 toast.success(`${perm.label} permission granted`);
@@ -1171,7 +1171,7 @@ export function GatewayTab({ className }: GatewayTabProps) {
                                                                 const poller = setInterval(async () => {
                                                                     checks++;
                                                                     if (checks > 15) { clearInterval(poller); return; }
-                                                                    const fresh = await openclaw.getPermissionStatus();
+                                                                    const fresh = await thinclaw.getPermissionStatus();
                                                                     setPermissions(fresh);
                                                                     if (fresh[perm.id as keyof typeof fresh]) {
                                                                         toast.success(`${perm.label} permission granted!`);

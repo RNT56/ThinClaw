@@ -8,7 +8,7 @@ import {
     ShieldAlert,
     Box
 } from 'lucide-react';
-import * as openclaw from '../../lib/openclaw';
+import * as thinclaw from '../../lib/thinclaw';
 import { commands, GGUFMetadata, Result, SidecarStatus } from '../../lib/bindings';
 import { toast } from 'sonner';
 import { cn } from '../../lib/utils';
@@ -103,9 +103,9 @@ export function ServerSettings() {
             }
             await checkStatus();
 
-            // Attempt dynamic config update for OpenClaw
+            // Attempt dynamic config update for ThinClaw
             try {
-                const gatewayStatus = await commands.openclawGetStatus();
+                const gatewayStatus = await commands.thinclawGetStatus();
                 if (gatewayStatus.status === "ok" && gatewayStatus.data.engine_running) {
                     toast.loading("Syncing Agent Configuration...", { id: toastId });
 
@@ -135,7 +135,7 @@ export function ServerSettings() {
                         }
                     };
 
-                    await openclaw.patchOpenClawConfig({
+                    await thinclaw.patchThinClawConfig({
                         raw: JSON.stringify(configPatch)
                     });
 
@@ -145,14 +145,14 @@ export function ServerSettings() {
             } catch (err) {
                 console.warn("Dynamic config update failed, falling back to restart:", err);
 
-                // Fallback: Restart OpenClaw Gateway if running
+                // Fallback: Restart ThinClaw Gateway if running
                 try {
-                    const gatewayStatus = await commands.openclawGetStatus();
+                    const gatewayStatus = await commands.thinclawGetStatus();
                     if (gatewayStatus.status === "ok" && gatewayStatus.data.engine_running) {
                         toast.loading("Restarting Agent Engine...", { id: toastId });
-                        await commands.openclawStopGateway();
+                        await commands.thinclawStopGateway();
                         await new Promise(r => setTimeout(r, 1000));
-                        await commands.openclawStartGateway();
+                        await commands.thinclawStartGateway();
                     }
                 } catch (ignore) {
                     console.warn("Failed to restart gateway:", ignore);

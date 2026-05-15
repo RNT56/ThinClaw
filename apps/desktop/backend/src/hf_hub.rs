@@ -57,7 +57,7 @@ pub struct ModelDownloadInfo {
 async fn build_hf_client(app: &AppHandle) -> Result<reqwest::Client, String> {
     let mut headers = reqwest::header::HeaderMap::new();
 
-    // Read HF token from the app-wide SecretStore (NOT OpenClawConfig)
+    // Read HF token from the app-wide SecretStore (NOT ThinClawConfig)
     if let Some(store) = app.try_state::<crate::secret_store::SecretStore>() {
         if let Some(token) = store.huggingface_token() {
             if !token.trim().is_empty() {

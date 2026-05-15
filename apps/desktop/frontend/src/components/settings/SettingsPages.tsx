@@ -55,9 +55,9 @@ export function SettingsContent({ activePage }: SettingsContentProps) {
                         {activePage === 'server' && <ServerSettings />}
                         {activePage === 'troubleshooting' && <TroubleshootingSettings />}
                         {activePage === 'appearance' && <AppearanceSettings />}
-                        {activePage === 'openclaw-slack' && <SlackTab />}
-                        {activePage === 'openclaw-telegram' && <TelegramTab />}
-                        {activePage === 'openclaw-gateway' && <Suspense fallback={<TabSkeleton />}><GatewayTab /></Suspense>}
+                        {activePage === 'thinclaw-slack' && <SlackTab />}
+                        {activePage === 'thinclaw-telegram' && <TelegramTab />}
+                        {activePage === 'thinclaw-gateway' && <Suspense fallback={<TabSkeleton />}><GatewayTab /></Suspense>}
                         {activePage === 'secrets' && <Suspense fallback={<TabSkeleton />}><SecretsTab /></Suspense>}
                         {activePage === 'inference' && <ChatProviderTab />}
                         {activePage === 'inference-mode' && <Suspense fallback={<TabSkeleton />}><InferenceModeTab /></Suspense>}
@@ -118,17 +118,17 @@ function PageHeader({ page }: { page: SettingsPage }) {
             description: "Customize the look and feel of your workspace.",
             icon: Settings
         },
-        'openclaw-slack': {
+        'thinclaw-slack': {
             title: "Slack Integration",
             description: "Connect ThinClaw to your Slack workspace.",
             icon: Settings
         },
-        'openclaw-telegram': {
+        'thinclaw-telegram': {
             title: "Telegram Integration",
             description: "Connect ThinClaw to Telegram.",
             icon: Settings
         },
-        'openclaw-gateway': {
+        'thinclaw-gateway': {
             title: "ThinClaw Gateway",
             description: "Manage autonomy, connectivity and agent runtime.",
             icon: Radio
@@ -156,7 +156,7 @@ function PageHeader({ page }: { page: SettingsPage }) {
     };
 
     const entry = titles[page];
-    if (!entry) return null; // Not a settings page (e.g. 'chat', 'openclaw', 'imagine')
+    if (!entry) return null; // Not a settings page (e.g. 'chat', 'thinclaw', 'imagine')
     const { title, description, icon: Icon } = entry;
 
     return (

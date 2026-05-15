@@ -12,7 +12,7 @@ import { toast } from 'sonner';
 import { WebSearchBubble, WebStatusState, WebSource } from './WebSearchBubble';
 import { StatusIndicator } from './StatusIndicator'; // New Import
 import { createPortal } from 'react-dom';
-import { revealPath } from '../../lib/openclaw';
+import { revealPath } from '../../lib/thinclaw';
 import { ThinkingDots } from './ThinkingDots';
 import { useInferenceBackends } from '../../hooks/use-inference-backends';
 import { parseStatusTaggedContent } from '../../lib/status-tags';

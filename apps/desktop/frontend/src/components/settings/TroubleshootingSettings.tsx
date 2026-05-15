@@ -7,7 +7,7 @@ import {
     Settings,
     FlaskConical
 } from 'lucide-react';
-import * as openclaw from '../../lib/openclaw';
+import * as thinclaw from '../../lib/thinclaw';
 import { commands, SidecarStatus } from '../../lib/bindings';
 import { toast } from 'sonner';
 import { cn, unwrap } from '../../lib/utils';
@@ -18,13 +18,13 @@ export function TroubleshootingSettings() {
     const [status, setStatus] = useState<SidecarStatus | null>(null);
     const [pathValid, setPathValid] = useState<boolean | null>(null);
 
-    const [clawStatus, setClawStatus] = useState<openclaw.OpenClawStatus | null>(null);
+    const [clawStatus, setClawStatus] = useState<thinclaw.ThinClawStatus | null>(null);
 
     const checkStatus = async () => {
         try {
             const s = await commands.getSidecarStatus();
             setStatus(s);
-            const cs = await openclaw.getOpenClawStatus();
+            const cs = await thinclaw.getThinClawStatus();
             setClawStatus(cs);
         } catch (e) {
             console.error(e);
@@ -33,8 +33,8 @@ export function TroubleshootingSettings() {
 
     const toggleDevMode = async (enabled: boolean) => {
         try {
-            await openclaw.setDevModeWizard(enabled);
-            const cs = await openclaw.getOpenClawStatus();
+            await thinclaw.setDevModeWizard(enabled);
+            const cs = await thinclaw.getThinClawStatus();
             setClawStatus(cs);
             toast.success(enabled ? "Dev mode onboarding enabled" : "Dev mode onboarding disabled");
         } catch (e) {

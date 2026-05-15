@@ -165,7 +165,7 @@ pub fn detect_model_family(architecture: &str, chat_template: Option<&str>) -> S
 }
 
 /// Return the appropriate stop tokens for a given model family.
-/// These are used both in llama-server --stop args and openclaw model config.
+/// These are used both in llama-server --stop args and thinclaw model config.
 pub fn stop_tokens_for_family(family: &str) -> Vec<String> {
     match family {
         "llama3" => vec![

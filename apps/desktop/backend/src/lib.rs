@@ -80,7 +80,7 @@ pub mod images;
 pub mod imagine;
 pub mod inference;
 pub mod model_manager;
-pub mod openclaw;
+pub mod thinclaw;
 pub mod permissions;
 pub mod personas;
 pub mod process_tracker;
@@ -119,12 +119,12 @@ fn sanitize_typescript_bindings(path: &str) -> std::io::Result<()> {
         "import { invoke as TAURI_INVOKE } from \"@tauri-apps/api/core\";",
     );
     source = source.replace(
-        "async openclawMcpGetPrompt(serverName: string, promptName: string, arguments: JsonValue | null)",
-        "async openclawMcpGetPrompt(serverName: string, promptName: string, promptArguments: JsonValue | null)",
+        "async thinclawMcpGetPrompt(serverName: string, promptName: string, arguments: JsonValue | null)",
+        "async thinclawMcpGetPrompt(serverName: string, promptName: string, promptArguments: JsonValue | null)",
     );
     source = source.replace(
-        "TAURI_INVOKE(\"openclaw_mcp_get_prompt\", { serverName, promptName, arguments })",
-        "TAURI_INVOKE(\"openclaw_mcp_get_prompt\", { serverName, promptName, arguments: promptArguments })",
+        "TAURI_INVOKE(\"thinclaw_mcp_get_prompt\", { serverName, promptName, arguments })",
+        "TAURI_INVOKE(\"thinclaw_mcp_get_prompt\", { serverName, promptName, arguments: promptArguments })",
     );
 
     if !source.contains("export const events =") {
@@ -178,8 +178,8 @@ import * as TAURI_API_EVENT from "@tauri-apps/api/event";
 export type Result<T, E> = { status: "ok"; data: T } | { status: "error"; error: E }
 export type TAURI_CHANNEL<TSend> = null
 export const commands = {
-async openclawMcpGetPrompt(serverName: string, promptName: string, arguments: JsonValue | null) {
-    return { status: "ok", data: await TAURI_INVOKE("openclaw_mcp_get_prompt", { serverName, promptName, arguments }) };
+async thinclawMcpGetPrompt(serverName: string, promptName: string, arguments: JsonValue | null) {
+    return { status: "ok", data: await TAURI_INVOKE("thinclaw_mcp_get_prompt", { serverName, promptName, arguments }) };
 }
 }
 function __makeEvents__() {}
@@ -355,7 +355,7 @@ pub fn run() {
     app.manage(SidecarManager::new());
     app.manage(model_manager::DownloadManager::new());
     app.manage(config::ConfigManager::new(app.handle()));
-    app.manage(openclaw::OpenClawManager::new(app.handle().clone()));
+    app.manage(thinclaw::ThinClawManager::new(app.handle().clone()));
     app.manage(rig_cache::RigManagerCache::new());
 
     // FileStore — centralized file I/O abstraction (local-first, cloud-ready)
@@ -375,9 +375,9 @@ pub fn run() {
 
             // ── Load ALL API keys from Keychain in a single read ─────────────
             // This triggers exactly one macOS authorization prompt, then caches
-            // everything in memory.  Must happen before OpenClawConfig::new()
+            // everything in memory.  Must happen before ThinClawConfig::new()
             // or any other code that calls keychain::get_key().
-            openclaw::config::keychain::load_all();
+            thinclaw::config::keychain::load_all();
 
             // ── App-wide secret store (reads from the just-loaded keychain) ───
             let secret_store = secret_store::SecretStore::new();
@@ -424,12 +424,12 @@ pub fn run() {
             let reranker_wrapper = reranker::RerankerWrapper::new(app_data_dir.clone()).await;
             handle.manage(reranker_wrapper);
 
-            let db_path = app_data_dir.join("openclaw.db");
+            let db_path = app_data_dir.join("thinclaw.db");
             let legacy_db = app_data_dir.join("scrappy.db");
 
-            // Migration: rename legacy scrappy.db to openclaw.db
+            // Migration: rename legacy scrappy.db to thinclaw.db
             if !db_path.exists() && legacy_db.exists() {
-                println!("[main] Migrating legacy scrappy.db to openclaw.db...");
+                println!("[main] Migrating legacy scrappy.db to thinclaw.db...");
                 let _ = fs::rename(&legacy_db, &db_path);
             }
 
@@ -476,8 +476,8 @@ pub fn run() {
             }
 
             // Init ThinClaw config (critical for paths to work before engine start)
-            let openclaw_state = handle.state::<openclaw::OpenClawManager>();
-            if let Err(e) = openclaw_state.init_config().await {
+            let thinclaw_state = handle.state::<thinclaw::ThinClawManager>();
+            if let Err(e) = thinclaw_state.init_config().await {
                 eprintln!("[main] Failed to init ThinClaw config: {}", e);
             } else {
                 // IronClaw is in-process — no separate gateway to auto-start
@@ -487,7 +487,7 @@ pub fn run() {
             // Pre-register the state container in "stopped" mode so all Tauri
             // commands can access it immediately. Then auto-start the engine.
             let ironclaw_state_dir = app_data_dir.clone();
-            let ironclaw_state = openclaw::ironclaw_bridge::IronClawState::new_stopped(
+            let ironclaw_state = thinclaw::ironclaw_bridge::IronClawState::new_stopped(
                 handle.clone(),
                 ironclaw_state_dir,
             );
@@ -502,8 +502,8 @@ pub fn run() {
                 // it in Gateway Settings. When false, the user starts/stops
                 // the engine manually via the Gateway panel.
                 let should_auto_start = {
-                    let openclaw_mgr = ironclaw_handle.state::<openclaw::OpenClawManager>();
-                    let oc_config = openclaw_mgr.get_config().await;
+                    let thinclaw_mgr = ironclaw_handle.state::<thinclaw::ThinClawManager>();
+                    let oc_config = thinclaw_mgr.get_config().await;
                     oc_config
                         .as_ref()
                         .map(|cfg| cfg.auto_start_gateway)
@@ -522,8 +522,8 @@ pub fn run() {
                 // wait for the engine to come online before starting IronClaw.
                 // This handles the common case where MLX boots after IronClaw init.
                 let needs_local_wait = {
-                    let openclaw_mgr = ironclaw_handle.state::<openclaw::OpenClawManager>();
-                    let oc_config = openclaw_mgr.get_config().await;
+                    let thinclaw_mgr = ironclaw_handle.state::<thinclaw::ThinClawManager>();
+                    let oc_config = thinclaw_mgr.get_config().await;
                     if let Some(ref cfg) = oc_config {
                         if cfg.local_inference_enabled {
                             let sidecar_mgr = ironclaw_handle.state::<sidecar::SidecarManager>();
@@ -585,10 +585,10 @@ pub fn run() {
                 let secrets_store: Option<
                     std::sync::Arc<dyn ironclaw::secrets::SecretsStore + Send + Sync>,
                 > = Some(std::sync::Arc::new(
-                    openclaw::ironclaw_secrets::KeychainSecretsAdapter::new(),
+                    thinclaw::ironclaw_secrets::KeychainSecretsAdapter::new(),
                 ));
 
-                let state = ironclaw_handle.state::<openclaw::ironclaw_bridge::IronClawState>();
+                let state = ironclaw_handle.state::<thinclaw::ironclaw_bridge::IronClawState>();
                 match state.start(secrets_store).await {
                     Ok(true) => {
                         println!("[main] IronClaw engine initialized successfully.");
@@ -624,7 +624,7 @@ pub fn run() {
             tauri::RunEvent::Exit => {
                 // Shutdown IronClaw engine gracefully
                 if let Some(state) =
-                    _app_handle.try_state::<openclaw::ironclaw_bridge::IronClawState>()
+                    _app_handle.try_state::<thinclaw::ironclaw_bridge::IronClawState>()
                 {
                     tauri::async_runtime::block_on(state.shutdown());
                 }

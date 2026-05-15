@@ -388,13 +388,13 @@ pub async fn cloud_get_storage_breakdown(
         ("ironclaw_db", "Agent Database", "ironclaw"),
         ("vectors", "Vector Indices", "vectors/"),
         ("previews", "Previews", "previews/"),
-        ("openclaw", "Agent State", "openclaw/"),
+        ("thinclaw", "Agent State", "thinclaw/"),
     ];
 
     let mut result = Vec::new();
     for (id, label, subdir) in categories {
         let path = if subdir.is_empty() {
-            app_data_dir.join("openclaw.db")
+            app_data_dir.join("thinclaw.db")
         } else if subdir == "ironclaw" {
             app_data_dir.join("ironclaw.db")
         } else {

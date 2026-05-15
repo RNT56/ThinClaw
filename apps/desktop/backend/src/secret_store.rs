@@ -1,7 +1,7 @@
 //! Application-level secret storage.
 //!
 //! `SecretStore` is a **top-level Tauri managed state** that holds all API keys
-//! for the application.  It is NOT part of the OpenClaw subsystem — it is an
+//! for the application.  It is NOT part of the ThinClaw subsystem — it is an
 //! app-wide concern consumed by:
 //!
 //!   - **IronClaw engine** — reads keys via `SecretsStore` trait adapter
@@ -15,29 +15,29 @@
 //! Keys are encrypted at rest in the macOS Keychain as a single JSON blob
 //! (one Keychain item → one unlock prompt on app launch).  At runtime, keys
 //! are cached in `keychain::key_cache()` — a single `Mutex<HashMap>` shared
-//! by both this store and `OpenClawConfig`.
+//! by both this store and `ThinClawConfig`.
 //!
 //! ## Architecture note (2026-02-24)
 //!
 //! Previously, `SecretStore` maintained its OWN `RwLock<HashMap>` that was
 //! populated from `keychain::key_cache()` on startup.  This created two caches
-//! that could drift: if `OpenClawConfig` called `keychain::set_key()` directly,
+//! that could drift: if `ThinClawConfig` called `keychain::set_key()` directly,
 //! `SecretStore`'s copy went stale.  Now `SecretStore` is a thin delegation
 //! wrapper over `keychain` — exactly one cache (the keychain module's), exactly
 //! one source of truth.
 //!
-//! ## Why this exists separately from OpenClawConfig
+//! ## Why this exists separately from ThinClawConfig
 //!
 //! API keys are an *application* concern, not an *agent* concern.  The old
-//! architecture stored keys inside `OpenClawConfig` because the app originally
-//! only needed keys for the OpenClaw engine.  As the app grew (Rig agent,
-//! HF Hub, etc.), every new consumer had to reach into `OpenClawConfig` to
+//! architecture stored keys inside `ThinClawConfig` because the app originally
+//! only needed keys for the ThinClaw engine.  As the app grew (Rig agent,
+//! HF Hub, etc.), every new consumer had to reach into `ThinClawConfig` to
 //! get keys — creating confusing coupling.
 //!
-//! Now: `SecretStore` owns the keys.  `OpenClawConfig` reads from it when
+//! Now: `SecretStore` owns the keys.  `ThinClawConfig` reads from it when
 //! generating engine config.  Everyone else reads from it directly.
 
-use crate::openclaw::config::keychain;
+use crate::thinclaw::config::keychain;
 
 /// Application-wide API key / secret store.
 ///
@@ -46,7 +46,7 @@ use crate::openclaw::config::keychain;
 ///
 /// This is a thin delegation wrapper over `keychain`.  All reads and writes
 /// go through the single `keychain::key_cache()` `Mutex<HashMap>`, ensuring
-/// consistency with `OpenClawConfig` which also uses `keychain` directly.
+/// consistency with `ThinClawConfig` which also uses `keychain` directly.
 pub struct SecretStore {
     // No local cache — delegates entirely to keychain::get_key / set_key
     // which maintain a single Mutex<HashMap> as the in-memory cache.
@@ -173,8 +173,8 @@ impl SecretStore {
 
     // NOTE: `snapshot()` was intentionally removed.
     //
-    // It returned ALL keys in the store without checking OpenClaw grant flags.
-    // The OpenClaw engine must NEVER receive keys that haven't been explicitly
+    // It returned ALL keys in the store without checking ThinClaw grant flags.
+    // The ThinClaw engine must NEVER receive keys that haven't been explicitly
     // granted via Settings > Secrets.  Auth-profiles generation in
     // `engine.rs::write_config()` correctly filters by per-provider `_granted`
     // flags — there is no need for an unfiltered snapshot.

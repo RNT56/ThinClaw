@@ -173,7 +173,7 @@ fn comparable_object_root(root: &str) -> String {
 /// Abstract interface for cloud storage backends.
 ///
 /// Implementations must be `Send + Sync` (Tauri managed state).
-/// All operations work with object keys (relative paths like `"db/openclaw.db.enc"`).
+/// All operations work with object keys (relative paths like `"db/thinclaw.db.enc"`).
 #[async_trait]
 pub trait CloudProvider: Send + Sync {
     /// Human-readable provider name (e.g. "AWS S3", "Cloudflare R2")

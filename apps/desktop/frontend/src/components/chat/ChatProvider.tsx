@@ -20,8 +20,8 @@ import { useAutoStart } from '../../hooks/use-auto-start';
 import { useAudioRecorder } from '../../hooks/use-audio-recorder';
 import { useProjects } from '../../hooks/use-projects';
 import { useConfig } from '../../hooks/use-config';
-import { OpenClawPage } from '../openclaw/OpenClawSidebar';
-import * as openclawApi from '../../lib/openclaw';
+import { ThinClawPage } from '../thinclaw/ThinClawSidebar';
+import * as thinclawApi from '../../lib/thinclaw';
 import { AppMode } from '../navigation/ModeNavigator';
 import { ImagineTab } from '../imagine';
 import { imagineGenerate } from '../../lib/imagine';
@@ -34,7 +34,7 @@ import { findStyle, STYLE_LIBRARY } from '../../lib/style-library';
 // Types
 // ---------------------------------------------------------------------------
 
-export type ActiveTab = SettingsPage | 'chat' | 'openclaw' | 'imagine';
+export type ActiveTab = SettingsPage | 'chat' | 'thinclaw' | 'imagine';
 
 export interface ChatLayoutState {
     // --- Chat hooks (pass-through from useChat) ---
@@ -125,7 +125,7 @@ export interface ChatLayoutState {
     setActiveTab: (v: ActiveTab) => void;
     appMode: AppMode;
     isSettingsMode: boolean;
-    isOpenClawMode: boolean;
+    isThinClawMode: boolean;
     isImagineMode: boolean;
 
     // --- Imagine state ---
@@ -136,12 +136,12 @@ export interface ChatLayoutState {
     lastGeneratedImage: string | null;
     setLastGeneratedImage: (v: string | null) => void;
 
-    // --- OpenClaw state ---
-    selectedOpenClawSession: string | null;
-    setSelectedOpenClawSession: (v: string | null) => void;
-    openclawGatewayRunning: boolean;
-    activeOpenClawPage: OpenClawPage;
-    setActiveOpenClawPage: (v: OpenClawPage) => void;
+    // --- ThinClaw state ---
+    selectedThinClawSession: string | null;
+    setSelectedThinClawSession: (v: string | null) => void;
+    thinclawGatewayRunning: boolean;
+    activeThinClawPage: ThinClawPage;
+    setActiveThinClawPage: (v: ThinClawPage) => void;
 
     // --- Computed ---
     isCloudProvider: boolean;
@@ -176,7 +176,7 @@ export interface ChatLayoutState {
     handleCancelGeneration: () => Promise<void>;
     handleImageUpload: () => void;
     handleFileUpload: () => void;
-    handleNewOpenClawSession: () => void;
+    handleNewThinClawSession: () => void;
     removeImage: (id: string) => void;
     removeIngestedFile: (id: string) => void;
     handleImagineGenerate: (prompt: string, options: {
@@ -279,8 +279,8 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     const [showImageSettings, setShowImageSettings] = useState(false);
 
     const [activeTab, setActiveTab] = useState<ActiveTab>('chat');
-    const isSettingsMode = activeTab !== 'chat' && activeTab !== 'openclaw' && activeTab !== 'imagine';
-    const isOpenClawMode = activeTab === 'openclaw';
+    const isSettingsMode = activeTab !== 'chat' && activeTab !== 'thinclaw' && activeTab !== 'imagine';
+    const isThinClawMode = activeTab === 'thinclaw';
     const isImagineMode = activeTab === 'imagine';
     const appMode: AppMode = isSettingsMode ? 'settings' : (activeTab as AppMode);
 
@@ -290,10 +290,10 @@ export function ChatProvider({ children }: { children: ReactNode }) {
     const [generationProgress, setGenerationProgress] = useState<any>(null);
     const [lastGeneratedImage, setLastGeneratedImage] = useState<string | null>(null);
 
-    // OpenClaw
-    const [selectedOpenClawSession, setSelectedOpenClawSession] = useState<string | null>(null);
-    const [openclawGatewayRunning, setOpenClawGatewayRunning] = useState(false);
-    const [activeOpenClawPage, setActiveOpenClawPage] = useState<OpenClawPage>('dashboard');
+    // ThinClaw
+    const [selectedThinClawSession, setSelectedThinClawSession] = useState<string | null>(null);
+    const [thinclawGatewayRunning, setThinClawGatewayRunning] = useState(false);
+    const [activeThinClawPage, setActiveThinClawPage] = useState<ThinClawPage>('dashboard');
 
     // File attachments
     const [attachedImages, setAttachedImages] = useState<{ id: string; path: string }[]>([]);
@@ -351,18 +351,18 @@ export function ChatProvider({ children }: { children: ReactNode }) {
 
     // ---- Effects -----------------------------------------------------------
 
-    // OpenClaw gateway poll
+    // ThinClaw gateway poll
     useEffect(() => {
         // Always poll gateway status — even when the user is on another tab.
-        // This prevents the OpenClawChatView from losing its event listener
+        // This prevents the ThinClawChatView from losing its event listener
         // and state when switching tabs (since gatewayRunning going false→true
         // triggers a full re-subscribe that can miss in-flight events).
         const checkStatus = async () => {
             try {
-                const status = await openclawApi.getOpenClawStatus();
-                setOpenClawGatewayRunning(status.engine_running);
+                const status = await thinclawApi.getThinClawStatus();
+                setThinClawGatewayRunning(status.engine_running);
             } catch {
-                setOpenClawGatewayRunning(false);
+                setThinClawGatewayRunning(false);
             }
         };
         checkStatus();
@@ -819,9 +819,9 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         catch { toast.error('Failed to cancel generation'); }
     }, [cancelGeneration]);
 
-    const handleNewOpenClawSession = () => {
+    const handleNewThinClawSession = () => {
         const newKey = `agent:main:chat-${crypto.randomUUID()}`;
-        setSelectedOpenClawSession(newKey);
+        setSelectedThinClawSession(newKey);
     };
 
     // Imagine generation handler (used by ImagineView)
@@ -916,13 +916,13 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         isWebSearchEnabled, setIsWebSearchEnabled, imageSteps, setImageSteps,
         showImageSettings, setShowImageSettings,
         // mode
-        activeTab, setActiveTab, appMode, isSettingsMode, isOpenClawMode, isImagineMode,
+        activeTab, setActiveTab, appMode, isSettingsMode, isThinClawMode, isImagineMode,
         // imagine
         activeImagineTab, setActiveImagineTab, imagineGenerating, generationProgress,
         lastGeneratedImage, setLastGeneratedImage,
-        // openclaw
-        selectedOpenClawSession, setSelectedOpenClawSession, openclawGatewayRunning,
-        activeOpenClawPage, setActiveOpenClawPage,
+        // thinclaw
+        selectedThinClawSession, setSelectedThinClawSession, thinclawGatewayRunning,
+        activeThinClawPage, setActiveThinClawPage,
         // computed
         isCloudProvider, canSee, isRagCapable, selectedProjectId, setSelectedProjectId,
         availableDocs, filteredDocs, mentionQuery, setMentionQuery, slashQuery, setSlashQuery,
@@ -932,7 +932,7 @@ export function ChatProvider({ children }: { children: ReactNode }) {
         // handlers
         handleSend, handleGenerateImage, handleSlashCommandExecute, handleEditMessage,
         handleMicClick, handleCancelGeneration, handleImageUpload, handleFileUpload,
-        handleNewOpenClawSession, removeImage, removeIngestedFile, handleImagineGenerate,
+        handleNewThinClawSession, removeImage, removeIngestedFile, handleImagineGenerate,
         // dropzone
         getRootProps, getInputProps, isDragActive,
         // config

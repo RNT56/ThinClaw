@@ -2,13 +2,13 @@
 
 Last updated: 2026-05-15
 
-This policy documents how Desktop stores, grants, injects, and migrates secrets during alpha.
+This policy documents how Desktop stores, grants, injects, and migrates secrets.
 
 ## Naming Rules
 
 - Public branding is ThinClaw.
 - New secret writes use ThinClaw provider identifiers such as `anthropic`, `openai`, `gemini`, `groq`, `openrouter`, `brave`, `huggingface`, `bedrock`, and custom OpenAI-compatible provider slugs.
-- Legacy Scrappy/OpenClaw key names remain fallback-only read inputs for migration and rollback.
+- Legacy Scrappy/ThinClaw key names remain fallback-only read inputs for migration and rollback.
 - Do not add new writes to legacy Scrappy identifiers.
 
 ## Storage
@@ -76,7 +76,7 @@ P3 contract tests should cover:
 
 ## Operational Checklist
 
-Before alpha handoff:
+Before handoff:
 
 - Save a key in Settings > Secrets.
 - Confirm status shows saved but ungranted.

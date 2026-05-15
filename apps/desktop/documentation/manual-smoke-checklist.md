@@ -94,7 +94,7 @@ set in the report.
 - Open diagnostics/status and verify local mode, gateway health, engine family,
   active model, sidecar state, runtime revision, and cache stats.
 - Restart the gateway or engine from the UI if the control is available.
-- Expected events: lifecycle/status updates appear through `openclaw-event`.
+- Expected events: lifecycle/status updates appear through `thinclaw-event`.
 
 ### Chat Streaming
 
@@ -102,7 +102,7 @@ set in the report.
 - Verify token streaming, final assistant message, transcript persistence, and
   no cross-session message leakage when switching sessions.
 - Expected events: lifecycle, agent message, token/chat delta, and completion
-  events on `openclaw-event`.
+  events on `thinclaw-event`.
 
 ### Plan, Usage, And Cost
 
@@ -111,7 +111,7 @@ set in the report.
   updates.
 - Export or reset costs only if that action is part of the run. Record the
   exact result.
-- Expected events: plan, usage, and cost events on `openclaw-event`.
+- Expected events: plan, usage, and cost events on `thinclaw-event`.
 
 ### Approvals And Auth
 
@@ -140,7 +140,7 @@ set in the report.
   jobs.
 - If a sandbox job is available, test restart, interactive prompt/done, file
   list, and file read.
-- Expected events: subagent and job lifecycle events on `openclaw-event`.
+- Expected events: subagent and job lifecycle events on `thinclaw-event`.
 
 ### Routines And Channels
 
@@ -148,7 +148,7 @@ set in the report.
   controls.
 - Open Channels and verify Gmail OAuth/status, Apple Mail settings, Slack,
   Telegram, and pairing screens.
-- Expected events: routine lifecycle events forward to `openclaw-event`.
+- Expected events: routine lifecycle events forward to `thinclaw-event`.
 
 ### Extensions, Skills, And MCP
 
@@ -165,7 +165,7 @@ set in the report.
 - Verify delete/export controls are either supported or explicitly unavailable.
 - Trigger a canvas/A2UI artifact, then verify open, update, dismiss, and
   availability states.
-- Expected events: canvas events on `openclaw-event`.
+- Expected events: canvas events on `thinclaw-event`.
 
 ### Experiments And Learning
 
@@ -195,7 +195,7 @@ or version when known.
 Additional remote-specific checks:
 
 - Chat uses `POST /api/chat/send`; approvals use `POST /api/chat/approval`.
-- Remote SSE events re-emit as `openclaw-event` with the same `UiEvent` schema
+- Remote SSE events re-emit as `thinclaw-event` with the same `UiEvent` schema
   as local mode.
 - Session routing is metadata-first by `thread_id`, `session_key`, and `run_id`.
 - Unsupported operations return typed unavailable responses, not success:

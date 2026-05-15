@@ -12,7 +12,7 @@ For alpha bridge and handoff details, also see:
 - [Remote Gateway Route Matrix](remote-gateway-route-matrix.md)
 - [Packaging And Platform Readiness](packaging-platform-readiness.md)
 - [Manual Smoke Checklist](manual-smoke-checklist.md)
-- [Known Post-Alpha Items](known-post-alpha.md)
+- [External Release Prerequisites](external-release-prerequisites.md)
 
 | Engine | Platforms | Model Format | Notes |
 |--------|-----------|-------------|-------|
@@ -327,7 +327,7 @@ ThinClaw Desktop has two MCP surfaces:
 
 - Store provider keys in **Settings → Secrets** where possible.
 - Saving a key does not grant agent access. Toggle **Grant Access** per provider.
-- New writes use ThinClaw identifiers; legacy Scrappy/OpenClaw names are read-only fallback inputs.
+- New writes use ThinClaw identifiers; legacy Scrappy/ThinClaw names are read-only fallback inputs.
 - Remote gateway mode can save/delete/status provider-vault keys, but it must never return raw secrets to Desktop.
 - Raw secret injection is local-only and intentionally unavailable in remote mode.
 
@@ -339,8 +339,8 @@ For the full policy, see [Secrets Policy](secrets-policy.md).
 
 Desktop can connect to a remote ThinClaw gateway while preserving the same frontend IPC and event contract.
 
-- Tauri command names remain `openclaw_*`.
-- Events still arrive on `openclaw-event`.
+- Tauri command names remain `thinclaw_*`.
+- Events still arrive on `thinclaw-event`.
 - Gateway SSE events are normalized into the same `UiEvent` schema as local mode.
 - Unsupported remote behavior must show a concrete unavailable reason.
 - The route-by-route support table lives in [Remote Gateway Route Matrix](remote-gateway-route-matrix.md).
@@ -362,7 +362,7 @@ apps/desktop/
 ├── backend/                # Rust + Tauri v2
 │   ├── src/
 │   │   ├── engine/         # InferenceEngine trait + implementations
-│   │   ├── openclaw/       # ThinClaw gateway integration
+│   │   ├── thinclaw/       # ThinClaw gateway integration
 │   │   ├── rig_lib/        # Rig agent, orchestrator, tools
 │   │   ├── hf_hub.rs       # HuggingFace Hub model discovery
 │   │   ├── sidecar.rs      # SidecarManager

@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { MessageSquare, Key, CheckCircle, Copy, Info, AlertTriangle } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { toast } from 'sonner';
-import * as openclaw from '../../lib/openclaw';
+import * as thinclaw from '../../lib/thinclaw';
 
 interface SlackTabProps {
     className?: string;
@@ -70,7 +70,7 @@ export function SlackTab({ className }: SlackTabProps) {
 
     // Load initial state from backend
     useEffect(() => {
-        openclaw.getOpenClawStatus().then(status => {
+        thinclaw.getThinClawStatus().then(status => {
             setEnabled(status.slack_enabled);
         }).catch(console.error);
     }, []);
@@ -84,7 +84,7 @@ export function SlackTab({ className }: SlackTabProps) {
         setIsLoading(true);
 
         try {
-            await openclaw.saveSlackConfig({
+            await thinclaw.saveSlackConfig({
                 enabled,
                 bot_token: botToken || null,
                 app_token: appToken || null,

@@ -63,7 +63,7 @@ const cargo = fs.readFileSync('backend/Cargo.toml', 'utf8');
 if (!cargo.includes('name = "thinclaw-desktop"')) fail('Cargo package name changed unexpectedly.');
 if (!cargo.includes('security-framework = "3"')) fail('macOS Keychain dependency is missing.');
 
-const keychain = fs.readFileSync('backend/src/openclaw/config/keychain.rs', 'utf8');
+const keychain = fs.readFileSync('backend/src/thinclaw/config/keychain.rs', 'utf8');
 if (!keychain.includes('const SERVICE: &str = "com.thinclaw.desktop";')) {
   fail('Keychain service must match the bundle identifier.');
 }
@@ -98,7 +98,7 @@ NODE
 done
 
 echo "== Focused platform tests =="
-cargo test --manifest-path backend/Cargo.toml --locked openclaw::ironclaw_secrets::tests:: -- --test-threads=1
+cargo test --manifest-path backend/Cargo.toml --locked thinclaw::ironclaw_secrets::tests:: -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked personas::tests::legacy_scrappy_persona_aliases_to_thinclaw -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked cloud::providers::icloud::tests:: -- --test-threads=1
 cargo test --manifest-path backend/Cargo.toml --locked cloud::migration::tests::test_validated_manifest_relative_path_rejects_traversal -- --test-threads=1

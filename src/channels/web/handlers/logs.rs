@@ -48,6 +48,24 @@ pub(crate) async fn logs_events_handler(
     ))
 }
 
+pub(crate) async fn logs_recent_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let broadcaster = state.log_broadcaster.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Log broadcaster not available".to_string(),
+    ))?;
+    let logs = broadcaster.recent_entries();
+    let lines = logs
+        .iter()
+        .map(|entry| format!("[{}] {}", entry.level, entry.message))
+        .collect::<Vec<_>>();
+    Ok(Json(serde_json::json!({
+        "logs": logs,
+        "lines": lines,
+    })))
+}
+
 pub(crate) async fn logs_level_get_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {

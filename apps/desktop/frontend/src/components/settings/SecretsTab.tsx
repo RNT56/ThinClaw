@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { commands, type OpenClawStatus } from '../../lib/bindings';
+import { commands, type ThinClawStatus } from '../../lib/bindings';
 import { Bot, Loader2, Search, Key, ShieldCheck, Radio, KeyRound } from 'lucide-react';
 import { toast } from 'sonner';
 import { useConfig } from '../../hooks/use-config';
@@ -8,7 +8,7 @@ import { BedrockCredentialsCard } from './BedrockCredentialsCard';
 import { AddSecretForm } from './AddSecretForm';
 
 export function SecretsTab() {
-    const [status, setStatus] = useState<OpenClawStatus | null>(null);
+    const [status, setStatus] = useState<ThinClawStatus | null>(null);
     const { config, updateConfig } = useConfig();
     const [loading, setLoading] = useState(true);
 
@@ -18,7 +18,7 @@ export function SecretsTab() {
 
     const loadData = async () => {
         try {
-            const sRes = await commands.openclawGetStatus();
+            const sRes = await commands.thinclawGetStatus();
             if (sRes.status === 'ok') setStatus(sRes.data);
         } catch (e) {
             console.error(e);
@@ -48,7 +48,7 @@ export function SecretsTab() {
 
     const handleAnthropicSave = async (key: string) => {
         const value = key.trim() || null;
-        const res = await commands.openclawSaveAnthropicKey(value);
+        const res = await commands.thinclawSaveAnthropicKey(value);
         if (res.status === 'ok') {
             if (value) await toggleProviderVisibility('anthropic', true);
             await loadStatus();
@@ -59,7 +59,7 @@ export function SecretsTab() {
 
     const handleBraveSave = async (key: string) => {
         const value = key.trim() || null;
-        const res = await commands.openclawSaveBraveKey(value);
+        const res = await commands.thinclawSaveBraveKey(value);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -69,7 +69,7 @@ export function SecretsTab() {
 
     const handleOpenAISave = async (key: string) => {
         const value = key.trim() || null;
-        const res = await commands.openclawSaveOpenaiKey(value);
+        const res = await commands.thinclawSaveOpenaiKey(value);
         if (res.status === 'ok') {
             if (value) await toggleProviderVisibility('openai', true);
             await loadStatus();
@@ -80,7 +80,7 @@ export function SecretsTab() {
 
     const handleOpenRouterSave = async (key: string) => {
         const value = key.trim() || null;
-        const res = await commands.openclawSaveOpenrouterKey(value);
+        const res = await commands.thinclawSaveOpenrouterKey(value);
         if (res.status === 'ok') {
             if (value) await toggleProviderVisibility('openrouter', true);
             await loadStatus();
@@ -91,7 +91,7 @@ export function SecretsTab() {
 
     const handleGeminiSave = async (key: string) => {
         const value = key.trim() || null;
-        const res = await commands.openclawSaveGeminiKey(value);
+        const res = await commands.thinclawSaveGeminiKey(value);
         if (res.status === 'ok') {
             if (value) await toggleProviderVisibility('gemini', true);
             await loadStatus();
@@ -102,7 +102,7 @@ export function SecretsTab() {
 
     const handleGroqSave = async (key: string) => {
         const value = key.trim() || null;
-        const res = await commands.openclawSaveGroqKey(value);
+        const res = await commands.thinclawSaveGroqKey(value);
         if (res.status === 'ok') {
             if (value) await toggleProviderVisibility('groq', true);
             await loadStatus();
@@ -113,7 +113,7 @@ export function SecretsTab() {
 
     const handleToggle = async (secret: string, granted: boolean) => {
         try {
-            const res = await commands.openclawToggleSecretAccess(secret, granted);
+            const res = await commands.thinclawToggleSecretAccess(secret, granted);
             if (res.status === 'ok') {
                 await loadStatus();
                 toast.success(`Access ${granted ? 'granted' : 'revoked'}`);
@@ -126,37 +126,37 @@ export function SecretsTab() {
     };
 
     const handleAnthropicFetch = async (): Promise<string | null> => {
-        const res = await commands.openclawGetAnthropicKey();
+        const res = await commands.thinclawGetAnthropicKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleBraveFetch = async (): Promise<string | null> => {
-        const res = await commands.openclawGetBraveKey();
+        const res = await commands.thinclawGetBraveKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleOpenAIFetch = async (): Promise<string | null> => {
-        const res = await commands.openclawGetOpenaiKey();
+        const res = await commands.thinclawGetOpenaiKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleOpenRouterFetch = async (): Promise<string | null> => {
-        const res = await commands.openclawGetOpenrouterKey();
+        const res = await commands.thinclawGetOpenrouterKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleGeminiFetch = async (): Promise<string | null> => {
-        const res = await commands.openclawGetGeminiKey();
+        const res = await commands.thinclawGetGeminiKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleGroqFetch = async (): Promise<string | null> => {
-        const res = await commands.openclawGetGroqKey();
+        const res = await commands.thinclawGetGroqKey();
         return res.status === 'ok' ? res.data : null;
     };
 
     const handleAnthropicDelete = async () => {
-        const res = await commands.openclawSaveAnthropicKey(null);
+        const res = await commands.thinclawSaveAnthropicKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -165,7 +165,7 @@ export function SecretsTab() {
     };
 
     const handleBraveDelete = async () => {
-        const res = await commands.openclawSaveBraveKey(null);
+        const res = await commands.thinclawSaveBraveKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -174,7 +174,7 @@ export function SecretsTab() {
     };
 
     const handleOpenAIDelete = async () => {
-        const res = await commands.openclawSaveOpenaiKey(null);
+        const res = await commands.thinclawSaveOpenaiKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -183,7 +183,7 @@ export function SecretsTab() {
     };
 
     const handleOpenRouterDelete = async () => {
-        const res = await commands.openclawSaveOpenrouterKey(null);
+        const res = await commands.thinclawSaveOpenrouterKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -192,7 +192,7 @@ export function SecretsTab() {
     };
 
     const handleGeminiDelete = async () => {
-        const res = await commands.openclawSaveGeminiKey(null);
+        const res = await commands.thinclawSaveGeminiKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -201,7 +201,7 @@ export function SecretsTab() {
     };
 
     const handleGroqDelete = async () => {
-        const res = await commands.openclawSaveGroqKey(null);
+        const res = await commands.thinclawSaveGroqKey(null);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -210,7 +210,7 @@ export function SecretsTab() {
     };
 
     const handleAddCustomSecret = async (name: string, value: string, description: string | null) => {
-        const res = await commands.openclawAddCustomSecret(name, value, description);
+        const res = await commands.thinclawAddCustomSecret(name, value, description);
         if (res.status === 'ok') {
             await loadStatus();
             toast.success(`${name} secret added`);
@@ -221,7 +221,7 @@ export function SecretsTab() {
     };
 
     const handleRemoveCustomSecret = async (id: string) => {
-        const res = await commands.openclawRemoveCustomSecret(id);
+        const res = await commands.thinclawRemoveCustomSecret(id);
         if (res.status === 'ok') {
             await loadStatus();
         } else {
@@ -230,7 +230,7 @@ export function SecretsTab() {
     };
 
     const handleToggleCustomSecret = async (id: string, granted: boolean) => {
-        const res = await commands.openclawToggleCustomSecret(id, granted);
+        const res = await commands.thinclawToggleCustomSecret(id, granted);
         if (res.status === 'ok') {
             await loadStatus();
             toast.success(`Access ${granted ? 'granted' : 'revoked'}`);
@@ -370,17 +370,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_xai_key}
                             granted={!!status?.xai_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('xai', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('xai', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('xAI key saved'); }
                                 else toast.error('Failed to save xAI key');
                             }}
                             onToggle={(g) => handleToggle('xai', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('xai');
+                                const res = await commands.thinclawGetImplicitProviderKey('xai');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('xai', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('xai', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete xAI key');
                             }}
@@ -395,17 +395,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_mistral_key}
                             granted={!!status?.mistral_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('mistral', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('mistral', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('Mistral key saved'); }
                                 else toast.error('Failed to save Mistral key');
                             }}
                             onToggle={(g) => handleToggle('mistral', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('mistral');
+                                const res = await commands.thinclawGetImplicitProviderKey('mistral');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('mistral', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('mistral', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete Mistral key');
                             }}
@@ -420,17 +420,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_venice_key}
                             granted={!!status?.venice_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('venice', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('venice', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('Venice key saved'); }
                                 else toast.error('Failed to save Venice key');
                             }}
                             onToggle={(g) => handleToggle('venice', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('venice');
+                                const res = await commands.thinclawGetImplicitProviderKey('venice');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('venice', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('venice', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete Venice key');
                             }}
@@ -445,17 +445,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_together_key}
                             granted={!!status?.together_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('together', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('together', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('Together key saved'); }
                                 else toast.error('Failed to save Together key');
                             }}
                             onToggle={(g) => handleToggle('together', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('together');
+                                const res = await commands.thinclawGetImplicitProviderKey('together');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('together', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('together', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete Together key');
                             }}
@@ -470,17 +470,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_moonshot_key}
                             granted={!!status?.moonshot_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('moonshot', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('moonshot', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('Moonshot key saved'); }
                                 else toast.error('Failed to save Moonshot key');
                             }}
                             onToggle={(g) => handleToggle('moonshot', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('moonshot');
+                                const res = await commands.thinclawGetImplicitProviderKey('moonshot');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('moonshot', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('moonshot', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete Moonshot key');
                             }}
@@ -495,17 +495,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_minimax_key}
                             granted={!!status?.minimax_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('minimax', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('minimax', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('MiniMax key saved'); }
                                 else toast.error('Failed to save MiniMax key');
                             }}
                             onToggle={(g) => handleToggle('minimax', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('minimax');
+                                const res = await commands.thinclawGetImplicitProviderKey('minimax');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('minimax', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('minimax', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete MiniMax key');
                             }}
@@ -519,17 +519,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_nvidia_key}
                             granted={!!status?.nvidia_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('nvidia', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('nvidia', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('NVIDIA key saved'); }
                                 else toast.error('Failed to save NVIDIA key');
                             }}
                             onToggle={(g) => handleToggle('nvidia', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('nvidia');
+                                const res = await commands.thinclawGetImplicitProviderKey('nvidia');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('nvidia', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('nvidia', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete NVIDIA key');
                             }}
@@ -544,17 +544,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_qianfan_key}
                             granted={!!status?.qianfan_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('qianfan', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('qianfan', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('Qianfan key saved'); }
                                 else toast.error('Failed to save Qianfan key');
                             }}
                             onToggle={(g) => handleToggle('qianfan', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('qianfan');
+                                const res = await commands.thinclawGetImplicitProviderKey('qianfan');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('qianfan', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('qianfan', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete Qianfan key');
                             }}
@@ -568,17 +568,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_xiaomi_key}
                             granted={!!status?.xiaomi_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('xiaomi', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('xiaomi', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('Xiaomi key saved'); }
                                 else toast.error('Failed to save Xiaomi key');
                             }}
                             onToggle={(g) => handleToggle('xiaomi', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('xiaomi');
+                                const res = await commands.thinclawGetImplicitProviderKey('xiaomi');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('xiaomi', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('xiaomi', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete Xiaomi key');
                             }}
@@ -592,17 +592,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_cohere_key}
                             granted={!!status?.cohere_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('cohere', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('cohere', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('Cohere key saved'); }
                                 else toast.error('Failed to save Cohere key');
                             }}
                             onToggle={(g) => handleToggle('cohere', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('cohere');
+                                const res = await commands.thinclawGetImplicitProviderKey('cohere');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('cohere', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('cohere', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete Cohere key');
                             }}
@@ -617,17 +617,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_voyage_key}
                             granted={!!status?.voyage_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('voyage', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('voyage', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('Voyage key saved'); }
                                 else toast.error('Failed to save Voyage key');
                             }}
                             onToggle={(g) => handleToggle('voyage', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('voyage');
+                                const res = await commands.thinclawGetImplicitProviderKey('voyage');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('voyage', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('voyage', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete Voyage key');
                             }}
@@ -652,17 +652,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_deepgram_key}
                             granted={!!status?.deepgram_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('deepgram', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('deepgram', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('Deepgram key saved'); }
                                 else toast.error('Failed to save Deepgram key');
                             }}
                             onToggle={(g) => handleToggle('deepgram', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('deepgram');
+                                const res = await commands.thinclawGetImplicitProviderKey('deepgram');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('deepgram', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('deepgram', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete Deepgram key');
                             }}
@@ -677,17 +677,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_elevenlabs_key}
                             granted={!!status?.elevenlabs_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('elevenlabs', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('elevenlabs', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('ElevenLabs key saved'); }
                                 else toast.error('Failed to save ElevenLabs key');
                             }}
                             onToggle={(g) => handleToggle('elevenlabs', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('elevenlabs');
+                                const res = await commands.thinclawGetImplicitProviderKey('elevenlabs');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('elevenlabs', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('elevenlabs', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete ElevenLabs key');
                             }}
@@ -702,17 +702,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_stability_key}
                             granted={!!status?.stability_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('stability', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('stability', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('Stability AI key saved'); }
                                 else toast.error('Failed to save Stability AI key');
                             }}
                             onToggle={(g) => handleToggle('stability', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('stability');
+                                const res = await commands.thinclawGetImplicitProviderKey('stability');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('stability', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('stability', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete Stability AI key');
                             }}
@@ -727,17 +727,17 @@ export function SecretsTab() {
                             hasKey={!!status?.has_fal_key}
                             granted={!!status?.fal_granted}
                             onSave={async (key) => {
-                                const res = await commands.openclawSaveImplicitProviderKey('fal', key);
+                                const res = await commands.thinclawSaveImplicitProviderKey('fal', key);
                                 if (res.status === 'ok') { await loadStatus(); toast.success('fal.ai key saved'); }
                                 else toast.error('Failed to save fal.ai key');
                             }}
                             onToggle={(g) => handleToggle('fal', g)}
                             onFetch={async () => {
-                                const res = await commands.openclawGetImplicitProviderKey('fal');
+                                const res = await commands.thinclawGetImplicitProviderKey('fal');
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSaveImplicitProviderKey('fal', '');
+                                const res = await commands.thinclawSaveImplicitProviderKey('fal', '');
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error('Failed to delete fal.ai key');
                             }}
@@ -791,7 +791,7 @@ export function SecretsTab() {
                             granted={!!status?.huggingface_granted}
                             onSave={async (key) => {
                                 const value = key.trim() || "";
-                                const res = await commands.openclawSetHfToken(value);
+                                const res = await commands.thinclawSetHfToken(value);
                                 if (res.status === 'ok') {
                                     await loadStatus();
                                     toast.success("Hugging Face token saved");
@@ -806,7 +806,7 @@ export function SecretsTab() {
                                 return res.status === 'ok' ? res.data : null;
                             }}
                             onDelete={async () => {
-                                const res = await commands.openclawSetHfToken("");
+                                const res = await commands.thinclawSetHfToken("");
                                 if (res.status === 'ok') await loadStatus();
                                 else toast.error("Failed to delete HF token");
                             }}

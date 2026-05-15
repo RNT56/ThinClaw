@@ -6,13 +6,13 @@ import {
     Server, Key, Bot, Database, Image, Mic, Type
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import * as openclaw from '../../lib/openclaw';
+import * as thinclaw from '../../lib/thinclaw';
 import { useTheme } from '../theme-provider';
 import { APP_THEMES } from '../../lib/app-themes';
 import { toast } from 'sonner';
 // model-library no longer used directly — all models discovered via HF Hub
 import { useModelContext } from '../model-context';
-import { openPath } from '../../lib/openclaw';
+import { openPath } from '../../lib/thinclaw';
 import { commands } from '../../lib/bindings';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -85,11 +85,11 @@ function normaliseHttpUrl(raw: string): string {
 
 // Cloud providers shown in API keys step
 const CLOUD_PROVIDERS = [
-    { id: 'anthropic', label: 'Anthropic', desc: 'Claude Sonnet, Opus & Haiku models', placeholder: 'sk-ant-api03-...', color: 'text-purple-500', keyUrl: 'https://console.anthropic.com/settings/keys', save: 'openclawSaveAnthropicKey' as const },
-    { id: 'openai', label: 'OpenAI', desc: 'GPT-5, reasoning & coding models', placeholder: 'sk-...', color: 'text-emerald-500', keyUrl: 'https://platform.openai.com/api-keys', save: 'openclawSaveOpenaiKey' as const },
-    { id: 'gemini', label: 'Google Gemini', desc: 'Gemini Flash, Pro & frontier models', placeholder: 'AIza...', color: 'text-cyan-500', keyUrl: 'https://aistudio.google.com/app/apikey', save: 'openclawSaveGeminiKey' as const },
-    { id: 'groq', label: 'Groq', desc: 'Ultra-fast Llama, Mixtral inference', placeholder: 'gsk_...', color: 'text-orange-400', keyUrl: 'https://console.groq.com/keys', save: 'openclawSaveGroqKey' as const },
-    { id: 'openrouter', label: 'OpenRouter', desc: 'Universal access to 100+ models', placeholder: 'sk-or-v1-...', color: 'text-indigo-500', keyUrl: 'https://openrouter.ai/keys', save: 'openclawSaveOpenrouterKey' as const },
+    { id: 'anthropic', label: 'Anthropic', desc: 'Claude Sonnet, Opus & Haiku models', placeholder: 'sk-ant-api03-...', color: 'text-purple-500', keyUrl: 'https://console.anthropic.com/settings/keys', save: 'thinclawSaveAnthropicKey' as const },
+    { id: 'openai', label: 'OpenAI', desc: 'GPT-5, reasoning & coding models', placeholder: 'sk-...', color: 'text-emerald-500', keyUrl: 'https://platform.openai.com/api-keys', save: 'thinclawSaveOpenaiKey' as const },
+    { id: 'gemini', label: 'Google Gemini', desc: 'Gemini Flash, Pro & frontier models', placeholder: 'AIza...', color: 'text-cyan-500', keyUrl: 'https://aistudio.google.com/app/apikey', save: 'thinclawSaveGeminiKey' as const },
+    { id: 'groq', label: 'Groq', desc: 'Ultra-fast Llama, Mixtral inference', placeholder: 'gsk_...', color: 'text-orange-400', keyUrl: 'https://console.groq.com/keys', save: 'thinclawSaveGroqKey' as const },
+    { id: 'openrouter', label: 'OpenRouter', desc: 'Universal access to 100+ models', placeholder: 'sk-or-v1-...', color: 'text-indigo-500', keyUrl: 'https://openrouter.ai/keys', save: 'thinclawSaveOpenrouterKey' as const },
 ];
 
 export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
@@ -223,7 +223,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
     const checkPermissions = async () => {
         try {
-            const perms = await openclaw.getPermissionStatus();
+            const perms = await thinclaw.getPermissionStatus();
             setPermissions(perms);
         } catch (e) {
             console.error("Failed to check permissions", e);
@@ -306,14 +306,14 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         setRemoteConnecting(true);
         setRemoteError('');
         try {
-            const ok = await commands.openclawTestConnection(url, remoteExistingToken || null);
+            const ok = await commands.thinclawTestConnection(url, remoteExistingToken || null);
             if (!ok) {
                 setRemoteError('Cannot connect — server unreachable or auth failed');
                 setRemoteConnecting(false);
                 return;
             }
             const displayHost = url.replace(/^https?:\/\//, '').split(':')[0];
-            const newProfile: openclaw.AgentProfile = {
+            const newProfile: thinclaw.AgentProfile = {
                 id: crypto.randomUUID(),
                 name: `Remote (${displayHost})`,
                 url,
@@ -321,8 +321,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 mode: 'remote',
                 auto_connect: true,
             };
-            await openclaw.addAgentProfile(newProfile);
-            await commands.openclawSaveGatewaySettings('remote', url, remoteExistingToken || '');
+            await thinclaw.addAgentProfile(newProfile);
+            await commands.thinclawSaveGatewaySettings('remote', url, remoteExistingToken || '');
             setRemoteConnected(true);
             toast.success('Connected to remote agent!');
         } catch (e: any) {
@@ -350,7 +350,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                     if (result.status === 'success') {
                         setRemoteConnected(true);
                         // Auto-save the deployed agent
-                        const newProfile: openclaw.AgentProfile = {
+                        const newProfile: thinclaw.AgentProfile = {
                             id: crypto.randomUUID(),
                             name: `Remote (${remoteIp})`,
                             url: result.url,
@@ -358,8 +358,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                             mode: 'remote',
                             auto_connect: true,
                         };
-                        openclaw.addAgentProfile(newProfile).catch(console.error);
-                        commands.openclawSaveGatewaySettings('remote', result.url, result.token || '').catch(console.error);
+                        thinclaw.addAgentProfile(newProfile).catch(console.error);
+                        commands.thinclawSaveGatewaySettings('remote', result.url, result.token || '').catch(console.error);
                         toast.success('Remote agent deployed and connected!');
                     } else {
                         setRemoteError(result.message || 'Deployment failed');
@@ -369,7 +369,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                 }
                 setRemoteDeploying(false);
             });
-            await commands.openclawDeployRemote(remoteIp, remoteUser, remoteTailscaleKey || null, remoteEnableSystemd);
+            await commands.thinclawDeployRemote(remoteIp, remoteUser, remoteTailscaleKey || null, remoteEnableSystemd);
         } catch (e: any) {
             setRemoteError(typeof e === 'string' ? e : e.message);
             setRemoteDeploying(false);
@@ -409,14 +409,14 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
         try {
             // Save HF Token if provided
             if (hfToken && hfToken.trim().length > 0) {
-                await openclaw.setHfToken(hfToken.trim());
+                await thinclaw.setHfToken(hfToken.trim());
             }
 
             // Clear onboarding flag
             clearOnboardingProgress();
 
             // Set inference mode
-            await openclaw.toggleOpenClawLocalInference(inferenceChoice === 'local');
+            await thinclaw.toggleThinClawLocalInference(inferenceChoice === 'local');
 
             // --- Local inference: download selected HF models per category ---
             if (inferenceChoice === 'local') {
@@ -490,7 +490,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
             }
 
             // Save setup completed status
-            await openclaw.setSetupCompleted(true);
+            await thinclaw.setSetupCompleted(true);
             toast.success("Setup complete!");
             onComplete();
         } catch (e) {
@@ -1346,7 +1346,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                     <CheckCircle className="w-4 h-4" /> Granted
                                                 </span>
                                                 <button
-                                                    onClick={() => openclaw.openPermissionSettings('accessibility')}
+                                                    onClick={() => thinclaw.openPermissionSettings('accessibility')}
                                                     className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 transition-colors"
                                                 >
                                                     Manage
@@ -1355,7 +1355,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                         ) : (
                                             <button
                                                 onClick={async () => {
-                                                    const updated = await openclaw.requestPermission('accessibility');
+                                                    const updated = await thinclaw.requestPermission('accessibility');
                                                     setPermissions(updated);
                                                 }}
                                                 className="text-sm bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-lg font-medium transition-colors"
@@ -1381,7 +1381,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                                     <CheckCircle className="w-4 h-4" /> Granted
                                                 </span>
                                                 <button
-                                                    onClick={() => openclaw.openPermissionSettings('screen_recording')}
+                                                    onClick={() => thinclaw.openPermissionSettings('screen_recording')}
                                                     className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2 transition-colors"
                                                 >
                                                     Manage
@@ -1390,7 +1390,7 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
                                         ) : (
                                             <button
                                                 onClick={async () => {
-                                                    const updated = await openclaw.requestPermission('screen_recording');
+                                                    const updated = await thinclaw.requestPermission('screen_recording');
                                                     setPermissions(updated);
                                                 }}
                                                 className="text-sm bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-lg font-medium transition-colors"

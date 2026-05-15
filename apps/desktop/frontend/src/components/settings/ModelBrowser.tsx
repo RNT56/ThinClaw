@@ -78,7 +78,7 @@ export function ModelBrowser() {
     useEffect(() => {
         const load = async () => {
             try {
-                const s = await commands.openclawGetStatus();
+                const s = await commands.thinclawGetStatus();
                 if (s.status === 'ok') setStatus(s.data);
             } catch (e) {
                 console.error(e);
@@ -904,12 +904,12 @@ export function ModelBrowser() {
                                                         selected_model_context_size: contextSize ?? undefined,
                                                     };
                                                     await updateConfig(newConfig);
-                                                    if (commands.openclawSaveSelectedCloudModel) {
-                                                        await commands.openclawSaveSelectedCloudModel(modelId);
+                                                    if (commands.thinclawSaveSelectedCloudModel) {
+                                                        await commands.thinclawSaveSelectedCloudModel(modelId);
                                                     }
                                                     const providerName = brain === "gemini" ? "Google" : brain.charAt(0).toUpperCase() + brain.slice(1);
                                                     toast.success(`${model.name} selected as active ${providerName} Brain`);
-                                                    const s = await commands.openclawGetStatus();
+                                                    const s = await commands.thinclawGetStatus();
                                                     if (s.status === 'ok') setStatus(s.data);
                                                 } catch (e) {
                                                     toast.error("Failed to select cloud model");
@@ -948,11 +948,11 @@ export function ModelBrowser() {
                                                             // For cloud models, deactivation means switching back to Local Neural Link
                                                             const newConfig = { ...config, selected_chat_provider: null, selected_cloud_model: null };
                                                             await updateConfig(newConfig);
-                                                            if (commands.openclawSaveSelectedCloudModel) {
-                                                                await commands.openclawSaveSelectedCloudModel(null);
+                                                            if (commands.thinclawSaveSelectedCloudModel) {
+                                                                await commands.thinclawSaveSelectedCloudModel(null);
                                                             }
                                                             toast.success("Switched to Local Neural Link");
-                                                            const s = await commands.openclawGetStatus();
+                                                            const s = await commands.thinclawGetStatus();
                                                             if (s.status === 'ok') setStatus(s.data);
                                                         } else {
                                                             setModelPath("");

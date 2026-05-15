@@ -524,11 +524,13 @@ mod tests {
             registry_entries: Vec::new(),
             cost_guard: None,
             cost_tracker: None,
+            response_cache: None,
             routine_engine: None,
             startup_time: std::time::Instant::now(),
             restart_requested: std::sync::atomic::AtomicBool::new(false),
             secrets_store: None,
             channel_manager: None,
+            hooks: None,
         }
     }
 

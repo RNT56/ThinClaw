@@ -1,10 +1,10 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { Settings } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { ChatModeIcon, OpenClawModeIcon, ImagineModeIcon } from '../icons/ModeIcons';
+import { ChatModeIcon, ThinClawModeIcon, ImagineModeIcon } from '../icons/ModeIcons';
 import { CloudSyncIndicator } from './CloudSyncIndicator';
 
-export type AppMode = 'chat' | 'openclaw' | 'imagine' | 'settings';
+export type AppMode = 'chat' | 'thinclaw' | 'imagine' | 'settings';
 
 interface ModeNavigatorProps {
     activeMode: AppMode;
@@ -15,7 +15,7 @@ interface ModeNavigatorProps {
 
 const MODES = [
     { id: 'chat' as const, label: 'Chat', Icon: ChatModeIcon },
-    { id: 'openclaw' as const, label: 'ThinClaw', Icon: OpenClawModeIcon },
+    { id: 'thinclaw' as const, label: 'ThinClaw', Icon: ThinClawModeIcon },
     { id: 'imagine' as const, label: 'Imagine', Icon: ImagineModeIcon },
 ];
 
@@ -41,7 +41,7 @@ export function ModeNavigator({ activeMode, onModeChange, sidebarOpen, gatewayRu
                 <AnimatePresence mode="popLayout">
                     {modesToShow.map((mode) => {
                         const isActive = activeMode === mode.id;
-                        const showGatewayPulse = mode.id === 'openclaw' && gatewayRunning;
+                        const showGatewayPulse = mode.id === 'thinclaw' && gatewayRunning;
 
                         return (
                             <motion.button

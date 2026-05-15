@@ -445,8 +445,8 @@ mod tests {
     #[test]
     fn test_key_to_graph_path() {
         assert_eq!(
-            OneDriveProvider::key_to_graph_path("db/openclaw.db.enc"),
-            "me/drive/root:/ThinClaw Desktop/db/openclaw.db.enc:"
+            OneDriveProvider::key_to_graph_path("db/thinclaw.db.enc"),
+            "me/drive/root:/ThinClaw Desktop/db/thinclaw.db.enc:"
         );
     }
 

@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_large_data() {
         let key = MasterKey::generate();
-        let path = "db/openclaw.db";
+        let path = "db/thinclaw.db";
         let data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
 
         let encrypted = encrypt(&key, path, &data).unwrap();

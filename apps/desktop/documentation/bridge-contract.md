@@ -1,6 +1,8 @@
 # ThinClaw Desktop Bridge Contract
 
-This document is the alpha compatibility contract for the Desktop bridge. Public product labels use ThinClaw / ThinClaw Desktop. Internal Tauri command names still use the `openclaw_*` prefix until the post-alpha rename.
+This document is the final bridge contract for the Desktop bridge. Public
+product labels use ThinClaw / ThinClaw Desktop, public Tauri command names use
+the `thinclaw_*` prefix, and frontend events are emitted on `thinclaw-event`.
 
 Last updated: 2026-05-15
 
@@ -13,7 +15,7 @@ Related handoff docs:
 - Platform readiness: `apps/desktop/documentation/packaging-platform-readiness.md`
 - Secrets policy: `apps/desktop/documentation/secrets-policy.md`
 - Manual smoke checklist: `apps/desktop/documentation/manual-smoke-checklist.md`
-- Known post-alpha work: `apps/desktop/documentation/known-post-alpha.md`
+- External release prerequisites: `apps/desktop/documentation/external-release-prerequisites.md`
 
 ## Runtime Modes
 
@@ -24,7 +26,7 @@ Desktop runs ThinClaw in-process through `IronClawState` and `IronClawInner`.
 - The frontend invokes stable Tauri commands.
 - Chat messages are injected into ThinClaw through `TauriChannel`.
 - ThinClaw emits `StatusUpdate` values through the channel.
-- `StatusUpdate` values are converted into `UiEvent` and emitted as `openclaw-event`.
+- `StatusUpdate` values are converted into `UiEvent` and emitted as `thinclaw-event`.
 
 ### Remote Mode
 
@@ -33,19 +35,19 @@ Desktop talks to a remote ThinClaw gateway through `RemoteGatewayProxy`.
 - The frontend still invokes the same Tauri commands.
 - Command handlers forward supported calls to the remote HTTP gateway.
 - The remote SSE stream is subscribed by the proxy.
-- Remote events must be re-emitted to the frontend as the same `openclaw-event` `UiEvent` schema used by local mode.
+- Remote events must be re-emitted to the frontend as the same `thinclaw-event` `UiEvent` schema used by local mode.
 - Unsupported remote endpoints must return a typed unavailable response or a clear error reason. They must not silently no-op.
 
 ## Event Contract
 
 `UiEvent` is the single desktop event schema. Local and remote modes must converge on this shape before crossing the frontend boundary.
 
-- Event bus: `openclaw-event`
-- Rust schema: `apps/desktop/backend/src/openclaw/ui_types.rs`
+- Event bus: `thinclaw-event`
+- Rust schema: `apps/desktop/backend/src/thinclaw/ui_types.rs`
 - Generated TS type: `apps/desktop/frontend/src/lib/bindings.ts`
-- Local conversion: `apps/desktop/backend/src/openclaw/ironclaw_types.rs`
-- Local transport: `apps/desktop/backend/src/openclaw/ironclaw_channel.rs`
-- Remote transport: `apps/desktop/backend/src/openclaw/remote_proxy.rs`
+- Local conversion: `apps/desktop/backend/src/thinclaw/ironclaw_types.rs`
+- Local transport: `apps/desktop/backend/src/thinclaw/ironclaw_channel.rs`
+- Remote transport: `apps/desktop/backend/src/thinclaw/remote_proxy.rs`
 
 Every current ThinClaw `StatusUpdate` variant must be either mapped to `UiEvent` or explicitly documented as intentionally ignored. As of this checkpoint, Desktop maps chat, plan, usage, cost, lifecycle, approval, auth, canvas, job, subagent, agent-message, and routine events. Unknown remote gateway SSE events are forwarded as `UiEvent::GatewayEvent` instead of being silently dropped.
 
@@ -64,12 +66,12 @@ Concurrent-session regressions should be treated as contract breaks, not UI bugs
 
 ## IPC Stability
 
-The alpha frontend and existing automation scripts depend on the current Tauri command names.
+The frontend and existing automation scripts depend on the current Tauri command names.
 
-- Keep `openclaw_*` command names stable for alpha.
-- Keep `openclaw-event` stable for alpha.
+- Keep `thinclaw_*` command names stable.
+- Keep `thinclaw-event` stable.
 - Add new capabilities through additive commands or additive `UiEvent` variants.
-- Do not rename `thinclaw-desktop-tools` during alpha unless the migration is explicitly planned.
+- Do not rename `thinclaw-desktop-tools` unless the migration is explicitly planned.
 - Regenerate `apps/desktop/frontend/src/lib/bindings.ts` from Rust after command/type changes. Do not hand-edit generated bindings.
 
 ### Command Surface Groups
@@ -79,7 +81,7 @@ The command registry lives in `apps/desktop/backend/src/setup/commands.rs`.
 | Surface | Local mode behavior | Remote mode behavior |
 | --- | --- | --- |
 | Chat/sessions/approvals | Uses in-process ThinClaw runtime and `TauriChannel`. | Proxies chat/session/approval HTTP routes and forwards gateway SSE. |
-| Memory/files | Uses ThinClaw memory/workspace APIs. | Proxies gateway memory routes where present; missing delete/export operations return explicit unavailable errors. |
+| Memory/files | Uses ThinClaw memory/workspace APIs. | Proxies gateway memory read/write/list/search/delete routes and returns explicit unavailable errors for host-only operations. |
 | Providers/routing/vault | Uses local keychain, provider config, route simulation, model discovery. | Uses provider gateway endpoints; raw secret reads remain denied. |
 | Skills/extensions/MCP | Uses root skill registry, extension manager, MCP API. | Uses `/api/skills`, `/api/extensions`, and `/api/mcp` gateway routes. |
 | Jobs/autonomy/experiments/learning | Uses root APIs when DB/runtime/config allow them. | Status/review routes are proxied; host-executing mutation stays gated or unavailable with concrete reasons. |
