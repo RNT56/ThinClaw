@@ -8,9 +8,11 @@ use tauri::State;
 use tracing::{error, info};
 
 use super::super::config::*;
+use super::remote_provider_config::{apply_remote_selected_brain, normalize_provider_slug};
 use super::types::*;
 // ws_rpc removed — IronClaw is in-process, no remote WS gateway
 use super::OpenClawManager;
+use crate::openclaw::ironclaw_bridge::IronClawState;
 use crate::sidecar::SidecarManager;
 
 /// Get OpenAI API key
@@ -365,8 +367,21 @@ pub async fn openclaw_toggle_secret_access(
 #[specta::specta]
 pub async fn select_openclaw_brain(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     brain: Option<String>,
 ) -> Result<(), String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let mut remote_config = proxy
+            .get_providers_config()
+            .await
+            .map_err(|err| format!("unavailable: remote provider config: {}", err))?;
+        apply_remote_selected_brain(&mut remote_config, brain.as_deref());
+        proxy
+            .set_providers_config(&remote_config)
+            .await
+            .map_err(|err| format!("remote provider config update failed: {}", err))?;
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -452,20 +467,51 @@ pub async fn openclaw_set_hf_token(
 }
 
 /// Save an implicit cloud provider API key (generic)
-/// Supports: xai, venice, together, moonshot, minimax, nvidia, qianfan, mistral, xiaomi
+/// Supports: xai, venice, together, moonshot, minimax, nvidia, qianfan, mistral,
+/// xiaomi, cohere, voyage, deepgram, elevenlabs, stability, fal.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_save_implicit_provider_key(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     provider: String,
     key: String,
 ) -> Result<(), String> {
     let valid_providers = [
-        "xai", "venice", "together", "moonshot", "minimax", "nvidia", "qianfan", "mistral",
+        "xai",
+        "venice",
+        "together",
+        "moonshot",
+        "minimax",
+        "nvidia",
+        "qianfan",
+        "mistral",
         "xiaomi",
+        "cohere",
+        "voyage",
+        "deepgram",
+        "elevenlabs",
+        "stability",
+        "fal",
     ];
     if !valid_providers.contains(&provider.as_str()) {
         return Err(format!("Unknown implicit provider: {}", provider));
+    }
+
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let key = key.trim();
+        let provider_slug = normalize_provider_slug(&provider);
+        if key.is_empty() {
+            proxy
+                .delete_provider_key(&provider_slug)
+                .await
+                .map_err(|err| format!("remote provider key delete failed: {}", err))?;
+        } else {
+            proxy
+                .save_provider_key(&provider_slug, key)
+                .await
+                .map_err(|err| format!("remote provider key save failed: {}", err))?;
+        }
     }
 
     let mut cfg = if let Some(c) = state.get_config().await {

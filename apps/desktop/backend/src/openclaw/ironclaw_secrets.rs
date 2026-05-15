@@ -982,6 +982,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_methods_deny_ungranted_keychain_access() {
+        let adapter = KeychainSecretsAdapter::with_config(&test_config());
+
+        let get_err = adapter.get("user", "OPENAI_API_KEY").await.unwrap_err();
+        assert!(matches!(get_err, SecretError::AccessDenied));
+
+        let inject_err = adapter
+            .get_for_injection(
+                "user",
+                "OPENAI_API_KEY",
+                SecretAccessContext::new("test", "contract"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(inject_err, SecretError::AccessDenied));
+
+        assert!(adapter.list("user").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn runtime_mutations_deny_ungranted_keychain_writes() {
         let adapter = KeychainSecretsAdapter::with_config(&test_config());
 

@@ -5,6 +5,7 @@
 use tauri::State;
 use tracing::info;
 
+use super::remote_provider_config::{apply_remote_cloud_config, apply_remote_selected_cloud_model};
 use super::OpenClawManager;
 use crate::openclaw::ironclaw_bridge::IronClawState;
 
@@ -495,8 +496,21 @@ pub async fn openclaw_web_login_telegram(
 #[specta::specta]
 pub async fn openclaw_save_selected_cloud_model(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     model: Option<String>,
 ) -> Result<(), String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let mut remote_config = proxy
+            .get_providers_config()
+            .await
+            .map_err(|err| format!("unavailable: remote provider config: {}", err))?;
+        apply_remote_selected_cloud_model(&mut remote_config, model.as_deref());
+        proxy
+            .set_providers_config(&remote_config)
+            .await
+            .map_err(|err| format!("remote provider config update failed: {}", err))?;
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {
@@ -541,10 +555,45 @@ pub struct CustomLlmConfigInput {
 #[specta::specta]
 pub async fn openclaw_save_cloud_config(
     state: State<'_, OpenClawManager>,
+    ironclaw: State<'_, IronClawState>,
     enabled_providers: Vec<String>,
     enabled_models: std::collections::HashMap<String, Vec<String>>,
     custom_llm: Option<CustomLlmConfigInput>,
 ) -> Result<(), String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let mut remote_config = proxy
+            .get_providers_config()
+            .await
+            .map_err(|err| format!("unavailable: remote provider config: {}", err))?;
+        apply_remote_cloud_config(
+            &mut remote_config,
+            &enabled_providers,
+            &enabled_models,
+            custom_llm.as_ref().map(|cfg| cfg.enabled).unwrap_or(false),
+            custom_llm.as_ref().and_then(|cfg| cfg.url.as_deref()),
+            custom_llm.as_ref().and_then(|cfg| cfg.model.as_deref()),
+        );
+        if let Some(custom) = custom_llm.as_ref() {
+            if custom.enabled {
+                if let Some(key) = custom
+                    .key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                {
+                    proxy
+                        .save_provider_key("openai_compatible", key)
+                        .await
+                        .map_err(|err| format!("remote provider key save failed: {}", err))?;
+                }
+            }
+        }
+        proxy
+            .set_providers_config(&remote_config)
+            .await
+            .map_err(|err| format!("remote provider config update failed: {}", err))?;
+    }
+
     let mut cfg = if let Some(c) = state.get_config().await {
         c
     } else {

@@ -7,7 +7,7 @@ use ironclaw::channels::StatusUpdate;
 use serde_json::Value;
 
 use super::sanitizer::strip_llm_tokens;
-use super::ui_types::UiEvent;
+use super::ui_types::{UiEvent, UiUsage};
 
 /// Convert an IronClaw `StatusUpdate` to a ThinClaw Desktop `UiEvent`.
 ///
@@ -257,6 +257,106 @@ pub fn status_to_ui_event(
             })
         }
 
-        StatusUpdate::Plan { .. } | StatusUpdate::Usage { .. } => None,
+        StatusUpdate::Plan { entries } => Some(UiEvent::PlanUpdate {
+            session_key,
+            run_id,
+            message_id: message_id.to_string(),
+            entries,
+        }),
+
+        StatusUpdate::Usage {
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            model,
+        } => {
+            let input_tokens = input_tokens as u64;
+            let output_tokens = output_tokens as u64;
+            Some(UiEvent::UsageUpdate {
+                session_key,
+                run_id,
+                message_id: message_id.to_string(),
+                usage: UiUsage {
+                    input_tokens,
+                    output_tokens,
+                    total_tokens: input_tokens + output_tokens,
+                },
+                cost_usd,
+                model,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_plan_status_to_ui_event() {
+        let event = status_to_ui_event(
+            StatusUpdate::Plan {
+                entries: vec![serde_json::json!({
+                    "step": "Inspect runtime wiring",
+                    "status": "in_progress"
+                })],
+            },
+            "agent:main",
+            Some("run-1"),
+            "msg-1",
+        )
+        .expect("plan status should map");
+
+        match event {
+            UiEvent::PlanUpdate {
+                session_key,
+                run_id,
+                message_id,
+                entries,
+            } => {
+                assert_eq!(session_key, "agent:main");
+                assert_eq!(run_id.as_deref(), Some("run-1"));
+                assert_eq!(message_id, "msg-1");
+                assert_eq!(entries.len(), 1);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_usage_status_to_ui_event() {
+        let event = status_to_ui_event(
+            StatusUpdate::Usage {
+                input_tokens: 123,
+                output_tokens: 45,
+                cost_usd: Some(0.0123),
+                model: Some("provider/model".into()),
+            },
+            "thread-a",
+            Some("run-2"),
+            "msg-2",
+        )
+        .expect("usage status should map");
+
+        match event {
+            UiEvent::UsageUpdate {
+                session_key,
+                run_id,
+                message_id,
+                usage,
+                cost_usd,
+                model,
+            } => {
+                assert_eq!(session_key, "thread-a");
+                assert_eq!(run_id.as_deref(), Some("run-2"));
+                assert_eq!(message_id, "msg-2");
+                assert_eq!(usage.input_tokens, 123);
+                assert_eq!(usage.output_tokens, 45);
+                assert_eq!(usage.total_tokens, 168);
+                assert_eq!(cost_usd, Some(0.0123));
+                assert_eq!(model.as_deref(), Some("provider/model"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 }

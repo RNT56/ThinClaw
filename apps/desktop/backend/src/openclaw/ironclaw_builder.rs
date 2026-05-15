@@ -16,8 +16,8 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::Mutex;
 
-use ironclaw::agent::{Agent, AgentDeps};
-use ironclaw::app::{AppBuilder, AppBuilderFlags};
+use ironclaw::agent::{Agent, AgentDeps, AgentRegistry, AgentRouter};
+use ironclaw::app::{AppBuilder, AppBuilderFlags, PeriodicPersistencePlan};
 use ironclaw::channels::web::log_layer::LogBroadcaster;
 use ironclaw::channels::web::types::SseEvent;
 use ironclaw::channels::ChannelManager;
@@ -604,6 +604,74 @@ pub(crate) async fn build_inner(
         );
     }
 
+    // Persistent multi-agent management parity with the root runtime.
+    let shared_agent_router = Arc::new(AgentRouter::new());
+    let agent_registry = {
+        let registry = AgentRegistry::new(Arc::clone(&shared_agent_router), components.db.clone());
+        if components.db.is_some() {
+            match registry.load_from_db().await {
+                Ok(count) if count > 0 => {
+                    tracing::info!(
+                        "[ironclaw] Loaded {} persisted agent workspace(s) into desktop router",
+                        count
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "[ironclaw] Failed to load persisted agent workspaces: {}",
+                        error
+                    );
+                }
+                _ => {}
+            }
+        }
+        let registry = Arc::new(registry);
+        components
+            .tools
+            .register_agent_management_tools(Arc::clone(&registry));
+        registry
+    };
+
+    let mut auxiliary_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+    if let Some(ref db) = components.db {
+        let persistence_plan = PeriodicPersistencePlan::cost_entries();
+        let persist_db = Arc::clone(db);
+        let persist_tracker = Arc::clone(&components.cost_tracker);
+        auxiliary_tasks.push(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(persistence_plan.interval);
+            interval.tick().await;
+            let mut last_count: usize = 0;
+            loop {
+                interval.tick().await;
+                let (snapshot, count) = {
+                    let guard = persist_tracker.lock().await;
+                    (guard.to_json(), guard.entry_count())
+                };
+                if count != last_count {
+                    match persist_db
+                        .set_setting("default", persistence_plan.setting_key, &snapshot)
+                        .await
+                    {
+                        Ok(()) => {
+                            tracing::debug!("[cost] Persisted {} cost entries to DB", count);
+                            last_count = count;
+                        }
+                        Err(error) => {
+                            tracing::warn!("[cost] Failed to persist cost entries: {}", error);
+                        }
+                    }
+                }
+            }
+        }));
+        tracing::info!("[ironclaw] Cost persistence background task started");
+    }
+
+    auxiliary_tasks.push(ironclaw::llm::pricing_sync::spawn_pricing_sync(
+        components.db.as_ref().map(Arc::clone),
+    ));
+    tracing::info!("[ironclaw] Pricing sync background task started");
+
     let agent_deps = AgentDeps {
         store: components.db.clone(),
         llm: components.llm.clone(),
@@ -622,8 +690,8 @@ pub(crate) async fn build_inner(
         llm_runtime: Some(components.llm_runtime.clone()),
         routing_policy: Some(components.routing_policy.clone()),
         sse_sender: Some(sse_tx.clone()), // ← wired into RoutineEngine + Dispatcher
-        agent_router: None,
-        agent_registry: None,
+        agent_router: Some(shared_agent_router),
+        agent_registry: Some(agent_registry),
         canvas_store: Some(ironclaw::channels::canvas_gateway::CanvasStore::new(
             std::time::Duration::from_secs(30 * 60), // 30 minute TTL
         )),
@@ -1037,5 +1105,7 @@ pub(crate) async fn build_inner(
         response_cache,
         audit_log_hook,
         manifest_validator,
+        oauth_credential_sync: components.oauth_credential_sync,
+        auxiliary_tasks,
     })
 }

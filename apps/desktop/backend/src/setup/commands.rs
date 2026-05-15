@@ -6,7 +6,8 @@
 
 /// Build the Specta builder with all registered commands.
 pub fn specta_builder() -> tauri_specta::Builder {
-    tauri_specta::Builder::new().commands(tauri_specta::collect_commands![
+    let builder = tauri_specta::Builder::new().typ::<crate::openclaw::ui_types::UiEvent>();
+    builder.commands(tauri_specta::collect_commands![
         // ── Core ────────────────────────────────────────────────────────
         crate::greet,
         // ── Chat ────────────────────────────────────────────────────────

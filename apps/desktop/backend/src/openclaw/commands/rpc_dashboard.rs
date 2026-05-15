@@ -10,6 +10,507 @@ use super::types::*;
 use super::OpenClawManager;
 use crate::openclaw::ironclaw_bridge::IronClawState;
 use crate::openclaw::ironclaw_builder::get_resolved_workspace_root;
+use crate::openclaw::remote_proxy::RemoteGatewayProxy;
+
+fn json_number_as_f64(value: &serde_json::Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_u64().map(|n| n as f64))
+        .or_else(|| value.as_i64().map(|n| n as f64))
+}
+
+fn json_f64_field(value: &serde_json::Value, key: &str) -> f64 {
+    value.get(key).and_then(json_number_as_f64).unwrap_or(0.0)
+}
+
+fn json_bool_field(value: &serde_json::Value, key: &str) -> bool {
+    value.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn json_f64_map(value: &serde_json::Value, key: &str) -> std::collections::HashMap<String, f64> {
+    value
+        .get(key)
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| json_number_as_f64(v).map(|n| (k.clone(), n)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn map_remote_cost_summary(value: serde_json::Value) -> Result<CostSummary, String> {
+    if !value.is_object() {
+        return Err("Remote cost summary returned an invalid response".to_string());
+    }
+
+    Ok(CostSummary {
+        total_cost_usd: json_f64_field(&value, "total_cost_usd"),
+        total_input_tokens: json_f64_field(&value, "total_input_tokens"),
+        total_output_tokens: json_f64_field(&value, "total_output_tokens"),
+        total_requests: json_f64_field(&value, "total_requests"),
+        avg_cost_per_request: json_f64_field(&value, "avg_cost_per_request"),
+        daily: json_f64_map(&value, "daily"),
+        monthly: json_f64_map(&value, "monthly"),
+        by_model: json_f64_map(&value, "by_model"),
+        by_agent: json_f64_map(&value, "by_agent"),
+        alert_threshold_usd: value
+            .get("alert_threshold_usd")
+            .and_then(json_number_as_f64)
+            .unwrap_or(50.0),
+        alert_triggered: json_bool_field(&value, "alert_triggered"),
+    })
+}
+
+#[cfg(test)]
+fn setting_value(raw: serde_json::Value) -> serde_json::Value {
+    if let Some(value) = raw.get("value").cloned() {
+        value
+    } else {
+        raw
+    }
+}
+
+#[cfg(test)]
+fn parse_routing_rules_value(value: Option<serde_json::Value>) -> Vec<RoutingRule> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+
+    serde_json::from_value::<Vec<RoutingRule>>(setting_value(value)).unwrap_or_default()
+}
+
+fn reindex_routing_rules(rules: &mut [RoutingRule]) {
+    for (i, rule) in rules.iter_mut().enumerate() {
+        rule.priority = i as u32;
+    }
+}
+
+fn routing_rules_mutation_unavailable() -> String {
+    "unavailable: remote ThinClaw uses provider policy rules; desktop routing rule mutation is not yet mapped to the gateway provider config schema".to_string()
+}
+
+fn provider_config_route_rules(config: &serde_json::Value) -> Vec<RoutingRule> {
+    config
+        .get("policy_rules")
+        .and_then(|value| value.as_array())
+        .map(|rules| {
+            rules
+                .iter()
+                .enumerate()
+                .map(|(index, rule)| provider_policy_rule_to_desktop(index, rule))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn provider_policy_rule_to_desktop(index: usize, rule: &serde_json::Value) -> RoutingRule {
+    let priority = index as u32;
+    let fallback = || RoutingRule {
+        id: format!("remote-policy-{}", index),
+        label: format!("Policy rule {}", index + 1),
+        match_kind: "policy".to_string(),
+        match_value: rule.to_string(),
+        target_model: String::new(),
+        target_provider: None,
+        priority,
+        enabled: true,
+    };
+
+    if matches!(rule.as_str(), Some("LowestLatency")) {
+        return RoutingRule {
+            id: format!("remote-policy-{}", index),
+            label: "Lowest latency".to_string(),
+            match_kind: "latency".to_string(),
+            match_value: String::new(),
+            target_model: "lowest_latency".to_string(),
+            target_provider: None,
+            priority,
+            enabled: true,
+        };
+    }
+
+    let Some(obj) = rule.as_object() else {
+        return fallback();
+    };
+
+    if let Some(inner) = obj.get("LargeContext") {
+        let threshold = inner
+            .get("threshold")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default();
+        let provider = inner
+            .get("provider")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        return RoutingRule {
+            id: format!("remote-policy-{}", index),
+            label: format!("Large context > {}", threshold),
+            match_kind: "context_length".to_string(),
+            match_value: threshold.to_string(),
+            target_model: provider.clone(),
+            target_provider: Some(provider),
+            priority,
+            enabled: true,
+        };
+    }
+
+    if let Some(inner) = obj.get("VisionContent") {
+        let provider = inner
+            .get("provider")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        return RoutingRule {
+            id: format!("remote-policy-{}", index),
+            label: "Vision content".to_string(),
+            match_kind: "vision".to_string(),
+            match_value: String::new(),
+            target_model: provider.clone(),
+            target_provider: Some(provider),
+            priority,
+            enabled: true,
+        };
+    }
+
+    if let Some(inner) = obj.get("CostOptimized") {
+        let max_cost = inner
+            .get("max_cost_per_m_usd")
+            .and_then(json_number_as_f64)
+            .unwrap_or_default();
+        return RoutingRule {
+            id: format!("remote-policy-{}", index),
+            label: format!("Cost optimized <= ${:.4}/M", max_cost),
+            match_kind: "cost".to_string(),
+            match_value: max_cost.to_string(),
+            target_model: "cheapest".to_string(),
+            target_provider: None,
+            priority,
+            enabled: true,
+        };
+    }
+
+    if obj.contains_key("LowestLatency") {
+        return RoutingRule {
+            id: format!("remote-policy-{}", index),
+            label: "Lowest latency".to_string(),
+            match_kind: "latency".to_string(),
+            match_value: String::new(),
+            target_model: "lowest_latency".to_string(),
+            target_provider: None,
+            priority,
+            enabled: true,
+        };
+    }
+
+    if let Some(inner) = obj.get("RoundRobin") {
+        let providers = json_string_vec_field(inner, "providers");
+        return RoutingRule {
+            id: format!("remote-policy-{}", index),
+            label: "Round robin".to_string(),
+            match_kind: "round_robin".to_string(),
+            match_value: providers.join(","),
+            target_model: providers.first().cloned().unwrap_or_default(),
+            target_provider: None,
+            priority,
+            enabled: true,
+        };
+    }
+
+    if let Some(inner) = obj.get("Fallback") {
+        let primary = inner
+            .get("primary")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let fallbacks = json_string_vec_field(inner, "fallbacks");
+        return RoutingRule {
+            id: format!("remote-policy-{}", index),
+            label: "Fallback chain".to_string(),
+            match_kind: "fallback".to_string(),
+            match_value: fallbacks.join(","),
+            target_model: primary.clone(),
+            target_provider: Some(primary),
+            priority,
+            enabled: true,
+        };
+    }
+
+    fallback()
+}
+
+async fn remote_load_routing_rules(proxy: &RemoteGatewayProxy) -> Result<Vec<RoutingRule>, String> {
+    let config = proxy.get_providers_config().await.map_err(|err| {
+        if err.contains("HTTP 404") {
+            "unavailable: remote ThinClaw gateway does not expose provider routing config"
+                .to_string()
+        } else {
+            err
+        }
+    })?;
+    Ok(provider_config_route_rules(&config))
+}
+
+async fn remote_smart_routing_enabled(proxy: &RemoteGatewayProxy) -> Result<bool, String> {
+    let config = proxy.get_providers_config().await?;
+    Ok(config
+        .get("routing_enabled")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false))
+}
+
+async fn remote_set_smart_routing_enabled(
+    proxy: &RemoteGatewayProxy,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut config = proxy.get_providers_config().await?;
+    config["routing_enabled"] = serde_json::json!(enabled);
+    proxy.set_providers_config(&config).await
+}
+
+fn routing_rule_summaries(rules: &[RoutingRule]) -> Vec<RoutingRuleSummary> {
+    rules
+        .iter()
+        .enumerate()
+        .map(|(i, r)| RoutingRuleSummary {
+            index: i as u32,
+            kind: r.match_kind.clone(),
+            description: format!(
+                "{}: {} -> {}",
+                r.label,
+                if r.match_value.is_empty() {
+                    "*"
+                } else {
+                    &r.match_value
+                },
+                r.target_model
+            ),
+            provider: r.target_provider.clone(),
+        })
+        .collect()
+}
+
+fn json_string_vec_field(value: &serde_json::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn remote_channel_status_entries(status: &serde_json::Value) -> Vec<ChannelStatusEntry> {
+    let Some(setup) = status
+        .get("channel_setup")
+        .and_then(|value| value.as_object())
+    else {
+        return Vec::new();
+    };
+
+    [
+        ("gmail", "Gmail", "builtin"),
+        ("nostr", "Nostr", "native"),
+        ("matrix", "Matrix", "native"),
+        ("voice_call", "Voice Call", "native"),
+        ("apns", "Apple Push", "native"),
+        ("browser_push", "Browser Push", "native"),
+    ]
+    .into_iter()
+    .filter_map(|(id, name, channel_type)| {
+        setup
+            .get(id)
+            .map(|channel| remote_channel_status_entry(id, name, channel_type, channel))
+    })
+    .collect()
+}
+
+fn remote_channel_status_entry(
+    id: &str,
+    name: &str,
+    channel_type: &str,
+    setup: &serde_json::Value,
+) -> ChannelStatusEntry {
+    let enabled = json_bool_field(setup, "enabled");
+    let configured = json_bool_field(setup, "configured");
+    let missing_fields = json_string_vec_field(setup, "missing_fields");
+    let needs_oauth = json_bool_field(setup, "needs_oauth");
+    let invalid_private_key = json_bool_field(setup, "invalid_private_key");
+    let connected_relays = setup
+        .get("connected_relay_count")
+        .and_then(|value| value.as_u64());
+
+    let state = if enabled && configured {
+        match connected_relays {
+            Some(0) => "Degraded",
+            _ => "Running",
+        }
+    } else if enabled {
+        "Error"
+    } else {
+        "Disconnected"
+    }
+    .to_string();
+
+    let last_error = if !missing_fields.is_empty() {
+        Some(format!("missing fields: {}", missing_fields.join(", ")))
+    } else if needs_oauth {
+        Some("OAuth authorization required".to_string())
+    } else if invalid_private_key {
+        Some("invalid private key".to_string())
+    } else {
+        None
+    };
+
+    ChannelStatusEntry {
+        id: id.to_string(),
+        name: name.to_string(),
+        channel_type: channel_type.to_string(),
+        state,
+        enabled,
+        uptime_secs: None,
+        messages_sent: 0,
+        messages_received: 0,
+        last_error,
+        stream_mode: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn routing_rule_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": "rule-1",
+            "label": "Code",
+            "match_kind": "keyword",
+            "match_value": "code",
+            "target_model": "gpt-4.1",
+            "target_provider": "openai",
+            "priority": 3,
+            "enabled": true
+        })
+    }
+
+    #[test]
+    fn maps_remote_cost_summary_from_gateway_shape() {
+        let summary = map_remote_cost_summary(serde_json::json!({
+            "total_cost_usd": 1.25,
+            "total_input_tokens": 1000,
+            "total_output_tokens": 250,
+            "total_requests": 5,
+            "avg_cost_per_request": 0.25,
+            "daily": { "2026-05-14": 1.25 },
+            "monthly": { "2026-05": 1.25 },
+            "by_model": { "gpt-4.1": 1.0 },
+            "by_agent": { "desktop": 0.25 },
+            "model_details": [],
+            "alert_threshold_usd": null,
+            "alert_triggered": true
+        }))
+        .expect("gateway cost summary should map to desktop summary");
+
+        assert_eq!(summary.total_cost_usd, 1.25);
+        assert_eq!(summary.total_input_tokens, 1000.0);
+        assert_eq!(summary.total_output_tokens, 250.0);
+        assert_eq!(summary.total_requests, 5.0);
+        assert_eq!(summary.by_model.get("gpt-4.1"), Some(&1.0));
+        assert_eq!(summary.by_agent.get("desktop"), Some(&0.25));
+        assert_eq!(summary.alert_threshold_usd, 50.0);
+        assert!(summary.alert_triggered);
+    }
+
+    #[test]
+    fn setting_value_unwraps_gateway_setting_response() {
+        assert_eq!(
+            setting_value(serde_json::json!({
+                "key": "smart_routing_enabled",
+                "value": true,
+                "updated_at": "2026-05-14T00:00:00Z"
+            })),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            setting_value(serde_json::json!(false)),
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
+    fn parse_routing_rules_value_accepts_raw_or_wrapped_arrays() {
+        let rule = routing_rule_json();
+
+        let raw = parse_routing_rules_value(Some(serde_json::json!([rule.clone()])));
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].id, "rule-1");
+
+        let wrapped = parse_routing_rules_value(Some(serde_json::json!({ "value": [rule] })));
+        assert_eq!(wrapped.len(), 1);
+        assert_eq!(wrapped[0].priority, 3);
+
+        assert!(parse_routing_rules_value(None).is_empty());
+    }
+
+    #[test]
+    fn provider_config_route_rules_maps_gateway_policy_rules() {
+        let rules = provider_config_route_rules(&serde_json::json!({
+            "policy_rules": [
+                { "LargeContext": { "threshold": 32000, "provider": "anthropic" } },
+                "LowestLatency",
+                { "Fallback": { "primary": "openai", "fallbacks": ["anthropic", "gemini"] } }
+            ]
+        }));
+
+        assert_eq!(rules.len(), 3);
+        assert_eq!(rules[0].match_kind, "context_length");
+        assert_eq!(rules[0].match_value, "32000");
+        assert_eq!(rules[0].target_provider.as_deref(), Some("anthropic"));
+        assert_eq!(rules[1].match_kind, "latency");
+        assert_eq!(rules[2].match_kind, "fallback");
+        assert_eq!(rules[2].match_value, "anthropic,gemini");
+    }
+
+    #[test]
+    fn remote_channel_status_entries_map_gateway_setup_status() {
+        let entries = remote_channel_status_entries(&serde_json::json!({
+            "channel_setup": {
+                "gmail": {
+                    "enabled": true,
+                    "configured": false,
+                    "missing_fields": ["gmail_client_secret"],
+                    "needs_oauth": true
+                },
+                "nostr": {
+                    "enabled": true,
+                    "configured": true,
+                    "connected_relay_count": 0
+                },
+                "matrix": {
+                    "enabled": false,
+                    "configured": false
+                }
+            }
+        }));
+
+        let gmail = entries.iter().find(|entry| entry.id == "gmail").unwrap();
+        assert_eq!(gmail.state, "Error");
+        assert_eq!(
+            gmail.last_error.as_deref(),
+            Some("missing fields: gmail_client_secret")
+        );
+
+        let nostr = entries.iter().find(|entry| entry.id == "nostr").unwrap();
+        assert_eq!(nostr.state, "Degraded");
+
+        let matrix = entries.iter().find(|entry| entry.id == "matrix").unwrap();
+        assert_eq!(matrix.state, "Disconnected");
+    }
+}
 
 // ============================================================================
 // Sprint 13 — New Backend API commands
@@ -26,6 +527,10 @@ use crate::openclaw::ironclaw_builder::get_resolved_workspace_root;
 pub async fn openclaw_cost_summary(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<CostSummary, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return map_remote_cost_summary(proxy.get_cost_summary().await?);
+    }
+
     let tracker_lock = ironclaw.cost_tracker().await?;
     let tracker = tracker_lock.lock().await;
     let ic_summary = ironclaw::tauri_commands::cost_summary(&tracker)?;
@@ -61,6 +566,10 @@ pub async fn openclaw_cost_summary(
 pub async fn openclaw_cost_export_csv(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<String, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy.export_cost_csv().await;
+    }
+
     let tracker_lock = ironclaw.cost_tracker().await?;
     let tracker = tracker_lock.lock().await;
     ironclaw::tauri_commands::cost_export_csv(&tracker)
@@ -72,6 +581,10 @@ pub async fn openclaw_cost_export_csv(
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_cost_reset(ironclaw: State<'_, IronClawState>) -> Result<(), String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy.reset_costs().await;
+    }
+
     let tracker_lock = ironclaw.cost_tracker().await?;
     let mut tracker = tracker_lock.lock().await;
     ironclaw::tauri_commands::cost_reset(&mut tracker)?;
@@ -97,6 +610,18 @@ pub async fn openclaw_cost_reset(ironclaw: State<'_, IronClawState>) -> Result<(
 pub async fn openclaw_channel_status_list(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<Vec<ChannelStatusEntry>, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let status = proxy.get_status().await?;
+        let entries = remote_channel_status_entries(&status);
+        if entries.is_empty() {
+            return Err(
+                "unavailable: remote ThinClaw gateway did not include channel setup status"
+                    .to_string(),
+            );
+        }
+        return Ok(entries);
+    }
+
     let agent = ironclaw.agent().await?;
     let channel_mgr = agent.channels();
     let ic_entries = channel_mgr.status_entries().await;
@@ -200,6 +725,13 @@ pub async fn openclaw_clawhub_install(
 pub async fn openclaw_cache_stats(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<CacheStats, String> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(
+            "unavailable: response cache stats are not exposed by the remote ThinClaw gateway"
+                .to_string(),
+        );
+    }
+
     let cache_lock = ironclaw.response_cache().await?;
     let cache = cache_lock.read().await;
     let ic_stats = ironclaw::tauri_commands::cache_stats(&cache)?;
@@ -265,6 +797,11 @@ pub async fn openclaw_manifest_validate(
 pub async fn openclaw_routing_get(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<serde_json::Value, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let enabled = remote_smart_routing_enabled(&proxy).await?;
+        return Ok(serde_json::json!({ "smart_routing_enabled": enabled }));
+    }
+
     let enabled = if let Some(agent) = ironclaw.agent().await.ok() {
         if let Some(store) = agent.store() {
             match store
@@ -290,6 +827,15 @@ pub async fn openclaw_routing_set(
     ironclaw: State<'_, IronClawState>,
     smart_routing_enabled: bool,
 ) -> Result<(), String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        remote_set_smart_routing_enabled(&proxy, smart_routing_enabled).await?;
+        info!(
+            "[ironclaw] Remote smart routing set to: {}",
+            smart_routing_enabled
+        );
+        return Ok(());
+    }
+
     if let Some(agent) = ironclaw.agent().await.ok() {
         if let Some(store) = agent.store() {
             store
@@ -312,6 +858,13 @@ pub async fn openclaw_routing_set(
 pub async fn openclaw_routing_rules_list(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<RoutingRulesResponse, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return Ok(RoutingRulesResponse {
+            rules: remote_load_routing_rules(&proxy).await?,
+            smart_routing_enabled: remote_smart_routing_enabled(&proxy).await?,
+        });
+    }
+
     let mut enabled = false;
     let mut rules: Vec<RoutingRule> = Vec::new();
 
@@ -349,6 +902,10 @@ pub async fn openclaw_routing_rules_save(
     ironclaw: State<'_, IronClawState>,
     rules: Vec<RoutingRule>,
 ) -> Result<(), String> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(routing_rules_mutation_unavailable());
+    }
+
     if let Some(agent) = ironclaw.agent().await.ok() {
         if let Some(store) = agent.store() {
             let value = serde_json::to_value(&rules).map_err(|e| e.to_string())?;
@@ -422,6 +979,10 @@ pub async fn openclaw_routing_rules_add(
     rule: RoutingRule,
     position: Option<u32>,
 ) -> Result<Vec<RoutingRule>, String> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(routing_rules_mutation_unavailable());
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent
         .store()
@@ -450,10 +1011,7 @@ pub async fn openclaw_routing_rules_add(
         rules.push(rule);
     }
 
-    // Re-index priorities
-    for (i, r) in rules.iter_mut().enumerate() {
-        r.priority = i as u32;
-    }
+    reindex_routing_rules(&mut rules);
 
     // Persist
     store
@@ -479,6 +1037,10 @@ pub async fn openclaw_routing_rules_remove(
     ironclaw: State<'_, IronClawState>,
     index: u32,
 ) -> Result<Vec<RoutingRule>, String> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(routing_rules_mutation_unavailable());
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent
         .store()
@@ -501,10 +1063,7 @@ pub async fn openclaw_routing_rules_remove(
 
     rules.remove(index as usize);
 
-    // Re-index priorities
-    for (i, r) in rules.iter_mut().enumerate() {
-        r.priority = i as u32;
-    }
+    reindex_routing_rules(&mut rules);
 
     store
         .set_setting(
@@ -531,6 +1090,10 @@ pub async fn openclaw_routing_rules_reorder(
     from: u32,
     to: u32,
 ) -> Result<Vec<RoutingRule>, String> {
+    if ironclaw.remote_proxy().await.is_some() {
+        return Err(routing_rules_mutation_unavailable());
+    }
+
     let agent = ironclaw.agent().await?;
     let store = agent
         .store()
@@ -557,10 +1120,7 @@ pub async fn openclaw_routing_rules_reorder(
     let rule = rules.remove(from);
     rules.insert(to, rule);
 
-    // Re-index priorities
-    for (i, r) in rules.iter_mut().enumerate() {
-        r.priority = i as u32;
-    }
+    reindex_routing_rules(&mut rules);
 
     store
         .set_setting(
@@ -581,6 +1141,56 @@ pub async fn openclaw_routing_rules_reorder(
 pub async fn openclaw_routing_status(
     ironclaw: State<'_, IronClawState>,
 ) -> Result<RoutingStatusResponse, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        let provider_config = proxy.get_providers_config().await?;
+        let gateway_status = proxy.get_status().await?;
+        let rules = provider_config_route_rules(&provider_config);
+        let enabled = provider_config
+            .get("routing_enabled")
+            .and_then(|v| v.as_bool())
+            .or_else(|| {
+                gateway_status
+                    .get("routing_enabled")
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false);
+
+        let default_provider = provider_config
+            .get("primary_provider")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                gateway_status
+                    .get("primary_provider")
+                    .and_then(|v| v.as_str())
+                    .map(ToOwned::to_owned)
+            })
+            .unwrap_or_else(|| "openai-compatible".to_string());
+
+        let latency_data = proxy
+            .get_cost_summary()
+            .await
+            .ok()
+            .map(|summary| {
+                json_f64_map(&summary, "by_model")
+                    .into_keys()
+                    .map(|provider| LatencyEntry {
+                        provider,
+                        avg_latency_ms: 0.0,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        return Ok(RoutingStatusResponse {
+            enabled,
+            default_provider,
+            rule_count: rules.len() as u32,
+            rules: routing_rule_summaries(&rules),
+            latency_data,
+        });
+    }
+
     let mut enabled = false;
     let mut rules: Vec<RoutingRule> = Vec::new();
     let mut default_provider = "openai-compatible".to_string();
@@ -604,26 +1214,7 @@ pub async fn openclaw_routing_status(
         }
     }
 
-    // Build rule summaries
-    let rule_summaries: Vec<RoutingRuleSummary> = rules
-        .iter()
-        .enumerate()
-        .map(|(i, r)| RoutingRuleSummary {
-            index: i as u32,
-            kind: r.match_kind.clone(),
-            description: format!(
-                "{}: {} → {}",
-                r.label,
-                if r.match_value.is_empty() {
-                    "*"
-                } else {
-                    &r.match_value
-                },
-                r.target_model
-            ),
-            provider: r.target_provider.clone(),
-        })
-        .collect();
+    let rule_summaries = routing_rule_summaries(&rules);
 
     // Collect latency data from IronClaw's cost tracker if available
     let mut latency_data: Vec<LatencyEntry> = Vec::new();

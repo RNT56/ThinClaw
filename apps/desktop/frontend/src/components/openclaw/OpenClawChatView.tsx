@@ -445,7 +445,7 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
             if (uiEvent.session_key !== effectiveSessionKey) return;
 
             // Handle message events
-            if (['AssistantInternal', 'AssistantSnapshot', 'AssistantDelta', 'AssistantFinal', 'ToolUpdate', 'RunStatus'].includes(uiEvent.kind)) {
+            if (['AssistantInternal', 'AssistantSnapshot', 'AssistantDelta', 'AssistantFinal', 'ToolUpdate', 'RunStatus', 'PlanUpdate', 'UsageUpdate'].includes(uiEvent.kind)) {
                 updateMessagesFromEvent(uiEvent);
                 if (isAutoScrollPinned.current) {
                     scrollToBottom();
@@ -659,6 +659,35 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
                 if (existing) return prev.map(m => m.id === toolMsgId ? { ...m, text: content, metadata } : m);
                 return [...prev, { id: toolMsgId, role: 'system', ts_ms: Date.now(), text: content, source: 'openclaw', metadata }];
             }
+            if (uiEvent.kind === 'PlanUpdate') {
+                const planMsgId = `plan-${uiEvent.run_id || uiEvent.message_id}`;
+                const entries = Array.isArray(uiEvent.entries) ? uiEvent.entries : [];
+                const lines = entries.map((entry: any, index: number) => {
+                    if (typeof entry === 'string') return `${index + 1}. ${entry}`;
+                    const step = entry?.step || entry?.text || entry?.title || JSON.stringify(entry);
+                    const status = entry?.status ? ` [${entry.status}]` : '';
+                    return `${index + 1}. ${step}${status}`;
+                });
+                const content = lines.length > 0 ? `Plan\n${lines.join('\n')}` : 'Plan updated';
+                const metadata = { type: 'plan', entries, run_id: uiEvent.run_id };
+                const existing = prev.find(m => m.id === planMsgId);
+                if (existing) return prev.map(m => m.id === planMsgId ? { ...m, text: content, metadata } : m);
+                return [...prev, { id: planMsgId, role: 'system', ts_ms: Date.now(), text: content, source: 'openclaw', metadata }];
+            }
+            if (uiEvent.kind === 'UsageUpdate') {
+                const usageMsgId = `usage-${uiEvent.run_id || uiEvent.message_id}`;
+                const usage = uiEvent.usage || {};
+                const input = Number(usage.input_tokens || 0);
+                const output = Number(usage.output_tokens || 0);
+                const total = Number(usage.total_tokens || input + output);
+                const cost = typeof uiEvent.cost_usd === 'number' ? ` · $${uiEvent.cost_usd.toFixed(4)}` : '';
+                const model = uiEvent.model ? ` · ${uiEvent.model}` : '';
+                const content = `Usage: ${total.toLocaleString()} tokens (${input.toLocaleString()} in / ${output.toLocaleString()} out)${cost}${model}`;
+                const metadata = { type: 'usage', usage, cost_usd: uiEvent.cost_usd, model: uiEvent.model, run_id: uiEvent.run_id };
+                const existing = prev.find(m => m.id === usageMsgId);
+                if (existing) return prev.map(m => m.id === usageMsgId ? { ...m, text: content, metadata } : m);
+                return [...prev, { id: usageMsgId, role: 'system', ts_ms: Date.now(), text: content, source: 'openclaw', metadata }];
+            }
             return prev;
         });
     }
@@ -777,7 +806,8 @@ export function OpenClawChatView({ sessionKey, gatewayRunning, bootstrapNeeded =
         .filter(m => !m.text.trim().startsWith('NO_REPL'))
         .filter(m => m.text.trim().length > 0 || m.role === 'system')
         .forEach(msg => {
-            const isSystemTool = msg.role === 'system' || (msg.metadata?.type === 'tool') || (msg.text.includes('[Tool'));
+            const isProgressEvent = msg.metadata?.type === 'plan' || msg.metadata?.type === 'usage';
+            const isSystemTool = (msg.role === 'system' && !isProgressEvent) || (msg.metadata?.type === 'tool') || (msg.text.includes('[Tool'));
             // Brain/Thoughts are technically system but we might want them standalone?
             // The user requested tool calls to be condensed.
             // Let's explicitly check for TOOL traits.

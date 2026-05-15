@@ -589,8 +589,8 @@ async agentChat(request: string) : Promise<Result<string, string>> {
  * Get OpenClaw status.
  *
  * Config fields (API keys, grants, cloud settings) come from `OpenClawConfig`.
- * Engine status fields (`engine_running`, `engine_connected`) reflect IronClaw's
- * in-process state — both are `true` when the agent is initialized.
+ * Engine status fields (`engine_running`, `engine_connected`) reflect the active
+ * gateway mode: embedded runtime in local mode or a connected proxy in remote mode.
  */
 async openclawGetStatus() : Promise<Result<OpenClawStatus, string>> {
     try {
@@ -1531,7 +1531,7 @@ async openclawGetBedrockCredentials() : Promise<Result<[string | null, string | 
 }
 },
 /**
- * Sync Local LLM config (llama-server) to OpenClaw config.
+ * Sync Local LLM config (llama-server) to ThinClaw config.
  *
  * Still needed: ThinClaw Desktop manages the local llama-server sidecar and needs to
  * sync its port/model info to the config that IronClaw reads on restart.
@@ -3213,6 +3213,133 @@ export type ToolInfoItem = { name: string; description: string; enabled: boolean
  * Tool list response
  */
 export type ToolsListResponse = { tools: ToolInfoItem[]; total: number }
+/**
+ * Stable UI event contract — what the OpenClaw chat UI consumes.
+ *
+ * Tagged with `#[serde(tag = "kind")]` so JSON looks like:
+ * `{ "kind": "AssistantDelta", "session_key": "...", "delta": "..." }`
+ */
+export type UiEvent =
+/**
+ * Successfully connected to engine
+ */
+{ kind: "Connected"; protocol: number } |
+/**
+ * Disconnected from engine
+ */
+{ kind: "Disconnected"; reason: string } |
+/**
+ * List of available sessions
+ */
+{ kind: "SessionList"; sessions: UiSession[] } |
+/**
+ * Chat history response
+ */
+{ kind: "History"; session_key: string; messages: UiMessage[]; has_more: boolean; before: string | null } |
+/**
+ * Streaming assistant delta (append to current text)
+ */
+{ kind: "AssistantDelta"; session_key: string; run_id: string | null; message_id: string; delta: string } |
+/**
+ * Internal assistant thinking (renders 🧠 indicator)
+ */
+{ kind: "AssistantInternal"; session_key: string; run_id: string | null; message_id: string; text: string } |
+/**
+ * Streaming assistant snapshot (replace current text)
+ */
+{ kind: "AssistantSnapshot"; session_key: string; run_id: string | null; message_id: string; text: string } |
+/**
+ * Final assistant message (replace, includes usage stats)
+ */
+{ kind: "AssistantFinal"; session_key: string; run_id: string | null; message_id: string; text: string; usage: UiUsage | null } |
+/**
+ * Tool execution update
+ */
+{ kind: "ToolUpdate"; session_key: string; run_id: string | null; tool_name: string; status: string; input: JsonValue; output: JsonValue } |
+/**
+ * Run status change
+ */
+{ kind: "RunStatus"; session_key: string; run_id: string | null; status: string; error: string | null } |
+/**
+ * Structured plan/progress update from the ThinClaw agent loop.
+ */
+{ kind: "PlanUpdate"; session_key: string; run_id: string | null; message_id: string; entries: JsonValue[] } |
+/**
+ * Token and cost usage for the most recent model turn.
+ */
+{ kind: "UsageUpdate"; session_key: string; run_id: string | null; message_id: string; usage: UiUsage; cost_usd: number | null; model: string | null } |
+/**
+ * Approval requested for tool execution
+ */
+{ kind: "ApprovalRequested"; approval_id: string; session_key: string; tool_name: string; input: JsonValue } |
+/**
+ * Approval has been resolved (approved/denied)
+ */
+{ kind: "ApprovalResolved"; approval_id: string; session_key: string; approved: boolean } |
+/**
+ * Engine error
+ */
+{ kind: "Error"; code: string; message: string; details: JsonValue } |
+/**
+ * Web login event (QR code, status)
+ */
+{ kind: "WebLogin"; provider: string; qr_code: string | null; status: string } |
+/**
+ * Canvas update
+ */
+{ kind: "CanvasUpdate"; session_key: string; run_id: string | null; content: string; content_type: string; url: string | null } |
+/**
+ * Sub-agent progress update (relayed to parent session's UI).
+ *
+ * Emitted when a child session spawned by `openclaw_spawn_session`
+ * changes state. The frontend can use this to show a progress panel
+ * in the parent session's chat view.
+ */
+{ kind: "SubAgentUpdate"; parent_session: string; child_session: string; task: string; status: string; progress: number | null; result_preview: string | null } |
+/**
+ * Mid-loop agent message — rendered as a persistent chat bubble.
+ *
+ * Emitted by the `emit_user_message` tool. The agent is still working
+ * (the agentic loop continues), so the processing indicator should
+ * stay active. These are NOT ephemeral status text.
+ */
+{ kind: "AgentMessage"; session_key: string; run_id: string | null; message_id: string; content: string; message_type: string } |
+/**
+ * Factory reset completed — frontend must clear all cached state
+ */
+{ kind: "FactoryReset" } |
+/**
+ * Routine lifecycle event — fired when a routine starts, completes, or fails.
+ * The frontend Automations panel and Console can display these as live status.
+ */
+{ kind: "RoutineLifecycle"; routine_name: string; event: string; run_id: string | null; result_summary: string | null } |
+/**
+ * Real-time log entry push from the internal tracing subscriber.
+ * Sent for every DEBUG+ event so the UI Logs tab updates live without polling.
+ */
+{ kind: "LogEntry"; timestamp: string; level: string; target: string; message: string } |
+/**
+ * Bootstrap ritual completed — BOOTSTRAP.md was deleted by the agent.
+ * Frontend should update bootstrapNeeded → false and hide the boot button.
+ */
+{ kind: "BootstrapCompleted" } |
+/**
+ * Agent created a file via write_file tool.
+ * Frontend should show a clickable Finder-reveal link in the chat.
+ */
+{ kind: "FileCreated"; path: string; relative_path: string; bytes: number }
+/**
+ * Message in chat history
+ */
+export type UiMessage = { id: string; role: string; ts_ms: number; text: string; source: string | null }
+/**
+ * Session metadata for session list
+ */
+export type UiSession = { session_key: string; title: string | null; updated_at_ms: number | null; source: string | null }
+/**
+ * Token usage stats
+ */
+export type UiUsage = { input_tokens: number; output_tokens: number; total_tokens: number }
 export type UserConfig = { search_concurrency_limit?: number; scrape_concurrency_limit?: number; max_search_results?: number; max_scrape_chars?: number; scrape_timeout_secs?: number; default_context_window?: number; summarization_chunk_size?: number; llm_temperature?: number; llm_top_p?: number; vector_dimensions?: number; sd_threads?: number; knowledge_bits?: KnowledgeBit[]; custom_personas?: CustomPersona[]; image_prompt_enhance_enabled?: boolean; selected_persona?: string; selected_chat_provider?: string | null; memory_reservation_gb?: number; enable_memory_reservation?: boolean; mlock?: boolean; quantize_kv?: boolean; spotlight_shortcut?: string;
 /**
  * Global keyboard shortcut for push-to-talk.

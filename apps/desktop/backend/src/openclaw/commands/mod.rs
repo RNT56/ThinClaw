@@ -22,6 +22,7 @@ use super::config::OpenClawConfig;
 
 mod gateway;
 mod keys;
+mod remote_provider_config;
 mod rpc;
 pub(crate) mod rpc_config;
 pub(crate) mod rpc_dashboard;

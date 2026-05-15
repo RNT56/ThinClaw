@@ -53,6 +53,19 @@ pub(crate) struct IronClawInner {
     pub audit_log_hook: Arc<AuditLogHook>,
     /// Plugin manifest validator.
     pub manifest_validator: Arc<ManifestValidator>,
+    /// OAuth credential sync task handle; dropping it aborts the sync loop.
+    #[allow(dead_code)]
+    pub oauth_credential_sync: Option<ironclaw::llm::OAuthCredentialSyncHandle>,
+    /// Desktop-local auxiliary tasks tied to the embedded engine lifecycle.
+    pub auxiliary_tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for IronClawInner {
+    fn drop(&mut self) {
+        for handle in &self.auxiliary_tasks {
+            handle.abort();
+        }
+    }
 }
 
 /// Managed state: holds the running IronClaw agent and background task handle.

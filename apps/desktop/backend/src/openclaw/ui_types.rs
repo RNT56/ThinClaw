@@ -14,7 +14,7 @@ use serde_json::Value;
 ///
 /// Tagged with `#[serde(tag = "kind")]` so JSON looks like:
 /// `{ "kind": "AssistantDelta", "session_key": "...", "delta": "..." }`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind")]
 pub enum UiEvent {
     /// Successfully connected to engine
@@ -83,6 +83,24 @@ pub enum UiEvent {
         run_id: Option<String>,
         status: String, // started|in_flight|ok|error|aborted
         error: Option<String>,
+    },
+
+    /// Structured plan/progress update from the ThinClaw agent loop.
+    PlanUpdate {
+        session_key: String,
+        run_id: Option<String>,
+        message_id: String,
+        entries: Vec<Value>,
+    },
+
+    /// Token and cost usage for the most recent model turn.
+    UsageUpdate {
+        session_key: String,
+        run_id: Option<String>,
+        message_id: String,
+        usage: UiUsage,
+        cost_usd: Option<f64>,
+        model: Option<String>,
     },
 
     /// Approval requested for tool execution
@@ -183,33 +201,39 @@ pub enum UiEvent {
         /// Relative path from workspace root (user-friendly display).
         relative_path: String,
         /// Size in bytes.
+        #[specta(type = f64)]
         bytes: u64,
     },
 }
 
 /// Session metadata for session list
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct UiSession {
     pub session_key: String,
     pub title: Option<String>,
+    #[specta(type = Option<f64>)]
     pub updated_at_ms: Option<u64>,
     pub source: Option<String>, // slack|telegram|webchat|...
 }
 
 /// Message in chat history
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct UiMessage {
     pub id: String,
     pub role: String, // user|assistant|tool|system
+    #[specta(type = f64)]
     pub ts_ms: u64,
     pub text: String,
     pub source: Option<String>,
 }
 
 /// Token usage stats
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 pub struct UiUsage {
+    #[specta(type = f64)]
     pub input_tokens: u64,
+    #[specta(type = f64)]
     pub output_tokens: u64,
+    #[specta(type = f64)]
     pub total_tokens: u64,
 }

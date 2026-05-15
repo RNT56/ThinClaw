@@ -19,8 +19,8 @@ use crate::openclaw::ironclaw_bridge::IronClawState;
 /// Get OpenClaw status.
 ///
 /// Config fields (API keys, grants, cloud settings) come from `OpenClawConfig`.
-/// Engine status fields (`engine_running`, `engine_connected`) reflect IronClaw's
-/// in-process state — both are `true` when the agent is initialized.
+/// Engine status fields (`engine_running`, `engine_connected`) reflect the active
+/// gateway mode: embedded runtime in local mode or a connected proxy in remote mode.
 #[tauri::command]
 #[specta::specta]
 pub async fn openclaw_get_status(
@@ -29,8 +29,7 @@ pub async fn openclaw_get_status(
 ) -> Result<OpenClawStatus, String> {
     let config = state.get_config().await;
 
-    // IronClaw is in-process — "running" means the agent was initialized
-    let engine_running = ironclaw.is_initialized();
+    let engine_running = ironclaw.is_initialized() || ironclaw.is_remote_mode().await;
 
     Ok(OpenClawStatus {
         gateway_mode: config

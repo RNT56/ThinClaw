@@ -36,6 +36,8 @@ pub mod router;
 pub mod stt;
 pub mod tts;
 
+use std::collections::{HashMap, HashSet};
+
 pub use model_discovery::CloudModelRegistry;
 pub use router::InferenceRouter;
 
@@ -322,6 +324,165 @@ pub async fn update_inference_backend(
 // Cloud Model Discovery commands
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn json_str_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value.get(key).and_then(|v| v.as_str()).map(str::to_string)
+}
+
+fn json_bool_field(value: &serde_json::Value, key: &str) -> bool {
+    value.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn json_u32_field(value: &serde_json::Value, key: &str) -> Option<u32> {
+    value
+        .get(key)
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+}
+
+fn remote_provider_slugs(
+    providers_config: &serde_json::Value,
+    requested: &[String],
+) -> Vec<String> {
+    if !requested.is_empty() {
+        return requested.to_vec();
+    }
+
+    let mut seen = HashSet::new();
+    let mut slugs = Vec::new();
+
+    for key in ["primary_provider", "preferred_cheap_provider"] {
+        if let Some(slug) = providers_config.get(key).and_then(|v| v.as_str()) {
+            if seen.insert(slug.to_string()) {
+                slugs.push(slug.to_string());
+            }
+        }
+    }
+
+    if let Some(providers) = providers_config.get("providers").and_then(|v| v.as_array()) {
+        for provider in providers {
+            let Some(slug) = provider.get("slug").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let should_include = json_bool_field(provider, "enabled")
+                || json_bool_field(provider, "primary")
+                || json_bool_field(provider, "preferred_cheap")
+                || json_bool_field(provider, "credential_ready")
+                || json_bool_field(provider, "has_key")
+                || !json_bool_field(provider, "auth_required");
+            if should_include && seen.insert(slug.to_string()) {
+                slugs.push(slug.to_string());
+            }
+        }
+    }
+
+    slugs
+}
+
+fn remote_provider_models_to_discovery(
+    response: serde_json::Value,
+) -> model_discovery::types::ProviderDiscoveryResult {
+    let provider = json_str_field(&response, "slug").unwrap_or_else(|| "unknown".to_string());
+    let provider_name =
+        json_str_field(&response, "display_name").unwrap_or_else(|| provider.clone());
+    let discovery_status =
+        json_str_field(&response, "discovery_status").unwrap_or_else(|| "unknown".to_string());
+    let error = json_str_field(&response, "error");
+
+    let models = response
+        .get("models")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    remote_model_option_to_entry(&provider, &provider_name, &discovery_status, item)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    model_discovery::types::ProviderDiscoveryResult {
+        provider,
+        models,
+        from_cache: discovery_status == "cached",
+        error,
+    }
+}
+
+fn remote_model_option_to_entry(
+    provider: &str,
+    provider_name: &str,
+    discovery_status: &str,
+    item: &serde_json::Value,
+) -> Option<model_discovery::types::CloudModelEntry> {
+    let id = json_str_field(item, "id")?;
+    let display_name = json_str_field(item, "label").unwrap_or_else(|| id.clone());
+    let mut metadata = HashMap::new();
+    if let Some(source) = json_str_field(item, "source") {
+        metadata.insert("source".to_string(), source);
+    }
+    metadata.insert("discovery_status".to_string(), discovery_status.to_string());
+    metadata.insert(
+        "recommended_primary".to_string(),
+        json_bool_field(item, "recommended_primary").to_string(),
+    );
+    metadata.insert(
+        "recommended_cheap".to_string(),
+        json_bool_field(item, "recommended_cheap").to_string(),
+    );
+
+    Some(model_discovery::types::CloudModelEntry {
+        id,
+        display_name,
+        provider: provider.to_string(),
+        provider_name: provider_name.to_string(),
+        category: model_discovery::types::ModelCategory::Chat,
+        context_window: json_u32_field(item, "context_length"),
+        max_output_tokens: None,
+        supports_vision: false,
+        supports_tools: false,
+        supports_streaming: true,
+        deprecated: false,
+        pricing: None,
+        embedding_dimensions: None,
+        metadata,
+    })
+}
+
+async fn remote_discover_cloud_models(
+    proxy: crate::openclaw::remote_proxy::RemoteGatewayProxy,
+    providers: Vec<String>,
+) -> Result<model_discovery::types::DiscoveryResult, String> {
+    let config = proxy.get_providers_config().await?;
+    let slugs = remote_provider_slugs(&config, &providers);
+    let mut provider_results = Vec::new();
+    let mut errors = Vec::new();
+
+    for slug in slugs {
+        match proxy.get_provider_models(&slug).await {
+            Ok(response) => {
+                let result = remote_provider_models_to_discovery(response);
+                if let Some(error) = result.error.as_ref() {
+                    errors.push(format!("{}: {}", result.provider, error));
+                }
+                provider_results.push(result);
+            }
+            Err(error) => errors.push(format!("{}: {}", slug, error)),
+        }
+    }
+
+    let total_models = provider_results
+        .iter()
+        .map(|provider| provider.models.len() as u32)
+        .sum();
+
+    Ok(model_discovery::types::DiscoveryResult {
+        providers: provider_results,
+        total_models,
+        errors,
+    })
+}
+
 /// Discover cloud models from all providers (or a specific list).
 ///
 /// Returns models grouped by provider. Results are cached for 30 minutes.
@@ -329,9 +490,14 @@ pub async fn update_inference_backend(
 #[tauri::command]
 #[specta::specta]
 pub async fn discover_cloud_models(
+    ironclaw: tauri::State<'_, crate::openclaw::ironclaw_bridge::IronClawState>,
     registry: tauri::State<'_, CloudModelRegistry>,
     providers: Vec<String>,
 ) -> Result<model_discovery::types::DiscoveryResult, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return remote_discover_cloud_models(proxy, providers).await;
+    }
+
     tracing::info!(
         "[model_discovery] Discovering models for {} providers",
         if providers.is_empty() {
@@ -354,9 +520,87 @@ pub async fn discover_cloud_models(
 #[tauri::command]
 #[specta::specta]
 pub async fn refresh_cloud_models(
+    ironclaw: tauri::State<'_, crate::openclaw::ironclaw_bridge::IronClawState>,
     registry: tauri::State<'_, CloudModelRegistry>,
     provider: String,
 ) -> Result<model_discovery::types::ProviderDiscoveryResult, String> {
+    if let Some(proxy) = ironclaw.remote_proxy().await {
+        return proxy
+            .get_provider_models(&provider)
+            .await
+            .map(remote_provider_models_to_discovery);
+    }
+
     tracing::info!("[model_discovery] Refreshing models for '{}'", provider);
     Ok(registry.refresh(&provider).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_provider_slugs_prefers_requested_list() {
+        let config = serde_json::json!({
+            "primary_provider": "openai",
+            "providers": [{ "slug": "anthropic", "enabled": true }]
+        });
+        assert_eq!(
+            remote_provider_slugs(&config, &["gemini".to_string()]),
+            vec!["gemini".to_string()]
+        );
+    }
+
+    #[test]
+    fn remote_provider_slugs_uses_configured_remote_providers() {
+        let config = serde_json::json!({
+            "primary_provider": "openai",
+            "preferred_cheap_provider": "anthropic",
+            "providers": [
+                { "slug": "openai", "enabled": true, "auth_required": true },
+                { "slug": "gemini", "credential_ready": true, "auth_required": true },
+                { "slug": "ollama", "auth_required": false },
+                { "slug": "xai", "auth_required": true }
+            ]
+        });
+
+        assert_eq!(
+            remote_provider_slugs(&config, &[]),
+            vec![
+                "openai".to_string(),
+                "anthropic".to_string(),
+                "gemini".to_string(),
+                "ollama".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_provider_models_map_to_discovery_result() {
+        let result = remote_provider_models_to_discovery(serde_json::json!({
+            "slug": "openai",
+            "display_name": "OpenAI",
+            "discovery_status": "discovered",
+            "error": null,
+            "models": [
+                {
+                    "id": "gpt-4.1",
+                    "label": "GPT-4.1",
+                    "context_length": 1048576,
+                    "source": "live",
+                    "recommended_primary": true,
+                    "recommended_cheap": false
+                }
+            ]
+        }));
+
+        assert_eq!(result.provider, "openai");
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.models[0].display_name, "GPT-4.1");
+        assert_eq!(result.models[0].context_window, Some(1_048_576));
+        assert_eq!(
+            result.models[0].metadata.get("recommended_primary"),
+            Some(&"true".to_string())
+        );
+    }
 }

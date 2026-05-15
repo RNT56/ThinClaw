@@ -120,6 +120,32 @@ impl RemoteGatewayProxy {
             .map_err(|e| format!("Failed to parse JSON response from {}: {}", url, e))
     }
 
+    async fn get_text(&self, path: &str) -> Result<String, String> {
+        let url = self.url(path);
+        debug!("[remote_proxy] GET {}", url);
+
+        let resp = self
+            .inner
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .map_err(|e| format!("Request failed ({}): {}", url, e))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+        if !status.is_success() {
+            return Err(format!("Remote returned HTTP {}: {}", status, body));
+        }
+
+        Ok(body)
+    }
+
     async fn post_json(
         &self,
         path: &str,
@@ -149,6 +175,42 @@ impl RemoteGatewayProxy {
         }
 
         // Some endpoints return empty body on success
+        if body_text.is_empty() {
+            return Ok(serde_json::json!({ "ok": true }));
+        }
+
+        serde_json::from_str(&body_text)
+            .map_err(|e| format!("Failed to parse JSON response from {}: {}", url, e))
+    }
+
+    async fn put_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let url = self.url(path);
+        debug!("[remote_proxy] PUT {}", url);
+
+        let resp = self
+            .inner
+            .client
+            .put(&url)
+            .header("Authorization", self.auth_header())
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("Request failed ({}): {}", url, e))?;
+
+        let status = resp.status();
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+        if !status.is_success() {
+            return Err(format!("Remote returned HTTP {}: {}", status, body_text));
+        }
+
         if body_text.is_empty() {
             return Ok(serde_json::json!({ "ok": true }));
         }
@@ -479,6 +541,67 @@ impl RemoteGatewayProxy {
         self.get_json("/api/skills").await
     }
 
+    // ── Providers / Routing ─────────────────────────────────────────────────
+
+    /// Get remote provider and routing configuration.
+    pub async fn get_providers_config(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/providers/config").await
+    }
+
+    /// Replace remote provider and routing configuration.
+    pub async fn set_providers_config(&self, config: &serde_json::Value) -> Result<(), String> {
+        self.put_json("/api/providers/config", config)
+            .await
+            .map(|_| ())
+    }
+
+    /// Get remote model options for one provider.
+    pub async fn get_provider_models(&self, slug: &str) -> Result<serde_json::Value, String> {
+        self.get_json(&format!(
+            "/api/providers/{}/models",
+            urlencoding::encode(slug)
+        ))
+        .await
+    }
+
+    /// Save a remote provider API key through the provider vault endpoint.
+    pub async fn save_provider_key(
+        &self,
+        slug: &str,
+        api_key: &str,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json(
+            &format!("/api/providers/{}/key", urlencoding::encode(slug)),
+            &serde_json::json!({ "api_key": api_key }),
+        )
+        .await
+    }
+
+    /// Delete a remote provider API key through the provider vault endpoint.
+    pub async fn delete_provider_key(&self, slug: &str) -> Result<(), String> {
+        self.delete(&format!("/api/providers/{}/key", urlencoding::encode(slug)))
+            .await
+    }
+
+    // ── Costs ────────────────────────────────────────────────────────────────
+
+    /// Get remote LLM cost summary.
+    pub async fn get_cost_summary(&self) -> Result<serde_json::Value, String> {
+        self.get_json("/api/costs/summary").await
+    }
+
+    /// Export remote cost data as CSV.
+    pub async fn export_cost_csv(&self) -> Result<String, String> {
+        self.get_text("/api/costs/export").await
+    }
+
+    /// Reset remote cost tracking data.
+    pub async fn reset_costs(&self) -> Result<(), String> {
+        self.post_json("/api/costs/reset", &serde_json::json!({}))
+            .await
+            .map(|_| ())
+    }
+
     // ── Export ───────────────────────────────────────────────────────────────
 
     /// Export a session as a formatted transcript.
@@ -515,22 +638,8 @@ impl RemoteGatewayProxy {
     /// Set a config setting on the remote agent.
     pub async fn set_setting(&self, key: &str, value: &serde_json::Value) -> Result<(), String> {
         let url = format!("/api/settings/{}", urlencoding::encode(key));
-        let resp = self
-            .inner
-            .client
-            .put(&self.url(&url))
-            .header("Authorization", self.auth_header())
-            .json(value)
-            .send()
-            .await
-            .map_err(|e| format!("Request failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Remote returned HTTP {}: {}", status, body));
-        }
-        Ok(())
+        let body = serde_json::json!({ "value": value });
+        self.put_json(&url, &body).await.map(|_| ())
     }
 
     /// Inject API secrets into the remote agent.
